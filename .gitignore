@@ -8,3 +8,5 @@
 !tests/**/*.rs
 !examples/**/*.rs
 target/
+!README.md
+!docs/**/*.md
