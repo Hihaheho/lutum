@@ -14,13 +14,13 @@ use crate::{
     budget::Usage,
     conversation::{
         AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, RawJson,
-        ToolCallId, ToolName, ToolUse,
+        ToolCallId, ToolMetadata, ToolName, ToolUse,
     },
     llm::{
         CompletionEvent, CompletionEventStream, CompletionRequest, FinishReason, LlmAdapter,
         ReasoningConfig, ReasoningEffort, ReasoningSummary, ResponsesOptions, StreamKind,
         StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnRequest, TextTurnEvent,
-        TextTurnEventStream, TextTurnRequest, TypedToolInvocation,
+        TextTurnEventStream, TextTurnRequest,
     },
     structured::StructuredOutput,
     toolset::{ToolCallError, ToolMode, Toolset},
@@ -134,7 +134,7 @@ impl LlmAdapter for OpenAiAdapter {
         let body = build_responses_request::<T>(
             &input,
             &turn.model,
-            &turn.options,
+            &turn.options(),
             &turn.tool_mode,
             None,
         )?;
@@ -163,7 +163,7 @@ impl LlmAdapter for OpenAiAdapter {
         let body = build_responses_request::<T>(
             &input,
             &turn.model,
-            &turn.options,
+            &turn.options(),
             &turn.tool_mode,
             output_schema,
         )?;
@@ -385,12 +385,10 @@ where
         return Ok(Vec::new());
     }
 
-    let selected = tool_mode.selected_refs();
+    let selected = tool_mode.selected_names();
     T::definitions()
         .iter()
-        .filter(|tool| {
-            selected.is_none_or(|refs| refs.iter().any(|tool_ref| tool_ref.name() == tool.name))
-        })
+        .filter(|tool| selected.is_none_or(|names| names.iter().any(|name| *name == tool.name)))
         .map(|tool| {
             Ok(json!({
                 "type": "function",
@@ -462,7 +460,7 @@ impl ToolCallTracker {
         id: ToolCallId,
         name: ToolName,
         explicit_arguments_json: Option<String>,
-    ) -> Result<Option<TypedToolInvocation<T::Call>>, OpenAiError>
+    ) -> Result<Option<T::ToolCall>, OpenAiError>
     where
         T: Toolset,
     {
@@ -490,12 +488,11 @@ impl ToolCallTracker {
         }
 
         let arguments = RawJson::parse(arguments_json.clone())?;
-        let invocation = TypedToolInvocation {
-            id: id.clone(),
-            name: name.clone(),
-            call: T::parse_call(name.as_str(), arguments.get())?,
-            arguments,
-        };
+        let invocation = T::parse_tool_call(
+            ToolMetadata::new(id.clone(), name.clone(), arguments.clone()),
+            name.as_str(),
+            arguments.get(),
+        )?;
         self.finalized.insert(
             key,
             FinalizedToolCall {
@@ -1017,6 +1014,7 @@ mod tests {
     use super::*;
     use crate::{
         AssistantInputItem, InputMessageRole, ModelInput, ModelInputItem, ToolDef, ToolUse,
+        toolset::{ToolCallWrapper, ToolInput},
     };
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1025,36 +1023,66 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-    enum Calls {
-        Weather(WeatherArgs),
+    struct WeatherResult {
+        forecast: String,
     }
 
-    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-    enum Results {
-        Weather { forecast: String },
+    impl ToolInput for WeatherArgs {
+        type Output = WeatherResult;
+
+        const NAME: &'static str = "weather";
+        const DESCRIPTION: &'static str = "Get weather";
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct WeatherArgsCall {
+        metadata: ToolMetadata,
+        input: WeatherArgs,
+    }
+
+    impl ToolCallWrapper for WeatherArgsCall {
+        fn metadata(&self) -> &ToolMetadata {
+            &self.metadata
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum ToolsCall {
+        Weather(WeatherArgsCall),
+    }
+
+    impl ToolCallWrapper for ToolsCall {
+        fn metadata(&self) -> &ToolMetadata {
+            match self {
+                Self::Weather(call) => &call.metadata,
+            }
+        }
     }
 
     #[derive(Clone, Copy, Debug, Default)]
     struct Tools;
 
     impl Toolset for Tools {
-        type Call = Calls;
-        type Result = Results;
+        type ToolCall = ToolsCall;
 
-        fn definitions() -> &'static [ToolDef<Self::Call, Self::Result>] {
+        fn definitions() -> &'static [ToolDef] {
             fn weather_args_schema() -> schemars::Schema {
                 schemars::schema_for!(WeatherArgs)
             }
 
-            static DEFS: [ToolDef<Calls, Results>; 1] =
+            static DEFS: [ToolDef; 1] =
                 [ToolDef::new("weather", "Get weather", weather_args_schema)];
             &DEFS
         }
 
-        fn parse_call(name: &str, arguments_json: &str) -> Result<Self::Call, ToolCallError> {
+        fn parse_tool_call(
+            metadata: ToolMetadata,
+            name: &str,
+            arguments_json: &str,
+        ) -> Result<Self::ToolCall, ToolCallError> {
             match name {
                 "weather" => serde_json::from_str(arguments_json)
-                    .map(Calls::Weather)
+                    .map(|input| ToolsCall::Weather(WeatherArgsCall { metadata, input }))
                     .map_err(|source| ToolCallError::Deserialize {
                         name: name.to_string(),
                         source,
@@ -1213,8 +1241,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ready.len(), 1);
         assert!(matches!(
-            &ready[0].call,
-            Calls::Weather(WeatherArgs { city }) if city == "Tokyo"
+            &ready[0],
+            ToolsCall::Weather(WeatherArgsCall {
+                input: WeatherArgs { city },
+                ..
+            }) if city == "Tokyo"
         ));
     }
 

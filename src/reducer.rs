@@ -3,9 +3,9 @@ use thiserror::Error;
 use crate::{
     budget::Usage,
     conversation::{AssistantTurn, AssistantTurnItem, RawJson, ToolCallId},
-    llm::{CompletionEvent, FinishReason, StructuredTurnEvent, TextTurnEvent, TypedToolInvocation},
+    llm::{CompletionEvent, FinishReason, StructuredTurnEvent, TextTurnEvent},
     structured::StructuredOutput,
-    toolset::Toolset,
+    toolset::{ToolCallWrapper, Toolset},
 };
 
 #[derive(Debug, Eq, PartialEq)]
@@ -13,7 +13,7 @@ pub struct TextTurnState<T: Toolset> {
     pub request_id: Option<String>,
     pub model: String,
     pub assistant_turn: Vec<AssistantTurnItem>,
-    pub typed_tool_calls: Vec<TypedToolInvocation<T::Call>>,
+    pub tool_calls: Vec<T::ToolCall>,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
 }
@@ -27,7 +27,7 @@ where
             request_id: None,
             model: String::new(),
             assistant_turn: Vec::new(),
-            typed_tool_calls: Vec::new(),
+            tool_calls: Vec::new(),
             finish_reason: None,
             usage: None,
         }
@@ -43,7 +43,7 @@ where
             request_id: self.request_id.clone(),
             model: self.model.clone(),
             assistant_turn: self.assistant_turn.clone(),
-            typed_tool_calls: self.typed_tool_calls.clone(),
+            tool_calls: self.tool_calls.clone(),
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
         }
@@ -64,7 +64,7 @@ pub struct TextTurnResult<T: Toolset> {
     pub request_id: Option<String>,
     pub model: String,
     pub assistant_turn: AssistantTurn,
-    pub typed_tool_calls: Vec<TypedToolInvocation<T::Call>>,
+    pub tool_calls: Vec<T::ToolCall>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
 }
@@ -87,7 +87,7 @@ where
             request_id: self.request_id.clone(),
             model: self.model.clone(),
             assistant_turn: self.assistant_turn.clone(),
-            typed_tool_calls: self.typed_tool_calls.clone(),
+            tool_calls: self.tool_calls.clone(),
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
         }
@@ -99,7 +99,7 @@ pub struct StructuredTurnState<T: Toolset, O: StructuredOutput> {
     pub request_id: Option<String>,
     pub model: String,
     pub assistant_turn: Vec<AssistantTurnItem>,
-    pub typed_tool_calls: Vec<TypedToolInvocation<T::Call>>,
+    pub tool_calls: Vec<T::ToolCall>,
     pub structured: Option<O>,
     pub refusal: Option<String>,
     pub finish_reason: Option<FinishReason>,
@@ -116,7 +116,7 @@ where
             request_id: None,
             model: String::new(),
             assistant_turn: Vec::new(),
-            typed_tool_calls: Vec::new(),
+            tool_calls: Vec::new(),
             structured: None,
             refusal: None,
             finish_reason: None,
@@ -135,7 +135,7 @@ where
             request_id: self.request_id.clone(),
             model: self.model.clone(),
             assistant_turn: self.assistant_turn.clone(),
-            typed_tool_calls: self.typed_tool_calls.clone(),
+            tool_calls: self.tool_calls.clone(),
             structured: self.structured.clone(),
             refusal: self.refusal.clone(),
             finish_reason: self.finish_reason.clone(),
@@ -155,7 +155,7 @@ pub struct StructuredTurnResult<T: Toolset, O: StructuredOutput> {
     pub request_id: Option<String>,
     pub model: String,
     pub assistant_turn: AssistantTurn,
-    pub typed_tool_calls: Vec<TypedToolInvocation<T::Call>>,
+    pub tool_calls: Vec<T::ToolCall>,
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
@@ -171,7 +171,7 @@ where
             request_id: self.request_id.clone(),
             model: self.model.clone(),
             assistant_turn: self.assistant_turn.clone(),
-            typed_tool_calls: self.typed_tool_calls.clone(),
+            tool_calls: self.tool_calls.clone(),
             semantic: self.semantic.clone(),
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
@@ -282,11 +282,11 @@ where
                 push_or_extend_refusal(&mut self.state.assistant_turn, delta);
             }
             TextTurnEvent::ToolCallChunk { .. } => {}
-            TextTurnEvent::ToolCallReady(invocation) => {
-                push_tool_invocation(
+            TextTurnEvent::ToolCallReady(tool_call) => {
+                push_tool_call(
                     &mut self.state.assistant_turn,
-                    &mut self.state.typed_tool_calls,
-                    invocation,
+                    &mut self.state.tool_calls,
+                    tool_call,
                 );
             }
             TextTurnEvent::Completed {
@@ -317,7 +317,7 @@ where
             request_id: self.state.request_id,
             model: self.state.model,
             assistant_turn,
-            typed_tool_calls: self.state.typed_tool_calls,
+            tool_calls: self.state.tool_calls,
             finish_reason,
             usage,
         })
@@ -391,11 +391,11 @@ where
                 }
             }
             StructuredTurnEvent::ToolCallChunk { .. } => {}
-            StructuredTurnEvent::ToolCallReady(invocation) => {
-                push_tool_invocation(
+            StructuredTurnEvent::ToolCallReady(tool_call) => {
+                push_tool_call(
                     &mut self.state.assistant_turn,
-                    &mut self.state.typed_tool_calls,
-                    invocation,
+                    &mut self.state.tool_calls,
+                    tool_call,
                 );
             }
             StructuredTurnEvent::Completed {
@@ -436,7 +436,7 @@ where
             request_id: self.state.request_id,
             model: self.state.model,
             assistant_turn,
-            typed_tool_calls: self.state.typed_tool_calls,
+            tool_calls: self.state.tool_calls,
             semantic,
             finish_reason,
             usage,
@@ -545,26 +545,24 @@ fn push_or_extend_refusal(items: &mut Vec<AssistantTurnItem>, delta: &str) {
     }
 }
 
-fn push_tool_invocation<T>(
-    assistant: &mut Vec<AssistantTurnItem>,
-    typed_tool_calls: &mut Vec<TypedToolInvocation<T>>,
-    invocation: &TypedToolInvocation<T>,
-) where
-    T: Clone,
+fn push_tool_call<T>(assistant: &mut Vec<AssistantTurnItem>, tool_calls: &mut Vec<T>, tool_call: &T)
+where
+    T: ToolCallWrapper + Clone,
 {
-    if typed_tool_calls
+    if tool_calls
         .iter()
-        .any(|existing| existing.id == invocation.id)
+        .any(|existing| existing.metadata().id == tool_call.metadata().id)
     {
         return;
     }
 
+    let metadata = tool_call.metadata();
     assistant.push(AssistantTurnItem::ToolCall {
-        id: invocation.id.clone(),
-        name: invocation.name.clone(),
-        arguments: invocation.arguments.clone(),
+        id: metadata.id.clone(),
+        name: metadata.name.clone(),
+        arguments: metadata.arguments.clone(),
     });
-    typed_tool_calls.push(invocation.clone());
+    tool_calls.push(tool_call.clone());
 }
 
 fn assistant_text(items: &[AssistantTurnItem]) -> String {
@@ -606,7 +604,10 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use super::*;
-    use crate::{ToolCallError, ToolDef, ToolName};
+    use crate::{
+        ToolCallError, ToolDef, ToolMetadata, ToolName,
+        toolset::{ToolCallWrapper, ToolInput},
+    };
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
     struct WeatherArgs {
@@ -614,36 +615,66 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-    enum Calls {
-        Weather(WeatherArgs),
+    struct WeatherResult {
+        forecast: String,
     }
 
-    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-    enum Results {
-        Weather { forecast: String },
+    impl ToolInput for WeatherArgs {
+        type Output = WeatherResult;
+
+        const NAME: &'static str = "weather";
+        const DESCRIPTION: &'static str = "Get weather";
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct WeatherArgsCall {
+        metadata: ToolMetadata,
+        input: WeatherArgs,
+    }
+
+    impl ToolCallWrapper for WeatherArgsCall {
+        fn metadata(&self) -> &ToolMetadata {
+            &self.metadata
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum CallsCall {
+        Weather(WeatherArgsCall),
+    }
+
+    impl ToolCallWrapper for CallsCall {
+        fn metadata(&self) -> &ToolMetadata {
+            match self {
+                Self::Weather(call) => &call.metadata,
+            }
+        }
     }
 
     #[derive(Clone, Copy, Debug, Default)]
     struct Tools;
 
     impl Toolset for Tools {
-        type Call = Calls;
-        type Result = Results;
+        type ToolCall = CallsCall;
 
-        fn definitions() -> &'static [ToolDef<Self::Call, Self::Result>] {
+        fn definitions() -> &'static [ToolDef] {
             fn weather_args_schema() -> schemars::Schema {
                 schemars::schema_for!(WeatherArgs)
             }
 
-            static DEFS: [ToolDef<Calls, Results>; 1] =
+            static DEFS: [ToolDef; 1] =
                 [ToolDef::new("weather", "Get weather", weather_args_schema)];
             &DEFS
         }
 
-        fn parse_call(name: &str, arguments_json: &str) -> Result<Self::Call, ToolCallError> {
+        fn parse_tool_call(
+            metadata: ToolMetadata,
+            name: &str,
+            arguments_json: &str,
+        ) -> Result<Self::ToolCall, ToolCallError> {
             match name {
                 "weather" => serde_json::from_str(arguments_json)
-                    .map(Calls::Weather)
+                    .map(|input| CallsCall::Weather(WeatherArgsCall { metadata, input }))
                     .map_err(|source| ToolCallError::Deserialize {
                         name: name.to_string(),
                         source,
@@ -662,7 +693,6 @@ mod tests {
 
     #[test]
     fn text_reducer_returns_assistant_turn() {
-        let arguments = RawJson::parse("{\"city\":\"Tokyo\"}").unwrap();
         let mut reducer = TextTurnReducer::<Tools>::new();
         reducer
             .apply(&TextTurnEvent::Started {
@@ -676,14 +706,18 @@ mod tests {
             })
             .unwrap();
         reducer
-            .apply(&TextTurnEvent::ToolCallReady(TypedToolInvocation {
-                id: ToolCallId::from("call-1"),
-                name: ToolName::from("weather"),
-                call: Calls::Weather(WeatherArgs {
-                    city: "Tokyo".into(),
-                }),
-                arguments,
-            }))
+            .apply(&TextTurnEvent::ToolCallReady(CallsCall::Weather(
+                WeatherArgsCall {
+                    metadata: ToolMetadata::new(
+                        ToolCallId::from("call-1"),
+                        ToolName::from("weather"),
+                        RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
+                    ),
+                    input: WeatherArgs {
+                        city: "Tokyo".into(),
+                    },
+                },
+            )))
             .unwrap();
         reducer
             .apply(&TextTurnEvent::Completed {

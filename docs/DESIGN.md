@@ -138,19 +138,30 @@ Typed semantics live on the turn, not in the canonical request algebra.
 
 ### Tools
 
-`Toolset` defines:
+`ToolInput` is the atomic primitive.
 
-- `type Call`
-- `type Result`
-- static definitions
-- parsing of tool calls
+- `#[tool_input(output = T)]` defines reusable tool schema and output typing
+- `#[derive(Toolset)]` on a normal enum closes over the allowed tool universe for a turn
+- the derive generates a metadata-bearing `<ToolsetName>Call` enum and per-tool wrapper structs
 
 Tool calls are surfaced in two forms:
 
 - canonically as erased `AssistantTurnItem::ToolCall`
-- ergonomically as `TypedToolInvocation<T::Call>`
+- ergonomically as generated wrapper values like `AppToolsCall::Weather(WeatherArgsCall)`
 
-`ToolUse::from_typed(...)` converts typed tool execution back into erased request input.
+Each wrapper carries:
+
+- parsed typed input
+- `ToolMetadata { id, name, arguments }`
+
+The raw explicit path is:
+
+1. `match` on the generated wrapper enum
+2. execute the tool in user code
+3. call `call.tool_use(output)` to build `ToolUse`
+
+`#[tool_fn(skip(...))]` is sugar on top of this model. It generates a `ToolInput` companion type
+and a wrapper `.call(...)` method whose arguments are exactly the skipped parameters.
 
 `AssistantTurn::into_input_items(...)` replays an assistant turn into request items while
 replacing each `ToolCall` with exactly one matching `ToolUse`. Missing, extra, duplicate, or

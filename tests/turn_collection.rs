@@ -4,10 +4,10 @@ use futures::executor::block_on;
 use agents::{
     AssistantTurnItem, BudgetManager, CollectError, Context, EventHandler, FinishReason,
     HandlerContext, HandlerDirective, InputMessageRole, Marker, MockError, MockLlmAdapter,
-    MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, NonEmpty, RequestBudget,
+    MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, RequestBudget,
     SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind, StructuredTurnOutcome,
-    StructuredTurnRequest, TextTurnEvent, TextTurnReducer, TextTurnRequest, ToolCallError, ToolDef,
-    ToolMode, Toolset, Usage, UsageEstimate,
+    StructuredTurnRequest, TextTurnEvent, TextTurnReducer, TextTurnRequest, ToolMetadata, Usage,
+    UsageEstimate,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,56 +21,25 @@ impl Marker for AppMarker {
     }
 }
 
+#[agents::tool_input(name = "weather", output = WeatherResult)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct WeatherArgs {
     city: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-enum Calls {
-    Weather(WeatherArgs),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-enum Results {
-    Weather { forecast: String },
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct Tools;
-
-impl Toolset for Tools {
-    type Call = Calls;
-    type Result = Results;
-
-    fn definitions() -> &'static [ToolDef<Self::Call, Self::Result>] {
-        fn weather_args_schema() -> schemars::Schema {
-            schemars::schema_for!(WeatherArgs)
-        }
-
-        static DEFS: [ToolDef<Calls, Results>; 1] =
-            [ToolDef::new("weather", "Get weather", weather_args_schema)];
-        &DEFS
-    }
-
-    fn parse_call(name: &str, arguments_json: &str) -> Result<Self::Call, ToolCallError> {
-        match name {
-            "weather" => serde_json::from_str(arguments_json)
-                .map(Calls::Weather)
-                .map_err(|source| ToolCallError::Deserialize {
-                    name: name.to_string(),
-                    source,
-                }),
-            _ => Err(ToolCallError::UnknownTool {
-                name: name.to_string(),
-            }),
-        }
-    }
+struct WeatherResult {
+    forecast: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Summary {
     answer: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, agents::Toolset)]
+enum Tools {
+    Weather(WeatherArgs),
 }
 
 fn input() -> ModelInput {
@@ -124,15 +93,16 @@ fn text_turn_collects_assistant_output_and_tool_calls() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
-    let turn = TextTurnRequest::<Tools>::new("gpt-4.1").with_tool_mode(ToolMode::AutoOnly(
-        NonEmpty::one(Tools::definitions()[0].tool_ref()),
-    ));
+    let turn = TextTurnRequest::<Tools>::builder()
+        .model("gpt-4.1")
+        .allow_tools(agents::tools!(WeatherArgs))
+        .build();
     let pending =
         block_on(ctx.responses_text(AppMarker, input(), turn, UsageEstimate::zero())).unwrap();
     let result = block_on(pending.collect_noop()).unwrap();
 
     assert_eq!(result.assistant_text(), "looking up ");
-    assert_eq!(result.typed_tool_calls.len(), 1);
+    assert_eq!(result.tool_calls.len(), 1);
     assert!(matches!(
         &result.assistant_turn.items()[0],
         AssistantTurnItem::Text(text) if text == "looking up "
@@ -194,14 +164,12 @@ fn recorded_events_reduce_to_same_result_as_collect() {
         TextTurnEvent::<Tools>::TextDelta {
             delta: "checking ".into(),
         },
-        TextTurnEvent::<Tools>::ToolCallReady(agents::TypedToolInvocation {
-            id: "call-1".into(),
-            name: "weather".into(),
-            call: Calls::Weather(WeatherArgs {
+        TextTurnEvent::<Tools>::ToolCallReady(ToolsCall::Weather(WeatherArgsCall {
+            metadata: ToolMetadata::new("call-1", "weather", arguments),
+            input: WeatherArgs {
                 city: "Tokyo".into(),
-            }),
-            arguments,
-        }),
+            },
+        })),
         TextTurnEvent::<Tools>::Completed {
             request_id: Some("req-r".into()),
             finish_reason: FinishReason::ToolCall,
@@ -242,19 +210,22 @@ fn recorded_events_reduce_to_same_result_as_collect() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
-    let pending = block_on(ctx.responses_text(
-        AppMarker,
-        input(),
-        TextTurnRequest::<Tools>::new("gpt-4.1").with_tool_mode(ToolMode::AutoOnly(NonEmpty::one(
-            Tools::definitions()[0].tool_ref(),
-        ))),
-        UsageEstimate::zero(),
-    ))
+    let pending = block_on(
+        ctx.responses_text(
+            AppMarker,
+            input(),
+            TextTurnRequest::<Tools>::builder()
+                .model("gpt-4.1")
+                .allow_tools(agents::tools!(WeatherArgs))
+                .build(),
+            UsageEstimate::zero(),
+        ),
+    )
     .unwrap();
     let collected = block_on(pending.collect_noop()).unwrap();
 
     assert_eq!(reduced.assistant_turn, collected.assistant_turn);
-    assert_eq!(reduced.typed_tool_calls, collected.typed_tool_calls);
+    assert_eq!(reduced.tool_calls, collected.tool_calls);
     assert_eq!(reduced.finish_reason, collected.finish_reason);
     assert_eq!(reduced.usage, collected.usage);
 }

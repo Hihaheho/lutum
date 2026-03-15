@@ -13,7 +13,7 @@ The library gives you:
 - an OpenAI-compatible `reqwest` adapter
 
 If you want the design rationale rather than just the surface API, read
-[DESIGN.md](DESIGN.md).
+[docs/DESIGN.md](docs/DESIGN.md).
 
 ## Core ideas
 
@@ -125,21 +125,73 @@ Useful environment variables:
 
 ### Typing
 
+- `ToolInput`
 - `Toolset`
 - `StructuredOutput`
-- `TypedToolInvocation<T>`
+- generated `<ToolsetName>Call` wrapper enums
 
 ## Tool flow
 
 The normal tool loop is:
 
 1. collect a turn
-2. inspect typed tool calls
+2. inspect generated wrapper tool calls
 3. execute tools in your own code
-4. convert results with `ToolUse::from_typed(...)`
+4. turn outputs into `ToolUse`
 5. replay the assistant turn with `AssistantTurn::into_input_items(...)`
 
 This keeps tool execution explicit and avoids hiding important control flow inside the framework.
+
+For raw tool definitions, use `#[tool_input(...)]` and call `call.tool_use(output)?` on the
+generated wrapper:
+
+```rust
+#[agents::tool_input(name = "weather", output = WeatherResult)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct WeatherArgs {
+    city: String,
+}
+
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    agents::Toolset,
+)]
+enum AppTools {
+    Weather(WeatherArgs),
+}
+
+match tool_call {
+    AppToolsCall::Weather(call) => {
+        let output = get_weather(&app_ctx, call.input.clone()).await?;
+        let tool_use = call.tool_use(output)?;
+        // append back into ModelInput
+    }
+}
+```
+
+For convenience, `#[tool_fn(skip(...))]` generates both the `ToolInput` type and a wrapper
+`call(...)` method whose arguments are exactly the skipped parameters:
+
+```rust
+#[agents::tool_fn(skip(app_ctx, tenant))]
+async fn get_weather(
+    app_ctx: &AppCtx,
+    tenant: TenantId,
+    city: String,
+) -> Result<WeatherResult, WeatherError> {
+    ...
+}
+
+match tool_call {
+    AppToolsCall::GetWeather(call) => {
+        let tool_use = call.call(&app_ctx, tenant).await?;
+    }
+}
+```
 
 ## Budgeting
 

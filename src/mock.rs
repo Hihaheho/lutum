@@ -9,11 +9,11 @@ use thiserror::Error;
 
 use crate::{
     budget::Usage,
-    conversation::{ModelInput, RawJson, ToolCallId, ToolName},
+    conversation::{ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
     llm::{
         CompletionEvent, CompletionEventStream, CompletionRequest, FinishReason, LlmAdapter,
         StreamKind, StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnRequest,
-        TextTurnEvent, TextTurnEventStream, TextTurnRequest, TypedToolInvocation,
+        TextTurnEvent, TextTurnEventStream, TextTurnRequest,
     },
     structured::StructuredOutput,
     toolset::Toolset,
@@ -231,15 +231,13 @@ impl LlmAdapter for MockLlmAdapter {
                     if is_complete_json(&entry.1) {
                         let arguments =
                             RawJson::parse(entry.1.clone()).expect("complete mock JSON is valid");
-                        match T::parse_call(entry.0.as_str(), arguments.get()) {
-                            Ok(call) => {
-                                out.push(Ok(TextTurnEvent::ToolCallReady(TypedToolInvocation {
-                                    id: id.clone(),
-                                    name: entry.0.clone(),
-                                    call,
-                                    arguments,
-                                })))
-                            }
+                        let arguments_json = arguments.get().to_string();
+                        match T::parse_tool_call(
+                            ToolMetadata::new(id.clone(), entry.0.clone(), arguments),
+                            entry.0.as_str(),
+                            &arguments_json,
+                        ) {
+                            Ok(tool_call) => out.push(Ok(TextTurnEvent::ToolCallReady(tool_call))),
                             Err(err) => out.push(Err(MockError::ToolCall(err.to_string()))),
                         }
                         tool_buffers.remove(&id);
@@ -316,15 +314,15 @@ impl LlmAdapter for MockLlmAdapter {
                     if is_complete_json(&entry.1) {
                         let arguments =
                             RawJson::parse(entry.1.clone()).expect("complete mock JSON is valid");
-                        match T::parse_call(entry.0.as_str(), arguments.get()) {
-                            Ok(call) => out.push(Ok(StructuredTurnEvent::ToolCallReady(
-                                TypedToolInvocation {
-                                    id: id.clone(),
-                                    name: entry.0.clone(),
-                                    call,
-                                    arguments,
-                                },
-                            ))),
+                        let arguments_json = arguments.get().to_string();
+                        match T::parse_tool_call(
+                            ToolMetadata::new(id.clone(), entry.0.clone(), arguments),
+                            entry.0.as_str(),
+                            &arguments_json,
+                        ) {
+                            Ok(tool_call) => {
+                                out.push(Ok(StructuredTurnEvent::ToolCallReady(tool_call)))
+                            }
                             Err(err) => out.push(Err(MockError::ToolCall(err.to_string()))),
                         }
                         tool_buffers.remove(&id);

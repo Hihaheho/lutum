@@ -4,17 +4,16 @@ use schemars::{JsonSchema, Schema, schema_for};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-use crate::conversation::NonEmpty;
+use crate::conversation::{NonEmpty, ToolMetadata, ToolUse};
 
 #[derive(Clone, Copy)]
-pub struct ToolDef<Call, Result> {
+pub struct ToolDef {
     pub name: &'static str,
     pub description: &'static str,
     schema: fn() -> Schema,
-    _marker: PhantomData<fn() -> (Call, Result)>,
 }
 
-impl<Call, Result> fmt::Debug for ToolDef<Call, Result> {
+impl fmt::Debug for ToolDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ToolDef")
             .field("name", &self.name)
@@ -23,7 +22,7 @@ impl<Call, Result> fmt::Debug for ToolDef<Call, Result> {
     }
 }
 
-impl<Call, Result> ToolDef<Call, Result> {
+impl ToolDef {
     pub const fn new(
         name: &'static str,
         description: &'static str,
@@ -33,7 +32,6 @@ impl<Call, Result> ToolDef<Call, Result> {
             name,
             description,
             schema,
-            _marker: PhantomData,
         }
     }
 
@@ -41,15 +39,11 @@ impl<Call, Result> ToolDef<Call, Result> {
         (self.schema)()
     }
 
-    pub fn for_input<Input>(name: &'static str, description: &'static str) -> Self
+    pub fn for_input<Input>() -> Self
     where
-        Input: JsonSchema,
+        Input: ToolInput,
     {
-        Self::new(name, description, || schema_for!(Input))
-    }
-
-    pub fn tool_ref(&self) -> ToolRef<Call, Result> {
-        ToolRef::new(self.name)
+        Self::new(Input::NAME, Input::DESCRIPTION, || schema_for!(Input))
     }
 }
 
@@ -66,34 +60,212 @@ pub enum ToolCallError {
 }
 
 #[derive(Debug, Error)]
-pub enum ToolResultError {
-    #[error("failed to serialize tool result: {0}")]
+pub enum ToolUseError {
+    #[error("tool metadata for `{actual}` does not match expected tool `{expected}`")]
+    MismatchedToolName {
+        expected: &'static str,
+        actual: String,
+    },
+    #[error("failed to serialize tool output: {0}")]
     Serialize(#[from] serde_json::Error),
 }
 
-pub trait Toolset: Send + Sync + 'static {
-    type Call: Serialize + DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static;
-    type Result: Serialize + DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static;
+#[derive(Debug, Error)]
+pub enum ToolExecutionError<E> {
+    #[error("tool execution failed: {0}")]
+    Execute(E),
+    #[error("failed to build tool use: {0}")]
+    ToolUse(#[from] ToolUseError),
+}
 
-    fn definitions() -> &'static [ToolDef<Self::Call, Self::Result>];
+pub trait ToolInput:
+    Serialize + DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static
+{
+    type Output: Serialize + DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static;
 
-    fn parse_call(name: &str, arguments_json: &str) -> Result<Self::Call, ToolCallError>;
+    const NAME: &'static str;
+    const DESCRIPTION: &'static str;
 
-    fn serialize_result(result: &Self::Result) -> Result<String, ToolResultError> {
-        serde_json::to_string(result).map_err(ToolResultError::from)
+    fn tool_use(metadata: ToolMetadata, output: Self::Output) -> Result<ToolUse, ToolUseError> {
+        if metadata.name.as_str() != Self::NAME {
+            return Err(ToolUseError::MismatchedToolName {
+                expected: Self::NAME,
+                actual: metadata.name.as_str().to_string(),
+            });
+        }
+        let result = crate::conversation::RawJson::from_serializable(&output)?;
+        Ok(metadata.into_tool_use(result))
     }
 }
 
-pub type ToolRefFor<T> = ToolRef<<T as Toolset>::Call, <T as Toolset>::Result>;
+pub trait ToolCallWrapper {
+    fn metadata(&self) -> &ToolMetadata;
+}
 
-#[derive(Default)]
+impl ToolCallWrapper for std::convert::Infallible {
+    fn metadata(&self) -> &ToolMetadata {
+        match *self {}
+    }
+}
+
+pub trait Toolset: Send + Sync + 'static {
+    type ToolCall: ToolCallWrapper + Clone + fmt::Debug + Eq + PartialEq + Send + Sync + 'static;
+
+    fn definitions() -> &'static [ToolDef];
+
+    fn parse_tool_call(
+        metadata: ToolMetadata,
+        name: &str,
+        arguments_json: &str,
+    ) -> Result<Self::ToolCall, ToolCallError>;
+}
+
+pub trait SupportsTool<I: ToolInput>: Toolset {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolSubsetMarker<S> {
+    _marker: PhantomData<fn() -> S>,
+}
+
+impl<S> Default for ToolSubsetMarker<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S> ToolSubsetMarker<S> {
+    pub const fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+pub trait ToolSubset<T: Toolset> {
+    fn tool_names() -> Vec<&'static str>;
+}
+
+impl<T> ToolSubset<T> for ToolSubsetMarker<()>
+where
+    T: Toolset,
+{
+    fn tool_names() -> Vec<&'static str> {
+        Vec::new()
+    }
+}
+
+macro_rules! impl_tool_subset_tuple {
+    ($(($($name:ident),+)),+ $(,)?) => {
+        $(
+            impl<T, $($name),+> ToolSubset<T> for ToolSubsetMarker<($($name,)+)>
+            where
+                T: Toolset $(+ SupportsTool<$name>)+,
+                $($name: ToolInput,)+
+            {
+                fn tool_names() -> Vec<&'static str> {
+                    vec![$($name::NAME),+]
+                }
+            }
+        )+
+    };
+}
+
+impl_tool_subset_tuple!(
+    (A),
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+    (A, B, C, D, E, F, G, H, I),
+    (A, B, C, D, E, F, G, H, I, J),
+    (A, B, C, D, E, F, G, H, I, J, K),
+    (A, B, C, D, E, F, G, H, I, J, K, L)
+);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ToolRef<I: ToolInput> {
+    _marker: PhantomData<fn() -> I>,
+}
+
+impl<I: ToolInput> Default for ToolRef<I> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<I: ToolInput> ToolRef<I> {
+    pub const fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        I::NAME
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ToolSelection<T: Toolset> {
+    names: NonEmpty<&'static str>,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for ToolSelection<T>
+where
+    T: Toolset,
+{
+    fn clone(&self) -> Self {
+        Self {
+            names: self.names.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> ToolSelection<T>
+where
+    T: Toolset,
+{
+    pub fn from_names(names: NonEmpty<&'static str>) -> Self {
+        Self {
+            names,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn from_subset<S>() -> Option<Self>
+    where
+        S: ToolSubset<T>,
+    {
+        NonEmpty::try_from_vec(S::tool_names())
+            .ok()
+            .map(Self::from_names)
+    }
+
+    pub fn names(&self) -> &[&'static str] {
+        self.names.as_slice()
+    }
+}
+
 pub enum ToolMode<T: Toolset> {
-    #[default]
     Disabled,
     AutoAll,
-    AutoOnly(NonEmpty<ToolRefFor<T>>),
+    AutoOnly(ToolSelection<T>),
     RequiredAll,
-    RequiredOnly(NonEmpty<ToolRefFor<T>>),
+    RequiredOnly(ToolSelection<T>),
+}
+
+impl<T> Default for ToolMode<T>
+where
+    T: Toolset,
+{
+    fn default() -> Self {
+        Self::Disabled
+    }
 }
 
 impl<T> Clone for ToolMode<T>
@@ -104,9 +276,9 @@ where
         match self {
             Self::Disabled => Self::Disabled,
             Self::AutoAll => Self::AutoAll,
-            Self::AutoOnly(selected) => Self::AutoOnly(selected.clone()),
+            Self::AutoOnly(selection) => Self::AutoOnly(selection.clone()),
             Self::RequiredAll => Self::RequiredAll,
-            Self::RequiredOnly(selected) => Self::RequiredOnly(selected.clone()),
+            Self::RequiredOnly(selection) => Self::RequiredOnly(selection.clone()),
         }
     }
 }
@@ -119,15 +291,14 @@ where
         match self {
             Self::Disabled => f.write_str("Disabled"),
             Self::AutoAll => f.write_str("AutoAll"),
-            Self::AutoOnly(selected) => {
-                let names = selected.iter().map(ToolRef::name).collect::<Vec<_>>();
-                f.debug_tuple("AutoOnly").field(&names).finish()
+            Self::AutoOnly(selection) => {
+                f.debug_tuple("AutoOnly").field(&selection.names()).finish()
             }
             Self::RequiredAll => f.write_str("RequiredAll"),
-            Self::RequiredOnly(selected) => {
-                let names = selected.iter().map(ToolRef::name).collect::<Vec<_>>();
-                f.debug_tuple("RequiredOnly").field(&names).finish()
-            }
+            Self::RequiredOnly(selection) => f
+                .debug_tuple("RequiredOnly")
+                .field(&selection.names())
+                .finish(),
         }
     }
 }
@@ -140,9 +311,9 @@ where
         match (self, other) {
             (Self::Disabled, Self::Disabled) => true,
             (Self::AutoAll, Self::AutoAll) => true,
-            (Self::AutoOnly(left), Self::AutoOnly(right)) => names_equal(left, right),
+            (Self::AutoOnly(left), Self::AutoOnly(right)) => left.names() == right.names(),
             (Self::RequiredAll, Self::RequiredAll) => true,
-            (Self::RequiredOnly(left), Self::RequiredOnly(right)) => names_equal(left, right),
+            (Self::RequiredOnly(left), Self::RequiredOnly(right)) => left.names() == right.names(),
             _ => false,
         }
     }
@@ -158,9 +329,9 @@ where
         !matches!(self, Self::Disabled)
     }
 
-    pub fn selected_refs(&self) -> Option<&[ToolRefFor<T>]> {
+    pub fn selected_names(&self) -> Option<&[&'static str]> {
         match self {
-            Self::AutoOnly(selected) | Self::RequiredOnly(selected) => Some(selected.as_slice()),
+            Self::AutoOnly(selection) | Self::RequiredOnly(selection) => Some(selection.names()),
             _ => None,
         }
     }
@@ -170,92 +341,21 @@ where
     }
 }
 
-pub struct ToolRef<Call, Result> {
-    name: &'static str,
-    _marker: PhantomData<fn() -> (Call, Result)>,
-}
-
-impl<Call, Result> Clone for ToolRef<Call, Result> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<Call, Result> Copy for ToolRef<Call, Result> {}
-
-impl<Call, Result> fmt::Debug for ToolRef<Call, Result> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ToolRef").field(&self.name).finish()
-    }
-}
-
-impl<Call, Result> PartialEq for ToolRef<Call, Result> {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-    }
-}
-
-impl<Call, Result> Eq for ToolRef<Call, Result> {}
-
-impl<Call, Result> PartialOrd for ToolRef<Call, Result> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<Call, Result> Ord for ToolRef<Call, Result> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.name.cmp(other.name)
-    }
-}
-
-impl<Call, Result> std::hash::Hash for ToolRef<Call, Result> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-    }
-}
-
-impl<Call, Result> ToolRef<Call, Result> {
-    pub const fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        self.name
-    }
-}
-
-fn names_equal<Call, Result>(
-    left: &NonEmpty<ToolRef<Call, Result>>,
-    right: &NonEmpty<ToolRef<Call, Result>>,
-) -> bool {
-    left.as_slice()
-        .iter()
-        .map(ToolRef::name)
-        .eq(right.as_slice().iter().map(ToolRef::name))
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, serde::Deserialize, JsonSchema)]
-pub struct NoToolCall;
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, serde::Deserialize, JsonSchema)]
-pub struct NoToolResult;
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoTools;
 
 impl Toolset for NoTools {
-    type Call = NoToolCall;
-    type Result = NoToolResult;
+    type ToolCall = std::convert::Infallible;
 
-    fn definitions() -> &'static [ToolDef<Self::Call, Self::Result>] {
+    fn definitions() -> &'static [ToolDef] {
         &[]
     }
 
-    fn parse_call(name: &str, _arguments_json: &str) -> Result<Self::Call, ToolCallError> {
+    fn parse_tool_call(
+        _metadata: ToolMetadata,
+        name: &str,
+        _arguments_json: &str,
+    ) -> Result<Self::ToolCall, ToolCallError> {
         Err(ToolCallError::UnknownTool {
             name: name.to_string(),
         })

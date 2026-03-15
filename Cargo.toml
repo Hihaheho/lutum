@@ -1,9 +1,13 @@
+[workspace]
+members = ["agents-macros"]
+
 [package]
 name = "agents"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+agents-macros = { path = "agents-macros" }
 async-stream = "0.3"
 async-trait = "0.1.89"
 bon = "3"

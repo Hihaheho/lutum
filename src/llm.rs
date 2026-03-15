@@ -5,9 +5,9 @@ use futures::Stream;
 
 use crate::{
     budget::{RequestBudget, Usage},
-    conversation::{ModelInput, RawJson, ToolCallId, ToolName},
+    conversation::ModelInput,
     structured::StructuredOutput,
-    toolset::{ToolMode, Toolset},
+    toolset::{ToolMode, ToolSelection, ToolSubset, ToolSubsetMarker, Toolset},
 };
 
 pub type TextTurnEventStream<T, E> =
@@ -44,11 +44,14 @@ impl ResponsesOptions {
 }
 
 #[derive(Builder, Clone, Debug, PartialEq)]
+#[builder(builder_type(name = TextTurnRequestBuilder))]
 pub struct TextTurnRequest<T: Toolset> {
     #[builder(into)]
     pub model: String,
-    #[builder(default)]
-    pub options: ResponsesOptions,
+    pub temperature: Option<Temperature>,
+    pub max_output_tokens: Option<u32>,
+    pub reasoning: Option<ReasoningConfig>,
+    pub thinking_budget: Option<ThinkingBudget>,
     #[builder(default)]
     pub tool_mode: ToolMode<T>,
     #[builder(default = RequestBudget::unlimited())]
@@ -62,14 +65,20 @@ where
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            options: ResponsesOptions::default(),
+            temperature: None,
+            max_output_tokens: None,
+            reasoning: None,
+            thinking_budget: None,
             tool_mode: ToolMode::<T>::Disabled,
             budget: RequestBudget::unlimited(),
         }
     }
 
     pub fn with_options(mut self, options: ResponsesOptions) -> Self {
-        self.options = options;
+        self.temperature = options.temperature;
+        self.max_output_tokens = options.max_output_tokens;
+        self.reasoning = options.reasoning;
+        self.thinking_budget = options.thinking_budget;
         self
     }
 
@@ -82,14 +91,26 @@ where
         self.budget = budget;
         self
     }
+
+    pub fn options(&self) -> ResponsesOptions {
+        ResponsesOptions {
+            temperature: self.temperature,
+            max_output_tokens: self.max_output_tokens,
+            reasoning: self.reasoning.clone(),
+            thinking_budget: self.thinking_budget,
+        }
+    }
 }
 
 #[derive(Builder, Clone, Debug, PartialEq)]
+#[builder(builder_type(name = StructuredTurnRequestBuilder))]
 pub struct StructuredTurnRequest<T: Toolset, O: StructuredOutput> {
     #[builder(into)]
     pub model: String,
-    #[builder(default)]
-    pub options: ResponsesOptions,
+    pub temperature: Option<Temperature>,
+    pub max_output_tokens: Option<u32>,
+    pub reasoning: Option<ReasoningConfig>,
+    pub thinking_budget: Option<ThinkingBudget>,
     #[builder(default)]
     pub tool_mode: ToolMode<T>,
     #[builder(default = RequestBudget::unlimited())]
@@ -106,7 +127,10 @@ where
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            options: ResponsesOptions::default(),
+            temperature: None,
+            max_output_tokens: None,
+            reasoning: None,
+            thinking_budget: None,
             tool_mode: ToolMode::<T>::Disabled,
             budget: RequestBudget::unlimited(),
             _marker: PhantomData,
@@ -114,7 +138,10 @@ where
     }
 
     pub fn with_options(mut self, options: ResponsesOptions) -> Self {
-        self.options = options;
+        self.temperature = options.temperature;
+        self.max_output_tokens = options.max_output_tokens;
+        self.reasoning = options.reasoning;
+        self.thinking_budget = options.thinking_budget;
         self
     }
 
@@ -126,6 +153,15 @@ where
     pub fn with_budget(mut self, budget: RequestBudget) -> Self {
         self.budget = budget;
         self
+    }
+
+    pub fn options(&self) -> ResponsesOptions {
+        ResponsesOptions {
+            temperature: self.temperature,
+            max_output_tokens: self.max_output_tokens,
+            reasoning: self.reasoning.clone(),
+            thinking_budget: self.thinking_budget,
+        }
     }
 }
 
@@ -235,14 +271,6 @@ pub struct CompletionOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TypedToolInvocation<C> {
-    pub id: ToolCallId,
-    pub name: ToolName,
-    pub call: C,
-    pub arguments: RawJson,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextTurnEvent<T: Toolset> {
     Started {
         request_id: Option<String>,
@@ -258,11 +286,11 @@ pub enum TextTurnEvent<T: Toolset> {
         delta: String,
     },
     ToolCallChunk {
-        id: ToolCallId,
-        name: ToolName,
+        id: crate::conversation::ToolCallId,
+        name: crate::conversation::ToolName,
         arguments_json_delta: String,
     },
-    ToolCallReady(TypedToolInvocation<T::Call>),
+    ToolCallReady(T::ToolCall),
     Completed {
         request_id: Option<String>,
         finish_reason: FinishReason,
@@ -287,11 +315,11 @@ pub enum StructuredTurnEvent<T: Toolset, O: StructuredOutput> {
         delta: String,
     },
     ToolCallChunk {
-        id: ToolCallId,
-        name: ToolName,
+        id: crate::conversation::ToolCallId,
+        name: crate::conversation::ToolName,
         arguments_json_delta: String,
     },
-    ToolCallReady(TypedToolInvocation<T::Call>),
+    ToolCallReady(T::ToolCall),
     Completed {
         request_id: Option<String>,
         finish_reason: FinishReason,
@@ -320,6 +348,144 @@ pub enum FinishReason {
     ToolCall,
     ContentFilter,
     Unknown(String),
+}
+
+impl<T, S> TextTurnRequestBuilder<T, S>
+where
+    T: Toolset,
+    S: text_turn_request_builder::State,
+{
+    pub fn allow_tools<Subset>(
+        self,
+        _subset: ToolSubsetMarker<Subset>,
+    ) -> TextTurnRequestBuilder<T, text_turn_request_builder::SetToolMode<S>>
+    where
+        ToolSubsetMarker<Subset>: ToolSubset<T>,
+        <S as text_turn_request_builder::State>::ToolMode: text_turn_request_builder::IsUnset,
+    {
+        match ToolSelection::<T>::from_subset::<ToolSubsetMarker<Subset>>() {
+            Some(selection) => self.tool_mode(ToolMode::AutoOnly(selection)),
+            None => self.disable_tools(),
+        }
+    }
+
+    pub fn require_tools<Subset>(
+        self,
+        _subset: ToolSubsetMarker<Subset>,
+    ) -> TextTurnRequestBuilder<T, text_turn_request_builder::SetToolMode<S>>
+    where
+        ToolSubsetMarker<Subset>: ToolSubset<T>,
+        <S as text_turn_request_builder::State>::ToolMode: text_turn_request_builder::IsUnset,
+    {
+        match ToolSelection::<T>::from_subset::<ToolSubsetMarker<Subset>>() {
+            Some(selection) => self.tool_mode(ToolMode::RequiredOnly(selection)),
+            None => self.disable_tools(),
+        }
+    }
+
+    pub fn allow_all_tools(
+        self,
+    ) -> TextTurnRequestBuilder<T, text_turn_request_builder::SetToolMode<S>>
+    where
+        <S as text_turn_request_builder::State>::ToolMode: text_turn_request_builder::IsUnset,
+    {
+        self.tool_mode(ToolMode::AutoAll)
+    }
+
+    pub fn disable_tools(
+        self,
+    ) -> TextTurnRequestBuilder<T, text_turn_request_builder::SetToolMode<S>>
+    where
+        <S as text_turn_request_builder::State>::ToolMode: text_turn_request_builder::IsUnset,
+    {
+        self.tool_mode(ToolMode::Disabled)
+    }
+
+    pub fn reasoning_summary(
+        self,
+        summary: ReasoningSummary,
+    ) -> TextTurnRequestBuilder<T, text_turn_request_builder::SetReasoning<S>>
+    where
+        <S as text_turn_request_builder::State>::Reasoning: text_turn_request_builder::IsUnset,
+    {
+        let reasoning = ReasoningConfig {
+            summary,
+            ..ReasoningConfig::default()
+        };
+        self.reasoning(reasoning)
+    }
+}
+
+impl<T, O, S> StructuredTurnRequestBuilder<T, O, S>
+where
+    T: Toolset,
+    O: StructuredOutput,
+    S: structured_turn_request_builder::State,
+{
+    pub fn allow_tools<Subset>(
+        self,
+        _subset: ToolSubsetMarker<Subset>,
+    ) -> StructuredTurnRequestBuilder<T, O, structured_turn_request_builder::SetToolMode<S>>
+    where
+        ToolSubsetMarker<Subset>: ToolSubset<T>,
+        <S as structured_turn_request_builder::State>::ToolMode:
+            structured_turn_request_builder::IsUnset,
+    {
+        match ToolSelection::<T>::from_subset::<ToolSubsetMarker<Subset>>() {
+            Some(selection) => self.tool_mode(ToolMode::AutoOnly(selection)),
+            None => self.disable_tools(),
+        }
+    }
+
+    pub fn require_tools<Subset>(
+        self,
+        _subset: ToolSubsetMarker<Subset>,
+    ) -> StructuredTurnRequestBuilder<T, O, structured_turn_request_builder::SetToolMode<S>>
+    where
+        ToolSubsetMarker<Subset>: ToolSubset<T>,
+        <S as structured_turn_request_builder::State>::ToolMode:
+            structured_turn_request_builder::IsUnset,
+    {
+        match ToolSelection::<T>::from_subset::<ToolSubsetMarker<Subset>>() {
+            Some(selection) => self.tool_mode(ToolMode::RequiredOnly(selection)),
+            None => self.disable_tools(),
+        }
+    }
+
+    pub fn allow_all_tools(
+        self,
+    ) -> StructuredTurnRequestBuilder<T, O, structured_turn_request_builder::SetToolMode<S>>
+    where
+        <S as structured_turn_request_builder::State>::ToolMode:
+            structured_turn_request_builder::IsUnset,
+    {
+        self.tool_mode(ToolMode::AutoAll)
+    }
+
+    pub fn disable_tools(
+        self,
+    ) -> StructuredTurnRequestBuilder<T, O, structured_turn_request_builder::SetToolMode<S>>
+    where
+        <S as structured_turn_request_builder::State>::ToolMode:
+            structured_turn_request_builder::IsUnset,
+    {
+        self.tool_mode(ToolMode::Disabled)
+    }
+
+    pub fn reasoning_summary(
+        self,
+        summary: ReasoningSummary,
+    ) -> StructuredTurnRequestBuilder<T, O, structured_turn_request_builder::SetReasoning<S>>
+    where
+        <S as structured_turn_request_builder::State>::Reasoning:
+            structured_turn_request_builder::IsUnset,
+    {
+        let reasoning = ReasoningConfig {
+            summary,
+            ..ReasoningConfig::default()
+        };
+        self.reasoning(reasoning)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

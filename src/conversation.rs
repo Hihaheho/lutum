@@ -4,11 +4,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwn
 use serde_json::value::RawValue;
 use thiserror::Error;
 
-use crate::{
-    llm::TypedToolInvocation,
-    toolset::{ToolResultError, Toolset},
-};
-
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ModelInput {
@@ -34,6 +29,50 @@ impl ModelInput {
 
     pub fn push(&mut self, item: ModelInputItem) {
         self.items.push(item);
+    }
+
+    pub fn system(mut self, text: impl Into<String>) -> Self {
+        self.push(ModelInputItem::text(InputMessageRole::System, text));
+        self
+    }
+
+    pub fn developer(mut self, text: impl Into<String>) -> Self {
+        self.push(ModelInputItem::text(InputMessageRole::Developer, text));
+        self
+    }
+
+    pub fn user(mut self, text: impl Into<String>) -> Self {
+        self.push(ModelInputItem::text(InputMessageRole::User, text));
+        self
+    }
+
+    pub fn assistant_text(mut self, text: impl Into<String>) -> Self {
+        self.push(ModelInputItem::assistant_text(text));
+        self
+    }
+
+    pub fn assistant_reasoning(mut self, text: impl Into<String>) -> Self {
+        self.push(ModelInputItem::assistant_reasoning(text));
+        self
+    }
+
+    pub fn assistant_refusal(mut self, text: impl Into<String>) -> Self {
+        self.push(ModelInputItem::assistant_refusal(text));
+        self
+    }
+
+    pub fn tool_use(mut self, tool_use: ToolUse) -> Self {
+        self.push(ModelInputItem::tool_use(tool_use));
+        self
+    }
+
+    pub fn append_assistant_turn(
+        mut self,
+        turn: AssistantTurn,
+        tool_uses: impl IntoIterator<Item = ToolUse>,
+    ) -> Result<Self, AssistantTurnInputError> {
+        self.items.extend(turn.into_input_items(tool_uses)?);
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), ModelInputValidationError> {
@@ -159,21 +198,26 @@ impl ToolUse {
             result,
         }
     }
+}
 
-    pub fn from_typed<T>(
-        invocation: &TypedToolInvocation<T::Call>,
-        result: &T::Result,
-    ) -> Result<Self, ToolResultError>
-    where
-        T: Toolset,
-    {
-        Ok(Self {
-            id: invocation.id.clone(),
-            name: invocation.name.clone(),
-            arguments: invocation.arguments.clone(),
-            result: RawJson::parse(T::serialize_result(result)?)
-                .map_err(ToolResultError::Serialize)?,
-        })
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolMetadata {
+    pub id: ToolCallId,
+    pub name: ToolName,
+    pub arguments: RawJson,
+}
+
+impl ToolMetadata {
+    pub fn new(id: impl Into<ToolCallId>, name: impl Into<ToolName>, arguments: RawJson) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    pub fn into_tool_use(self, result: RawJson) -> ToolUse {
+        ToolUse::new(self.id, self.name, self.arguments, result)
     }
 }
 
@@ -577,7 +621,7 @@ mod tests {
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
-    use crate::toolset::{ToolCallError, ToolDef};
+    use crate::toolset::ToolInput;
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
     struct WeatherArgs {
@@ -585,45 +629,15 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-    enum Calls {
-        Weather(WeatherArgs),
+    struct WeatherResult {
+        forecast: String,
     }
 
-    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-    enum Results {
-        Weather { forecast: String },
-    }
+    impl ToolInput for WeatherArgs {
+        type Output = WeatherResult;
 
-    #[derive(Clone, Copy, Debug, Default)]
-    struct Tools;
-
-    impl Toolset for Tools {
-        type Call = Calls;
-        type Result = Results;
-
-        fn definitions() -> &'static [ToolDef<Self::Call, Self::Result>] {
-            fn weather_args_schema() -> schemars::Schema {
-                schemars::schema_for!(WeatherArgs)
-            }
-
-            static DEFS: [ToolDef<Calls, Results>; 1] =
-                [ToolDef::new("weather", "Get weather", weather_args_schema)];
-            &DEFS
-        }
-
-        fn parse_call(name: &str, arguments_json: &str) -> Result<Self::Call, ToolCallError> {
-            match name {
-                "weather" => serde_json::from_str(arguments_json)
-                    .map(Calls::Weather)
-                    .map_err(|source| ToolCallError::Deserialize {
-                        name: name.to_string(),
-                        source,
-                    }),
-                _ => Err(ToolCallError::UnknownTool {
-                    name: name.to_string(),
-                }),
-            }
-        }
+        const NAME: &'static str = "weather";
+        const DESCRIPTION: &'static str = "Get weather";
     }
 
     #[test]
@@ -667,28 +681,20 @@ mod tests {
     }
 
     #[test]
-    fn tool_use_from_typed_serializes_result() {
-        let invocation = TypedToolInvocation {
-            id: ToolCallId::from("call-1"),
-            name: ToolName::from("weather"),
-            call: Calls::Weather(WeatherArgs {
-                city: "Tokyo".into(),
-            }),
-            arguments: RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-        };
-
-        let tool_use = ToolUse::from_typed::<Tools>(
-            &invocation,
-            &Results::Weather {
+    fn tool_input_serializes_result() {
+        let tool_use = WeatherArgs::tool_use(
+            ToolMetadata::new(
+                "call-1",
+                "weather",
+                RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
+            ),
+            WeatherResult {
                 forecast: "sunny".into(),
             },
         )
         .unwrap();
 
-        assert_eq!(
-            tool_use.result.get(),
-            "{\"Weather\":{\"forecast\":\"sunny\"}}"
-        );
+        assert_eq!(tool_use.result.get(), "{\"forecast\":\"sunny\"}");
     }
 
     #[test]

@@ -4,8 +4,8 @@ use agents::{
     ModelInput, ModelInputItem, NonEmpty, RawJson, ReasoningConfig, RequestBudget,
     SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind, StructuredOutput,
     StructuredTurnEventStream, StructuredTurnRequest, Temperature, TextTurnEventStream,
-    TextTurnReducer, TextTurnRequest, ThinkingBudget, ToolCallError, ToolDef, ToolMode, ToolUse,
-    Toolset, Usage, UsageEstimate,
+    TextTurnReducer, TextTurnRequest, ThinkingBudget, ToolMetadata, ToolUse, Toolset, Usage,
+    UsageEstimate,
 };
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -119,56 +119,25 @@ impl BudgetManager<AppMarker> for NonCloneBudget {
     }
 }
 
+#[agents::tool_input(name = "weather", output = WeatherResult)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct WeatherArgs {
     city: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-enum Calls {
-    Weather(WeatherArgs),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-enum Results {
-    Weather { forecast: String },
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct Tools;
-
-impl Toolset for Tools {
-    type Call = Calls;
-    type Result = Results;
-
-    fn definitions() -> &'static [ToolDef<Self::Call, Self::Result>] {
-        fn weather_args_schema() -> schemars::Schema {
-            schemars::schema_for!(WeatherArgs)
-        }
-
-        static DEFS: [ToolDef<Calls, Results>; 1] =
-            [ToolDef::new("weather", "Get weather", weather_args_schema)];
-        &DEFS
-    }
-
-    fn parse_call(name: &str, arguments_json: &str) -> Result<Self::Call, ToolCallError> {
-        match name {
-            "weather" => serde_json::from_str(arguments_json)
-                .map(Calls::Weather)
-                .map_err(|source| ToolCallError::Deserialize {
-                    name: name.to_string(),
-                    source,
-                }),
-            _ => Err(ToolCallError::UnknownTool {
-                name: name.to_string(),
-            }),
-        }
-    }
+struct WeatherResult {
+    forecast: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Summary {
     answer: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, agents::Toolset)]
+enum Tools {
+    Weather(WeatherArgs),
 }
 
 #[test]
@@ -187,7 +156,7 @@ fn typed_public_api_compiles_and_constructs_requests() {
             "call-1",
             "weather",
             RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-            RawJson::from_serializable(&Results::Weather {
+            RawJson::from_serializable(&WeatherResult {
                 forecast: "sunny".into(),
             })
             .unwrap(),
@@ -196,22 +165,16 @@ fn typed_public_api_compiles_and_constructs_requests() {
 
     let _text = TextTurnRequest::<Tools>::builder()
         .model("gpt-4.1")
-        .tool_mode(ToolMode::AutoOnly(NonEmpty::one(
-            Tools::definitions()[0].tool_ref(),
-        )))
+        .allow_tools(agents::tools!(WeatherArgs))
         .budget(RequestBudget::from_tokens(256))
         .build();
     let _structured = StructuredTurnRequest::<Tools, Summary>::builder()
         .model("gpt-4.1")
-        .options(
-            agents::ResponsesOptions::builder()
-                .temperature(Temperature::try_from(0.3).unwrap())
-                .max_output_tokens(512)
-                .reasoning(
-                    ReasoningConfig::builder()
-                        .effort(ThinkingBudget::Low)
-                        .build(),
-                )
+        .temperature(Temperature::try_from(0.3).unwrap())
+        .max_output_tokens(512)
+        .reasoning(
+            ReasoningConfig::builder()
+                .effort(ThinkingBudget::Low)
                 .build(),
         )
         .build();
@@ -265,15 +228,16 @@ fn reducer_is_public_and_directly_usable() {
 
 #[test]
 fn reducer_ignores_duplicate_tool_call_ready() {
-    let arguments = RawJson::parse("{\"city\":\"Tokyo\"}").unwrap();
-    let invocation = agents::TypedToolInvocation {
-        id: "call-1".into(),
-        name: "weather".into(),
-        call: Calls::Weather(WeatherArgs {
+    let invocation = ToolsCall::Weather(WeatherArgsCall {
+        metadata: ToolMetadata::new(
+            "call-1",
+            "weather",
+            RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
+        ),
+        input: WeatherArgs {
             city: "Tokyo".into(),
-        }),
-        arguments,
-    };
+        },
+    });
 
     let mut reducer = TextTurnReducer::<Tools>::new();
     reducer
@@ -291,7 +255,7 @@ fn reducer_ignores_duplicate_tool_call_ready() {
         .unwrap();
 
     let result = reducer.into_result().unwrap();
-    assert_eq!(result.typed_tool_calls.len(), 1);
+    assert_eq!(result.tool_calls.len(), 1);
 }
 
 #[test]
