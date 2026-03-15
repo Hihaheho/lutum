@@ -15,6 +15,15 @@ The library gives you:
 If you want the design rationale rather than just the surface API, read
 [docs/DESIGN.md](docs/DESIGN.md).
 
+## Workspace layout
+
+This repository is a Cargo workspace with four crates under `crates/`:
+
+- `crates/agents` — public facade crate and `Context`
+- `crates/agents-protocol` — canonical request/response algebras and core traits
+- `crates/agents-openai` — OpenAI-compatible adapter
+- `crates/agents-macros` — proc-macros for tools
+
 ## Core ideas
 
 - No monolithic `Agent` trait.
@@ -82,12 +91,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 This repository includes a minimal example:
 
-- [examples/greeting.rs](examples/greeting.rs)
+- [crates/agents/examples/greeting.rs](crates/agents/examples/greeting.rs)
 
 It uses `OpenAiAdapter` directly and defaults to an Ollama OpenAI-compatible endpoint:
 
 ```bash
-cargo run --quiet --example greeting -- "Hello!"
+cargo run -p agents --quiet --example greeting -- "Hello!"
 ```
 
 Useful environment variables:
@@ -220,6 +229,6 @@ Multimodal request/response content is not modeled yet.
 Useful commands:
 
 ```bash
-cargo check --all-targets
-cargo test
+cargo check --workspace --all-targets
+cargo test --workspace
 ```

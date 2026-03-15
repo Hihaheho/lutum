@@ -4,7 +4,7 @@ use futures::StreamExt;
 use thiserror::Error;
 use tracing::{Instrument, Span, field};
 
-use crate::{
+use agents_protocol::{
     budget::{BudgetLease, BudgetManager, Remaining, Usage, UsageEstimate},
     conversation::{ModelInput, ModelInputValidationError},
     llm::{

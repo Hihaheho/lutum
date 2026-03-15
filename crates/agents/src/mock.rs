@@ -7,7 +7,7 @@ use futures::stream;
 
 use thiserror::Error;
 
-use crate::{
+use agents_protocol::{
     budget::Usage,
     conversation::{ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
     llm::{

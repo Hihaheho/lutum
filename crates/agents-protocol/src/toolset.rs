@@ -251,21 +251,14 @@ where
     }
 }
 
+#[derive(Default)]
 pub enum ToolMode<T: Toolset> {
+    #[default]
     Disabled,
     AutoAll,
     AutoOnly(ToolSelection<T>),
     RequiredAll,
     RequiredOnly(ToolSelection<T>),
-}
-
-impl<T> Default for ToolMode<T>
-where
-    T: Toolset,
-{
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 impl<T> Clone for ToolMode<T>

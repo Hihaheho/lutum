@@ -1,0 +1,16 @@
+[package]
+name = "agents-openai"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agents-protocol.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

@@ -7,12 +7,10 @@ name = "agents"
 version = "0.1.0"
 dependencies = [
  "agents-macros",
- "async-stream",
+ "agents-openai",
+ "agents-protocol",
  "async-trait",
- "bon",
- "bytes",
  "futures",
- "reqwest",
  "schemars",
  "serde",
  "serde_json",
@@ -29,6 +27,35 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "agents-openai"
+version = "0.1.0"
+dependencies = [
+ "agents-protocol",
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "futures",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "agents-protocol"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bon",
+ "futures",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

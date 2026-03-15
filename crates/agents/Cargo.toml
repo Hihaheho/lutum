@@ -1,0 +1,23 @@
+[package]
+name = "agents"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["openai"]
+openai = ["dep:agents-openai"]
+
+[dependencies]
+agents-macros.workspace = true
+agents-openai = { workspace = true, optional = true }
+agents-protocol.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+schemars.workspace = true
+serde.workspace = true
+tokio.workspace = true

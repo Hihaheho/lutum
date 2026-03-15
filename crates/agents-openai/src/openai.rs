@@ -10,7 +10,7 @@ use reqwest::{
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::{
+use agents_protocol::{
     budget::Usage,
     conversation::{
         AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, RawJson,
@@ -388,7 +388,7 @@ where
     let selected = tool_mode.selected_names();
     T::definitions()
         .iter()
-        .filter(|tool| selected.is_none_or(|names| names.iter().any(|name| *name == tool.name)))
+        .filter(|tool| selected.is_none_or(|names| names.contains(&tool.name)))
         .map(|tool| {
             Ok(json!({
                 "type": "function",
@@ -1011,11 +1011,12 @@ mod tests {
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
-    use super::*;
-    use crate::{
+    use agents_protocol::{
         AssistantInputItem, InputMessageRole, ModelInput, ModelInputItem, ToolDef, ToolUse,
         toolset::{ToolCallWrapper, ToolInput},
     };
+
+    use super::*;
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
     struct WeatherArgs {

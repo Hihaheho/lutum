@@ -3,6 +3,13 @@
 `agents` is a typed, streaming LLM runtime. It intentionally does not provide a top-level
 `Agent` abstraction.
 
+The repository is split into a small workspace:
+
+- `crates/agents` exposes the public facade and `Context`
+- `crates/agents-protocol` owns canonical data and core traits
+- `crates/agents-openai` implements the OpenAI-compatible adapter
+- `crates/agents-macros` owns proc-macro code generation
+
 The crate is built around a few constraints:
 
 - execution stays in plain user code
