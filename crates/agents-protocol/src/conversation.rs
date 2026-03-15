@@ -67,12 +67,12 @@ impl ModelInput {
     }
 
     pub fn append_assistant_turn(
-        mut self,
+        &mut self,
         turn: AssistantTurn,
         tool_uses: impl IntoIterator<Item = ToolUse>,
-    ) -> Result<Self, AssistantTurnInputError> {
+    ) -> Result<(), AssistantTurnInputError> {
         self.items.extend(turn.into_input_items(tool_uses)?);
-        Ok(self)
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<(), ModelInputValidationError> {
@@ -503,7 +503,7 @@ impl RawJson {
 
 impl Clone for RawJson {
     fn clone(&self) -> Self {
-        Self::parse(self.get()).expect("stored raw json is valid")
+        Self(self.0.clone())
     }
 }
 

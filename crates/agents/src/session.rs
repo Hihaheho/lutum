@@ -157,9 +157,7 @@ where
         turn: AssistantTurn,
         tool_uses: impl IntoIterator<Item = ToolUse>,
     ) -> Result<(), AssistantTurnInputError> {
-        let input = std::mem::replace(&mut self.input, ModelInput::new());
-        self.input = input.append_assistant_turn(turn, tool_uses)?;
-        Ok(())
+        self.input.append_assistant_turn(turn, tool_uses)
     }
 
     pub async fn prepare_text<T>(
