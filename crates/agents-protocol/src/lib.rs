@@ -1,5 +1,6 @@
 pub mod budget;
 pub mod conversation;
+pub mod error;
 pub mod llm;
 pub mod marker;
 pub mod reducer;
@@ -15,8 +16,12 @@ pub use conversation::{
     EmptyNonEmptyError, InputMessageRole, MessageContent, ModelInput, ModelInputItem,
     ModelInputValidationError, NonEmpty, RawJson, ToolCallId, ToolMetadata, ToolName, ToolUse,
 };
+pub use error::{AgentError, BoxError};
 pub use llm::{
-    CompletionEvent, CompletionEventStream, CompletionOptions, CompletionRequest, FinishReason,
+    AdapterStructuredOutputSpec, AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice,
+    AdapterToolDefinition, AdapterTurnConfig, CompletionEvent, CompletionEventStream,
+    CompletionOptions, CompletionRequest, ErasedStructuredTurnEvent,
+    ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream, FinishReason,
     GenerationParams, LlmAdapter, ModelName, ModelNameError, ReasoningEffort, ReasoningParams,
     ReasoningSummary, StreamKind, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
     StructuredTurnEventStream, Temperature, TemperatureError, TextTurn, TextTurnEvent,

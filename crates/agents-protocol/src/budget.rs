@@ -8,6 +8,8 @@ use std::{
 
 use thiserror::Error;
 
+use crate::AgentError;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct UsageEstimate {
     pub input_tokens: u64,
@@ -132,16 +134,36 @@ impl<M> BudgetLease<M> {
 }
 
 pub trait BudgetManager<M>: Send + Sync + 'static {
-    type Error: std::error::Error + Send + Sync + 'static;
-
     fn remaining(&self, marker: &M) -> Remaining;
     fn reserve(
         &self,
         marker: &M,
         estimate: &UsageEstimate,
         request_budget: RequestBudget,
-    ) -> Result<BudgetLease<M>, Self::Error>;
-    fn record_used(&self, lease: BudgetLease<M>, usage: Usage) -> Result<(), Self::Error>;
+    ) -> Result<BudgetLease<M>, AgentError>;
+    fn record_used(&self, lease: BudgetLease<M>, usage: Usage) -> Result<(), AgentError>;
+}
+
+impl<M, T> BudgetManager<M> for Arc<T>
+where
+    T: BudgetManager<M> + ?Sized,
+{
+    fn remaining(&self, marker: &M) -> Remaining {
+        (**self).remaining(marker)
+    }
+
+    fn reserve(
+        &self,
+        marker: &M,
+        estimate: &UsageEstimate,
+        request_budget: RequestBudget,
+    ) -> Result<BudgetLease<M>, AgentError> {
+        (**self).reserve(marker, estimate, request_budget)
+    }
+
+    fn record_used(&self, lease: BudgetLease<M>, usage: Usage) -> Result<(), AgentError> {
+        (**self).record_used(lease, usage)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -238,13 +260,11 @@ impl<M> BudgetManager<M> for SharedPoolBudgetManager
 where
     M: Clone + Send + Sync + 'static,
 {
-    type Error = SharedPoolBudgetError;
-
     fn remaining(&self, _marker: &M) -> Remaining {
         let state = self
             .state
             .lock()
-            .map_err(|_| SharedPoolBudgetError::Poisoned);
+            .map_err(|_| AgentError::budget(SharedPoolBudgetError::Poisoned));
         match state {
             Ok(state) => self.remaining_with_state(&state),
             Err(_) => Remaining {
@@ -260,20 +280,22 @@ where
         marker: &M,
         estimate: &UsageEstimate,
         request_budget: RequestBudget,
-    ) -> Result<BudgetLease<M>, Self::Error> {
+    ) -> Result<BudgetLease<M>, AgentError> {
         if !request_budget.allows(estimate.total_tokens, estimate.cost_micros_usd) {
-            return Err(SharedPoolBudgetError::RequestBudgetExceeded {
-                requested_tokens: estimate.total_tokens,
-                requested_cost_micros_usd: estimate.cost_micros_usd,
-                budget_tokens: request_budget.tokens,
-                budget_cost_micros_usd: request_budget.cost_micros_usd,
-            });
+            return Err(AgentError::budget(
+                SharedPoolBudgetError::RequestBudgetExceeded {
+                    requested_tokens: estimate.total_tokens,
+                    requested_cost_micros_usd: estimate.cost_micros_usd,
+                    budget_tokens: request_budget.tokens,
+                    budget_cost_micros_usd: request_budget.cost_micros_usd,
+                },
+            ));
         }
 
         let mut state = self
             .state
             .lock()
-            .map_err(|_| SharedPoolBudgetError::Poisoned)?;
+            .map_err(|_| AgentError::budget(SharedPoolBudgetError::Poisoned))?;
         let remaining = self.remaining_with_state(&state);
 
         let remaining_after_tokens = remaining.tokens.saturating_sub(estimate.total_tokens);
@@ -286,12 +308,14 @@ where
             || remaining_after_cost < self.options.stop_threshold_cost_micros_usd;
 
         if denied {
-            return Err(SharedPoolBudgetError::ThresholdExceeded {
-                requested_tokens: estimate.total_tokens,
-                requested_cost_micros_usd: estimate.cost_micros_usd,
-                remaining_tokens: remaining.tokens,
-                remaining_cost_micros_usd: remaining.cost_micros_usd,
-            });
+            return Err(AgentError::budget(
+                SharedPoolBudgetError::ThresholdExceeded {
+                    requested_tokens: estimate.total_tokens,
+                    requested_cost_micros_usd: estimate.cost_micros_usd,
+                    remaining_tokens: remaining.tokens,
+                    remaining_cost_micros_usd: remaining.cost_micros_usd,
+                },
+            ));
         }
 
         let id = self.next_lease_id.fetch_add(1, Ordering::Relaxed);
@@ -309,13 +333,15 @@ where
         ))
     }
 
-    fn record_used(&self, lease: BudgetLease<M>, usage: Usage) -> Result<(), Self::Error> {
+    fn record_used(&self, lease: BudgetLease<M>, usage: Usage) -> Result<(), AgentError> {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| SharedPoolBudgetError::Poisoned)?;
+            .map_err(|_| AgentError::budget(SharedPoolBudgetError::Poisoned))?;
         let Some((reserved, request_budget)) = state.leases.remove(&lease.id) else {
-            return Err(SharedPoolBudgetError::UnknownLease { lease_id: lease.id });
+            return Err(AgentError::budget(SharedPoolBudgetError::UnknownLease {
+                lease_id: lease.id,
+            }));
         };
 
         state.reserved_tokens = state.reserved_tokens.saturating_sub(reserved.total_tokens);
@@ -328,12 +354,14 @@ where
             .saturating_add(usage.cost_micros_usd);
 
         if !request_budget.allows(usage.total_tokens, usage.cost_micros_usd) {
-            return Err(SharedPoolBudgetError::RequestBudgetExceeded {
-                requested_tokens: usage.total_tokens,
-                requested_cost_micros_usd: usage.cost_micros_usd,
-                budget_tokens: request_budget.tokens,
-                budget_cost_micros_usd: request_budget.cost_micros_usd,
-            });
+            return Err(AgentError::budget(
+                SharedPoolBudgetError::RequestBudgetExceeded {
+                    requested_tokens: usage.total_tokens,
+                    requested_cost_micros_usd: usage.cost_micros_usd,
+                    budget_tokens: request_budget.tokens,
+                    budget_cost_micros_usd: request_budget.cost_micros_usd,
+                },
+            ));
         }
 
         Ok(())
@@ -343,6 +371,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shared_pool_error(err: &AgentError) -> &SharedPoolBudgetError {
+        match err {
+            AgentError::Budget(source) => source
+                .downcast_ref::<SharedPoolBudgetError>()
+                .expect("shared pool budget error source"),
+            other => panic!("expected budget error, got {other}"),
+        }
+    }
 
     #[test]
     fn shared_pool_reserves_and_refunds_difference() {
@@ -404,7 +441,7 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(
-            err,
+            shared_pool_error(&err),
             SharedPoolBudgetError::ThresholdExceeded { .. }
         ));
     }
@@ -425,7 +462,7 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(
-            err,
+            shared_pool_error(&err),
             SharedPoolBudgetError::RequestBudgetExceeded {
                 requested_tokens: 32,
                 budget_tokens: Some(16),
@@ -460,7 +497,7 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(
-            err,
+            shared_pool_error(&err),
             SharedPoolBudgetError::RequestBudgetExceeded {
                 requested_tokens: 12,
                 budget_tokens: Some(10),

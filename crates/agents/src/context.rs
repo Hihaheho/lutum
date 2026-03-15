@@ -5,12 +5,16 @@ use thiserror::Error;
 use tracing::{Instrument, Span, field};
 
 use agents_protocol::{
+    AgentError,
     budget::{BudgetLease, BudgetManager, Remaining, Usage, UsageEstimate},
-    conversation::{ModelInput, ModelInputValidationError},
+    conversation::ModelInput,
     llm::{
-        CompletionEvent, CompletionEventStream, CompletionRequest, LlmAdapter, StreamKind,
-        StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream, TextTurn, TextTurnEvent,
-        TextTurnEventStream,
+        AdapterStructuredOutputSpec, AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice,
+        AdapterToolDefinition, AdapterTurnConfig, CompletionEvent, CompletionEventStream,
+        CompletionRequest, ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream,
+        ErasedTextTurnEvent, ErasedTextTurnEventStream, LlmAdapter, StreamKind, StructuredTurn,
+        StructuredTurnEvent, StructuredTurnEventStream, TextTurn, TextTurnEvent,
+        TextTurnEventStream, TurnConfig,
     },
     marker::Marker,
     reducer::{
@@ -20,42 +24,36 @@ use agents_protocol::{
         TextTurnState,
     },
     structured::StructuredOutput,
-    toolset::Toolset,
+    toolset::{ToolSelector, Toolset},
 };
 
+pub type ContextError = AgentError;
+
 #[derive(Clone)]
-pub struct Context<M, B, L> {
-    budget: Arc<B>,
-    adapter: Arc<L>,
-    _marker: std::marker::PhantomData<fn() -> M>,
+pub struct Context<M> {
+    budget: Arc<dyn BudgetManager<M>>,
+    adapter: Arc<dyn LlmAdapter>,
 }
 
-impl<M, B, L> Context<M, B, L> {
-    pub fn new(budget: B, adapter: L) -> Self {
+impl<M> Context<M> {
+    pub fn new<B, L>(budget: B, adapter: L) -> Self
+    where
+        B: BudgetManager<M>,
+        L: LlmAdapter,
+    {
         Self {
             budget: Arc::new(budget),
             adapter: Arc::new(adapter),
-            _marker: std::marker::PhantomData,
         }
     }
 
-    pub fn budget(&self) -> &B {
+    pub fn budget(&self) -> &dyn BudgetManager<M> {
         self.budget.as_ref()
     }
 
-    pub fn adapter(&self) -> &L {
+    pub fn adapter(&self) -> &dyn LlmAdapter {
         self.adapter.as_ref()
     }
-}
-
-#[derive(Debug, Error)]
-pub enum ContextError<BudgetError, AdapterError> {
-    #[error("invalid model input: {0}")]
-    InvalidModelInput(#[from] ModelInputValidationError),
-    #[error("budget error: {0}")]
-    Budget(#[source] BudgetError),
-    #[error("adapter error: {0}")]
-    Adapter(#[source] AdapterError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,17 +113,11 @@ where
 }
 
 #[derive(Debug, Error)]
-pub enum CollectError<BudgetError, AdapterError, HandlerError, ReductionError, Partial> {
-    #[error("budget error: {source}")]
-    Budget {
+pub enum CollectError<HandlerError, ReductionError, Partial> {
+    #[error("execution error: {source}")]
+    Execution {
         #[source]
-        source: BudgetError,
-        partial: Partial,
-    },
-    #[error("adapter error: {source}")]
-    Adapter {
-        #[source]
-        source: AdapterError,
+        source: AgentError,
         partial: Partial,
     },
     #[error("handler error: {source}")]
@@ -146,53 +138,46 @@ pub enum CollectError<BudgetError, AdapterError, HandlerError, ReductionError, P
     UnexpectedEof { partial: Partial },
 }
 
-pub struct PendingTextTurn<M, B, L, T>
+pub struct PendingTextTurn<M, T>
 where
     T: Toolset,
-    L: LlmAdapter,
 {
     marker: M,
-    budget: Arc<B>,
-    adapter: Arc<L>,
+    budget: Arc<dyn BudgetManager<M>>,
+    adapter: Arc<dyn LlmAdapter>,
     span: Span,
     lease: Option<BudgetLease<M>>,
-    stream: TextTurnEventStream<T, L::Error>,
+    stream: TextTurnEventStream<T>,
     reducer: TextTurnReducer<T>,
 }
 
-pub struct PendingStructuredTurn<M, B, L, T, O>
+pub struct PendingStructuredTurn<M, T, O>
 where
     T: Toolset,
     O: StructuredOutput,
-    L: LlmAdapter,
 {
     marker: M,
-    budget: Arc<B>,
-    adapter: Arc<L>,
+    budget: Arc<dyn BudgetManager<M>>,
+    adapter: Arc<dyn LlmAdapter>,
     span: Span,
     lease: Option<BudgetLease<M>>,
-    stream: StructuredTurnEventStream<T, O, L::Error>,
+    stream: StructuredTurnEventStream<T, O>,
     reducer: StructuredTurnReducer<T, O>,
 }
 
-pub struct PendingCompletion<M, B, L>
-where
-    L: LlmAdapter,
-{
+pub struct PendingCompletion<M> {
     marker: M,
-    budget: Arc<B>,
-    adapter: Arc<L>,
+    budget: Arc<dyn BudgetManager<M>>,
+    adapter: Arc<dyn LlmAdapter>,
     span: Span,
     lease: Option<BudgetLease<M>>,
-    stream: CompletionEventStream<L::Error>,
+    stream: CompletionEventStream,
     reducer: CompletionReducer,
 }
 
-impl<M, B, L> Context<M, B, L>
+impl<M> Context<M>
 where
     M: Marker,
-    B: BudgetManager<M>,
-    L: LlmAdapter,
 {
     pub async fn responses_text<T>(
         &self,
@@ -200,15 +185,14 @@ where
         input: ModelInput,
         turn: TextTurn<T>,
         estimate: UsageEstimate,
-    ) -> Result<PendingTextTurn<M, B, L, T>, ContextError<B::Error, L::Error>>
+    ) -> Result<PendingTextTurn<M, T>, ContextError>
     where
         T: Toolset,
     {
         input.validate()?;
         let lease = self
             .budget
-            .reserve(&marker, &estimate, turn.config.budget)
-            .map_err(ContextError::Budget)?;
+            .reserve(&marker, &estimate, turn.config.budget)?;
         let span = turn_span(
             marker.span_name().into_owned(),
             "responses_text",
@@ -217,16 +201,15 @@ where
         );
         let stream = self
             .adapter
-            .responses_text(input, turn)
-            .await
-            .map_err(ContextError::Adapter)?;
+            .responses_text(input, erase_text_turn(turn)?)
+            .await?;
         Ok(PendingTextTurn {
             marker,
             budget: Arc::clone(&self.budget),
             adapter: Arc::clone(&self.adapter),
             span,
             lease: Some(lease),
-            stream,
+            stream: map_text_stream::<T>(stream),
             reducer: TextTurnReducer::new(),
         })
     }
@@ -237,7 +220,7 @@ where
         input: ModelInput,
         turn: StructuredTurn<T, O>,
         estimate: UsageEstimate,
-    ) -> Result<PendingStructuredTurn<M, B, L, T, O>, ContextError<B::Error, L::Error>>
+    ) -> Result<PendingStructuredTurn<M, T, O>, ContextError>
     where
         T: Toolset,
         O: StructuredOutput,
@@ -245,8 +228,7 @@ where
         input.validate()?;
         let lease = self
             .budget
-            .reserve(&marker, &estimate, turn.config.budget)
-            .map_err(ContextError::Budget)?;
+            .reserve(&marker, &estimate, turn.config.budget)?;
         let span = turn_span(
             marker.span_name().into_owned(),
             "responses_structured",
@@ -255,16 +237,15 @@ where
         );
         let stream = self
             .adapter
-            .responses_structured(input, turn)
-            .await
-            .map_err(ContextError::Adapter)?;
+            .responses_structured(input, erase_structured_turn(turn)?)
+            .await?;
         Ok(PendingStructuredTurn {
             marker,
             budget: Arc::clone(&self.budget),
             adapter: Arc::clone(&self.adapter),
             span,
             lease: Some(lease),
-            stream,
+            stream: map_structured_stream::<T, O>(stream),
             reducer: StructuredTurnReducer::new(),
         })
     }
@@ -274,22 +255,15 @@ where
         marker: M,
         request: CompletionRequest,
         estimate: UsageEstimate,
-    ) -> Result<PendingCompletion<M, B, L>, ContextError<B::Error, L::Error>> {
-        let lease = self
-            .budget
-            .reserve(&marker, &estimate, request.budget)
-            .map_err(ContextError::Budget)?;
+    ) -> Result<PendingCompletion<M>, ContextError> {
+        let lease = self.budget.reserve(&marker, &estimate, request.budget)?;
         let span = turn_span(
             marker.span_name().into_owned(),
             "completion",
             request.model.as_ref(),
             estimate,
         );
-        let stream = self
-            .adapter
-            .completion(request)
-            .await
-            .map_err(ContextError::Adapter)?;
+        let stream = self.adapter.completion(request).await?;
         Ok(PendingCompletion {
             marker,
             budget: Arc::clone(&self.budget),
@@ -302,20 +276,15 @@ where
     }
 }
 
-impl<M, B, L, T> PendingTextTurn<M, B, L, T>
+impl<M, T> PendingTextTurn<M, T>
 where
     M: Marker,
-    B: BudgetManager<M>,
-    L: LlmAdapter,
     T: Toolset,
 {
     pub async fn collect<H>(
         mut self,
         mut handler: H,
-    ) -> Result<
-        TextTurnResult<T>,
-        CollectError<B::Error, L::Error, H::Error, TextTurnReductionError, TextTurnState<T>>,
-    >
+    ) -> Result<TextTurnResult<T>, CollectError<H::Error, TextTurnReductionError, TextTurnState<T>>>
     where
         H: EventHandler<TextTurnEvent<T>, M, TextTurnState<T>>,
     {
@@ -337,7 +306,7 @@ where
                             self.reducer.state().request_id.as_deref(),
                             usage,
                         ) {
-                            return Err(CollectError::Budget {
+                            return Err(CollectError::Execution {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
@@ -368,7 +337,7 @@ where
                             )
                             .await
                             {
-                                return Err(CollectError::Budget { source, partial });
+                                return Err(CollectError::Execution { source, partial });
                             }
                             return Err(CollectError::Stopped {
                                 partial: self.reducer.into_state(),
@@ -376,7 +345,7 @@ where
                         }
                         Err(source) => {
                             let partial = self.reducer.state().clone();
-                            if let Err(budget_source) = recover_or_release_budget(
+                            if let Err(execution_source) = recover_or_release_budget(
                                 &mut self.lease,
                                 &*self.budget,
                                 &*self.adapter,
@@ -385,8 +354,8 @@ where
                             )
                             .await
                             {
-                                return Err(CollectError::Budget {
-                                    source: budget_source,
+                                return Err(CollectError::Execution {
+                                    source: execution_source,
                                     partial,
                                 });
                             }
@@ -399,7 +368,7 @@ where
                 }
                 Err(source) => {
                     let partial = self.reducer.state().clone();
-                    if let Err(budget_source) = recover_or_release_budget(
+                    if let Err(execution_source) = recover_or_release_budget(
                         &mut self.lease,
                         &*self.budget,
                         &*self.adapter,
@@ -408,12 +377,12 @@ where
                     )
                     .await
                     {
-                        return Err(CollectError::Budget {
-                            source: budget_source,
+                        return Err(CollectError::Execution {
+                            source: execution_source,
                             partial,
                         });
                     }
-                    return Err(CollectError::Adapter {
+                    return Err(CollectError::Execution {
                         source,
                         partial: self.reducer.into_state(),
                     });
@@ -431,7 +400,7 @@ where
         )
         .await
         {
-            return Err(CollectError::Budget { source, partial });
+            return Err(CollectError::Execution { source, partial });
         }
         Err(CollectError::UnexpectedEof {
             partial: self.reducer.into_state(),
@@ -440,10 +409,8 @@ where
 
     pub async fn collect_noop(
         self,
-    ) -> Result<
-        TextTurnResult<T>,
-        CollectError<B::Error, L::Error, Infallible, TextTurnReductionError, TextTurnState<T>>,
-    > {
+    ) -> Result<TextTurnResult<T>, CollectError<Infallible, TextTurnReductionError, TextTurnState<T>>>
+    {
         self.collect(NoopHandler).await
     }
 
@@ -464,11 +431,9 @@ where
     }
 }
 
-impl<M, B, L, T, O> PendingStructuredTurn<M, B, L, T, O>
+impl<M, T, O> PendingStructuredTurn<M, T, O>
 where
     M: Marker,
-    B: BudgetManager<M>,
-    L: LlmAdapter,
     T: Toolset,
     O: StructuredOutput,
 {
@@ -477,13 +442,7 @@ where
         mut handler: H,
     ) -> Result<
         StructuredTurnResult<T, O>,
-        CollectError<
-            B::Error,
-            L::Error,
-            H::Error,
-            StructuredTurnReductionError,
-            StructuredTurnState<T, O>,
-        >,
+        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnState<T, O>>,
     >
     where
         H: EventHandler<StructuredTurnEvent<T, O>, M, StructuredTurnState<T, O>>,
@@ -506,7 +465,7 @@ where
                             self.reducer.state().request_id.as_deref(),
                             usage,
                         ) {
-                            return Err(CollectError::Budget {
+                            return Err(CollectError::Execution {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
@@ -537,7 +496,7 @@ where
                             )
                             .await
                             {
-                                return Err(CollectError::Budget { source, partial });
+                                return Err(CollectError::Execution { source, partial });
                             }
                             return Err(CollectError::Stopped {
                                 partial: self.reducer.into_state(),
@@ -545,7 +504,7 @@ where
                         }
                         Err(source) => {
                             let partial = self.reducer.state().clone();
-                            if let Err(budget_source) = recover_or_release_budget(
+                            if let Err(execution_source) = recover_or_release_budget(
                                 &mut self.lease,
                                 &*self.budget,
                                 &*self.adapter,
@@ -554,8 +513,8 @@ where
                             )
                             .await
                             {
-                                return Err(CollectError::Budget {
-                                    source: budget_source,
+                                return Err(CollectError::Execution {
+                                    source: execution_source,
                                     partial,
                                 });
                             }
@@ -568,7 +527,7 @@ where
                 }
                 Err(source) => {
                     let partial = self.reducer.state().clone();
-                    if let Err(budget_source) = recover_or_release_budget(
+                    if let Err(execution_source) = recover_or_release_budget(
                         &mut self.lease,
                         &*self.budget,
                         &*self.adapter,
@@ -577,12 +536,12 @@ where
                     )
                     .await
                     {
-                        return Err(CollectError::Budget {
-                            source: budget_source,
+                        return Err(CollectError::Execution {
+                            source: execution_source,
                             partial,
                         });
                     }
-                    return Err(CollectError::Adapter {
+                    return Err(CollectError::Execution {
                         source,
                         partial: self.reducer.into_state(),
                     });
@@ -600,7 +559,7 @@ where
         )
         .await
         {
-            return Err(CollectError::Budget { source, partial });
+            return Err(CollectError::Execution { source, partial });
         }
         Err(CollectError::UnexpectedEof {
             partial: self.reducer.into_state(),
@@ -611,13 +570,7 @@ where
         self,
     ) -> Result<
         StructuredTurnResult<T, O>,
-        CollectError<
-            B::Error,
-            L::Error,
-            Infallible,
-            StructuredTurnReductionError,
-            StructuredTurnState<T, O>,
-        >,
+        CollectError<Infallible, StructuredTurnReductionError, StructuredTurnState<T, O>>,
     > {
         self.collect(NoopHandler).await
     }
@@ -639,18 +592,16 @@ where
     }
 }
 
-impl<M, B, L> PendingCompletion<M, B, L>
+impl<M> PendingCompletion<M>
 where
     M: Marker,
-    B: BudgetManager<M>,
-    L: LlmAdapter,
 {
     pub async fn collect<H>(
         mut self,
         mut handler: H,
     ) -> Result<
         CompletionTurnResult,
-        CollectError<B::Error, L::Error, H::Error, CompletionReductionError, CompletionTurnState>,
+        CollectError<H::Error, CompletionReductionError, CompletionTurnState>,
     >
     where
         H: EventHandler<CompletionEvent, M, CompletionTurnState>,
@@ -673,7 +624,7 @@ where
                             self.reducer.state().request_id.as_deref(),
                             usage,
                         ) {
-                            return Err(CollectError::Budget {
+                            return Err(CollectError::Execution {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
@@ -704,7 +655,7 @@ where
                             )
                             .await
                             {
-                                return Err(CollectError::Budget { source, partial });
+                                return Err(CollectError::Execution { source, partial });
                             }
                             return Err(CollectError::Stopped {
                                 partial: self.reducer.into_state(),
@@ -712,7 +663,7 @@ where
                         }
                         Err(source) => {
                             let partial = self.reducer.state().clone();
-                            if let Err(budget_source) = recover_or_release_budget(
+                            if let Err(execution_source) = recover_or_release_budget(
                                 &mut self.lease,
                                 &*self.budget,
                                 &*self.adapter,
@@ -721,8 +672,8 @@ where
                             )
                             .await
                             {
-                                return Err(CollectError::Budget {
-                                    source: budget_source,
+                                return Err(CollectError::Execution {
+                                    source: execution_source,
                                     partial,
                                 });
                             }
@@ -735,7 +686,7 @@ where
                 }
                 Err(source) => {
                     let partial = self.reducer.state().clone();
-                    if let Err(budget_source) = recover_or_release_budget(
+                    if let Err(execution_source) = recover_or_release_budget(
                         &mut self.lease,
                         &*self.budget,
                         &*self.adapter,
@@ -744,12 +695,12 @@ where
                     )
                     .await
                     {
-                        return Err(CollectError::Budget {
-                            source: budget_source,
+                        return Err(CollectError::Execution {
+                            source: execution_source,
                             partial,
                         });
                     }
-                    return Err(CollectError::Adapter {
+                    return Err(CollectError::Execution {
                         source,
                         partial: self.reducer.into_state(),
                     });
@@ -767,7 +718,7 @@ where
         )
         .await
         {
-            return Err(CollectError::Budget { source, partial });
+            return Err(CollectError::Execution { source, partial });
         }
         Err(CollectError::UnexpectedEof {
             partial: self.reducer.into_state(),
@@ -778,7 +729,7 @@ where
         self,
     ) -> Result<
         CompletionTurnResult,
-        CollectError<B::Error, L::Error, Infallible, CompletionReductionError, CompletionTurnState>,
+        CollectError<Infallible, CompletionReductionError, CompletionTurnState>,
     > {
         self.collect(NoopHandler).await
     }
@@ -820,47 +771,213 @@ where
     }
 }
 
-fn finalize_budget<M, B>(
+fn erase_text_turn<T>(turn: TextTurn<T>) -> Result<AdapterTextTurn, AgentError>
+where
+    T: Toolset,
+{
+    Ok(AdapterTextTurn {
+        config: erase_turn_config(turn.config)?,
+    })
+}
+
+fn erase_structured_turn<T, O>(
+    turn: StructuredTurn<T, O>,
+) -> Result<AdapterStructuredTurn, AgentError>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    Ok(AdapterStructuredTurn {
+        config: erase_turn_config(turn.config)?,
+        output: AdapterStructuredOutputSpec {
+            schema_name: <O as StructuredOutput>::schema_name().into_owned(),
+            schema: serde_json::to_value(<O as StructuredOutput>::json_schema())?,
+        },
+    })
+}
+
+fn erase_turn_config<T>(config: TurnConfig<T>) -> Result<AdapterTurnConfig, AgentError>
+where
+    T: Toolset,
+{
+    let tool_choice = if config.tools.requires_tools() {
+        AdapterToolChoice::Required
+    } else if config.tools.uses_tools() {
+        AdapterToolChoice::Auto
+    } else {
+        AdapterToolChoice::None
+    };
+    let selected = config.tools.selected().map(|selectors| {
+        selectors
+            .iter()
+            .map(|selector| selector.name())
+            .collect::<Vec<_>>()
+    });
+    let tools = T::definitions()
+        .iter()
+        .filter(|tool| {
+            selected
+                .as_ref()
+                .is_none_or(|names: &Vec<&'static str>| names.contains(&tool.name))
+        })
+        .map(|tool| {
+            Ok(AdapterToolDefinition {
+                name: tool.name.to_string(),
+                description: tool.description.to_string(),
+                input_schema: serde_json::to_value(tool.input_schema())?,
+            })
+        })
+        .collect::<Result<Vec<_>, serde_json::Error>>()?;
+
+    Ok(AdapterTurnConfig {
+        model: config.model,
+        generation: config.generation,
+        reasoning: config.reasoning,
+        tools,
+        tool_choice,
+    })
+}
+
+fn map_text_stream<T>(stream: ErasedTextTurnEventStream) -> TextTurnEventStream<T>
+where
+    T: Toolset,
+{
+    Box::pin(stream.map(|item| item.and_then(map_text_event::<T>)))
+}
+
+fn map_structured_stream<T, O>(
+    stream: ErasedStructuredTurnEventStream,
+) -> StructuredTurnEventStream<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    Box::pin(stream.map(|item| item.and_then(map_structured_event::<T, O>)))
+}
+
+fn map_text_event<T>(event: ErasedTextTurnEvent) -> Result<TextTurnEvent<T>, AgentError>
+where
+    T: Toolset,
+{
+    match event {
+        ErasedTextTurnEvent::Started { request_id, model } => {
+            Ok(TextTurnEvent::Started { request_id, model })
+        }
+        ErasedTextTurnEvent::TextDelta { delta } => Ok(TextTurnEvent::TextDelta { delta }),
+        ErasedTextTurnEvent::ReasoningDelta { delta } => {
+            Ok(TextTurnEvent::ReasoningDelta { delta })
+        }
+        ErasedTextTurnEvent::RefusalDelta { delta } => Ok(TextTurnEvent::RefusalDelta { delta }),
+        ErasedTextTurnEvent::ToolCallChunk {
+            id,
+            name,
+            arguments_json_delta,
+        } => Ok(TextTurnEvent::ToolCallChunk {
+            id,
+            name,
+            arguments_json_delta,
+        }),
+        ErasedTextTurnEvent::ToolCallReady(metadata) => {
+            let name = metadata.name.as_str().to_string();
+            let arguments_json = metadata.arguments.get().to_string();
+            let tool_call = T::parse_tool_call(metadata, &name, &arguments_json)?;
+            Ok(TextTurnEvent::ToolCallReady(tool_call))
+        }
+        ErasedTextTurnEvent::Completed {
+            request_id,
+            finish_reason,
+            usage,
+        } => Ok(TextTurnEvent::Completed {
+            request_id,
+            finish_reason,
+            usage,
+        }),
+    }
+}
+
+fn map_structured_event<T, O>(
+    event: ErasedStructuredTurnEvent,
+) -> Result<StructuredTurnEvent<T, O>, AgentError>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    match event {
+        ErasedStructuredTurnEvent::Started { request_id, model } => {
+            Ok(StructuredTurnEvent::Started { request_id, model })
+        }
+        ErasedStructuredTurnEvent::StructuredOutputChunk { json_delta } => {
+            Ok(StructuredTurnEvent::StructuredOutputChunk { json_delta })
+        }
+        ErasedStructuredTurnEvent::StructuredOutputReady(raw) => {
+            Ok(StructuredTurnEvent::StructuredOutputReady(
+                raw.deserialize().map_err(AgentError::structured_output)?,
+            ))
+        }
+        ErasedStructuredTurnEvent::ReasoningDelta { delta } => {
+            Ok(StructuredTurnEvent::ReasoningDelta { delta })
+        }
+        ErasedStructuredTurnEvent::RefusalDelta { delta } => {
+            Ok(StructuredTurnEvent::RefusalDelta { delta })
+        }
+        ErasedStructuredTurnEvent::ToolCallChunk {
+            id,
+            name,
+            arguments_json_delta,
+        } => Ok(StructuredTurnEvent::ToolCallChunk {
+            id,
+            name,
+            arguments_json_delta,
+        }),
+        ErasedStructuredTurnEvent::ToolCallReady(metadata) => {
+            let name = metadata.name.as_str().to_string();
+            let arguments_json = metadata.arguments.get().to_string();
+            let tool_call = T::parse_tool_call(metadata, &name, &arguments_json)?;
+            Ok(StructuredTurnEvent::ToolCallReady(tool_call))
+        }
+        ErasedStructuredTurnEvent::Completed {
+            request_id,
+            finish_reason,
+            usage,
+        } => Ok(StructuredTurnEvent::Completed {
+            request_id,
+            finish_reason,
+            usage,
+        }),
+    }
+}
+
+fn finalize_budget<M: 'static>(
     lease: &mut Option<BudgetLease<M>>,
-    budget: &B,
+    budget: &dyn BudgetManager<M>,
     span: &Span,
     request_id: Option<&str>,
     usage: Usage,
-) -> Result<(), B::Error>
-where
-    B: BudgetManager<M>,
-{
+) -> Result<(), AgentError> {
     if let Some(request_id) = request_id {
         span.record("request_id", field::display(request_id));
     }
     record_budget_usage(lease, budget, usage)
 }
 
-fn record_budget_usage<M, B>(
+fn record_budget_usage<M: 'static>(
     lease: &mut Option<BudgetLease<M>>,
-    budget: &B,
+    budget: &dyn BudgetManager<M>,
     usage: Usage,
-) -> Result<(), B::Error>
-where
-    B: BudgetManager<M>,
-{
+) -> Result<(), AgentError> {
     if let Some(lease) = lease.take() {
         budget.record_used(lease, usage)?;
     }
     Ok(())
 }
 
-async fn recover_or_release_budget<M, B, L>(
+async fn recover_or_release_budget<M: 'static>(
     lease: &mut Option<BudgetLease<M>>,
-    budget: &B,
-    adapter: &L,
+    budget: &dyn BudgetManager<M>,
+    adapter: &dyn LlmAdapter,
     kind: StreamKind,
     request_id: Option<&str>,
-) -> Result<(), B::Error>
-where
-    B: BudgetManager<M>,
-    L: LlmAdapter,
-{
+) -> Result<(), AgentError> {
     let recovered_usage = if let Some(request_id) = request_id {
         adapter
             .recover_usage(kind, request_id)

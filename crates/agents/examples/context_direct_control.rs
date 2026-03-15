@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::<AppMarker, _, _>::new(budget, adapter);
+    let ctx = Context::<AppMarker>::new(budget, adapter);
     let input = ModelInput::from_items(vec![ModelInputItem::text(
         InputMessageRole::User,
         "Run without session helpers.",

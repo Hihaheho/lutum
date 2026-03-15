@@ -8,15 +8,14 @@ use futures::stream;
 use thiserror::Error;
 
 use agents_protocol::{
+    AgentError,
     budget::Usage,
     conversation::{ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
     llm::{
-        CompletionEvent, CompletionEventStream, CompletionRequest, FinishReason, LlmAdapter,
-        StreamKind, StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream, TextTurn,
-        TextTurnEvent, TextTurnEventStream,
+        AdapterStructuredTurn, AdapterTextTurn, CompletionEvent, CompletionEventStream,
+        CompletionRequest, ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream,
+        ErasedTextTurnEvent, ErasedTextTurnEventStream, FinishReason, LlmAdapter, StreamKind,
     },
-    structured::StructuredOutput,
-    toolset::Toolset,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,22 +179,17 @@ impl MockLlmAdapter {
 
 #[async_trait::async_trait]
 impl LlmAdapter for MockLlmAdapter {
-    type Error = MockError;
-
-    async fn responses_text<T>(
+    async fn responses_text(
         &self,
         _input: ModelInput,
-        _turn: TextTurn<T>,
-    ) -> Result<TextTurnEventStream<T, Self::Error>, Self::Error>
-    where
-        T: Toolset,
-    {
+        _turn: AdapterTextTurn,
+    ) -> Result<ErasedTextTurnEventStream, AgentError> {
         let scenario = self
             .text_turns
             .lock()
             .unwrap()
             .pop_front()
-            .ok_or(MockError::MissingTextScenario)?;
+            .ok_or_else(|| AgentError::backend(MockError::MissingTextScenario))?;
         let mut tool_buffers: BTreeMap<ToolCallId, (ToolName, String)> = BTreeMap::new();
 
         let events = scenario
@@ -203,16 +197,16 @@ impl LlmAdapter for MockLlmAdapter {
             .into_iter()
             .flat_map(move |event| match event {
                 Ok(RawTextTurnEvent::Started { request_id, model }) => {
-                    vec![Ok(TextTurnEvent::Started { request_id, model })]
+                    vec![Ok(ErasedTextTurnEvent::Started { request_id, model })]
                 }
                 Ok(RawTextTurnEvent::TextDelta { delta }) => {
-                    vec![Ok(TextTurnEvent::TextDelta { delta })]
+                    vec![Ok(ErasedTextTurnEvent::TextDelta { delta })]
                 }
                 Ok(RawTextTurnEvent::ReasoningDelta { delta }) => {
-                    vec![Ok(TextTurnEvent::ReasoningDelta { delta })]
+                    vec![Ok(ErasedTextTurnEvent::ReasoningDelta { delta })]
                 }
                 Ok(RawTextTurnEvent::RefusalDelta { delta }) => {
-                    vec![Ok(TextTurnEvent::RefusalDelta { delta })]
+                    vec![Ok(ErasedTextTurnEvent::RefusalDelta { delta })]
                 }
                 Ok(RawTextTurnEvent::ToolCallChunk {
                     id,
@@ -223,7 +217,7 @@ impl LlmAdapter for MockLlmAdapter {
                         .entry(id.clone())
                         .or_insert_with(|| (name.clone(), String::new()));
                     entry.1.push_str(&arguments_json_delta);
-                    let mut out = vec![Ok(TextTurnEvent::ToolCallChunk {
+                    let mut out = vec![Ok(ErasedTextTurnEvent::ToolCallChunk {
                         id: id.clone(),
                         name: name.clone(),
                         arguments_json_delta,
@@ -231,15 +225,11 @@ impl LlmAdapter for MockLlmAdapter {
                     if is_complete_json(&entry.1) {
                         let arguments =
                             RawJson::parse(entry.1.clone()).expect("complete mock JSON is valid");
-                        let arguments_json = arguments.get().to_string();
-                        match T::parse_tool_call(
-                            ToolMetadata::new(id.clone(), entry.0.clone(), arguments),
-                            entry.0.as_str(),
-                            &arguments_json,
-                        ) {
-                            Ok(tool_call) => out.push(Ok(TextTurnEvent::ToolCallReady(tool_call))),
-                            Err(err) => out.push(Err(MockError::ToolCall(err.to_string()))),
-                        }
+                        out.push(Ok(ErasedTextTurnEvent::ToolCallReady(ToolMetadata::new(
+                            id.clone(),
+                            entry.0.clone(),
+                            arguments,
+                        ))));
                         tool_buffers.remove(&id);
                     }
                     out
@@ -248,33 +238,29 @@ impl LlmAdapter for MockLlmAdapter {
                     request_id,
                     finish_reason,
                     usage,
-                }) => vec![Ok(TextTurnEvent::Completed {
+                }) => vec![Ok(ErasedTextTurnEvent::Completed {
                     request_id,
                     finish_reason,
                     usage,
                 })],
-                Err(err) => vec![Err(err)],
+                Err(err) => vec![Err(AgentError::backend(err))],
             })
             .collect::<Vec<_>>();
 
-        Ok(Box::pin(stream::iter(events)) as TextTurnEventStream<T, Self::Error>)
+        Ok(Box::pin(stream::iter(events)) as ErasedTextTurnEventStream)
     }
 
-    async fn responses_structured<T, O>(
+    async fn responses_structured(
         &self,
         _input: ModelInput,
-        _turn: StructuredTurn<T, O>,
-    ) -> Result<StructuredTurnEventStream<T, O, Self::Error>, Self::Error>
-    where
-        T: Toolset,
-        O: StructuredOutput,
-    {
+        _turn: AdapterStructuredTurn,
+    ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
         let scenario = self
             .structured_turns
             .lock()
             .unwrap()
             .pop_front()
-            .ok_or(MockError::MissingStructuredScenario)?;
+            .ok_or_else(|| AgentError::backend(MockError::MissingStructuredScenario))?;
         let mut structured_buffer = String::new();
         let mut tool_buffers: BTreeMap<ToolCallId, (ToolName, String)> = BTreeMap::new();
 
@@ -283,19 +269,19 @@ impl LlmAdapter for MockLlmAdapter {
             .into_iter()
             .flat_map(move |event| match event {
                 Ok(RawStructuredTurnEvent::Started { request_id, model }) => {
-                    vec![Ok(StructuredTurnEvent::Started { request_id, model })]
+                    vec![Ok(ErasedStructuredTurnEvent::Started { request_id, model })]
                 }
                 Ok(RawStructuredTurnEvent::StructuredOutputChunk { json_delta }) => {
                     structured_buffer.push_str(&json_delta);
-                    vec![Ok(StructuredTurnEvent::StructuredOutputChunk {
+                    vec![Ok(ErasedStructuredTurnEvent::StructuredOutputChunk {
                         json_delta,
                     })]
                 }
                 Ok(RawStructuredTurnEvent::ReasoningDelta { delta }) => {
-                    vec![Ok(StructuredTurnEvent::ReasoningDelta { delta })]
+                    vec![Ok(ErasedStructuredTurnEvent::ReasoningDelta { delta })]
                 }
                 Ok(RawStructuredTurnEvent::RefusalDelta { delta }) => {
-                    vec![Ok(StructuredTurnEvent::RefusalDelta { delta })]
+                    vec![Ok(ErasedStructuredTurnEvent::RefusalDelta { delta })]
                 }
                 Ok(RawStructuredTurnEvent::ToolCallChunk {
                     id,
@@ -306,7 +292,7 @@ impl LlmAdapter for MockLlmAdapter {
                         .entry(id.clone())
                         .or_insert_with(|| (name.clone(), String::new()));
                     entry.1.push_str(&arguments_json_delta);
-                    let mut out = vec![Ok(StructuredTurnEvent::ToolCallChunk {
+                    let mut out = vec![Ok(ErasedStructuredTurnEvent::ToolCallChunk {
                         id: id.clone(),
                         name: name.clone(),
                         arguments_json_delta,
@@ -314,17 +300,9 @@ impl LlmAdapter for MockLlmAdapter {
                     if is_complete_json(&entry.1) {
                         let arguments =
                             RawJson::parse(entry.1.clone()).expect("complete mock JSON is valid");
-                        let arguments_json = arguments.get().to_string();
-                        match T::parse_tool_call(
+                        out.push(Ok(ErasedStructuredTurnEvent::ToolCallReady(
                             ToolMetadata::new(id.clone(), entry.0.clone(), arguments),
-                            entry.0.as_str(),
-                            &arguments_json,
-                        ) {
-                            Ok(tool_call) => {
-                                out.push(Ok(StructuredTurnEvent::ToolCallReady(tool_call)))
-                            }
-                            Err(err) => out.push(Err(MockError::ToolCall(err.to_string()))),
-                        }
+                        )));
                         tool_buffers.remove(&id);
                     }
                     out
@@ -336,37 +314,36 @@ impl LlmAdapter for MockLlmAdapter {
                 }) => {
                     let mut out = Vec::new();
                     if !structured_buffer.is_empty() {
-                        match serde_json::from_str::<O>(&structured_buffer) {
-                            Ok(value) => {
-                                out.push(Ok(StructuredTurnEvent::StructuredOutputReady(value)))
-                            }
-                            Err(err) => out.push(Err(MockError::StructuredOutput(err.to_string()))),
+                        match RawJson::parse(structured_buffer.clone()) {
+                            Ok(value) => out
+                                .push(Ok(ErasedStructuredTurnEvent::StructuredOutputReady(value))),
+                            Err(err) => out.push(Err(AgentError::structured_output(err))),
                         }
                     }
-                    out.push(Ok(StructuredTurnEvent::Completed {
+                    out.push(Ok(ErasedStructuredTurnEvent::Completed {
                         request_id,
                         finish_reason,
                         usage,
                     }));
                     out
                 }
-                Err(err) => vec![Err(err)],
+                Err(err) => vec![Err(AgentError::backend(err))],
             })
             .collect::<Vec<_>>();
 
-        Ok(Box::pin(stream::iter(events)) as StructuredTurnEventStream<T, O, Self::Error>)
+        Ok(Box::pin(stream::iter(events)) as ErasedStructuredTurnEventStream)
     }
 
     async fn completion(
         &self,
         _request: CompletionRequest,
-    ) -> Result<CompletionEventStream<Self::Error>, Self::Error> {
+    ) -> Result<CompletionEventStream, AgentError> {
         let scenario = self
             .completions
             .lock()
             .unwrap()
             .pop_front()
-            .ok_or(MockError::MissingCompletionScenario)?;
+            .ok_or_else(|| AgentError::backend(MockError::MissingCompletionScenario))?;
         let events = scenario.events.into_iter().map(|event| match event {
             Ok(RawCompletionEvent::Started { request_id, model }) => {
                 Ok(CompletionEvent::Started { request_id, model })
@@ -381,18 +358,17 @@ impl LlmAdapter for MockLlmAdapter {
                 finish_reason,
                 usage,
             }),
-            Err(err) => Err(err),
+            Err(err) => Err(AgentError::backend(err)),
         });
 
-        Ok(Box::pin(stream::iter(events.collect::<Vec<_>>()))
-            as CompletionEventStream<Self::Error>)
+        Ok(Box::pin(stream::iter(events.collect::<Vec<_>>())) as CompletionEventStream)
     }
 
     async fn recover_usage(
         &self,
         kind: StreamKind,
         request_id: &str,
-    ) -> Result<Option<Usage>, Self::Error> {
+    ) -> Result<Option<Usage>, AgentError> {
         Ok(self
             .recovered_usage
             .lock()

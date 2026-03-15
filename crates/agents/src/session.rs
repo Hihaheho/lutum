@@ -4,8 +4,7 @@ use agents_protocol::{
     AssistantTurn, AssistantTurnInputError, FinishReason, GenerationParams, InputMessageRole,
     ModelInput, ModelInputItem, ModelName, ReasoningParams, RequestBudget, StructuredTurn,
     TextTurn, ToolUse, Toolset, TurnConfig, UsageEstimate,
-    budget::{BudgetManager, Usage},
-    llm::LlmAdapter,
+    budget::Usage,
     marker::Marker,
     reducer::{
         StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, TextTurnResult,
@@ -52,20 +51,18 @@ impl SessionDefaults {
 }
 
 #[derive(Clone)]
-pub struct Session<M, B, L> {
-    ctx: Context<M, B, L>,
+pub struct Session<M> {
+    ctx: Context<M>,
     marker: M,
     input: ModelInput,
     defaults: SessionDefaults,
 }
 
-impl<M, B, L> Session<M, B, L>
+impl<M> Session<M>
 where
     M: Marker + Clone,
-    B: BudgetManager<M>,
-    L: LlmAdapter,
 {
-    pub fn new(ctx: Context<M, B, L>, marker: M) -> Self {
+    pub fn new(ctx: Context<M>, marker: M) -> Self {
         Self {
             ctx,
             marker,
@@ -74,7 +71,7 @@ where
         }
     }
 
-    pub fn from_snapshot(ctx: Context<M, B, L>, marker: M, input: ModelInput) -> Self {
+    pub fn from_snapshot(ctx: Context<M>, marker: M, input: ModelInput) -> Self {
         Self {
             ctx,
             marker,
@@ -92,7 +89,7 @@ where
         &self.defaults
     }
 
-    pub fn context(&self) -> &Context<M, B, L> {
+    pub fn context(&self) -> &Context<M> {
         &self.ctx
     }
 
@@ -164,7 +161,7 @@ where
         &self,
         mut turn: TextTurn<T>,
         estimate: UsageEstimate,
-    ) -> Result<SessionPendingText<M, B, L, T>, ContextError<B::Error, L::Error>>
+    ) -> Result<SessionPendingText<M, T>, ContextError>
     where
         T: Toolset,
     {
@@ -180,7 +177,7 @@ where
         &self,
         mut turn: StructuredTurn<T, O>,
         estimate: UsageEstimate,
-    ) -> Result<SessionPendingStructured<M, B, L, T, O>, ContextError<B::Error, L::Error>>
+    ) -> Result<SessionPendingStructured<M, T, O>, ContextError>
     where
         T: Toolset,
         O: StructuredOutput,
@@ -226,22 +223,19 @@ where
     }
 }
 
-pub struct SessionPendingText<M, B, L, T>
+pub struct SessionPendingText<M, T>
 where
     T: Toolset,
-    L: LlmAdapter,
 {
-    pending: CorePendingTextTurn<M, B, L, T>,
+    pending: CorePendingTextTurn<M, T>,
 }
 
-impl<M, B, L, T> SessionPendingText<M, B, L, T>
+impl<M, T> SessionPendingText<M, T>
 where
     M: Marker,
-    B: BudgetManager<M>,
-    L: LlmAdapter,
     T: Toolset,
 {
-    pub fn into_pending(self) -> PendingTextTurn<M, B, L, T> {
+    pub fn into_pending(self) -> PendingTextTurn<M, T> {
         self.pending
     }
 
@@ -250,13 +244,7 @@ where
         handler: H,
     ) -> Result<
         TextStepOutcome<T>,
-        CollectError<
-            B::Error,
-            L::Error,
-            H::Error,
-            crate::TextTurnReductionError,
-            crate::TextTurnState<T>,
-        >,
+        CollectError<H::Error, crate::TextTurnReductionError, crate::TextTurnState<T>>,
     >
     where
         H: EventHandler<crate::TextTurnEvent<T>, M, crate::TextTurnState<T>>,
@@ -269,27 +257,21 @@ where
         self,
     ) -> Result<
         TextStepOutcome<T>,
-        CollectError<
-            B::Error,
-            L::Error,
-            Infallible,
-            crate::TextTurnReductionError,
-            crate::TextTurnState<T>,
-        >,
+        CollectError<Infallible, crate::TextTurnReductionError, crate::TextTurnState<T>>,
     > {
         let result = self.pending.collect_noop().await?;
         Ok(TextStepOutcome::from_result(result))
     }
 }
 
-fn map_structured_result<T, O, BE, LE, HE>(
+fn map_structured_result<T, O, HE>(
     raw: Result<
         StructuredTurnResult<T, O>,
-        CollectError<BE, LE, HE, StructuredTurnReductionError, crate::StructuredTurnState<T, O>>,
+        CollectError<HE, StructuredTurnReductionError, crate::StructuredTurnState<T, O>>,
     >,
 ) -> Result<
     StructuredStepOutcome<T, O>,
-    CollectError<BE, LE, HE, StructuredTurnReductionError, crate::StructuredTurnState<T, O>>,
+    CollectError<HE, StructuredTurnReductionError, crate::StructuredTurnState<T, O>>,
 >
 where
     T: Toolset,
@@ -314,24 +296,21 @@ where
     }
 }
 
-pub struct SessionPendingStructured<M, B, L, T, O>
+pub struct SessionPendingStructured<M, T, O>
 where
     T: Toolset,
     O: StructuredOutput,
-    L: LlmAdapter,
 {
-    pending: CorePendingStructuredTurn<M, B, L, T, O>,
+    pending: CorePendingStructuredTurn<M, T, O>,
 }
 
-impl<M, B, L, T, O> SessionPendingStructured<M, B, L, T, O>
+impl<M, T, O> SessionPendingStructured<M, T, O>
 where
     M: Marker,
-    B: BudgetManager<M>,
-    L: LlmAdapter,
     T: Toolset,
     O: StructuredOutput,
 {
-    pub fn into_pending(self) -> PendingStructuredTurn<M, B, L, T, O> {
+    pub fn into_pending(self) -> PendingStructuredTurn<M, T, O> {
         self.pending
     }
 
@@ -341,8 +320,6 @@ where
     ) -> Result<
         StructuredStepOutcome<T, O>,
         CollectError<
-            B::Error,
-            L::Error,
             H::Error,
             crate::StructuredTurnReductionError,
             crate::StructuredTurnState<T, O>,
@@ -359,8 +336,6 @@ where
     ) -> Result<
         StructuredStepOutcome<T, O>,
         CollectError<
-            B::Error,
-            L::Error,
             Infallible,
             crate::StructuredTurnReductionError,
             crate::StructuredTurnState<T, O>,

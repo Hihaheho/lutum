@@ -52,6 +52,24 @@ fn weather_turn(model: &str) -> TextTurn<Tools> {
     turn
 }
 
+fn shared_pool_budget_error(err: &agents::AgentError) -> &agents::SharedPoolBudgetError {
+    match err {
+        agents::AgentError::Budget(source) => source
+            .downcast_ref::<agents::SharedPoolBudgetError>()
+            .expect("shared pool budget error source"),
+        other => panic!("expected budget error, got {other}"),
+    }
+}
+
+fn test_budget() -> SharedPoolBudgetManager {
+    SharedPoolBudgetManager::new(SharedPoolBudgetOptions {
+        capacity_tokens: 100,
+        capacity_cost_micros_usd: 1_000,
+        stop_threshold_tokens: 0,
+        stop_threshold_cost_micros_usd: 0,
+    })
+}
+
 struct StopOnTextDelta;
 
 #[async_trait]
@@ -98,7 +116,7 @@ fn text_turn_collects_assistant_output_and_tool_calls() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
+    let ctx: Context<AppMarker> = Context::new(budget, adapter);
     let turn = weather_turn("gpt-4.1");
     let pending =
         block_on(ctx.responses_text(AppMarker, input(), turn, UsageEstimate::zero())).unwrap();
@@ -139,7 +157,7 @@ fn structured_turn_collects_typed_output_and_appends_assistant_item() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
+    let ctx: Context<AppMarker> = Context::new(budget, adapter);
     let turn = StructuredTurn::<Tools, Summary>::new(agents::ModelName::new("gpt-4.1").unwrap());
     let pending =
         block_on(ctx.responses_structured(AppMarker, input(), turn, UsageEstimate::zero()))
@@ -212,7 +230,7 @@ fn recorded_events_reduce_to_same_result_as_collect() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
+    let ctx: Context<AppMarker> = Context::new(budget, adapter);
     let pending = block_on(ctx.responses_text(
         AppMarker,
         input(),
@@ -230,12 +248,7 @@ fn recorded_events_reduce_to_same_result_as_collect() {
 
 #[test]
 fn handler_stop_returns_partial_including_triggering_event_and_releases_budget() {
-    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions {
-        capacity_tokens: 100,
-        capacity_cost_micros_usd: 1_000,
-        stop_threshold_tokens: 0,
-        stop_threshold_cost_micros_usd: 0,
-    });
+    let budget = test_budget();
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
         Ok(agents::mock::RawTextTurnEvent::Started {
             request_id: Some("req-stop".into()),
@@ -243,7 +256,7 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
         }),
         Ok(agents::mock::RawTextTurnEvent::TextDelta { delta: "he".into() }),
     ]));
-    let ctx: Context<AppMarker, _, _> = Context::new(budget.clone(), adapter);
+    let ctx: Context<AppMarker> = Context::new(budget.clone(), adapter);
     let pending = block_on(ctx.responses_text(
         AppMarker,
         input(),
@@ -269,12 +282,7 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
 
 #[test]
 fn adapter_error_uses_recovered_usage_when_available() {
-    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions {
-        capacity_tokens: 100,
-        capacity_cost_micros_usd: 1_000,
-        stop_threshold_tokens: 0,
-        stop_threshold_cost_micros_usd: 0,
-    });
+    let budget = test_budget();
     let adapter = MockLlmAdapter::new()
         .with_text_scenario(MockTextScenario::events(vec![
             Ok(agents::mock::RawTextTurnEvent::Started {
@@ -293,7 +301,7 @@ fn adapter_error_uses_recovered_usage_when_available() {
                 ..Usage::zero()
             },
         );
-    let ctx: Context<AppMarker, _, _> = Context::new(budget.clone(), adapter);
+    let ctx: Context<AppMarker> = Context::new(budget.clone(), adapter);
     let pending = block_on(ctx.responses_text(
         AppMarker,
         input(),
@@ -306,15 +314,118 @@ fn adapter_error_uses_recovered_usage_when_available() {
     .unwrap();
 
     let err = block_on(pending.collect_noop()).unwrap_err();
-    assert!(matches!(err, CollectError::Adapter { .. }));
+    assert!(matches!(err, CollectError::Execution { .. }));
     assert_eq!(budget.remaining(&AppMarker).tokens, 95);
+}
+
+#[test]
+fn tool_call_deserialize_error_surfaces_as_execution_error() {
+    let budget = test_budget();
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(agents::mock::RawTextTurnEvent::Started {
+            request_id: Some("req-bad-tool".into()),
+            model: "gpt-4.1".into(),
+        }),
+        Ok(agents::mock::RawTextTurnEvent::TextDelta {
+            delta: "looking up ".into(),
+        }),
+        Ok(agents::mock::RawTextTurnEvent::ToolCallChunk {
+            id: "call-bad".into(),
+            name: "weather".into(),
+            arguments_json_delta: "{}".into(),
+        }),
+    ]));
+    let ctx: Context<AppMarker> = Context::new(budget.clone(), adapter);
+    let pending = block_on(ctx.responses_text(
+        AppMarker,
+        input(),
+        weather_turn("gpt-4.1"),
+        UsageEstimate {
+            total_tokens: 10,
+            ..UsageEstimate::zero()
+        },
+    ))
+    .unwrap();
+
+    let err = block_on(pending.collect_noop()).unwrap_err();
+
+    match err {
+        CollectError::Execution { source, partial } => {
+            assert!(matches!(
+                source,
+                agents::AgentError::ToolCall(agents::ToolCallError::Deserialize { ref name, .. })
+                    if name == "weather"
+            ));
+            assert_eq!(partial.request_id.as_deref(), Some("req-bad-tool"));
+            assert_eq!(partial.assistant_text(), "looking up ");
+            assert!(partial.tool_calls.is_empty());
+            assert!(partial.finish_reason.is_none());
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    assert_eq!(budget.remaining(&AppMarker).tokens, 100);
+}
+
+#[test]
+fn structured_output_deserialize_error_surfaces_as_execution_error() {
+    let budget = test_budget();
+    let adapter =
+        MockLlmAdapter::new().with_structured_scenario(MockStructuredScenario::events(vec![
+            Ok(agents::mock::RawStructuredTurnEvent::Started {
+                request_id: Some("req-bad-structured".into()),
+                model: "gpt-4.1".into(),
+            }),
+            Ok(
+                agents::mock::RawStructuredTurnEvent::StructuredOutputChunk {
+                    json_delta: "{\"answer\":42}".into(),
+                },
+            ),
+            Ok(agents::mock::RawStructuredTurnEvent::Completed {
+                request_id: Some("req-bad-structured".into()),
+                finish_reason: FinishReason::Stop,
+                usage: Usage {
+                    total_tokens: 8,
+                    ..Usage::zero()
+                },
+            }),
+        ]));
+    let ctx: Context<AppMarker> = Context::new(budget.clone(), adapter);
+    let pending = block_on(ctx.responses_structured(
+        AppMarker,
+        input(),
+        StructuredTurn::<Tools, Summary>::new(agents::ModelName::new("gpt-4.1").unwrap()),
+        UsageEstimate {
+            total_tokens: 10,
+            ..UsageEstimate::zero()
+        },
+    ))
+    .unwrap();
+
+    let err = block_on(pending.collect_noop()).unwrap_err();
+
+    match err {
+        CollectError::Execution { source, partial } => {
+            assert!(matches!(source, agents::AgentError::StructuredOutput(_)));
+            assert_eq!(partial.request_id.as_deref(), Some("req-bad-structured"));
+            assert!(matches!(
+                partial.assistant_turn.as_slice(),
+                [AssistantTurnItem::Text(text)] if text == "{\"answer\":42}"
+            ));
+            assert!(partial.structured.is_none());
+            assert!(partial.finish_reason.is_none());
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    assert_eq!(budget.remaining(&AppMarker).tokens, 100);
 }
 
 #[test]
 fn request_budget_is_enforced_per_turn() {
     let adapter = MockLlmAdapter::new();
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
+    let ctx: Context<AppMarker> = Context::new(budget, adapter);
 
     let err = match block_on(ctx.responses_text(
         AppMarker,
@@ -334,11 +445,11 @@ fn request_budget_is_enforced_per_turn() {
     };
 
     assert!(matches!(
-        err,
-        agents::ContextError::Budget(agents::SharedPoolBudgetError::RequestBudgetExceeded {
+        shared_pool_budget_error(&err),
+        agents::SharedPoolBudgetError::RequestBudgetExceeded {
             requested_tokens: 32,
             budget_tokens: Some(16),
             ..
-        })
+        }
     ));
 }

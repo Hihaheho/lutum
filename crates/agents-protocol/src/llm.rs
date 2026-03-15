@@ -4,18 +4,23 @@ use bon::Builder;
 use futures::Stream;
 
 use crate::{
+    AgentError,
     budget::{RequestBudget, Usage},
-    conversation::ModelInput,
+    conversation::{ModelInput, RawJson, ToolMetadata},
     structured::StructuredOutput,
     toolset::{NoTools, ToolPolicy, Toolset},
 };
 
-pub type TextTurnEventStream<T, E> =
+pub type TextTurnEventStream<T, E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<TextTurnEvent<T>, E>> + Send + 'static>>;
-pub type StructuredTurnEventStream<T, O, E> =
+pub type StructuredTurnEventStream<T, O, E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<StructuredTurnEvent<T, O>, E>> + Send + 'static>>;
-pub type CompletionEventStream<E> =
+pub type CompletionEventStream<E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<CompletionEvent, E>> + Send + 'static>>;
+pub type ErasedTextTurnEventStream<E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<ErasedTextTurnEvent, E>> + Send + 'static>>;
+pub type ErasedStructuredTurnEventStream<E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<ErasedStructuredTurnEvent, E>> + Send + 'static>>;
 
 #[derive(
     Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
@@ -196,6 +201,46 @@ where
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdapterToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdapterToolChoice {
+    None,
+    Auto,
+    Required,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdapterTurnConfig {
+    pub model: ModelName,
+    pub generation: GenerationParams,
+    pub reasoning: ReasoningParams,
+    pub tools: Vec<AdapterToolDefinition>,
+    pub tool_choice: AdapterToolChoice,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdapterTextTurn {
+    pub config: AdapterTurnConfig,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdapterStructuredOutputSpec {
+    pub schema_name: String,
+    pub schema: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdapterStructuredTurn {
+    pub config: AdapterTurnConfig,
+    pub output: AdapterStructuredOutputSpec,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Temperature(f32);
 
@@ -334,6 +379,63 @@ pub enum StructuredTurnEvent<T: Toolset, O: StructuredOutput> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ErasedTextTurnEvent {
+    Started {
+        request_id: Option<String>,
+        model: String,
+    },
+    TextDelta {
+        delta: String,
+    },
+    ReasoningDelta {
+        delta: String,
+    },
+    RefusalDelta {
+        delta: String,
+    },
+    ToolCallChunk {
+        id: crate::conversation::ToolCallId,
+        name: crate::conversation::ToolName,
+        arguments_json_delta: String,
+    },
+    ToolCallReady(ToolMetadata),
+    Completed {
+        request_id: Option<String>,
+        finish_reason: FinishReason,
+        usage: Usage,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ErasedStructuredTurnEvent {
+    Started {
+        request_id: Option<String>,
+        model: String,
+    },
+    StructuredOutputChunk {
+        json_delta: String,
+    },
+    StructuredOutputReady(RawJson),
+    ReasoningDelta {
+        delta: String,
+    },
+    RefusalDelta {
+        delta: String,
+    },
+    ToolCallChunk {
+        id: crate::conversation::ToolCallId,
+        name: crate::conversation::ToolName,
+        arguments_json_delta: String,
+    },
+    ToolCallReady(ToolMetadata),
+    Completed {
+        request_id: Option<String>,
+        finish_reason: FinishReason,
+        usage: Usage,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompletionEvent {
     Started {
         request_id: Option<String>,
@@ -365,33 +467,63 @@ pub enum StreamKind {
 
 #[async_trait::async_trait]
 pub trait LlmAdapter: Send + Sync + 'static {
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    async fn responses_text<T>(
+    async fn responses_text(
         &self,
         input: ModelInput,
-        turn: TextTurn<T>,
-    ) -> Result<TextTurnEventStream<T, Self::Error>, Self::Error>
-    where
-        T: Toolset;
+        turn: AdapterTextTurn,
+    ) -> Result<ErasedTextTurnEventStream, AgentError>;
 
-    async fn responses_structured<T, O>(
+    async fn responses_structured(
         &self,
         input: ModelInput,
-        turn: StructuredTurn<T, O>,
-    ) -> Result<StructuredTurnEventStream<T, O, Self::Error>, Self::Error>
-    where
-        T: Toolset,
-        O: StructuredOutput;
+        turn: AdapterStructuredTurn,
+    ) -> Result<ErasedStructuredTurnEventStream, AgentError>;
 
     async fn completion(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionEventStream<Self::Error>, Self::Error>;
+    ) -> Result<CompletionEventStream, AgentError>;
 
     async fn recover_usage(
         &self,
         kind: StreamKind,
         request_id: &str,
-    ) -> Result<Option<Usage>, Self::Error>;
+    ) -> Result<Option<Usage>, AgentError>;
+}
+
+#[async_trait::async_trait]
+impl<T> LlmAdapter for std::sync::Arc<T>
+where
+    T: LlmAdapter + ?Sized,
+{
+    async fn responses_text(
+        &self,
+        input: ModelInput,
+        turn: AdapterTextTurn,
+    ) -> Result<ErasedTextTurnEventStream, AgentError> {
+        (**self).responses_text(input, turn).await
+    }
+
+    async fn responses_structured(
+        &self,
+        input: ModelInput,
+        turn: AdapterStructuredTurn,
+    ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
+        (**self).responses_structured(input, turn).await
+    }
+
+    async fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionEventStream, AgentError> {
+        (**self).completion(request).await
+    }
+
+    async fn recover_usage(
+        &self,
+        kind: StreamKind,
+        request_id: &str,
+    ) -> Result<Option<Usage>, AgentError> {
+        (**self).recover_usage(kind, request_id).await
+    }
 }

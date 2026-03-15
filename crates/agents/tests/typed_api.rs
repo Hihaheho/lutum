@@ -1,11 +1,11 @@
 use agents::{
-    AssistantInputItem, AssistantTurnItem, BudgetLease, BudgetManager, CompletionEventStream,
-    CompletionRequest, Context, ContextError, InputMessageRole, LlmAdapter, Marker, MessageContent,
-    ModelInput, ModelInputItem, ModelName, ModelNameError, NonEmpty, RawJson, ReasoningEffort,
-    ReasoningParams, RequestBudget, SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind,
-    StructuredOutput, StructuredTurn, StructuredTurnEventStream, Temperature, TextTurn,
-    TextTurnEventStream, TextTurnReducer, ToolMetadata, ToolPolicy, ToolUse, Toolset, Usage,
-    UsageEstimate,
+    AdapterStructuredTurn, AdapterTextTurn, AgentError, AssistantInputItem, AssistantTurnItem,
+    BudgetLease, BudgetManager, CompletionEventStream, CompletionRequest, Context, ContextError,
+    ErasedStructuredTurnEventStream, ErasedTextTurnEventStream, InputMessageRole, LlmAdapter,
+    Marker, MessageContent, ModelInput, ModelInputItem, ModelName, ModelNameError, NonEmpty,
+    RawJson, ReasoningEffort, ReasoningParams, RequestBudget, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, StreamKind, StructuredTurn, Temperature, TextTurn, TextTurnReducer,
+    ToolMetadata, ToolPolicy, ToolUse, Usage, UsageEstimate,
 };
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -22,76 +22,43 @@ impl Marker for AppMarker {
 
 struct NullAdapter;
 
-#[derive(Debug)]
-struct Never;
-
-impl std::fmt::Display for Never {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("never")
-    }
-}
-
-impl std::error::Error for Never {}
-
 #[async_trait]
 impl LlmAdapter for NullAdapter {
-    type Error = Never;
-
-    async fn responses_text<T>(
+    async fn responses_text(
         &self,
         _input: ModelInput,
-        _turn: TextTurn<T>,
-    ) -> Result<TextTurnEventStream<T, Self::Error>, Self::Error>
-    where
-        T: Toolset,
-    {
-        Ok(Box::pin(futures::stream::empty()) as TextTurnEventStream<T, Self::Error>)
+        _turn: AdapterTextTurn,
+    ) -> Result<ErasedTextTurnEventStream, AgentError> {
+        Ok(Box::pin(futures::stream::empty()) as ErasedTextTurnEventStream)
     }
 
-    async fn responses_structured<T, O>(
+    async fn responses_structured(
         &self,
         _input: ModelInput,
-        _turn: StructuredTurn<T, O>,
-    ) -> Result<StructuredTurnEventStream<T, O, Self::Error>, Self::Error>
-    where
-        T: Toolset,
-        O: StructuredOutput,
-    {
-        Ok(Box::pin(futures::stream::empty()) as StructuredTurnEventStream<T, O, Self::Error>)
+        _turn: AdapterStructuredTurn,
+    ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
+        Ok(Box::pin(futures::stream::empty()) as ErasedStructuredTurnEventStream)
     }
 
     async fn completion(
         &self,
         _request: CompletionRequest,
-    ) -> Result<CompletionEventStream<Self::Error>, Self::Error> {
-        Ok(Box::pin(futures::stream::empty()) as CompletionEventStream<Self::Error>)
+    ) -> Result<CompletionEventStream, AgentError> {
+        Ok(Box::pin(futures::stream::empty()) as CompletionEventStream)
     }
 
     async fn recover_usage(
         &self,
         _kind: StreamKind,
         _request_id: &str,
-    ) -> Result<Option<Usage>, Self::Error> {
+    ) -> Result<Option<Usage>, AgentError> {
         Ok(None)
     }
 }
 
 struct NonCloneBudget;
 
-#[derive(Debug)]
-struct BudgetNever;
-
-impl std::fmt::Display for BudgetNever {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("never")
-    }
-}
-
-impl std::error::Error for BudgetNever {}
-
 impl BudgetManager<AppMarker> for NonCloneBudget {
-    type Error = BudgetNever;
-
     fn remaining(&self, _marker: &AppMarker) -> agents::Remaining {
         agents::Remaining::default()
     }
@@ -101,7 +68,7 @@ impl BudgetManager<AppMarker> for NonCloneBudget {
         marker: &AppMarker,
         estimate: &UsageEstimate,
         request_budget: RequestBudget,
-    ) -> Result<BudgetLease<AppMarker>, Self::Error> {
+    ) -> Result<BudgetLease<AppMarker>, AgentError> {
         Ok(BudgetLease::new(
             1,
             marker.clone(),
@@ -110,11 +77,7 @@ impl BudgetManager<AppMarker> for NonCloneBudget {
         ))
     }
 
-    fn record_used(
-        &self,
-        _lease: BudgetLease<AppMarker>,
-        _usage: Usage,
-    ) -> Result<(), Self::Error> {
+    fn record_used(&self, _lease: BudgetLease<AppMarker>, _usage: Usage) -> Result<(), AgentError> {
         Ok(())
     }
 }
@@ -148,7 +111,7 @@ enum Tools {
 #[test]
 fn typed_public_api_compiles_and_constructs_requests() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker, _, _> = Context::new(budget, NullAdapter);
+    let ctx: Context<AppMarker> = Context::new(budget, NullAdapter);
     let _ = ctx;
 
     let input = ModelInput::from_items(vec![
@@ -193,7 +156,7 @@ fn typed_public_api_compiles_and_constructs_requests() {
 
 #[test]
 fn context_accepts_non_clone_budget_and_adapter() {
-    let ctx: Context<AppMarker, _, _> = Context::new(NonCloneBudget, NullAdapter);
+    let ctx: Context<AppMarker> = Context::new(NonCloneBudget, NullAdapter);
     let _ = ctx;
 }
 
@@ -289,7 +252,7 @@ fn reducer_ignores_duplicate_tool_call_ready() {
 #[test]
 fn context_rejects_invalid_model_input_before_adapter_call() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker, _, _> = Context::new(budget, NullAdapter);
+    let ctx: Context<AppMarker> = Context::new(budget, NullAdapter);
     let input = ModelInput::from_items(vec![
         ModelInputItem::text(InputMessageRole::User, "hello"),
         ModelInputItem::tool_use_parts(

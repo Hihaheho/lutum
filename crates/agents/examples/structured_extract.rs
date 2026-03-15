@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker, _, _>::new(budget, adapter);
+    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
     let mut session = Session::new(ctx, AppMarker);
     session.push_user("Extract the email address.");
 

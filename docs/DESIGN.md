@@ -23,7 +23,7 @@ The key change in vNext is not hidden automation. It is a clearer split between:
 
 The library still does not own the agent loop. The stable exact surface is:
 
-- `Context<M, B, L>`
+- `Context<M>`
 - `ModelInput`
 - `AssistantTurn`
 - public reducers
@@ -38,7 +38,7 @@ User code still decides:
 
 ## Execution boundary
 
-`Context<M, B, L>` remains the only official execution boundary.
+`Context<M>` remains the only official execution boundary.
 
 That is where:
 
@@ -48,7 +48,9 @@ That is where:
 - streamed events are reduced into canonical results
 
 Adapters are still public because providers need an SPI boundary, but adapter-direct execution
-still bypasses the library's execution contract.
+still bypasses the library's execution contract. `Context::new(...)` accepts concrete budget and
+provider implementations and erases them behind `dyn BudgetManager<M>` and `dyn LlmAdapter`, so
+backend type noise does not leak into application state.
 
 ## Canonical request surface
 
@@ -137,7 +139,7 @@ This preserves type safety without a separate subset macro.
 
 ## Session
 
-`Session<M, B, L>` is a transcript helper, not a higher-order runtime.
+`Session<M>` is a transcript helper, not a higher-order runtime.
 
 It owns:
 
@@ -201,6 +203,10 @@ Reducers remain public so replay and deterministic tests do not need internal co
 ## Provider boundary
 
 Provider-specific wire formats still live behind `LlmAdapter`.
+
+The adapter boundary is intentionally object-safe and erased. Typed tool decoding, structured
+output decoding, and canonical reduction stay in the core; adapters only translate between the
+provider transport and erased canonical events.
 
 The core algebra is not shrunk for adapter convenience. If a provider cannot represent the
 canonical request faithfully, that remains an adapter limitation rather than a reason to weaken the

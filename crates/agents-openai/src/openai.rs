@@ -11,19 +11,18 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use agents_protocol::{
+    AgentError,
     budget::Usage,
     conversation::{
         AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, RawJson,
         ToolCallId, ToolMetadata, ToolName, ToolUse,
     },
     llm::{
-        CompletionEvent, CompletionEventStream, CompletionRequest, FinishReason, LlmAdapter,
-        ReasoningEffort, ReasoningParams, ReasoningSummary, StreamKind, StructuredTurn,
-        StructuredTurnEvent, StructuredTurnEventStream, TextTurn, TextTurnEvent,
-        TextTurnEventStream, TurnConfig,
+        AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
+        CompletionEvent, CompletionEventStream, CompletionRequest, ErasedStructuredTurnEvent,
+        ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
+        FinishReason, LlmAdapter, ReasoningEffort, ReasoningParams, ReasoningSummary, StreamKind,
     },
-    structured::StructuredOutput,
-    toolset::{ToolCallError, ToolPolicy, ToolSelector, Toolset},
 };
 
 #[derive(Clone)]
@@ -111,8 +110,6 @@ pub enum OpenAiError {
     },
     #[error("failed to encode or decode JSON: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("failed to parse tool call: {0}")]
-    ToolCall(#[from] ToolCallError),
     #[error("failed to parse structured output: {0}")]
     StructuredOutput(serde_json::Error),
     #[error("unexpected SSE payload: {message}")]
@@ -121,64 +118,73 @@ pub enum OpenAiError {
 
 #[async_trait::async_trait]
 impl LlmAdapter for OpenAiAdapter {
-    type Error = OpenAiError;
-
-    async fn responses_text<T>(
+    async fn responses_text(
         &self,
         input: ModelInput,
-        turn: TextTurn<T>,
-    ) -> Result<TextTurnEventStream<T, Self::Error>, Self::Error>
-    where
-        T: Toolset,
-    {
+        turn: AdapterTextTurn,
+    ) -> Result<ErasedTextTurnEventStream, AgentError> {
         let model = turn.config.model.to_string();
-        let body = build_responses_request::<T>(&input, &turn.config, None)?;
-        let stream = self.send_streaming_json("/responses", body).await?;
-        Ok(Box::pin(map_text_stream::<T, _>(stream, model)) as TextTurnEventStream<T, Self::Error>)
+        let body =
+            build_responses_request(&input, &turn.config, None).map_err(AgentError::backend)?;
+        let stream = self
+            .send_streaming_json("/responses", body)
+            .await
+            .map_err(AgentError::backend)?;
+        Ok(
+            Box::pin(map_text_stream(stream, model).map(|item| item.map_err(AgentError::backend)))
+                as ErasedTextTurnEventStream,
+        )
     }
 
-    async fn responses_structured<T, O>(
+    async fn responses_structured(
         &self,
         input: ModelInput,
-        turn: StructuredTurn<T, O>,
-    ) -> Result<StructuredTurnEventStream<T, O, Self::Error>, Self::Error>
-    where
-        T: Toolset,
-        O: StructuredOutput,
-    {
+        turn: AdapterStructuredTurn,
+    ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
         let model = turn.config.model.to_string();
         let output_schema = Some(json!({
             "type": "json_schema",
-            "name": <O as StructuredOutput>::schema_name(),
+            "name": turn.output.schema_name,
             "strict": true,
-            "schema": serde_json::to_value(<O as StructuredOutput>::json_schema())?,
+            "schema": turn.output.schema,
         }));
-        let body = build_responses_request::<T>(&input, &turn.config, output_schema)?;
-        let stream = self.send_streaming_json("/responses", body).await?;
-        Ok(Box::pin(map_structured_stream::<T, O, _>(stream, model))
-            as StructuredTurnEventStream<T, O, Self::Error>)
+        let body = build_responses_request(&input, &turn.config, output_schema)
+            .map_err(AgentError::backend)?;
+        let stream = self
+            .send_streaming_json("/responses", body)
+            .await
+            .map_err(AgentError::backend)?;
+        Ok(Box::pin(
+            map_structured_stream(stream, model).map(|item| item.map_err(AgentError::backend)),
+        ) as ErasedStructuredTurnEventStream)
     }
 
     async fn completion(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionEventStream<Self::Error>, Self::Error> {
+    ) -> Result<CompletionEventStream, AgentError> {
         let body = build_completion_request(&request);
-        let stream = self.send_streaming_json("/completions", body).await?;
-        Ok(
-            Box::pin(map_completion_stream(stream, request.model.to_string()))
-                as CompletionEventStream<Self::Error>,
-        )
+        let stream = self
+            .send_streaming_json("/completions", body)
+            .await
+            .map_err(AgentError::backend)?;
+        Ok(Box::pin(
+            map_completion_stream(stream, request.model.to_string())
+                .map(|item| item.map_err(AgentError::backend)),
+        ) as CompletionEventStream)
     }
 
     async fn recover_usage(
         &self,
         kind: StreamKind,
         request_id: &str,
-    ) -> Result<Option<Usage>, Self::Error> {
+    ) -> Result<Option<Usage>, AgentError> {
         match kind {
             StreamKind::ResponsesText | StreamKind::ResponsesStructured => {
-                let value = self.get_json(&format!("/responses/{request_id}")).await?;
+                let value = self
+                    .get_json(&format!("/responses/{request_id}"))
+                    .await
+                    .map_err(AgentError::backend)?;
                 Ok(Some(parse_response_usage(&value)))
             }
             StreamKind::Completion => Ok(None),
@@ -186,21 +192,18 @@ impl LlmAdapter for OpenAiAdapter {
     }
 }
 
-fn build_responses_request<T>(
+fn build_responses_request(
     input: &ModelInput,
-    config: &TurnConfig<T>,
+    config: &AdapterTurnConfig,
     text_format: Option<Value>,
-) -> Result<Value, OpenAiError>
-where
-    T: Toolset,
-{
-    let tools = build_tool_definitions::<T>(&config.tools)?;
+) -> Result<Value, OpenAiError> {
+    let tools = build_tool_definitions(config);
     let mut body = json!({
         "model": config.model,
         "input": convert_model_input(input)?,
         "stream": true,
         "tools": tools,
-        "parallel_tool_calls": !config.tools.requires_tools(),
+        "parallel_tool_calls": config.tool_choice != AdapterToolChoice::Required,
     });
 
     if let Some(temperature) = config.generation.temperature {
@@ -215,9 +218,9 @@ where
     if let Some(text_format) = text_format {
         body["text"] = json!({ "format": text_format });
     }
-    if config.tools.requires_tools() {
+    if config.tool_choice == AdapterToolChoice::Required {
         body["tool_choice"] = json!("required");
-    } else if !config.tools.uses_tools() {
+    } else if config.tool_choice == AdapterToolChoice::None {
         body["tool_choice"] = json!("none");
     }
 
@@ -360,34 +363,17 @@ fn message_content(content: &MessageContent) -> Value {
     }
 }
 
-fn build_tool_definitions<T>(tool_policy: &ToolPolicy<T>) -> Result<Vec<Value>, OpenAiError>
-where
-    T: Toolset,
-{
-    if !tool_policy.uses_tools() {
-        return Ok(Vec::new());
-    }
-
-    let selected = tool_policy.selected().map(|selectors| {
-        selectors
-            .iter()
-            .map(|selector| selector.name())
-            .collect::<Vec<_>>()
-    });
-    T::definitions()
+fn build_tool_definitions(config: &AdapterTurnConfig) -> Vec<Value> {
+    config
+        .tools
         .iter()
-        .filter(|tool| {
-            selected
-                .as_ref()
-                .is_none_or(|names| names.contains(&tool.name))
-        })
         .map(|tool| {
-            Ok(json!({
+            json!({
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
-                "parameters": serde_json::to_value(tool.input_schema())?,
-            }))
+                "parameters": tool.input_schema,
+            })
         })
         .collect()
 }
@@ -460,16 +446,13 @@ impl ToolCallTracker {
         Some((entry.id.clone(), entry.name.clone(), delta.to_string()))
     }
 
-    fn finish<T>(
+    fn finish(
         &mut self,
         key: String,
         id: ToolCallId,
         name: ToolName,
         explicit_arguments_json: Option<String>,
-    ) -> Result<Option<T::ToolCall>, OpenAiError>
-    where
-        T: Toolset,
-    {
+    ) -> Result<Option<ToolMetadata>, OpenAiError> {
         let arguments_json = explicit_arguments_json
             .or_else(|| {
                 self.buffers
@@ -494,11 +477,7 @@ impl ToolCallTracker {
         }
 
         let arguments = RawJson::parse(arguments_json.clone())?;
-        let invocation = T::parse_tool_call(
-            ToolMetadata::new(id.clone(), name.clone(), arguments.clone()),
-            name.as_str(),
-            arguments.get(),
-        )?;
+        let metadata = ToolMetadata::new(id.clone(), name.clone(), arguments);
         self.finalized.insert(
             key,
             FinalizedToolCall {
@@ -507,7 +486,7 @@ impl ToolCallTracker {
                 arguments_json,
             },
         );
-        Ok(Some(invocation))
+        Ok(Some(metadata))
     }
 }
 
@@ -567,28 +546,25 @@ fn json_string(value: &Value) -> Result<String, OpenAiError> {
     }
 }
 
-fn maybe_parse_structured_output<O>(
+fn maybe_parse_structured_output(
     buffer: &str,
     emitted_ready: &mut bool,
-) -> Result<Option<O>, OpenAiError>
-where
-    O: StructuredOutput,
-{
+) -> Result<Option<RawJson>, OpenAiError> {
     if *emitted_ready || buffer.is_empty() {
         return Ok(None);
     }
 
-    let value = serde_json::from_str::<O>(buffer).map_err(OpenAiError::StructuredOutput)?;
     *emitted_ready = true;
-    Ok(Some(value))
+    RawJson::parse(buffer.to_string())
+        .map(Some)
+        .map_err(OpenAiError::StructuredOutput)
 }
 
-fn map_text_stream<T, S>(
+fn map_text_stream<S>(
     stream: S,
     fallback_model: String,
-) -> impl Stream<Item = Result<TextTurnEvent<T>, OpenAiError>> + Send + 'static
+) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + Send + 'static
 where
-    T: Toolset,
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
 {
     try_stream! {
@@ -618,7 +594,7 @@ where
                     }
                     if !started {
                         started = true;
-                        yield TextTurnEvent::Started {
+                        yield ErasedTextTurnEvent::Started {
                             request_id: request_id.clone(),
                             model: model.clone(),
                         };
@@ -628,7 +604,7 @@ where
 
                 if !started {
                     started = true;
-                    yield TextTurnEvent::Started {
+                    yield ErasedTextTurnEvent::Started {
                         request_id: request_id.clone(),
                         model: model.clone(),
                     };
@@ -637,14 +613,14 @@ where
                 match event_type {
                     "response.output_text.delta" => {
                         if let Some(delta) = event["delta"].as_str() {
-                            yield TextTurnEvent::TextDelta {
+                            yield ErasedTextTurnEvent::TextDelta {
                                 delta: delta.to_string(),
                             };
                         }
                     }
                     "response.reasoning_summary_text.delta" | "response.reasoning.delta" => {
                         if let Some(delta) = event["delta"].as_str() {
-                            yield TextTurnEvent::ReasoningDelta {
+                            yield ErasedTextTurnEvent::ReasoningDelta {
                                 delta: delta.to_string(),
                             };
                         }
@@ -652,7 +628,7 @@ where
                     "response.refusal.delta" => {
                         saw_refusal = true;
                         if let Some(delta) = event["delta"].as_str() {
-                            yield TextTurnEvent::RefusalDelta {
+                            yield ErasedTextTurnEvent::RefusalDelta {
                                 delta: delta.to_string(),
                             };
                         }
@@ -662,10 +638,10 @@ where
                             && let Some((id, name, delta)) = tool_calls.record_delta(
                                 response_tool_key(&event),
                                 response_tool_id(&event),
-                                response_tool_name(&event),
-                                delta,
-                            ) {
-                                yield TextTurnEvent::ToolCallChunk {
+                            response_tool_name(&event),
+                            delta,
+                        ) {
+                                yield ErasedTextTurnEvent::ToolCallChunk {
                                     id,
                                     name,
                                     arguments_json_delta: delta,
@@ -674,25 +650,25 @@ where
                     }
                     "response.function_call_arguments.done" => {
                         saw_tool_call = true;
-                        if let Some(invocation) = tool_calls.finish::<T>(
+                        if let Some(invocation) = tool_calls.finish(
                             response_tool_key(&event),
                             response_tool_id(&event),
                             response_tool_name(&event),
                             event.get("arguments").map(json_string).transpose()?,
                         )? {
-                            yield TextTurnEvent::ToolCallReady(invocation);
+                            yield ErasedTextTurnEvent::ToolCallReady(invocation);
                         }
                     }
                     "response.output_item.done" => {
                         if event.pointer("/item/type").and_then(Value::as_str) == Some("function_call") {
                             saw_tool_call = true;
-                            if let Some(invocation) = tool_calls.finish::<T>(
+                            if let Some(invocation) = tool_calls.finish(
                                 output_item_tool_key(&event),
                                 output_item_tool_id(&event),
                                 output_item_tool_name(&event),
                                 event.pointer("/item/arguments").map(json_string).transpose()?,
                             )? {
-                                yield TextTurnEvent::ToolCallReady(invocation);
+                                yield ErasedTextTurnEvent::ToolCallReady(invocation);
                             }
                         }
                     }
@@ -700,7 +676,7 @@ where
                         if let Some(id) = event.pointer("/response/id").and_then(Value::as_str) {
                             request_id = Some(id.to_string());
                         }
-                        yield TextTurnEvent::Completed {
+                        yield ErasedTextTurnEvent::Completed {
                             request_id: request_id.clone(),
                             finish_reason: if saw_tool_call {
                                 FinishReason::ToolCall
@@ -719,13 +695,11 @@ where
     }
 }
 
-fn map_structured_stream<T, O, S>(
+fn map_structured_stream<S>(
     stream: S,
     fallback_model: String,
-) -> impl Stream<Item = Result<StructuredTurnEvent<T, O>, OpenAiError>> + Send + 'static
+) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, OpenAiError>> + Send + 'static
 where
-    T: Toolset,
-    O: StructuredOutput,
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
 {
     try_stream! {
@@ -757,7 +731,7 @@ where
                     }
                     if !started {
                         started = true;
-                        yield StructuredTurnEvent::Started {
+                        yield ErasedStructuredTurnEvent::Started {
                             request_id: request_id.clone(),
                             model: model.clone(),
                         };
@@ -767,7 +741,7 @@ where
 
                 if !started {
                     started = true;
-                    yield StructuredTurnEvent::Started {
+                    yield ErasedStructuredTurnEvent::Started {
                         request_id: request_id.clone(),
                         model: model.clone(),
                     };
@@ -777,7 +751,7 @@ where
                     "response.output_text.delta" => {
                         if let Some(delta) = event["delta"].as_str() {
                             structured_buffer.push_str(delta);
-                            yield StructuredTurnEvent::StructuredOutputChunk {
+                            yield ErasedStructuredTurnEvent::StructuredOutputChunk {
                                 json_delta: delta.to_string(),
                             };
                         }
@@ -788,14 +762,14 @@ where
                             structured_buffer.push_str(text);
                         }
                         if let Some(value) =
-                            maybe_parse_structured_output::<O>(&structured_buffer, &mut emitted_ready)?
+                            maybe_parse_structured_output(&structured_buffer, &mut emitted_ready)?
                         {
-                            yield StructuredTurnEvent::StructuredOutputReady(value);
+                            yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
                         }
                     }
                     "response.reasoning_summary_text.delta" | "response.reasoning.delta" => {
                         if let Some(delta) = event["delta"].as_str() {
-                            yield StructuredTurnEvent::ReasoningDelta {
+                            yield ErasedStructuredTurnEvent::ReasoningDelta {
                                 delta: delta.to_string(),
                             };
                         }
@@ -803,7 +777,7 @@ where
                     "response.refusal.delta" => {
                         saw_refusal = true;
                         if let Some(delta) = event["delta"].as_str() {
-                            yield StructuredTurnEvent::RefusalDelta {
+                            yield ErasedStructuredTurnEvent::RefusalDelta {
                                 delta: delta.to_string(),
                             };
                         }
@@ -813,10 +787,10 @@ where
                             && let Some((id, name, delta)) = tool_calls.record_delta(
                                 response_tool_key(&event),
                                 response_tool_id(&event),
-                                response_tool_name(&event),
-                                delta,
-                            ) {
-                                yield StructuredTurnEvent::ToolCallChunk {
+                            response_tool_name(&event),
+                            delta,
+                        ) {
+                                yield ErasedStructuredTurnEvent::ToolCallChunk {
                                     id,
                                     name,
                                     arguments_json_delta: delta,
@@ -825,25 +799,25 @@ where
                     }
                     "response.function_call_arguments.done" => {
                         saw_tool_call = true;
-                        if let Some(invocation) = tool_calls.finish::<T>(
+                        if let Some(invocation) = tool_calls.finish(
                             response_tool_key(&event),
                             response_tool_id(&event),
                             response_tool_name(&event),
                             event.get("arguments").map(json_string).transpose()?,
                         )? {
-                            yield StructuredTurnEvent::ToolCallReady(invocation);
+                            yield ErasedStructuredTurnEvent::ToolCallReady(invocation);
                         }
                     }
                     "response.output_item.done" => {
                         if event.pointer("/item/type").and_then(Value::as_str) == Some("function_call") {
                             saw_tool_call = true;
-                            if let Some(invocation) = tool_calls.finish::<T>(
+                            if let Some(invocation) = tool_calls.finish(
                                 output_item_tool_key(&event),
                                 output_item_tool_id(&event),
                                 output_item_tool_name(&event),
                                 event.pointer("/item/arguments").map(json_string).transpose()?,
                             )? {
-                                yield StructuredTurnEvent::ToolCallReady(invocation);
+                                yield ErasedStructuredTurnEvent::ToolCallReady(invocation);
                             }
                         }
                     }
@@ -852,11 +826,11 @@ where
                             request_id = Some(id.to_string());
                         }
                         if let Some(value) =
-                            maybe_parse_structured_output::<O>(&structured_buffer, &mut emitted_ready)?
+                            maybe_parse_structured_output(&structured_buffer, &mut emitted_ready)?
                         {
-                            yield StructuredTurnEvent::StructuredOutputReady(value);
+                            yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
                         }
-                        yield StructuredTurnEvent::Completed {
+                        yield ErasedStructuredTurnEvent::Completed {
                             request_id: request_id.clone(),
                             finish_reason: if saw_tool_call {
                                 FinishReason::ToolCall
@@ -1018,8 +992,9 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use agents_protocol::{
-        AssistantInputItem, InputMessageRole, ModelInput, ModelInputItem, ToolDef, ToolUse,
-        toolset::{ToolCallWrapper, ToolInput, ToolPolicy, ToolSelector},
+        AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
+        ErasedStructuredTurnEvent, ErasedTextTurnEvent, GenerationParams, InputMessageRole,
+        ModelInput, ModelInputItem, ModelName, ReasoningParams, ToolUse,
     };
 
     use super::*;
@@ -1027,103 +1002,6 @@ mod tests {
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
     struct WeatherArgs {
         city: String,
-    }
-
-    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-    struct WeatherResult {
-        forecast: String,
-    }
-
-    impl ToolInput for WeatherArgs {
-        type Output = WeatherResult;
-
-        const NAME: &'static str = "weather";
-        const DESCRIPTION: &'static str = "Get weather";
-    }
-
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct WeatherArgsCall {
-        metadata: ToolMetadata,
-        input: WeatherArgs,
-    }
-
-    impl ToolCallWrapper for WeatherArgsCall {
-        fn metadata(&self) -> &ToolMetadata {
-            &self.metadata
-        }
-    }
-
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    enum ToolsCall {
-        Weather(WeatherArgsCall),
-    }
-
-    impl ToolCallWrapper for ToolsCall {
-        fn metadata(&self) -> &ToolMetadata {
-            match self {
-                Self::Weather(call) => &call.metadata,
-            }
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, Default)]
-    struct Tools;
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema)]
-    enum ToolsSelector {
-        Weather,
-    }
-
-    impl ToolSelector<Tools> for ToolsSelector {
-        fn name(self) -> &'static str {
-            match self {
-                Self::Weather => "weather",
-            }
-        }
-
-        fn all() -> &'static [Self] {
-            &[Self::Weather]
-        }
-
-        fn try_from_name(name: &str) -> Option<Self> {
-            match name {
-                "weather" => Some(Self::Weather),
-                _ => None,
-            }
-        }
-    }
-
-    impl Toolset for Tools {
-        type ToolCall = ToolsCall;
-        type Selector = ToolsSelector;
-
-        fn definitions() -> &'static [ToolDef] {
-            fn weather_args_schema() -> schemars::Schema {
-                schemars::schema_for!(WeatherArgs)
-            }
-
-            static DEFS: [ToolDef; 1] =
-                [ToolDef::new("weather", "Get weather", weather_args_schema)];
-            &DEFS
-        }
-
-        fn parse_tool_call(
-            metadata: ToolMetadata,
-            name: &str,
-            arguments_json: &str,
-        ) -> Result<Self::ToolCall, ToolCallError> {
-            match name {
-                "weather" => serde_json::from_str(arguments_json)
-                    .map(|input| ToolsCall::Weather(WeatherArgsCall { metadata, input }))
-                    .map_err(|source| ToolCallError::Deserialize {
-                        name: name.to_string(),
-                        source,
-                    }),
-                _ => Err(ToolCallError::UnknownTool {
-                    name: name.to_string(),
-                }),
-            }
-        }
     }
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1178,7 +1056,7 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_text_stream::<Tools, _>(futures::stream::iter(payloads), "gpt-4.1".into())
+            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into())
                 .collect::<Vec<_>>()
                 .await
         })
@@ -1186,17 +1064,23 @@ mod tests {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-        assert!(matches!(events[0], TextTurnEvent::Started { .. }));
-        assert!(matches!(events[1], TextTurnEvent::ReasoningDelta { .. }));
-        assert!(matches!(events[2], TextTurnEvent::RefusalDelta { .. }));
+        assert!(matches!(events[0], ErasedTextTurnEvent::Started { .. }));
+        assert!(matches!(
+            events[1],
+            ErasedTextTurnEvent::ReasoningDelta { .. }
+        ));
+        assert!(matches!(
+            events[2],
+            ErasedTextTurnEvent::RefusalDelta { .. }
+        ));
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, TextTurnEvent::ToolCallReady(_)))
+                .any(|event| matches!(event, ErasedTextTurnEvent::ToolCallReady(_)))
         );
         assert!(matches!(
             events.last(),
-            Some(TextTurnEvent::Completed { .. })
+            Some(ErasedTextTurnEvent::Completed { .. })
         ));
     }
 
@@ -1215,23 +1099,30 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_structured_stream::<Tools, Summary, _>(
-                futures::stream::iter(payloads),
-                "gpt-4.1".into(),
-            )
-            .collect::<Vec<_>>()
-            .await
+            map_structured_stream(futures::stream::iter(payloads), "gpt-4.1".into())
+                .collect::<Vec<_>>()
+                .await
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-        assert!(events.iter().any(|event| matches!(event, StructuredTurnEvent::StructuredOutputReady(summary) if summary.answer == "42")));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ErasedStructuredTurnEvent::StructuredOutputReady(summary)
+                if summary.deserialize::<Summary>().unwrap().answer == "42"
+        )));
     }
 
     #[test]
     fn disabled_tool_mode_sends_no_tool_definitions() {
-        let tools = build_tool_definitions::<Tools>(&ToolPolicy::Disabled).unwrap();
+        let tools = build_tool_definitions(&AdapterTurnConfig {
+            model: ModelName::new("gpt-4.1").unwrap(),
+            generation: GenerationParams::default(),
+            reasoning: ReasoningParams::default(),
+            tools: Vec::<AdapterToolDefinition>::new(),
+            tool_choice: AdapterToolChoice::None,
+        });
         assert!(tools.is_empty());
     }
 
@@ -1256,7 +1147,7 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_text_stream::<Tools, _>(futures::stream::iter(payloads), "gpt-4.1".into())
+            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into())
                 .collect::<Vec<_>>()
                 .await
         })
@@ -1267,18 +1158,20 @@ mod tests {
         let ready = events
             .iter()
             .filter_map(|event| match event {
-                TextTurnEvent::ToolCallReady(invocation) => Some(invocation),
+                ErasedTextTurnEvent::ToolCallReady(invocation) => Some(invocation),
                 _ => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(ready.len(), 1);
-        assert!(matches!(
-            &ready[0],
-            ToolsCall::Weather(WeatherArgsCall {
-                input: WeatherArgs { city },
-                ..
-            }) if city == "Tokyo"
-        ));
+        assert_eq!(ready[0].name.as_str(), "weather");
+        assert_eq!(
+            ready[0]
+                .arguments
+                .deserialize::<WeatherArgs>()
+                .unwrap()
+                .city,
+            "Tokyo"
+        );
     }
 
     #[test]
@@ -1299,12 +1192,9 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_structured_stream::<Tools, u64, _>(
-                futures::stream::iter(payloads),
-                "gpt-4.1".into(),
-            )
-            .collect::<Vec<_>>()
-            .await
+            map_structured_stream(futures::stream::iter(payloads), "gpt-4.1".into())
+                .collect::<Vec<_>>()
+                .await
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -1312,17 +1202,22 @@ mod tests {
 
         assert!(matches!(
             events[1],
-            StructuredTurnEvent::StructuredOutputChunk { .. }
+            ErasedStructuredTurnEvent::StructuredOutputChunk { .. }
         ));
         assert!(matches!(
             events[2],
-            StructuredTurnEvent::StructuredOutputChunk { .. }
+            ErasedStructuredTurnEvent::StructuredOutputChunk { .. }
         ));
+        match &events[3] {
+            ErasedStructuredTurnEvent::StructuredOutputReady(value) => {
+                assert_eq!(value.deserialize::<u64>().unwrap(), 12);
+            }
+            other => panic!("expected structured output ready, got {other:?}"),
+        }
         assert!(matches!(
-            events[3],
-            StructuredTurnEvent::StructuredOutputReady(12)
+            events[4],
+            ErasedStructuredTurnEvent::Completed { .. }
         ));
-        assert!(matches!(events[4], StructuredTurnEvent::Completed { .. }));
     }
 
     #[test]

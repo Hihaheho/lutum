@@ -51,7 +51,7 @@ fn prepare_and_collect_do_not_mutate_transcript_before_commit() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker, _, _>::new(budget, adapter);
+    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
     let mut session = Session::new(ctx, AppMarker);
     session.push_user("Hi.");
     let before = session.snapshot();
@@ -101,7 +101,7 @@ fn tool_round_is_only_applied_on_explicit_commit() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker, _, _>::new(budget, adapter);
+    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
     let mut session = Session::new(ctx, AppMarker);
     session.push_user("Check weather.");
     let before = session.snapshot();
@@ -152,7 +152,7 @@ fn tool_round_is_only_applied_on_explicit_commit() {
 fn snapshot_round_trips_through_session() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let adapter = MockLlmAdapter::new();
-    let ctx = agents::Context::<AppMarker, _, _>::new(budget, adapter);
+    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
     let mut session = Session::new(ctx.clone(), AppMarker);
     session.push_system("Be exact.");
     session.push_user("Hello.");
@@ -201,7 +201,7 @@ fn session_can_drive_a_stateful_step_loop() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker, _, _>::new(budget, adapter);
+    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
     let mut session = Session::new(ctx, AppMarker);
 
     for prompt in ["step one", "step two"] {
@@ -255,7 +255,7 @@ fn structured_tool_round_stays_explicit_until_commit() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker, _, _>::new(budget, adapter);
+    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
     let mut session = Session::new(ctx, AppMarker);
     session.push_user("Plan with a tool.");
     let before = session.snapshot();

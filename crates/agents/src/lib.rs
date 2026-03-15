@@ -10,6 +10,10 @@ pub mod conversation {
     pub use agents_protocol::conversation::*;
 }
 
+pub mod error {
+    pub use agents_protocol::error::*;
+}
+
 pub mod llm {
     pub use agents_protocol::llm::*;
 }
@@ -41,11 +45,14 @@ pub use agents_macros::{Toolset, tool_fn, tool_input};
 #[cfg(feature = "openai")]
 pub use agents_openai::{OpenAiAdapter, OpenAiError};
 pub use agents_protocol::{
-    AssistantInputItem, AssistantTurn, AssistantTurnInputError, AssistantTurnItem, BudgetLease,
-    BudgetManager, CompletionEvent, CompletionEventStream, CompletionOptions, CompletionReducer,
-    CompletionReductionError, CompletionRequest, CompletionTurnResult, CompletionTurnState,
-    EmptyNonEmptyError, FinishReason, GenerationParams, InputMessageRole, LlmAdapter, Marker,
-    MessageContent, ModelInput, ModelInputItem, ModelInputValidationError, ModelName,
+    AdapterStructuredOutputSpec, AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice,
+    AdapterToolDefinition, AdapterTurnConfig, AgentError, AssistantInputItem, AssistantTurn,
+    AssistantTurnInputError, AssistantTurnItem, BudgetLease, BudgetManager, CompletionEvent,
+    CompletionEventStream, CompletionOptions, CompletionReducer, CompletionReductionError,
+    CompletionRequest, CompletionTurnResult, CompletionTurnState, EmptyNonEmptyError,
+    ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
+    ErasedTextTurnEventStream, FinishReason, GenerationParams, InputMessageRole, LlmAdapter,
+    Marker, MessageContent, ModelInput, ModelInputItem, ModelInputValidationError, ModelName,
     ModelNameError, NoToolSelector, NoTools, NonEmpty, RawJson, ReasoningEffort, ReasoningParams,
     ReasoningSummary, Remaining, RequestBudget, SharedPoolBudgetError, SharedPoolBudgetManager,
     SharedPoolBudgetOptions, StreamKind, StructuredOutput, StructuredOutputSpec, StructuredTurn,
