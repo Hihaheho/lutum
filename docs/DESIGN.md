@@ -42,7 +42,7 @@ The "agent loop" is then just user code:
 2. start a turn with `Context`
 3. stream/reduce events
 4. execute tools if needed
-5. turn the resulting `AssistantTurn` back into request input
+5. turn the resulting `AssistantTurn` back into request input with `ModelInput::append_assistant_turn(...)`
 
 ## Core runtime
 
@@ -58,6 +58,20 @@ where:
 
 `Context` is cloneable because it owns `Arc<B>` and `Arc<L>`. The traits themselves do not need
 to be `Clone`.
+
+### `Context` is the execution boundary
+
+`Context` is the only official execution entrypoint.
+
+That is intentional. The stable execution contract lives there:
+
+- `ModelInput` validation happens before the adapter is called
+- budget is reserved before execution and finalized or recovered after execution
+- tracing spans and request ids are emitted there
+- event reduction and `collect(handler)` semantics are anchored there
+
+The adapter trait is still public because providers need an SPI boundary, but adapter-direct use is
+not the primary API. If you bypass `Context`, you are bypassing the library's execution contract.
 
 ### Marker
 
@@ -83,6 +97,18 @@ Request replay is represented by:
 
 - `ModelInput`
 - `ModelInputItem`
+
+`ModelInput` is intentionally explicit, but it is not bare-metal-only. The main low-level replay
+path is still ergonomic:
+
+- `.system(...)`
+- `.developer(...)`
+- `.user(...)`
+- `.assistant_text(...)`
+- `.assistant_reasoning(...)`
+- `.assistant_refusal(...)`
+- `.tool_use(...)`
+- `.append_assistant_turn(turn, tool_uses)`
 
 `ModelInputItem` has exactly three cases:
 
@@ -151,6 +177,9 @@ Typed semantics live on the turn, not in the canonical request algebra.
 - `#[derive(Toolset)]` on a normal enum closes over the allowed tool universe for a turn
 - the derive generates a metadata-bearing `<ToolsetName>Call` enum and per-tool wrapper structs
 
+The design here is deliberately low-level-first. The library does not auto-run tools. Instead it
+makes the explicit loop pleasant enough that higher-level hidden control flow is unnecessary.
+
 Tool calls are surfaced in two forms:
 
 - canonically as erased `AssistantTurnItem::ToolCall`
@@ -168,11 +197,42 @@ The raw explicit path is:
 3. call `call.tool_use(output)` to build `ToolUse`
 
 `#[tool_fn(skip(...))]` is sugar on top of this model. It generates a `ToolInput` companion type
-and a wrapper `.call(...)` method whose arguments are exactly the skipped parameters.
+and a wrapper `.call(...)` method whose arguments are exactly the skipped parameters. So the two
+intended paths are:
+
+- raw: execute the function yourself, then call `call.tool_use(output)`
+- sugar: call `call.call(...)` directly on the generated wrapper
+
+### Tool selection ergonomics
+
+The request builders are intentionally flat and `bon`-driven. The main low-level entrypoint is
+builder-first rather than nested-options-first.
+
+The common surface is:
+
+- `.model(...)`
+- `.temperature(...)`
+- `.max_output_tokens(...)`
+- `.thinking_budget(...)`
+- `.reasoning_summary(...)`
+- `.budget(...)`
+- `.allow_tools(tools!(...))`
+- `.require_tools(tools!(...))`
+- `.allow_all_tools()`
+- `.disable_tools()`
+
+`tools!(...)` is a type-level subset marker. It keeps subset selection compile-time checked against
+the declared `Toolset`, while still letting the returned tool calls stay plain matchable enums.
+
+`ToolMode` still exists, but it is the advanced escape hatch rather than the primary user-facing
+entrypoint.
 
 `AssistantTurn::into_input_items(...)` replays an assistant turn into request items while
 replacing each `ToolCall` with exactly one matching `ToolUse`. Missing, extra, duplicate, or
 mismatched tool uses are rejected.
+
+At the public API level, the intended replay helper is `ModelInput::append_assistant_turn(...)`.
+`AssistantTurn::into_input_items(...)` remains available as the lower-level primitive.
 
 ### Structured output
 
@@ -252,6 +312,9 @@ In particular:
 
 If a provider cannot faithfully represent the canonical request, that is an adapter limitation, not
 a reason to shrink the core algebra.
+
+This is also why the library does not encourage adapter-direct execution. Provider implementations
+are swappable, but execution policy is owned by `Context`.
 
 ## Current scope
 
