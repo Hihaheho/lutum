@@ -1,341 +1,216 @@
 # Design
 
-`agents` is a typed, streaming LLM runtime. It intentionally does not provide a top-level
-`Agent` abstraction.
+`agents` is a typed, streaming LLM runtime. It still intentionally avoids a top-level `Agent`
+abstraction.
 
-The repository is split into a small workspace:
+The key change in vNext is not hidden automation. It is a clearer split between:
 
-- `crates/agents` exposes the public facade and `Context`
-- `crates/agents-protocol` owns canonical data and core traits
-- `crates/agents-openai` implements the OpenAI-compatible adapter
-- `crates/agents-macros` owns proc-macro code generation
+- exact core state and execution
+- thin request facades
+- explicit convenience for transcript management
 
-The crate is built around a few constraints:
+## Core principles
 
-- execution stays in plain user code
+- execution stays in user code
 - request replay and response capture use different algebras
 - tool execution is explicit
 - streaming is primary
 - reduction is public
 - provider details stay at the edge
+- convenience must not reduce control
 
-## Why there is no `Agent`
+## No hidden `Agent`
 
-An `Agent` abstraction tends to hide the wrong things:
-
-- what the model actually saw
-- what state is durable
-- whether a tool call came from the model or the framework
-- how budget was spent
-- where provider-specific compromises were made
-
-This crate instead exposes:
-
-- `Context<M, B, L>` for execution
-- `ModelInput` as the canonical request surface
-- `AssistantTurn` as the canonical response surface
-- public reducers for deterministic event reduction
-
-The "agent loop" is then just user code:
-
-1. construct `ModelInput`
-2. start a turn with `Context`
-3. stream/reduce events
-4. execute tools if needed
-5. turn the resulting `AssistantTurn` back into request input with `ModelInput::append_assistant_turn(...)`
-
-## Core runtime
-
-The runtime is:
+The library still does not own the agent loop. The stable exact surface is:
 
 - `Context<M, B, L>`
+- `ModelInput`
+- `AssistantTurn`
+- public reducers
 
-where:
+User code still decides:
 
-- `M: Marker`
-- `B: BudgetManager<M>`
-- `L: LlmAdapter`
+1. what the model sees
+2. when a turn starts
+3. whether a result is committed to transcript state
+4. how tool calls are executed
+5. how branches, retries, approvals, and multi-agent handoff work
 
-`Context` is cloneable because it owns `Arc<B>` and `Arc<L>`. The traits themselves do not need
-to be `Clone`.
+## Execution boundary
 
-### `Context` is the execution boundary
+`Context<M, B, L>` remains the only official execution boundary.
 
-`Context` is the only official execution entrypoint.
+That is where:
 
-That is intentional. The stable execution contract lives there:
+- `ModelInput` validation happens
+- budget is reserved and finalized
+- tracing/request ids are recorded
+- streamed events are reduced into canonical results
 
-- `ModelInput` validation happens before the adapter is called
-- budget is reserved before execution and finalized or recovered after execution
-- tracing spans and request ids are emitted there
-- event reduction and `collect(handler)` semantics are anchored there
+Adapters are still public because providers need an SPI boundary, but adapter-direct execution
+still bypasses the library's execution contract.
 
-The adapter trait is still public because providers need an SPI boundary, but adapter-direct use is
-not the primary API. If you bypass `Context`, you are bypassing the library's execution contract.
-
-### Marker
-
-`Marker` is the caller-owned label for tracing and budget partitioning. The library does not
-prescribe what a marker means.
-
-### Budgeting
-
-Budgeting is reservation-based.
-
-There are two separate ideas:
-
-- shared/global budget control through `BudgetManager`
-- per-request constraints through `RequestBudget`
-
-`ThinkingBudget` is separate again. It shapes model behavior, not spending policy.
-
-This is intentional. A single "max tokens" number is too blunt once calls happen concurrently.
-
-## Canonical request surface: `ModelInput`
+## Canonical request surface
 
 Request replay is represented by:
 
 - `ModelInput`
 - `ModelInputItem`
+- `ToolUse`
 
-`ModelInput` is intentionally explicit, but it is not bare-metal-only. The main low-level replay
-path is still ergonomic:
+The request algebra stays exact and provider-neutral:
 
-- `.system(...)`
-- `.developer(...)`
-- `.user(...)`
-- `.assistant_text(...)`
-- `.assistant_reasoning(...)`
-- `.assistant_refusal(...)`
-- `.tool_use(...)`
-- `.append_assistant_turn(turn, tool_uses)`
+- messages remain ordered
+- assistant replay remains ordered
+- tool call/result pairs stay bundled on the request side
 
-`ModelInputItem` has exactly three cases:
+The library does not collapse this into a hidden chat history abstraction.
 
-- `Message { role: InputMessageRole, content: NonEmpty<MessageContent> }`
-- `Assistant(AssistantInputItem)`
-- `ToolUse(ToolUse)`
+## Canonical response surface
 
-### Why request and response differ
-
-By the time the next request is constructed, a tool call and its tool result should travel
-together. So request-side tool state is bundled as:
-
-- `ToolUse { id, name, arguments, result }`
-
-This removes dangling "tool result without call" states from the public request surface.
-
-### Why `ModelInput` is erased
-
-Tool schemas and structured output schemas can change per turn. A full conversation cannot be
-described correctly by one global generic parameter.
-
-So the canonical request surface is erased where it needs to be:
-
-- tool arguments/results use `RawJson`
-- typed tool and structured semantics stay at the turn boundary
-
-### Validation scope
-
-`ModelInput::validate()` only checks provider-neutral invariants:
-
-- input must be non-empty
-- `ToolUse.id` values must be unique
-
-It deliberately does not impose stronger temporal ordering rules. `ModelInput` is a full replay
-surface, so the caller is allowed to preserve whatever valid order they intend.
-
-## Canonical response surface: `AssistantTurn`
-
-A completed model response is represented by:
+Completed model output is represented by:
 
 - `AssistantTurn`
 - `AssistantTurnItem`
 
-`AssistantTurnItem` can be:
+This stays richer than the request side because the model can emit tool calls before any tool
+results exist.
 
-- `Text(String)`
-- `Reasoning(String)`
-- `Refusal(String)`
-- `ToolCall { id, name, arguments }`
+## Shared turn config
 
-This is richer than request-side `AssistantInputItem` because a model can emit a tool call before
-any tool result exists.
+The old duplicated request structs have been replaced by shared config plus thin facades.
 
-Tool calls stay on the response side because they are model-authored output. Tool results are
-external observations.
+Shared config:
 
-## Typed tools and structured output
+- `GenerationParams`
+- `ReasoningParams`
+- `TurnConfig<T>`
+- `ToolPolicy<T>`
 
-Typed semantics live on the turn, not in the canonical request algebra.
+Thin facades:
 
-### Tools
+- `TextTurn<T>`
+- `StructuredTurn<T, O>`
 
-`ToolInput` is the atomic primitive.
+This keeps:
 
-- `#[tool_input(output = T)]` defines reusable tool schema and output typing
-- `#[derive(Toolset)]` on a normal enum closes over the allowed tool universe for a turn
-- the derive generates a metadata-bearing `<ToolsetName>Call` enum and per-tool wrapper structs
+- one shared place for model, generation, reasoning, tool, and budget policy
+- separate public types for text vs structured output
+- no dummy output type on text turns
 
-The design here is deliberately low-level-first. The library does not auto-run tools. Instead it
-makes the explicit loop pleasant enough that higher-level hidden control flow is unnecessary.
+The intended primary path is:
 
-Tool calls are surfaced in two forms:
+- `TextTurn::new(model)` / `StructuredTurn::new(model)` for top-level turn construction
+- the model value itself is validated once via `ModelName::new(...)`
+- `..Default::default()` only for nested parameter bundles such as `GenerationParams`
+  and `ReasoningParams`
 
-- canonically as erased `AssistantTurnItem::ToolCall`
-- ergonomically as generated wrapper values like `AppToolsCall::Weather(WeatherArgsCall)`
+This keeps required fields required while still allowing concise partial overrides. All config and
+facade types also derive `bon::Builder`, but builder usage is secondary.
 
-Each wrapper carries:
+## Tool selection
 
-- parsed typed input
-- `ToolMetadata { id, name, arguments }`
+Tool typing still lives per turn.
 
-The raw explicit path is:
+`#[derive(Toolset)]` generates:
 
-1. `match` on the generated wrapper enum
-2. execute the tool in user code
-3. call `call.tool_use(output)` to build `ToolUse`
+- `<Toolset>Call`
+- `<Toolset>Selector`
 
-`#[tool_fn(skip(...))]` is sugar on top of this model. It generates a `ToolInput` companion type
-and a wrapper `.call(...)` method whose arguments are exactly the skipped parameters. So the two
-intended paths are:
+`<Toolset>Selector` is:
 
-- raw: execute the function yourself, then call `call.tool_use(output)`
-- sugar: call `call.call(...)` directly on the generated wrapper
+- typed to its toolset
+- serializable/deserializable
+- JSON-schema capable
 
-### Tool selection ergonomics
+That makes tool subset selection usable in both Rust code and model-facing structured outputs.
 
-The request builders are intentionally flat and `bon`-driven. The main low-level entrypoint is
-builder-first rather than nested-options-first.
+The public selection API is now value-based:
 
-The common surface is:
+- `ToolPolicy::Disabled`
+- `ToolPolicy::AllowAll`
+- `ToolPolicy::AllowOnly(Vec<T::Selector>)`
+- `ToolPolicy::RequireAll`
+- `ToolPolicy::RequireOnly(Vec<T::Selector>)`
 
-- `.model(...)`
-- `.temperature(...)`
-- `.max_output_tokens(...)`
-- `.thinking_budget(...)`
-- `.reasoning_summary(...)`
-- `.budget(...)`
-- `.allow_tools(tools!(...))`
-- `.require_tools(tools!(...))`
-- `.allow_all_tools()`
-- `.disable_tools()`
+This preserves type safety without a separate subset macro.
 
-`tools!(...)` is a type-level subset marker. It keeps subset selection compile-time checked against
-the declared `Toolset`, while still letting the returned tool calls stay plain matchable enums.
+## Session
 
-`ToolMode` still exists, but it is the advanced escape hatch rather than the primary user-facing
-entrypoint.
+`Session<M, B, L>` is a transcript helper, not a higher-order runtime.
 
-`AssistantTurn::into_input_items(...)` replays an assistant turn into request items while
-replacing each `ToolCall` with exactly one matching `ToolUse`. Missing, extra, duplicate, or
-mismatched tool uses are rejected.
+It owns:
 
-At the public API level, the intended replay helper is `ModelInput::append_assistant_turn(...)`.
-`AssistantTurn::into_input_items(...)` remains available as the lower-level primitive.
+- a `ModelInput`
+- an execution `Context`
+- optional turn defaults
+- replay helpers
 
-### Structured output
+It deliberately does not own:
 
-Structured output is turn-local.
+- hidden loops
+- hidden tool execution
+- hidden retries
+- hidden transcript mutation
 
-The request decides whether a turn is:
+### Explicit commit model
 
-- plain text
-- structured output
+`Session` is designed so convenience never hides control:
 
-The result becomes:
+- `prepare_text(...)` / `prepare_structured(...)` do not mutate transcript state
+- `collect*()` does not mutate transcript state
+- transcript state changes only through explicit `commit_*`
+- `snapshot()`, `input()`, `input_mut()`, and `into_input()` remain available
+- `into_pending()` lets callers drop back to raw `Context`-style collection
 
-- `StructuredTurnOutcome::Structured(O)`
-- `StructuredTurnOutcome::Refusal(String)`
+This is what makes it safe for:
 
-Refusal is treated as valid model behavior, not necessarily an execution failure.
+- branch evaluation
+- human approval gates
+- speculative execution
+- planner/worker tool handoff
+- external state machines and blackboards
 
-## Streaming and public reducers
+## Structured output and selector planning
 
-Execution is streaming-first, but the public surface is not "just expose a raw stream."
+Structured output remains turn-local.
 
-The model is:
+Because selectors are schema-bearing public types, a model can return:
 
-- create a pending turn from `Context`
-- call `collect(handler)`
-- let the library reduce streamed events into canonical state and results
+- `Vec<AppToolsSelector>`
 
-Reduction is public:
+and a later turn can feed that directly into:
 
-- `TextTurnReducer<T>`
-- `StructuredTurnReducer<T, O>`
-- `CompletionReducer`
+- `ToolPolicy::AllowOnly(...)`
 
-This keeps replay and deterministic testing possible without re-implementing internal rules.
+That supports explicit multi-agent planning without introducing a framework-owned agent model.
 
-### Handlers
+## Streaming and reducers
 
-`collect(handler)` accepts `EventHandler`, with a blanket impl for compatible `FnMut`.
+Execution remains streaming-first.
 
-Control is explicit:
+The public surface is:
 
-- `HandlerDirective::Continue`
-- `HandlerDirective::Stop`
+- start a turn with `Context` or `Session`
+- stream events
+- reduce through public reducers
+- optionally stop via handler directives
 
-The handler sees read-only context:
-
-- current reducer state
-- marker
-- remaining budget
-
-There is no hidden imperative stop channel.
+Reducers remain public so replay and deterministic tests do not need internal code.
 
 ## Provider boundary
 
-Provider-specific wire formats live behind `LlmAdapter`.
+Provider-specific wire formats still live behind `LlmAdapter`.
 
-The current provider is:
-
-- `OpenAiAdapter`
-
-It targets OpenAI-compatible:
-
-- `/v1/responses`
-- `/v1/completions`
-
-and is implemented directly with `reqwest`.
-
-### Lowering rules
-
-Core ordering must not be rewritten away for adapter convenience.
-
-In particular:
-
-- mid-conversation `System` and `Developer` items remain ordered
-- assistant replay input remains ordered
-- `ToolUse` lowers as adjacent `function_call` then `function_call_output`
-
-If a provider cannot faithfully represent the canonical request, that is an adapter limitation, not
-a reason to shrink the core algebra.
-
-This is also why the library does not encourage adapter-direct execution. Provider implementations
-are swappable, but execution policy is owned by `Context`.
-
-## Current scope
-
-The crate is intentionally narrow today:
-
-- text messages
-- reasoning summaries
-- refusals
-- typed tools
-- typed structured output
-- OpenAI-compatible responses/completions provider
-
-Not yet modeled:
-
-- multimodal content
-- arbitrary provider metadata channels
-- built-in multi-turn executors
+The core algebra is not shrunk for adapter convenience. If a provider cannot represent the
+canonical request faithfully, that remains an adapter limitation rather than a reason to weaken the
+core.
 
 ## Summary
 
-The crate is lower-level than a typical "agent framework" on purpose.
+The point of the redesign is not to add abstraction layers that own behavior. The point is:
 
-The point is not to hide the loop. The point is to make the loop exact, typed, replayable, and
-observable.
+- shared config instead of duplicated request structs
+- typed selector values instead of subset macros
+- session convenience without hidden control flow
+- examples that cover real application patterns without downstream-specific assumptions

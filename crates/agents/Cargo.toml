@@ -21,3 +21,4 @@ tracing.workspace = true
 schemars.workspace = true
 serde.workspace = true
 tokio.workspace = true
+trybuild = "1"

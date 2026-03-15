@@ -606,7 +606,7 @@ mod tests {
     use super::*;
     use crate::{
         ToolCallError, ToolDef, ToolMetadata, ToolName,
-        toolset::{ToolCallWrapper, ToolInput},
+        toolset::{ToolCallWrapper, ToolInput, ToolSelector},
     };
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -654,8 +654,33 @@ mod tests {
     #[derive(Clone, Copy, Debug, Default)]
     struct Tools;
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema)]
+    enum ToolsSelector {
+        Weather,
+    }
+
+    impl ToolSelector<Tools> for ToolsSelector {
+        fn name(self) -> &'static str {
+            match self {
+                Self::Weather => "weather",
+            }
+        }
+
+        fn all() -> &'static [Self] {
+            &[Self::Weather]
+        }
+
+        fn try_from_name(name: &str) -> Option<Self> {
+            match name {
+                "weather" => Some(Self::Weather),
+                _ => None,
+            }
+        }
+    }
+
     impl Toolset for Tools {
         type ToolCall = CallsCall;
+        type Selector = ToolsSelector;
 
         fn definitions() -> &'static [ToolDef] {
             fn weather_args_schema() -> schemars::Schema {

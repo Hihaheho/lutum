@@ -332,13 +332,18 @@ fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     };
 
     let call_enum_ident = format_ident!("{enum_ident}Call");
+    let selector_enum_ident = format_ident!("{enum_ident}Selector");
     let variants = data_enum.variants.into_iter().collect::<Vec<_>>();
 
     let mut wrapper_variants = Vec::new();
+    let mut selector_variants = Vec::new();
     let mut metadata_arms = Vec::new();
     let mut parse_arms = Vec::new();
     let mut defs = Vec::new();
-    let mut supports = Vec::new();
+    let mut selector_name_arms = Vec::new();
+    let mut selector_try_from_arms = Vec::new();
+    let mut selector_all = Vec::new();
+    let mut selector_expected_names = Vec::new();
 
     for variant in variants {
         let variant_ident = variant.ident;
@@ -358,13 +363,18 @@ fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             }
         };
         let wrapper_ident = wrapper_ident_for_type(&input_ty);
+        let tool_name = quote! { <#input_ty as ::agents::ToolInput>::NAME };
 
         wrapper_variants.push(quote! { #variant_ident(#wrapper_ident) });
+        selector_variants.push(quote! { #variant_ident });
         metadata_arms.push(quote! { Self::#variant_ident(inner) => &inner.metadata });
         defs.push(quote! { ::agents::ToolDef::for_input::<#input_ty>() });
-        supports.push(quote! { impl ::agents::SupportsTool<#input_ty> for #enum_ident {} });
+        selector_name_arms.push(quote! { Self::#variant_ident => #tool_name });
+        selector_try_from_arms.push(quote! { #tool_name => Some(Self::#variant_ident) });
+        selector_all.push(quote! { Self::#variant_ident });
+        selector_expected_names.push(tool_name.clone());
         parse_arms.push(quote! {
-            <#input_ty as ::agents::ToolInput>::NAME => {
+            #tool_name => {
                 let input = ::serde_json::from_str::<#input_ty>(arguments_json)
                     .map_err(|source| ::agents::ToolCallError::Deserialize {
                         name: name.to_string(),
@@ -384,8 +394,91 @@ fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             #(#wrapper_variants,)*
         }
 
+        #[derive(
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            PartialEq,
+            Hash
+        )]
+        #vis enum #selector_enum_ident {
+            #(#selector_variants,)*
+        }
+
+        impl #selector_enum_ident {
+            pub const ALL: &'static [Self] = &[#(#selector_all),*];
+
+            pub const fn name(self) -> &'static str {
+                match self {
+                    #(#selector_name_arms,)*
+                }
+            }
+
+            pub fn definitions() -> &'static [::agents::ToolDef] {
+                <#enum_ident as ::agents::Toolset>::definitions()
+            }
+
+            pub fn try_from_name(name: &str) -> Option<Self> {
+                match name {
+                    #(#selector_try_from_arms,)*
+                    _ => None,
+                }
+            }
+
+            pub fn from_name(name: &str) -> Result<Self, ::agents::ToolCallError> {
+                Self::try_from_name(name).ok_or_else(|| ::agents::ToolCallError::UnknownTool {
+                    name: name.to_string(),
+                })
+            }
+        }
+
+        impl ::serde::Serialize for #selector_enum_ident {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: ::serde::Serializer,
+            {
+                serializer.serialize_str(self.name())
+            }
+        }
+
+        impl<'de> ::serde::Deserialize<'de> for #selector_enum_ident {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: ::serde::Deserializer<'de>,
+            {
+                let name = <::std::string::String as ::serde::Deserialize>::deserialize(deserializer)?;
+                Self::try_from_name(&name).ok_or_else(|| {
+                    <D::Error as ::serde::de::Error>::unknown_variant(
+                        &name,
+                        &[#(#selector_expected_names),*],
+                    )
+                })
+            }
+        }
+
+        impl ::schemars::JsonSchema for #selector_enum_ident {
+            fn inline_schema() -> bool {
+                true
+            }
+
+            fn schema_name() -> ::std::borrow::Cow<'static, str> {
+                ::std::borrow::Cow::Borrowed(stringify!(#selector_enum_ident))
+            }
+
+            fn json_schema(
+                _generator: &mut ::schemars::SchemaGenerator,
+            ) -> ::schemars::Schema {
+                ::schemars::json_schema!({
+                    "type": "string",
+                    "enum": [#(#selector_expected_names),*]
+                })
+            }
+        }
+
         impl ::agents::Toolset for #enum_ident {
             type ToolCall = #call_enum_ident;
+            type Selector = #selector_enum_ident;
 
             fn definitions() -> &'static [::agents::ToolDef] {
                 static DEFS: ::std::sync::OnceLock<::std::vec::Vec<::agents::ToolDef>> =
@@ -415,7 +508,19 @@ fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             }
         }
 
-        #(#supports)*
+        impl ::agents::toolset::ToolSelector<#enum_ident> for #selector_enum_ident {
+            fn name(self) -> &'static str {
+                self.name()
+            }
+
+            fn all() -> &'static [Self] {
+                Self::ALL
+            }
+
+            fn try_from_name(name: &str) -> Option<Self> {
+                Self::try_from_name(name)
+            }
+        }
     }
 }
 

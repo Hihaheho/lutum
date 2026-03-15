@@ -5,9 +5,9 @@ use agents::{
     AssistantTurnItem, BudgetManager, CollectError, Context, EventHandler, FinishReason,
     HandlerContext, HandlerDirective, InputMessageRole, Marker, MockError, MockLlmAdapter,
     MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, RequestBudget,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind, StructuredTurnOutcome,
-    StructuredTurnRequest, TextTurnEvent, TextTurnReducer, TextTurnRequest, ToolMetadata, Usage,
-    UsageEstimate,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind, StructuredTurn,
+    StructuredTurnOutcome, TextTurn, TextTurnEvent, TextTurnReducer, ToolMetadata, ToolPolicy,
+    Usage, UsageEstimate,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,12 @@ enum Tools {
 
 fn input() -> ModelInput {
     ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")])
+}
+
+fn weather_turn(model: &str) -> TextTurn<Tools> {
+    let mut turn = TextTurn::new(agents::ModelName::new(model).unwrap());
+    turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
+    turn
 }
 
 struct StopOnTextDelta;
@@ -93,10 +99,7 @@ fn text_turn_collects_assistant_output_and_tool_calls() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
-    let turn = TextTurnRequest::<Tools>::builder()
-        .model("gpt-4.1")
-        .allow_tools(agents::tools!(WeatherArgs))
-        .build();
+    let turn = weather_turn("gpt-4.1");
     let pending =
         block_on(ctx.responses_text(AppMarker, input(), turn, UsageEstimate::zero())).unwrap();
     let result = block_on(pending.collect_noop()).unwrap();
@@ -137,7 +140,7 @@ fn structured_turn_collects_typed_output_and_appends_assistant_item() {
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
-    let turn = StructuredTurnRequest::<Tools, Summary>::new("gpt-4.1");
+    let turn = StructuredTurn::<Tools, Summary>::new(agents::ModelName::new("gpt-4.1").unwrap());
     let pending =
         block_on(ctx.responses_structured(AppMarker, input(), turn, UsageEstimate::zero()))
             .unwrap();
@@ -210,17 +213,12 @@ fn recorded_events_reduce_to_same_result_as_collect() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
-    let pending = block_on(
-        ctx.responses_text(
-            AppMarker,
-            input(),
-            TextTurnRequest::<Tools>::builder()
-                .model("gpt-4.1")
-                .allow_tools(agents::tools!(WeatherArgs))
-                .build(),
-            UsageEstimate::zero(),
-        ),
-    )
+    let pending = block_on(ctx.responses_text(
+        AppMarker,
+        input(),
+        weather_turn("gpt-4.1"),
+        UsageEstimate::zero(),
+    ))
     .unwrap();
     let collected = block_on(pending.collect_noop()).unwrap();
 
@@ -249,7 +247,7 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
     let pending = block_on(ctx.responses_text(
         AppMarker,
         input(),
-        TextTurnRequest::<Tools>::new("gpt-4.1"),
+        TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1").unwrap()),
         UsageEstimate {
             total_tokens: 10,
             ..UsageEstimate::zero()
@@ -299,7 +297,7 @@ fn adapter_error_uses_recovered_usage_when_available() {
     let pending = block_on(ctx.responses_text(
         AppMarker,
         input(),
-        TextTurnRequest::<Tools>::new("gpt-4.1"),
+        TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1").unwrap()),
         UsageEstimate {
             total_tokens: 10,
             ..UsageEstimate::zero()
@@ -318,20 +316,19 @@ fn request_budget_is_enforced_per_turn() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
 
-    let err = match block_on(
-        ctx.responses_text(
-            AppMarker,
-            input(),
-            TextTurnRequest::<Tools>::builder()
-                .model("gpt-4.1")
-                .budget(RequestBudget::from_tokens(16))
-                .build(),
-            UsageEstimate {
-                total_tokens: 32,
-                ..UsageEstimate::zero()
-            },
-        ),
-    ) {
+    let err = match block_on(ctx.responses_text(
+        AppMarker,
+        input(),
+        {
+            let mut turn = TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1").unwrap());
+            turn.config.budget = RequestBudget::from_tokens(16);
+            turn
+        },
+        UsageEstimate {
+            total_tokens: 32,
+            ..UsageEstimate::zero()
+        },
+    )) {
         Ok(_) => panic!("request should have been rejected by the per-request budget"),
         Err(err) => err,
     };

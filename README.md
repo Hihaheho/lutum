@@ -1,47 +1,39 @@
 # agents
 
-`agents` is a small Rust library for building typed, streaming LLM workflows without introducing a
-top-level `Agent` abstraction.
+`agents` is a small Rust library for typed, streaming LLM workflows.
 
-The library gives you:
+The library is built around three layers:
 
-- `Context<M, B, L>` for execution
-- typed text and structured turns
-- public reducers for deterministic event reduction
-- request and response algebras that reflect different invariants
-- reservation-based budget management
-- an OpenAI-compatible `reqwest` adapter
+- `Context<M, B, L>`: the exact execution contract
+- `TextTurn` / `StructuredTurn`: thin turn facades over shared config
+- `Session<M, B, L>`: transcript and replay convenience without hidden control flow
 
-If you want the design rationale rather than just the surface API, read
+If you want the design rationale rather than just the public surface, read
 [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Workspace layout
 
-This repository is a Cargo workspace with four crates under `crates/`:
-
-- `crates/agents` — public facade crate and `Context`
-- `crates/agents-protocol` — canonical request/response algebras and core traits
-- `crates/agents-openai` — OpenAI-compatible adapter
-- `crates/agents-macros` — proc-macros for tools
+- `crates/agents` - public facade crate, `Context`, `Session`, mocks
+- `crates/agents-protocol` - canonical request/response algebras and core traits
+- `crates/agents-openai` - OpenAI-compatible adapter
+- `crates/agents-macros` - proc-macros for tools
 
 ## Core ideas
 
-- No monolithic `Agent` trait.
-- Request replay is modeled as `ModelInput`.
-- Completed model output is modeled as `AssistantTurn`.
-- Tools and structured output are typed per turn, not globally.
-- Tool execution stays in user code.
-
-## Installation
-
-Add the crate to your project in the usual way, or work from this repository directly.
+- No monolithic `Agent` abstraction
+- Request replay is modeled as `ModelInput`
+- Completed model output is modeled as `AssistantTurn`
+- Turn configuration is shared through `TurnConfig<T>`
+- Text and structured turns stay separate as thin facades
+- Tool execution stays in user code
+- `Session` is convenience, not hidden control flow
 
 ## Minimal example
 
 ```rust
 use agents::{
-    Context, InputMessageRole, ModelInput, ModelInputItem, NoTools, OpenAiAdapter,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextTurnRequest, UsageEstimate,
+    Context, InputMessageRole, ModelInput, ModelInputItem, NoTools, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, TextTurn, TurnConfig, UsageEstimate,
 };
 
 #[derive(Clone, Debug)]
@@ -53,21 +45,14 @@ impl agents::Marker for AppMarker {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let adapter = OpenAiAdapter::new(std::env::var("OPENAI_API_KEY").unwrap_or_default())
-        .with_base_url(
-            std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:11434/v1".to_string()),
-        );
-    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker, _, _> = Context::new(budget, adapter);
-
+async fn run<L: agents::LlmAdapter>(
+    ctx: Context<AppMarker, agents::SharedPoolBudgetManager, L>,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    L::Error: std::error::Error + 'static,
+{
     let input = ModelInput::from_items(vec![
-        ModelInputItem::text(
-            InputMessageRole::System,
-            "You are a concise assistant.",
-        ),
+        ModelInputItem::text(InputMessageRole::System, "You are concise."),
         ModelInputItem::text(InputMessageRole::User, "Say hello."),
     ]);
 
@@ -75,7 +60,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .responses_text(
             AppMarker,
             input,
-            TextTurnRequest::<NoTools>::new("qwen3.5:latest"),
+            TextTurn::<NoTools> {
+                config: TurnConfig::<NoTools>::new(agents::ModelName::new("gpt-4.1-mini")?),
+            },
             UsageEstimate::zero(),
         )
         .await?
@@ -85,82 +72,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", result.assistant_text());
     Ok(())
 }
+
+# fn main() {
+#     let _ = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
+# }
 ```
 
-## Running the included example
+## Shared turn config
 
-This repository includes a minimal example:
+Turn-level configuration lives in plain structs:
 
-- [crates/agents/examples/greeting.rs](crates/agents/examples/greeting.rs)
+- `GenerationParams`
+- `ReasoningParams`
+- `TurnConfig<T>`
+- `ToolPolicy<T>`
 
-It uses `OpenAiAdapter` directly and defaults to an Ollama OpenAI-compatible endpoint:
-
-```bash
-cargo run -p agents --quiet --example greeting -- "Hello!"
-```
-
-Useful environment variables:
-
-- `OPENAI_BASE_URL`  
-  Default: `http://localhost:11434/v1`
-- `OPENAI_MODEL`  
-  Default: `qwen3.5:latest`
-- `OPENAI_API_KEY`  
-  Optional for local Ollama setups; defaults to the empty string
-
-## Main types
-
-### Request side
-
-- `ModelInput`
-- `ModelInputItem`
-- `ToolUse`
-
-`ModelInput` is the canonical request surface. It is ordered and schema-erased where necessary.
-
-### Response side
-
-- `AssistantTurn`
-- `AssistantTurnItem`
-
-`AssistantTurn` is the canonical response surface for a completed model turn.
-
-### Execution
-
-- `Context<M, B, L>`
-- `TextTurnRequest<T>`
-- `StructuredTurnRequest<T, O>`
-- `collect(handler)`
-
-### Typing
-
-- `ToolInput`
-- `Toolset`
-- `StructuredOutput`
-- generated `<ToolsetName>Call` wrapper enums
-
-## Tool flow
-
-The normal tool loop is:
-
-1. collect a turn
-2. inspect generated wrapper tool calls
-3. execute tools in your own code
-4. turn outputs into `ToolUse`
-5. replay the assistant turn with `AssistantTurn::into_input_items(...)`
-
-This keeps tool execution explicit and avoids hiding important control flow inside the framework.
-
-For raw tool definitions, use `#[tool_input(...)]` and call `call.tool_use(output)?` on the
-generated wrapper:
+The safe primary path is `TextTurn::new(ModelName::new(...)? )` /
+`StructuredTurn::new(ModelName::new(...)? )` for top-level turns,
+with `..Default::default()` reserved for nested parameter bundles:
 
 ```rust
-#[agents::tool_input(name = "weather", output = WeatherResult)]
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-struct WeatherArgs {
-    city: String,
-}
+use agents::{GenerationParams, TextTurn, ToolPolicy};
 
+let mut turn = TextTurn::<AppTools>::new(agents::ModelName::new("gpt-4.1")?);
+turn.config.tools = ToolPolicy::allow_only(vec![AppToolsSelector::Weather]);
+turn.config.generation = GenerationParams {
+    max_output_tokens: Some(512),
+    ..Default::default()
+};
+```
+
+All of these structs also derive `bon::Builder`, so builder usage stays available as a secondary
+construction path.
+
+## Tool selection
+
+`#[derive(Toolset)]` generates two public enums:
+
+- `<Toolset>Call`
+- `<Toolset>Selector`
+
+`<Toolset>Selector` is serializable and schema-bearing, so it can be used as part of a structured
+output contract when one model selects the tools that another model may use.
+
+```rust
 #[derive(
     Clone,
     Debug,
@@ -171,58 +126,58 @@ struct WeatherArgs {
 )]
 enum AppTools {
     Weather(WeatherArgs),
+    Search(SearchArgs),
 }
 
-match tool_call {
-    AppToolsCall::Weather(call) => {
-        let output = get_weather(&app_ctx, call.input.clone()).await?;
-        let tool_use = call.tool_use(output)?;
-        // append back into ModelInput
-    }
-}
+let turn = TextTurn::<AppTools> {
+    config: {
+        let mut config = agents::TurnConfig::<AppTools>::new(agents::ModelName::new("gpt-4.1")?);
+        config.tools = ToolPolicy::allow_only(vec![
+            AppToolsSelector::Weather,
+            AppToolsSelector::Search,
+        ]);
+        config
+    },
+};
 ```
 
-For convenience, `#[tool_fn(skip(...))]` generates both the `ToolInput` type and a wrapper
-`call(...)` method whose arguments are exactly the skipped parameters:
+## Session
+
+`Session` keeps transcript state and replay helpers without hiding execution:
+
+- `prepare_text(...)` / `prepare_structured(...)` do not mutate transcript state
+- `collect*()` does not auto-commit transcript state
+- transcript state changes only on explicit `commit_*`
+- you can always access `Context` or raw `ModelInput` directly
+
+This makes branching and tool replay explicit:
 
 ```rust
-#[agents::tool_fn(skip(app_ctx, tenant))]
-async fn get_weather(
-    app_ctx: &AppCtx,
-    tenant: TenantId,
-    city: String,
-) -> Result<WeatherResult, WeatherError> {
-    ...
-}
+let outcome = session
+    .prepare_text(turn, UsageEstimate::zero())
+    .await?
+    .collect_noop()
+    .await?;
 
-match tool_call {
-    AppToolsCall::GetWeather(call) => {
-        let tool_use = call.call(&app_ctx, tenant).await?;
+match outcome {
+    agents::TextStepOutcome::Finished(result) => {
+        session.commit_text(result)?;
+    }
+    agents::TextStepOutcome::NeedsToolResults(round) => {
+        let tool_uses = execute_tools(round.tool_calls.clone())?;
+        session.commit_tool_round(round, tool_uses)?;
     }
 }
 ```
 
-## Budgeting
+## Examples
 
-Budgeting is reservation-based.
-
-- global control comes from `BudgetManager`
-- per-request limits come from `RequestBudget`
-- reasoning intensity is separate and uses `ThinkingBudget`
-
-This makes concurrent use less brittle than a single global "max tokens" knob.
-
-## Status
-
-Current scope is intentionally narrow:
-
-- text messages
-- text turns
-- structured turns
-- typed tools
-- OpenAI-compatible responses/completions provider
-
-Multimodal request/response content is not modeled yet.
+- `text_minimal.rs`
+- `text_session.rs`
+- `structured_extract.rs`
+- `single_tool_roundtrip.rs`
+- `parallel_tools.rs`
+- `context_direct_control.rs`
 
 ## Development
 

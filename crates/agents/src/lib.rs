@@ -27,6 +27,8 @@ pub mod reducer {
     pub use agents_protocol::reducer::*;
 }
 
+pub mod session;
+
 pub mod structured {
     pub use agents_protocol::structured::*;
 }
@@ -42,18 +44,18 @@ pub use agents_protocol::{
     AssistantInputItem, AssistantTurn, AssistantTurnInputError, AssistantTurnItem, BudgetLease,
     BudgetManager, CompletionEvent, CompletionEventStream, CompletionOptions, CompletionReducer,
     CompletionReductionError, CompletionRequest, CompletionTurnResult, CompletionTurnState,
-    EmptyNonEmptyError, FinishReason, InputMessageRole, LlmAdapter, Marker, MessageContent,
-    ModelInput, ModelInputItem, ModelInputValidationError, NoTools, NonEmpty, RawJson,
-    ReasoningConfig, ReasoningEffort, ReasoningSummary, Remaining, RequestBudget, ResponsesOptions,
-    SharedPoolBudgetError, SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind,
-    StructuredOutput, StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnOutcome,
-    StructuredTurnReducer, StructuredTurnReductionError, StructuredTurnRequest,
-    StructuredTurnResult, StructuredTurnState, SupportsTool, Temperature, TemperatureError,
-    TextTurnEvent, TextTurnEventStream, TextTurnReducer, TextTurnReductionError, TextTurnRequest,
-    TextTurnResult, TextTurnState, ThinkingBudget, ToolCallError, ToolCallId, ToolCallWrapper,
-    ToolDef, ToolExecutionError, ToolInput, ToolMetadata, ToolMode, ToolName, ToolRef,
-    ToolSelection, ToolSubset, ToolSubsetMarker, ToolUse, ToolUseError, Toolset, Usage,
-    UsageEstimate, assistant_json, find_tool_call_arguments,
+    EmptyNonEmptyError, FinishReason, GenerationParams, InputMessageRole, LlmAdapter, Marker,
+    MessageContent, ModelInput, ModelInputItem, ModelInputValidationError, ModelName,
+    ModelNameError, NoToolSelector, NoTools, NonEmpty, RawJson, ReasoningEffort, ReasoningParams,
+    ReasoningSummary, Remaining, RequestBudget, SharedPoolBudgetError, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, StreamKind, StructuredOutput, StructuredOutputSpec, StructuredTurn,
+    StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnOutcome, StructuredTurnReducer,
+    StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, Temperature,
+    TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TextTurnReducer,
+    TextTurnReductionError, TextTurnResult, TextTurnState, ToolCallError, ToolCallId,
+    ToolCallWrapper, ToolDef, ToolExecutionError, ToolInput, ToolMetadata, ToolName, ToolPolicy,
+    ToolSelector, ToolUse, ToolUseError, Toolset, TurnConfig, Usage, UsageEstimate, assistant_json,
+    find_tool_call_arguments,
 };
 pub use context::{
     CollectError, Context, ContextError, EventHandler, HandlerContext, HandlerDirective,
@@ -63,10 +65,7 @@ pub use mock::{
     MockCompletionScenario, MockError, MockLlmAdapter, MockStructuredScenario, MockTextScenario,
     RawCompletionEvent, RawStructuredTurnEvent, RawTextTurnEvent,
 };
-
-#[macro_export]
-macro_rules! tools {
-    ($($tool:ty),+ $(,)?) => {
-        $crate::ToolSubsetMarker::<($($tool,)+)>::new()
-    };
-}
+pub use session::{
+    Session, SessionDefaults, SessionPendingStructured, SessionPendingText, StructuredStepOutcome,
+    TextStepOutcome, ToolRound,
+};

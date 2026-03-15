@@ -18,7 +18,7 @@ struct WeatherArgs {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, agents::Toolset)]
 enum RawTools {
-    Weather(WeatherArgs),
+    CurrentWeather(WeatherArgs),
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -45,6 +45,22 @@ enum FnTools {
 
 #[test]
 fn tool_input_wrapper_builds_tool_use() {
+    assert_eq!(RawToolsSelector::CurrentWeather.name(), "weather");
+    assert_eq!(
+        RawToolsSelector::try_from_name("weather"),
+        Some(RawToolsSelector::CurrentWeather)
+    );
+    assert_eq!(
+        serde_json::to_string(&RawToolsSelector::CurrentWeather).unwrap(),
+        "\"weather\""
+    );
+    assert_eq!(
+        serde_json::from_str::<RawToolsSelector>("\"weather\"").unwrap(),
+        RawToolsSelector::CurrentWeather
+    );
+    let schema = serde_json::to_value(schemars::schema_for!(RawToolsSelector)).unwrap();
+    assert_eq!(schema["enum"][0], "weather");
+
     let tool_call = RawTools::parse_tool_call(
         ToolMetadata::new(
             "call-1",
@@ -57,7 +73,7 @@ fn tool_input_wrapper_builds_tool_use() {
     .unwrap();
 
     let tool_use = match tool_call {
-        RawToolsCall::Weather(call) => call
+        RawToolsCall::CurrentWeather(call) => call
             .tool_use(WeatherResult {
                 forecast: "sunny".into(),
             })

@@ -12,8 +12,8 @@ use agents_protocol::{
     conversation::{ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
     llm::{
         CompletionEvent, CompletionEventStream, CompletionRequest, FinishReason, LlmAdapter,
-        StreamKind, StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnRequest,
-        TextTurnEvent, TextTurnEventStream, TextTurnRequest,
+        StreamKind, StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream, TextTurn,
+        TextTurnEvent, TextTurnEventStream,
     },
     structured::StructuredOutput,
     toolset::Toolset,
@@ -185,7 +185,7 @@ impl LlmAdapter for MockLlmAdapter {
     async fn responses_text<T>(
         &self,
         _input: ModelInput,
-        _turn: TextTurnRequest<T>,
+        _turn: TextTurn<T>,
     ) -> Result<TextTurnEventStream<T, Self::Error>, Self::Error>
     where
         T: Toolset,
@@ -263,7 +263,7 @@ impl LlmAdapter for MockLlmAdapter {
     async fn responses_structured<T, O>(
         &self,
         _input: ModelInput,
-        _turn: StructuredTurnRequest<T, O>,
+        _turn: StructuredTurn<T, O>,
     ) -> Result<StructuredTurnEventStream<T, O, Self::Error>, Self::Error>
     where
         T: Toolset,

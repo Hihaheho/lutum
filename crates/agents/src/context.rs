@@ -9,8 +9,8 @@ use agents_protocol::{
     conversation::{ModelInput, ModelInputValidationError},
     llm::{
         CompletionEvent, CompletionEventStream, CompletionRequest, LlmAdapter, StreamKind,
-        StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnRequest, TextTurnEvent,
-        TextTurnEventStream, TextTurnRequest,
+        StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream, TextTurn, TextTurnEvent,
+        TextTurnEventStream,
     },
     marker::Marker,
     reducer::{
@@ -198,7 +198,7 @@ where
         &self,
         marker: M,
         input: ModelInput,
-        turn: TextTurnRequest<T>,
+        turn: TextTurn<T>,
         estimate: UsageEstimate,
     ) -> Result<PendingTextTurn<M, B, L, T>, ContextError<B::Error, L::Error>>
     where
@@ -207,12 +207,12 @@ where
         input.validate()?;
         let lease = self
             .budget
-            .reserve(&marker, &estimate, turn.budget)
+            .reserve(&marker, &estimate, turn.config.budget)
             .map_err(ContextError::Budget)?;
         let span = turn_span(
             marker.span_name().into_owned(),
             "responses_text",
-            &turn.model,
+            turn.config.model.as_ref(),
             estimate,
         );
         let stream = self
@@ -235,7 +235,7 @@ where
         &self,
         marker: M,
         input: ModelInput,
-        turn: StructuredTurnRequest<T, O>,
+        turn: StructuredTurn<T, O>,
         estimate: UsageEstimate,
     ) -> Result<PendingStructuredTurn<M, B, L, T, O>, ContextError<B::Error, L::Error>>
     where
@@ -245,12 +245,12 @@ where
         input.validate()?;
         let lease = self
             .budget
-            .reserve(&marker, &estimate, turn.budget)
+            .reserve(&marker, &estimate, turn.config.budget)
             .map_err(ContextError::Budget)?;
         let span = turn_span(
             marker.span_name().into_owned(),
             "responses_structured",
-            &turn.model,
+            turn.config.model.as_ref(),
             estimate,
         );
         let stream = self
@@ -282,7 +282,7 @@ where
         let span = turn_span(
             marker.span_name().into_owned(),
             "completion",
-            &request.model,
+            request.model.as_ref(),
             estimate,
         );
         let stream = self

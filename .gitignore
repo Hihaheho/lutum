@@ -5,8 +5,6 @@
 !Cargo.toml
 !Cargo.lock
 !**/*.rs
-!tests/**/*.rs
-!examples/**/*.rs
 target/
 !README.md
 !docs/**/*.md

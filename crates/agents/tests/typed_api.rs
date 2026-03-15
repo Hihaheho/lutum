@@ -1,10 +1,10 @@
 use agents::{
     AssistantInputItem, AssistantTurnItem, BudgetLease, BudgetManager, CompletionEventStream,
     CompletionRequest, Context, ContextError, InputMessageRole, LlmAdapter, Marker, MessageContent,
-    ModelInput, ModelInputItem, NonEmpty, RawJson, ReasoningConfig, RequestBudget,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind, StructuredOutput,
-    StructuredTurnEventStream, StructuredTurnRequest, Temperature, TextTurnEventStream,
-    TextTurnReducer, TextTurnRequest, ThinkingBudget, ToolMetadata, ToolUse, Toolset, Usage,
+    ModelInput, ModelInputItem, ModelName, ModelNameError, NonEmpty, RawJson, ReasoningEffort,
+    ReasoningParams, RequestBudget, SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind,
+    StructuredOutput, StructuredTurn, StructuredTurnEventStream, Temperature, TextTurn,
+    TextTurnEventStream, TextTurnReducer, ToolMetadata, ToolPolicy, ToolUse, Toolset, Usage,
     UsageEstimate,
 };
 use async_trait::async_trait;
@@ -40,7 +40,7 @@ impl LlmAdapter for NullAdapter {
     async fn responses_text<T>(
         &self,
         _input: ModelInput,
-        _turn: TextTurnRequest<T>,
+        _turn: TextTurn<T>,
     ) -> Result<TextTurnEventStream<T, Self::Error>, Self::Error>
     where
         T: Toolset,
@@ -51,7 +51,7 @@ impl LlmAdapter for NullAdapter {
     async fn responses_structured<T, O>(
         &self,
         _input: ModelInput,
-        _turn: StructuredTurnRequest<T, O>,
+        _turn: StructuredTurn<T, O>,
     ) -> Result<StructuredTurnEventStream<T, O, Self::Error>, Self::Error>
     where
         T: Toolset,
@@ -135,6 +135,11 @@ struct Summary {
     answer: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct ToolPlan {
+    tools: Vec<ToolsSelector>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, agents::Toolset)]
 enum Tools {
     Weather(WeatherArgs),
@@ -163,23 +168,21 @@ fn typed_public_api_compiles_and_constructs_requests() {
         )),
     ]);
 
-    let _text = TextTurnRequest::<Tools>::builder()
-        .model("gpt-4.1")
-        .allow_tools(agents::tools!(WeatherArgs))
-        .budget(RequestBudget::from_tokens(256))
-        .build();
-    let _structured = StructuredTurnRequest::<Tools, Summary>::builder()
-        .model("gpt-4.1")
-        .temperature(Temperature::try_from(0.3).unwrap())
-        .max_output_tokens(512)
-        .reasoning(
-            ReasoningConfig::builder()
-                .effort(ThinkingBudget::Low)
-                .build(),
-        )
-        .build();
+    let mut _text = TextTurn::<Tools>::new(ModelName::new("gpt-4.1").unwrap());
+    _text.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
+    _text.config.budget = RequestBudget::from_tokens(256);
+
+    let mut _structured = StructuredTurn::<Tools, Summary>::new(ModelName::new("gpt-4.1").unwrap());
+    _structured.config.generation = agents::GenerationParams {
+        temperature: Some(Temperature::try_from(0.3).unwrap()),
+        max_output_tokens: Some(512),
+    };
+    _structured.config.reasoning = ReasoningParams {
+        effort: Some(ReasoningEffort::Low),
+        summary: None,
+    };
     let _completion = CompletionRequest::builder()
-        .model("gpt-4.1-mini")
+        .model(ModelName::new("gpt-4.1-mini").unwrap())
         .prompt("hello")
         .budget(RequestBudget::from_tokens(128))
         .build();
@@ -192,6 +195,31 @@ fn typed_public_api_compiles_and_constructs_requests() {
 fn context_accepts_non_clone_budget_and_adapter() {
     let ctx: Context<AppMarker, _, _> = Context::new(NonCloneBudget, NullAdapter);
     let _ = ctx;
+}
+
+#[test]
+fn model_name_rejects_empty_strings() {
+    assert_eq!(ModelName::new("   "), Err(ModelNameError::Empty));
+}
+
+#[test]
+fn selector_plans_round_trip_and_drive_tool_policy() {
+    let plan = ToolPlan {
+        tools: vec![ToolsSelector::Weather],
+    };
+    let json = serde_json::to_string(&plan).unwrap();
+    assert_eq!(json, "{\"tools\":[\"weather\"]}");
+
+    let decoded: ToolPlan = serde_json::from_str(&json).unwrap();
+    let policy = ToolPolicy::<Tools>::allow_only(decoded.tools);
+    let selected = policy
+        .selected()
+        .unwrap()
+        .iter()
+        .map(|selector| selector.name())
+        .collect::<Vec<_>>();
+
+    assert_eq!(selected, vec!["weather"]);
 }
 
 #[test]
@@ -281,7 +309,7 @@ fn context_rejects_invalid_model_input_before_adapter_call() {
     let err = futures::executor::block_on(ctx.responses_text(
         AppMarker,
         input,
-        TextTurnRequest::<Tools>::new("gpt-4.1"),
+        TextTurn::<Tools>::new(ModelName::new("gpt-4.1").unwrap()),
         UsageEstimate::zero(),
     ));
 

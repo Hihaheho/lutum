@@ -18,12 +18,12 @@ use agents_protocol::{
     },
     llm::{
         CompletionEvent, CompletionEventStream, CompletionRequest, FinishReason, LlmAdapter,
-        ReasoningConfig, ReasoningEffort, ReasoningSummary, ResponsesOptions, StreamKind,
-        StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnRequest, TextTurnEvent,
-        TextTurnEventStream, TextTurnRequest,
+        ReasoningEffort, ReasoningParams, ReasoningSummary, StreamKind, StructuredTurn,
+        StructuredTurnEvent, StructuredTurnEventStream, TextTurn, TextTurnEvent,
+        TextTurnEventStream, TurnConfig,
     },
     structured::StructuredOutput,
-    toolset::{ToolCallError, ToolMode, Toolset},
+    toolset::{ToolCallError, ToolPolicy, ToolSelector, Toolset},
 };
 
 #[derive(Clone)]
@@ -126,52 +126,37 @@ impl LlmAdapter for OpenAiAdapter {
     async fn responses_text<T>(
         &self,
         input: ModelInput,
-        turn: TextTurnRequest<T>,
+        turn: TextTurn<T>,
     ) -> Result<TextTurnEventStream<T, Self::Error>, Self::Error>
     where
         T: Toolset,
     {
-        let body = build_responses_request::<T>(
-            &input,
-            &turn.model,
-            &turn.options(),
-            &turn.tool_mode,
-            None,
-        )?;
+        let model = turn.config.model.to_string();
+        let body = build_responses_request::<T>(&input, &turn.config, None)?;
         let stream = self.send_streaming_json("/responses", body).await?;
-        Ok(
-            Box::pin(map_text_stream::<T, _>(stream, turn.model.clone()))
-                as TextTurnEventStream<T, Self::Error>,
-        )
+        Ok(Box::pin(map_text_stream::<T, _>(stream, model)) as TextTurnEventStream<T, Self::Error>)
     }
 
     async fn responses_structured<T, O>(
         &self,
         input: ModelInput,
-        turn: StructuredTurnRequest<T, O>,
+        turn: StructuredTurn<T, O>,
     ) -> Result<StructuredTurnEventStream<T, O, Self::Error>, Self::Error>
     where
         T: Toolset,
         O: StructuredOutput,
     {
+        let model = turn.config.model.to_string();
         let output_schema = Some(json!({
             "type": "json_schema",
             "name": <O as StructuredOutput>::schema_name(),
             "strict": true,
             "schema": serde_json::to_value(<O as StructuredOutput>::json_schema())?,
         }));
-        let body = build_responses_request::<T>(
-            &input,
-            &turn.model,
-            &turn.options(),
-            &turn.tool_mode,
-            output_schema,
-        )?;
+        let body = build_responses_request::<T>(&input, &turn.config, output_schema)?;
         let stream = self.send_streaming_json("/responses", body).await?;
-        Ok(
-            Box::pin(map_structured_stream::<T, O, _>(stream, turn.model.clone()))
-                as StructuredTurnEventStream<T, O, Self::Error>,
-        )
+        Ok(Box::pin(map_structured_stream::<T, O, _>(stream, model))
+            as StructuredTurnEventStream<T, O, Self::Error>)
     }
 
     async fn completion(
@@ -181,7 +166,7 @@ impl LlmAdapter for OpenAiAdapter {
         let body = build_completion_request(&request);
         let stream = self.send_streaming_json("/completions", body).await?;
         Ok(
-            Box::pin(map_completion_stream(stream, request.model.clone()))
+            Box::pin(map_completion_stream(stream, request.model.to_string()))
                 as CompletionEventStream<Self::Error>,
         )
     }
@@ -203,38 +188,36 @@ impl LlmAdapter for OpenAiAdapter {
 
 fn build_responses_request<T>(
     input: &ModelInput,
-    model: &str,
-    options: &ResponsesOptions,
-    tool_mode: &ToolMode<T>,
+    config: &TurnConfig<T>,
     text_format: Option<Value>,
 ) -> Result<Value, OpenAiError>
 where
     T: Toolset,
 {
-    let tools = build_tool_definitions::<T>(tool_mode)?;
+    let tools = build_tool_definitions::<T>(&config.tools)?;
     let mut body = json!({
-        "model": model,
+        "model": config.model,
         "input": convert_model_input(input)?,
         "stream": true,
         "tools": tools,
-        "parallel_tool_calls": !matches!(tool_mode, ToolMode::RequiredAll | ToolMode::RequiredOnly(_)),
+        "parallel_tool_calls": !config.tools.requires_tools(),
     });
 
-    if let Some(temperature) = options.temperature {
+    if let Some(temperature) = config.generation.temperature {
         body["temperature"] = json!(temperature.get());
     }
-    if let Some(max_output_tokens) = options.max_output_tokens {
+    if let Some(max_output_tokens) = config.generation.max_output_tokens {
         body["max_output_tokens"] = json!(max_output_tokens);
     }
-    if let Some(reasoning) = options.effective_reasoning().as_ref() {
-        body["reasoning"] = reasoning_to_json(reasoning);
+    if let Some(reasoning) = reasoning_to_json(&config.reasoning) {
+        body["reasoning"] = reasoning;
     }
     if let Some(text_format) = text_format {
         body["text"] = json!({ "format": text_format });
     }
-    if tool_mode.requires_tools() {
+    if config.tools.requires_tools() {
         body["tool_choice"] = json!("required");
-    } else if !tool_mode.uses_tools() {
+    } else if !config.tools.uses_tools() {
         body["tool_choice"] = json!("none");
     }
 
@@ -377,18 +360,27 @@ fn message_content(content: &MessageContent) -> Value {
     }
 }
 
-fn build_tool_definitions<T>(tool_mode: &ToolMode<T>) -> Result<Vec<Value>, OpenAiError>
+fn build_tool_definitions<T>(tool_policy: &ToolPolicy<T>) -> Result<Vec<Value>, OpenAiError>
 where
     T: Toolset,
 {
-    if !tool_mode.uses_tools() {
+    if !tool_policy.uses_tools() {
         return Ok(Vec::new());
     }
 
-    let selected = tool_mode.selected_names();
+    let selected = tool_policy.selected().map(|selectors| {
+        selectors
+            .iter()
+            .map(|selector| selector.name())
+            .collect::<Vec<_>>()
+    });
     T::definitions()
         .iter()
-        .filter(|tool| selected.is_none_or(|names| names.contains(&tool.name)))
+        .filter(|tool| {
+            selected
+                .as_ref()
+                .is_none_or(|names| names.contains(&tool.name))
+        })
         .map(|tool| {
             Ok(json!({
                 "type": "function",
@@ -400,19 +392,33 @@ where
         .collect()
 }
 
-fn reasoning_to_json(reasoning: &ReasoningConfig) -> Value {
-    json!({
-        "effort": match reasoning.effort {
-            ReasoningEffort::Low => "low",
-            ReasoningEffort::Medium => "medium",
-            ReasoningEffort::High => "high",
-        },
-        "summary": match reasoning.summary {
-            ReasoningSummary::Auto => "auto",
-            ReasoningSummary::Concise => "concise",
-            ReasoningSummary::Detailed => "detailed",
-        }
-    })
+fn reasoning_to_json(reasoning: &ReasoningParams) -> Option<Value> {
+    let mut map = serde_json::Map::new();
+    if let Some(effort) = reasoning.effort {
+        map.insert(
+            "effort".into(),
+            json!(match effort {
+                ReasoningEffort::Low => "low",
+                ReasoningEffort::Medium => "medium",
+                ReasoningEffort::High => "high",
+            }),
+        );
+    }
+    if let Some(summary) = reasoning.summary {
+        map.insert(
+            "summary".into(),
+            json!(match summary {
+                ReasoningSummary::Auto => "auto",
+                ReasoningSummary::Concise => "concise",
+                ReasoningSummary::Detailed => "detailed",
+            }),
+        );
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(Value::Object(map))
+    }
 }
 
 #[derive(Default)]
@@ -1013,7 +1019,7 @@ mod tests {
 
     use agents_protocol::{
         AssistantInputItem, InputMessageRole, ModelInput, ModelInputItem, ToolDef, ToolUse,
-        toolset::{ToolCallWrapper, ToolInput},
+        toolset::{ToolCallWrapper, ToolInput, ToolPolicy, ToolSelector},
     };
 
     use super::*;
@@ -1063,8 +1069,33 @@ mod tests {
     #[derive(Clone, Copy, Debug, Default)]
     struct Tools;
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema)]
+    enum ToolsSelector {
+        Weather,
+    }
+
+    impl ToolSelector<Tools> for ToolsSelector {
+        fn name(self) -> &'static str {
+            match self {
+                Self::Weather => "weather",
+            }
+        }
+
+        fn all() -> &'static [Self] {
+            &[Self::Weather]
+        }
+
+        fn try_from_name(name: &str) -> Option<Self> {
+            match name {
+                "weather" => Some(Self::Weather),
+                _ => None,
+            }
+        }
+    }
+
     impl Toolset for Tools {
         type ToolCall = ToolsCall;
+        type Selector = ToolsSelector;
 
         fn definitions() -> &'static [ToolDef] {
             fn weather_args_schema() -> schemars::Schema {
@@ -1200,7 +1231,7 @@ mod tests {
 
     #[test]
     fn disabled_tool_mode_sends_no_tool_definitions() {
-        let tools = build_tool_definitions::<Tools>(&ToolMode::Disabled).unwrap();
+        let tools = build_tool_definitions::<Tools>(&ToolPolicy::Disabled).unwrap();
         assert!(tools.is_empty());
     }
 

@@ -17,9 +17,10 @@ pub use conversation::{
 };
 pub use llm::{
     CompletionEvent, CompletionEventStream, CompletionOptions, CompletionRequest, FinishReason,
-    LlmAdapter, ReasoningConfig, ReasoningEffort, ReasoningSummary, ResponsesOptions, StreamKind,
-    StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnRequest, Temperature,
-    TemperatureError, TextTurnEvent, TextTurnEventStream, TextTurnRequest, ThinkingBudget,
+    GenerationParams, LlmAdapter, ModelName, ModelNameError, ReasoningEffort, ReasoningParams,
+    ReasoningSummary, StreamKind, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
+    StructuredTurnEventStream, Temperature, TemperatureError, TextTurn, TextTurnEvent,
+    TextTurnEventStream, TurnConfig,
 };
 pub use marker::Marker;
 pub use reducer::{
@@ -30,6 +31,6 @@ pub use reducer::{
 };
 pub use structured::StructuredOutput;
 pub use toolset::{
-    NoTools, SupportsTool, ToolCallError, ToolCallWrapper, ToolDef, ToolExecutionError, ToolInput,
-    ToolMode, ToolRef, ToolSelection, ToolSubset, ToolSubsetMarker, ToolUseError, Toolset,
+    NoToolSelector, NoTools, ToolCallError, ToolCallWrapper, ToolDef, ToolExecutionError,
+    ToolInput, ToolPolicy, ToolSelector, ToolUseError, Toolset,
 };
