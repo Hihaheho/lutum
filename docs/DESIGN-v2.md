@@ -149,6 +149,7 @@ The stable exact public execution surface remains:
 - `Context<M>`
 - `ModelInput`
 - `AssistantTurn`
+- request-side sidecars for execution hints such as cache hints
 - public event view traits and common projection enums
 - public turn state/result types
 
@@ -336,6 +337,14 @@ The explicit commit model remains:
 - `snapshot()`, `input()`, `input_mut()`, and `into_input()` remain available where applicable
 - `into_pending()` remains available for dropping back to raw collection style
 
+This section is describing explicit commit semantics, not fixing a persistence API shape.
+
+In particular:
+
+- this document is not using `snapshot()` to imply a core-owned serialized transcript boundary
+- the exact persistence form of committed turns remains adapter-owned
+- the presence of `snapshot()` here should not be read as a commitment to a universal library DTO or envelope
+
 The meaning of commit becomes stricter:
 
 - commit stores exact replayable transcript state
@@ -362,6 +371,42 @@ Conceptually:
 - adapter can roundtrip them with serde
 - adapter can expose `TurnView` / `ItemView`
 - adapter can compile replay input from exact stored turns
+
+### Concrete type ownership and runtime erasure
+
+The concrete Rust type for an exact committed turn lives in the adapter crate.
+
+That means:
+
+- the adapter owns the concrete exact-turn type definition
+- serde roundtrip is centered on that adapter-defined concrete type
+- the core library does not define a universal serialized exact-turn DTO
+
+The object-safe erasure described above is a runtime abstraction boundary.
+
+In other words:
+
+- core may hold adapter-owned exact turns behind object-safe transcript traits at runtime
+- that runtime erasure is not itself the persistence contract
+- this document is not saying that core serializes or deserializes `Box<dyn ...>` directly
+
+The important distinction is:
+
+- adapter-defined concrete types are the persistence types
+- erased trait objects are the runtime abstraction used so core does not need to know those concrete types
+
+---
+
+### Example
+
+For example, an OpenAI adapter could define an `OpenAiCommittedTurn` concrete type that derives
+`Serialize` and `Deserialize` and implements the relevant transcript view traits.
+
+Core would then interact with that value through erased traits for runtime transcript handling and
+replay, while serde roundtrip would remain centered on `OpenAiCommittedTurn` itself.
+
+This example is only meant to show the ownership boundary. It does not freeze the exact public API
+spelling.
 
 ---
 
@@ -472,6 +517,19 @@ That means the adapter is effectively:
 - plus common semantic projection logic
 
 This is intentionally narrower and cleaner than a design where adapters reconstruct from a lossy canonical transcript IR.
+
+This section is also intentionally not prescribing one Rust implementation technique for type
+erasure or persistence wiring.
+
+For example, it does not require:
+
+- `Any`
+- downcasting
+- registries
+- `typetag`
+
+If an adapter needs one of those internally, that is an adapter implementation choice rather than
+part of this document's public contract.
 
 ---
 
@@ -606,6 +664,100 @@ The key distinction is:
 
 ---
 
+## Request-side cache hints
+
+Prompt cache planning should be modeled as request-side execution metadata, not transcript content.
+
+That means:
+
+- cache hints are not stored in `ModelInput`
+- cache hints are not committed into exact transcript turns
+- transcript persistence and `snapshot()` do not imply cache hint persistence
+- cache hints may influence transport compilation for a single request
+
+The intended shape is a typed sidecar attached to the user-facing request/session surface.
+
+Conceptually:
+
+- `RequestSidecar<H>`
+- `Session<M, H>`
+- `ErasedRequestSidecar`
+- `ErasedCacheHint`
+
+This gives users a typed API while allowing the adapter boundary to remain object-safe.
+
+### Single cache hint slot
+
+A request should have at most one cache hint slot.
+
+If a caller needs more sophistication, the caller should supply a richer hint type rather than stacking multiple unrelated hint values.
+
+This keeps the model simple:
+
+- no priority lattice
+- no heterogeneous hint merge rules
+- no multiple-hint conflict semantics at request execution time
+
+### Adapter-local hint handlers
+
+Cache hint lowering is adapter-local.
+
+Conceptually:
+
+- `OpenAiCacheHintHandler<H>`
+- `ClaudeCacheHintHandler<H>`
+- `VertexCacheHintHandler<H>`
+
+An adapter instance may own a registry keyed by hint type so the same application code and same backend can behave differently depending on which handler is installed.
+
+What remains provider-local is:
+
+- boundary lowering
+- TTL mapping
+- fallback/strictness handling
+- provider-specific warnings and telemetry
+
+### Transport-draft decoration boundary
+
+Cache hint handlers should operate on a provider request draft after canonical request compilation but before serialization and network I/O.
+
+That means:
+
+- user-owned logical input remains unchanged
+- handlers may attach provider cache metadata to the transport draft
+- the decorated draft is transient and only used for the outbound request
+
+This is the right place for:
+
+- Claude `cache_control`
+- OpenAI `prompt_cache_key` / `prompt_cache_retention`
+- Vertex `cachedContent` references or equivalent explicit-cache lowering
+
+This preserves the principle that user code decides the logical request while still allowing adapters to inject provider-specific cache metadata at the edge.
+
+### Built-in and user-defined hints
+
+The library may ship a small set of built-in hint types, such as:
+
+- a simple single-boundary hint
+- a richer segmented/best-effort hint
+- a no-cache-hint marker type
+
+Users should also be able to define their own hint type and install matching adapter-local handlers.
+
+Because provider capabilities differ, hint semantics are intent-based rather than guaranteed feature parity.
+
+This means a handler may:
+
+- apply the hint exactly
+- approximate it
+- ignore it
+- return an error
+
+That decision belongs to the adapter-local handler, not to transcript storage or canonical request types.
+
+---
+
 ## Canonical response surface
 
 Completed model output may still be represented by:
@@ -722,6 +874,20 @@ without requiring the core crate to know any provider-specific transcript repres
 
 The persistence contract should be centered on the adapter's exact committed turn type, not a universal transcript DTO.
 
+This section is about responsibility, not about introducing a new core-level persistence API.
+
+In particular, this design does not define:
+
+- a universal serialized snapshot DTO in core
+- a core-owned opaque payload envelope for exact turns
+- a requirement that core serialize or deserialize `Box<dyn ...>` directly
+
+What it does define is narrower:
+
+- adapters own the concrete exact committed turn types
+- adapters own serde roundtrip for those concrete types
+- core stays provider-neutral at the runtime abstraction boundary
+
 ---
 
 ## Why not a universal canonical transcript IR
@@ -793,6 +959,7 @@ If explicit branch metadata is ever introduced later, it can be added deliberate
 
 - `Context<M>`
 - canonical request validation
+- request-side sidecar carriers for execution hints
 - budget reservation/finalization
 - tracing and request ids at execution time
 - streaming collection/finalization semantics
@@ -806,6 +973,7 @@ If explicit branch metadata is ever introduced later, it can be added deliberate
 ### Edge adapters should own
 
 - exact transport request/response mapping
+- cache hint handler registries and request-draft cache lowering
 - exact committed transcript turn representation
 - serde roundtrip for committed turns
 - replay request compilation from exact committed turns
@@ -815,8 +983,11 @@ If explicit branch metadata is ever introduced later, it can be added deliberate
 ### Core should not own
 
 - provider-specific transcript enums
+- provider-specific exact-turn serialization formats
 - universal transcript normalization logic
+- a core-level persistence API for adapter exact turns
 - eager lossy canonicalization at commit
+- a mandated transcript-persistence strategy based on `Any`, downcast, registry, or `typetag`
 - transcript branch graph semantics for now
 - a universal app-facing transcript IR
 
