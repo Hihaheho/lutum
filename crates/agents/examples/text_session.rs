@@ -1,7 +1,7 @@
 use agents::{
     FinishReason, MockLlmAdapter, MockTextScenario, NoTools, RequestExtensions, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcome, TextTurn, TurnConfig,
-    Usage, UsageEstimate,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcome, TextTurn, TurnConfig, Usage,
+    UsageEstimate,
 };
 
 #[tokio::main]

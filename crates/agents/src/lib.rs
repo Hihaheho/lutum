@@ -56,8 +56,8 @@ pub use agents_protocol::{
     ModelInputValidationError, ModelName, ModelNameError, NoToolSelector, NoTools, NonEmpty,
     RawJson, ReasoningEffort, ReasoningParams, ReasoningSummary, Remaining, RequestBudget,
     RequestExtensions, SharedPoolBudgetError, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-    StreamKind, StructuredOutput, StructuredOutputSpec, StructuredTurn,
-    StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnOutcome, StructuredTurnReducer,
+    StreamKind, StructuredOutput, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
+    StructuredTurnEventStream, StructuredTurnOutcome, StructuredTurnReducer,
     StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, Temperature,
     TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TextTurnReducer,
     TextTurnReductionError, TextTurnResult, TextTurnState, ToolCallError, ToolCallId,
@@ -68,7 +68,7 @@ pub use agents_protocol::{
 };
 pub use context::{
     CollectError, Context, ContextError, EventHandler, HandlerContext, HandlerDirective,
-    PendingCompletion, PendingStructuredTurn, PendingTextTurn,
+    PendingCompletion, PendingStructuredTurn, PendingTextTurn, StructuredTurnPartial,
 };
 pub use mock::{
     MockCompletionScenario, MockError, MockLlmAdapter, MockStructuredScenario, MockTextScenario,

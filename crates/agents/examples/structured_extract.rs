@@ -1,7 +1,7 @@
 use agents::{
     FinishReason, MockLlmAdapter, MockStructuredScenario, NoTools, RequestExtensions, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcome, StructuredTurn,
-    Usage, UsageEstimate,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcome, StructuredTurn, Usage,
+    UsageEstimate,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
