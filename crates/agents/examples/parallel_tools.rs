@@ -104,6 +104,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TextStepOutcome::Finished(_) => unreachable!(),
     }
 
-    println!("items={}", session.snapshot().items().len());
+    println!("items={}", session.input().items().len());
     Ok(())
 }

@@ -43,11 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match outcome {
         TextStepOutcome::Finished(result) => {
-            session.commit_text(result)?;
+            session.commit_text(result);
         }
         TextStepOutcome::NeedsToolResults(_) => unreachable!(),
     }
 
-    println!("items={}", session.snapshot().items().len());
+    println!("items={}", session.input().items().len());
     Ok(())
 }

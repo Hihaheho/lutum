@@ -1,11 +1,12 @@
-use std::{borrow::Borrow, collections::BTreeMap, fmt};
+use std::{borrow::Borrow, fmt};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::value::RawValue;
 use thiserror::Error;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
+use crate::transcript::CommittedTurn;
+
+#[derive(Clone, Debug, Default)]
 pub struct ModelInput {
     items: Vec<ModelInputItem>,
 }
@@ -66,15 +67,6 @@ impl ModelInput {
         self
     }
 
-    pub fn append_assistant_turn(
-        &mut self,
-        turn: AssistantTurn,
-        tool_uses: impl IntoIterator<Item = ToolUse>,
-    ) -> Result<(), AssistantTurnInputError> {
-        self.items.extend(turn.into_input_items(tool_uses)?);
-        Ok(())
-    }
-
     pub fn validate(&self) -> Result<(), ModelInputValidationError> {
         if self.items.is_empty() {
             return Err(ModelInputValidationError::Empty);
@@ -101,7 +93,7 @@ impl From<Vec<ModelInputItem>> for ModelInput {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum ModelInputItem {
     Message {
         role: InputMessageRole,
@@ -109,6 +101,7 @@ pub enum ModelInputItem {
     },
     Assistant(AssistantInputItem),
     ToolUse(ToolUse),
+    Turn(CommittedTurn),
 }
 
 impl ModelInputItem {
@@ -141,6 +134,10 @@ impl ModelInputItem {
 
     pub fn tool_use(tool_use: ToolUse) -> Self {
         Self::ToolUse(tool_use)
+    }
+
+    pub fn turn(committed_turn: CommittedTurn) -> Self {
+        Self::Turn(committed_turn)
     }
 
     pub fn tool_use_parts(
@@ -283,69 +280,6 @@ impl AssistantTurn {
             }
         }
         text
-    }
-
-    pub fn into_input_items(
-        self,
-        tool_uses: impl IntoIterator<Item = ToolUse>,
-    ) -> Result<Vec<ModelInputItem>, AssistantTurnInputError> {
-        let mut tool_use_map = BTreeMap::new();
-        for tool_use in tool_uses {
-            let duplicate_id = tool_use.id.clone();
-            if tool_use_map
-                .insert(duplicate_id.clone(), tool_use)
-                .is_some()
-            {
-                return Err(AssistantTurnInputError::DuplicateToolUse { id: duplicate_id });
-            }
-        }
-
-        let mut input = Vec::new();
-        for item in self.items.into_vec() {
-            match item {
-                AssistantTurnItem::Text(text) => {
-                    input.push(ModelInputItem::Assistant(AssistantInputItem::Text(text)));
-                }
-                AssistantTurnItem::Reasoning(text) => {
-                    input.push(ModelInputItem::Assistant(AssistantInputItem::Reasoning(
-                        text,
-                    )));
-                }
-                AssistantTurnItem::Refusal(text) => {
-                    input.push(ModelInputItem::Assistant(AssistantInputItem::Refusal(text)));
-                }
-                AssistantTurnItem::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                } => {
-                    let Some(tool_use) = tool_use_map.remove(&id) else {
-                        return Err(AssistantTurnInputError::MissingToolUse { id });
-                    };
-                    if tool_use.name != name {
-                        return Err(AssistantTurnInputError::MismatchedToolName {
-                            id,
-                            expected: name,
-                            actual: tool_use.name,
-                        });
-                    }
-                    if tool_use.arguments != arguments {
-                        return Err(AssistantTurnInputError::MismatchedToolArguments {
-                            id,
-                            expected: arguments,
-                            actual: tool_use.arguments,
-                        });
-                    }
-                    input.push(ModelInputItem::ToolUse(tool_use));
-                }
-            }
-        }
-
-        if let Some((id, _)) = tool_use_map.into_iter().next() {
-            return Err(AssistantTurnInputError::ExtraToolUse { id });
-        }
-
-        Ok(input)
     }
 }
 
@@ -695,155 +629,5 @@ mod tests {
         .unwrap();
 
         assert_eq!(tool_use.result.get(), "{\"forecast\":\"sunny\"}");
-    }
-
-    #[test]
-    fn assistant_turn_into_input_items_preserves_order() {
-        let turn = AssistantTurn::from_items(vec![
-            AssistantTurnItem::Reasoning("think".into()),
-            AssistantTurnItem::Text("before".into()),
-            AssistantTurnItem::ToolCall {
-                id: ToolCallId::from("call-1"),
-                name: ToolName::from("weather"),
-                arguments: RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-            },
-            AssistantTurnItem::Text("after".into()),
-        ])
-        .unwrap();
-
-        let items = turn
-            .into_input_items(vec![ToolUse::new(
-                "call-1",
-                "weather",
-                RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-                RawJson::parse("\"sunny\"").unwrap(),
-            )])
-            .unwrap();
-
-        assert!(matches!(
-            items[0],
-            ModelInputItem::Assistant(AssistantInputItem::Reasoning(_))
-        ));
-        assert!(matches!(
-            items[1],
-            ModelInputItem::Assistant(AssistantInputItem::Text(_))
-        ));
-        assert!(matches!(items[2], ModelInputItem::ToolUse(_)));
-        assert!(matches!(
-            items[3],
-            ModelInputItem::Assistant(AssistantInputItem::Text(_))
-        ));
-    }
-
-    #[test]
-    fn assistant_turn_into_input_items_rejects_missing_tool_use() {
-        let turn = AssistantTurn::tool_call(
-            "call-1",
-            "weather",
-            RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-        );
-
-        assert_eq!(
-            turn.into_input_items(Vec::<ToolUse>::new()).unwrap_err(),
-            AssistantTurnInputError::MissingToolUse {
-                id: ToolCallId::from("call-1"),
-            }
-        );
-    }
-
-    #[test]
-    fn assistant_turn_into_input_items_rejects_extra_tool_use() {
-        let turn = AssistantTurn::text("done");
-
-        assert_eq!(
-            turn.into_input_items(vec![ToolUse::new(
-                "call-1",
-                "weather",
-                RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-                RawJson::parse("\"sunny\"").unwrap(),
-            )])
-            .unwrap_err(),
-            AssistantTurnInputError::ExtraToolUse {
-                id: ToolCallId::from("call-1"),
-            }
-        );
-    }
-
-    #[test]
-    fn assistant_turn_into_input_items_rejects_duplicate_tool_use() {
-        let turn = AssistantTurn::tool_call(
-            "call-1",
-            "weather",
-            RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-        );
-
-        assert_eq!(
-            turn.into_input_items(vec![
-                ToolUse::new(
-                    "call-1",
-                    "weather",
-                    RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-                    RawJson::parse("\"sunny\"").unwrap(),
-                ),
-                ToolUse::new(
-                    "call-1",
-                    "weather",
-                    RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-                    RawJson::parse("\"rainy\"").unwrap(),
-                ),
-            ])
-            .unwrap_err(),
-            AssistantTurnInputError::DuplicateToolUse {
-                id: ToolCallId::from("call-1"),
-            }
-        );
-    }
-
-    #[test]
-    fn assistant_turn_into_input_items_rejects_mismatched_tool_name() {
-        let turn = AssistantTurn::tool_call(
-            "call-1",
-            "weather",
-            RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-        );
-
-        assert_eq!(
-            turn.into_input_items(vec![ToolUse::new(
-                "call-1",
-                "forecast",
-                RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-                RawJson::parse("\"sunny\"").unwrap(),
-            )])
-            .unwrap_err(),
-            AssistantTurnInputError::MismatchedToolName {
-                id: ToolCallId::from("call-1"),
-                expected: ToolName::from("weather"),
-                actual: ToolName::from("forecast"),
-            }
-        );
-    }
-
-    #[test]
-    fn assistant_turn_into_input_items_rejects_mismatched_tool_arguments() {
-        let turn = AssistantTurn::tool_call(
-            "call-1",
-            "weather",
-            RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-        );
-
-        assert_eq!(
-            turn.into_input_items(vec![ToolUse::new(
-                "call-1",
-                "weather",
-                RawJson::parse("{\"city\":\"Osaka\"}").unwrap(),
-                RawJson::parse("\"sunny\"").unwrap(),
-            )])
-            .unwrap_err(),
-            AssistantTurnInputError::MismatchedToolArguments {
-                id: ToolCallId::from("call-1"),
-                expected: RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-                actual: RawJson::parse("{\"city\":\"Osaka\"}").unwrap(),
-            }
-        );
     }
 }

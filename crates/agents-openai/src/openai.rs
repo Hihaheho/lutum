@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, env, pin::Pin, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env,
+    pin::Pin,
+    sync::Arc,
+};
 
 use async_stream::try_stream;
 use bytes::Bytes;
@@ -273,6 +278,7 @@ async fn error_for_status_with_body(
 fn convert_model_input(input: &ModelInput) -> Result<Vec<Value>, OpenAiError> {
     let mut items = Vec::new();
     let mut assistant_message_content = Vec::new();
+    let mut replayed_tool_call_ids = BTreeSet::new();
 
     for item in input.items() {
         match item {
@@ -292,7 +298,27 @@ fn convert_model_input(input: &ModelInput) -> Result<Vec<Value>, OpenAiError> {
             }
             ModelInputItem::ToolUse(tool_use) => {
                 flush_assistant_message(&mut assistant_message_content, &mut items);
-                lower_tool_use(tool_use, &mut items)?;
+                lower_tool_use(
+                    tool_use,
+                    !replayed_tool_call_ids.contains(&tool_use.id),
+                    &mut items,
+                )?;
+            }
+            ModelInputItem::Turn(committed_turn) => {
+                flush_assistant_message(&mut assistant_message_content, &mut items);
+                if let Some(openai_turn) = committed_turn
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<OpenAiCommittedTurn>()
+                {
+                    emit_openai_turn_exact(openai_turn, &mut items, &mut replayed_tool_call_ids)?;
+                } else {
+                    emit_turn_from_view(
+                        committed_turn.as_ref(),
+                        &mut items,
+                        &mut replayed_tool_call_ids,
+                    )?;
+                }
             }
         }
     }
@@ -323,13 +349,19 @@ fn lower_assistant_input_item(
     Ok(())
 }
 
-fn lower_tool_use(tool_use: &ToolUse, out: &mut Vec<Value>) -> Result<(), OpenAiError> {
-    out.push(json!({
-        "type": "function_call",
-        "call_id": tool_use.id.as_str(),
-        "name": tool_use.name.as_str(),
-        "arguments": serde_json::from_str::<Value>(tool_use.arguments.get())?,
-    }));
+fn lower_tool_use(
+    tool_use: &ToolUse,
+    emit_call: bool,
+    out: &mut Vec<Value>,
+) -> Result<(), OpenAiError> {
+    if emit_call {
+        out.push(json!({
+            "type": "function_call",
+            "call_id": tool_use.id.as_str(),
+            "name": tool_use.name.as_str(),
+            "arguments": serde_json::from_str::<Value>(tool_use.arguments.get())?,
+        }));
+    }
     out.push(json!({
         "type": "function_call_output",
         "call_id": tool_use.id.as_str(),
@@ -338,13 +370,159 @@ fn lower_tool_use(tool_use: &ToolUse, out: &mut Vec<Value>) -> Result<(), OpenAi
     Ok(())
 }
 
+fn emit_openai_turn_exact(
+    turn: &OpenAiCommittedTurn,
+    out: &mut Vec<Value>,
+    replayed_tool_call_ids: &mut BTreeSet<ToolCallId>,
+) -> Result<(), OpenAiError> {
+    let mut assistant_message_content = Vec::new();
+    for item in &turn.items {
+        match item {
+            OpenAiTurnItem::Text { content } => {
+                assistant_message_content.push(json!({ "type": "output_text", "text": content }));
+            }
+            OpenAiTurnItem::Reasoning { content } => {
+                flush_assistant_message(&mut assistant_message_content, out);
+                out.push(json!({
+                    "type": "reasoning",
+                    "summary": [{ "type": "summary_text", "text": content }],
+                }));
+            }
+            OpenAiTurnItem::Refusal { content } => {
+                assistant_message_content.push(json!({ "type": "refusal", "text": content }));
+            }
+            OpenAiTurnItem::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                replayed_tool_call_ids.insert(id.clone());
+                flush_assistant_message(&mut assistant_message_content, out);
+                out.push(json!({
+                    "type": "function_call",
+                    "call_id": id.as_str(),
+                    "name": name.as_str(),
+                    "arguments": serde_json::from_str::<Value>(arguments.get())?,
+                }));
+            }
+        }
+    }
+    flush_assistant_message(&mut assistant_message_content, out);
+    Ok(())
+}
+
+fn emit_turn_from_view(
+    turn: &dyn TurnView,
+    out: &mut Vec<Value>,
+    replayed_tool_call_ids: &mut BTreeSet<ToolCallId>,
+) -> Result<(), OpenAiError> {
+    match turn.role() {
+        TurnRole::Assistant => emit_assistant_turn_from_view(turn, out, replayed_tool_call_ids),
+        role => emit_message_turn_from_view(role, turn, out, replayed_tool_call_ids),
+    }
+}
+
+fn emit_assistant_turn_from_view(
+    turn: &dyn TurnView,
+    out: &mut Vec<Value>,
+    replayed_tool_call_ids: &mut BTreeSet<ToolCallId>,
+) -> Result<(), OpenAiError> {
+    let mut assistant_message_content = Vec::new();
+    for index in 0..turn.item_count() {
+        let Some(item) = turn.item_at(index) else {
+            continue;
+        };
+        if let Some(text) = item.as_text() {
+            assistant_message_content.push(json!({ "type": "output_text", "text": text }));
+            continue;
+        }
+        if let Some(text) = item.as_reasoning() {
+            flush_assistant_message(&mut assistant_message_content, out);
+            out.push(json!({
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": text }],
+            }));
+            continue;
+        }
+        if let Some(text) = item.as_refusal() {
+            assistant_message_content.push(json!({ "type": "refusal", "text": text }));
+            continue;
+        }
+        if let Some(tool_call) = item.as_tool_call() {
+            replayed_tool_call_ids.insert(tool_call.id.clone());
+            flush_assistant_message(&mut assistant_message_content, out);
+            out.push(json!({
+                "type": "function_call",
+                "call_id": tool_call.id.as_str(),
+                "name": tool_call.name.as_str(),
+                "arguments": serde_json::from_str::<Value>(tool_call.arguments.get())?,
+            }));
+        }
+    }
+    flush_assistant_message(&mut assistant_message_content, out);
+    Ok(())
+}
+
+fn emit_message_turn_from_view(
+    role: TurnRole,
+    turn: &dyn TurnView,
+    out: &mut Vec<Value>,
+    replayed_tool_call_ids: &mut BTreeSet<ToolCallId>,
+) -> Result<(), OpenAiError> {
+    let mut message_content = Vec::new();
+    for index in 0..turn.item_count() {
+        let Some(item) = turn.item_at(index) else {
+            continue;
+        };
+        if let Some(text) = item.as_text() {
+            message_content.push(json!({ "type": "input_text", "text": text }));
+            continue;
+        }
+        if let Some(text) = item.as_reasoning().or_else(|| item.as_refusal()) {
+            message_content.push(json!({ "type": "input_text", "text": text }));
+            continue;
+        }
+        if let Some(tool_call) = item.as_tool_call() {
+            replayed_tool_call_ids.insert(tool_call.id.clone());
+            flush_message(turn_role(role), &mut message_content, out);
+            out.push(json!({
+                "type": "function_call",
+                "call_id": tool_call.id.as_str(),
+                "name": tool_call.name.as_str(),
+                "arguments": serde_json::from_str::<Value>(tool_call.arguments.get())?,
+            }));
+        }
+        if let Some(tool_result) = item.as_tool_result() {
+            replayed_tool_call_ids.insert(tool_result.id.clone());
+            flush_message(turn_role(role), &mut message_content, out);
+            out.push(json!({
+                "type": "function_call",
+                "call_id": tool_result.id.as_str(),
+                "name": tool_result.name.as_str(),
+                "arguments": serde_json::from_str::<Value>(tool_result.arguments.get())?,
+            }));
+            out.push(json!({
+                "type": "function_call_output",
+                "call_id": tool_result.id.as_str(),
+                "output": tool_result.result.get(),
+            }));
+        }
+    }
+    flush_message(turn_role(role), &mut message_content, out);
+    Ok(())
+}
+
 fn flush_assistant_message(message_content: &mut Vec<Value>, out: &mut Vec<Value>) {
+    flush_message("assistant", message_content, out);
+}
+
+fn flush_message(role: &str, message_content: &mut Vec<Value>, out: &mut Vec<Value>) {
     if message_content.is_empty() {
         return;
     }
     out.push(json!({
         "type": "message",
-        "role": "assistant",
+        "role": role,
         "content": std::mem::take(message_content),
     }));
 }
@@ -354,6 +532,15 @@ fn message_role(role: &InputMessageRole) -> &'static str {
         InputMessageRole::System => "system",
         InputMessageRole::Developer => "developer",
         InputMessageRole::User => "user",
+    }
+}
+
+fn turn_role(role: TurnRole) -> &'static str {
+    match role {
+        TurnRole::System => "system",
+        TurnRole::Developer => "developer",
+        TurnRole::User => "user",
+        TurnRole::Assistant => "assistant",
     }
 }
 
@@ -563,6 +750,116 @@ fn maybe_parse_structured_output(
         .map_err(OpenAiError::StructuredOutput)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BufferedTurnItemKind {
+    Text,
+    Reasoning,
+    Refusal,
+}
+
+#[derive(Debug)]
+struct BufferedTurnItem {
+    kind: BufferedTurnItemKind,
+    item_id: String,
+    content: String,
+}
+
+fn push_buffered_content(
+    pending_item: &mut Option<BufferedTurnItem>,
+    committed_items: &mut Vec<OpenAiTurnItem>,
+    kind: BufferedTurnItemKind,
+    item_id: &str,
+    delta: &str,
+) {
+    if delta.is_empty() {
+        return;
+    }
+
+    match pending_item {
+        Some(buffer) if buffer.kind == kind && buffer.item_id == item_id => {
+            buffer.content.push_str(delta);
+        }
+        Some(_) => {
+            flush_buffered_content(pending_item, committed_items);
+            *pending_item = Some(BufferedTurnItem {
+                kind,
+                item_id: item_id.to_string(),
+                content: delta.to_string(),
+            });
+        }
+        None => {
+            *pending_item = Some(BufferedTurnItem {
+                kind,
+                item_id: item_id.to_string(),
+                content: delta.to_string(),
+            });
+        }
+    }
+}
+
+fn replace_buffered_text(
+    pending_item: &mut Option<BufferedTurnItem>,
+    committed_items: &mut Vec<OpenAiTurnItem>,
+    item_id: &str,
+    content: &str,
+) {
+    if content.is_empty() {
+        return;
+    }
+
+    match pending_item {
+        Some(buffer) if buffer.kind == BufferedTurnItemKind::Text && buffer.item_id == item_id => {
+            buffer.content.clear();
+            buffer.content.push_str(content);
+        }
+        Some(_) => {
+            flush_buffered_content(pending_item, committed_items);
+            *pending_item = Some(BufferedTurnItem {
+                kind: BufferedTurnItemKind::Text,
+                item_id: item_id.to_string(),
+                content: content.to_string(),
+            });
+        }
+        None => {
+            *pending_item = Some(BufferedTurnItem {
+                kind: BufferedTurnItemKind::Text,
+                item_id: item_id.to_string(),
+                content: content.to_string(),
+            });
+        }
+    }
+}
+
+fn flush_buffered_content(
+    pending_item: &mut Option<BufferedTurnItem>,
+    committed_items: &mut Vec<OpenAiTurnItem>,
+) {
+    let Some(buffer) = pending_item.take() else {
+        return;
+    };
+
+    let item = match buffer.kind {
+        BufferedTurnItemKind::Text => OpenAiTurnItem::Text {
+            content: buffer.content,
+        },
+        BufferedTurnItemKind::Reasoning => OpenAiTurnItem::Reasoning {
+            content: buffer.content,
+        },
+        BufferedTurnItemKind::Refusal => OpenAiTurnItem::Refusal {
+            content: buffer.content,
+        },
+    };
+    committed_items.push(item);
+}
+
+fn push_committed_tool_call(committed_items: &mut Vec<OpenAiTurnItem>, metadata: &ToolMetadata) {
+    committed_items.push(OpenAiTurnItem::ToolCall {
+        id: metadata.id.clone(),
+        name: metadata.name.clone(),
+        arguments: metadata.arguments.clone(),
+    });
+}
+
 fn map_text_stream<S>(
     stream: S,
     fallback_model: String,
@@ -578,6 +875,8 @@ where
         let mut saw_tool_call = false;
         let mut saw_refusal = false;
         let mut tool_calls = ToolCallTracker::default();
+        let mut pending_item = None::<BufferedTurnItem>;
+        let mut committed_items = Vec::<OpenAiTurnItem>::new();
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -616,6 +915,13 @@ where
                 match event_type {
                     "response.output_text.delta" => {
                         if let Some(delta) = event["delta"].as_str() {
+                            push_buffered_content(
+                                &mut pending_item,
+                                &mut committed_items,
+                                BufferedTurnItemKind::Text,
+                                event["item_id"].as_str().unwrap_or(""),
+                                delta,
+                            );
                             yield ErasedTextTurnEvent::TextDelta {
                                 delta: delta.to_string(),
                             };
@@ -623,6 +929,13 @@ where
                     }
                     "response.reasoning_summary_text.delta" | "response.reasoning.delta" => {
                         if let Some(delta) = event["delta"].as_str() {
+                            push_buffered_content(
+                                &mut pending_item,
+                                &mut committed_items,
+                                BufferedTurnItemKind::Reasoning,
+                                event["item_id"].as_str().unwrap_or(""),
+                                delta,
+                            );
                             yield ErasedTextTurnEvent::ReasoningDelta {
                                 delta: delta.to_string(),
                             };
@@ -631,9 +944,26 @@ where
                     "response.refusal.delta" => {
                         saw_refusal = true;
                         if let Some(delta) = event["delta"].as_str() {
+                            push_buffered_content(
+                                &mut pending_item,
+                                &mut committed_items,
+                                BufferedTurnItemKind::Refusal,
+                                event["item_id"].as_str().unwrap_or(""),
+                                delta,
+                            );
                             yield ErasedTextTurnEvent::RefusalDelta {
                                 delta: delta.to_string(),
                             };
+                        }
+                    }
+                    "response.output_text.done" => {
+                        if let Some(text) = event["text"].as_str() {
+                            replace_buffered_text(
+                                &mut pending_item,
+                                &mut committed_items,
+                                event["item_id"].as_str().unwrap_or(""),
+                                text,
+                            );
                         }
                     }
                     "response.function_call_arguments.delta" => {
@@ -659,6 +989,8 @@ where
                             response_tool_name(&event),
                             event.get("arguments").map(json_string).transpose()?,
                         )? {
+                            flush_buffered_content(&mut pending_item, &mut committed_items);
+                            push_committed_tool_call(&mut committed_items, &invocation);
                             yield ErasedTextTurnEvent::ToolCallReady(invocation);
                         }
                     }
@@ -671,6 +1003,8 @@ where
                                 output_item_tool_name(&event),
                                 event.pointer("/item/arguments").map(json_string).transpose()?,
                             )? {
+                                flush_buffered_content(&mut pending_item, &mut committed_items);
+                                push_committed_tool_call(&mut committed_items, &invocation);
                                 yield ErasedTextTurnEvent::ToolCallReady(invocation);
                             }
                         }
@@ -679,16 +1013,26 @@ where
                         if let Some(id) = event.pointer("/response/id").and_then(Value::as_str) {
                             request_id = Some(id.to_string());
                         }
+                        flush_buffered_content(&mut pending_item, &mut committed_items);
+                        let finish_reason = if saw_tool_call {
+                            FinishReason::ToolCall
+                        } else if saw_refusal {
+                            FinishReason::ContentFilter
+                        } else {
+                            FinishReason::Stop
+                        };
+                        let usage = parse_response_usage(&event["response"]);
                         yield ErasedTextTurnEvent::Completed {
                             request_id: request_id.clone(),
-                            finish_reason: if saw_tool_call {
-                                FinishReason::ToolCall
-                            } else if saw_refusal {
-                                FinishReason::ContentFilter
-                            } else {
-                                FinishReason::Stop
-                            },
-                            usage: parse_response_usage(&event["response"]),
+                            finish_reason: finish_reason.clone(),
+                            usage,
+                            committed_turn: Arc::new(OpenAiCommittedTurn {
+                                request_id: request_id.clone(),
+                                model: model.clone(),
+                                items: committed_items.clone(),
+                                finish_reason,
+                                usage,
+                            }),
                         };
                     }
                     _ => {}
@@ -715,6 +1059,8 @@ where
         let mut tool_calls = ToolCallTracker::default();
         let mut structured_buffer = String::new();
         let mut emitted_ready = false;
+        let mut pending_item = None::<BufferedTurnItem>;
+        let mut committed_items = Vec::<OpenAiTurnItem>::new();
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -754,6 +1100,13 @@ where
                     "response.output_text.delta" => {
                         if let Some(delta) = event["delta"].as_str() {
                             structured_buffer.push_str(delta);
+                            push_buffered_content(
+                                &mut pending_item,
+                                &mut committed_items,
+                                BufferedTurnItemKind::Text,
+                                event["item_id"].as_str().unwrap_or(""),
+                                delta,
+                            );
                             yield ErasedStructuredTurnEvent::StructuredOutputChunk {
                                 json_delta: delta.to_string(),
                             };
@@ -763,6 +1116,12 @@ where
                         if let Some(text) = event["text"].as_str() {
                             structured_buffer.clear();
                             structured_buffer.push_str(text);
+                            replace_buffered_text(
+                                &mut pending_item,
+                                &mut committed_items,
+                                event["item_id"].as_str().unwrap_or(""),
+                                text,
+                            );
                         }
                         if let Some(value) =
                             maybe_parse_structured_output(&structured_buffer, &mut emitted_ready)?
@@ -772,6 +1131,13 @@ where
                     }
                     "response.reasoning_summary_text.delta" | "response.reasoning.delta" => {
                         if let Some(delta) = event["delta"].as_str() {
+                            push_buffered_content(
+                                &mut pending_item,
+                                &mut committed_items,
+                                BufferedTurnItemKind::Reasoning,
+                                event["item_id"].as_str().unwrap_or(""),
+                                delta,
+                            );
                             yield ErasedStructuredTurnEvent::ReasoningDelta {
                                 delta: delta.to_string(),
                             };
@@ -780,6 +1146,13 @@ where
                     "response.refusal.delta" => {
                         saw_refusal = true;
                         if let Some(delta) = event["delta"].as_str() {
+                            push_buffered_content(
+                                &mut pending_item,
+                                &mut committed_items,
+                                BufferedTurnItemKind::Refusal,
+                                event["item_id"].as_str().unwrap_or(""),
+                                delta,
+                            );
                             yield ErasedStructuredTurnEvent::RefusalDelta {
                                 delta: delta.to_string(),
                             };
@@ -808,6 +1181,8 @@ where
                             response_tool_name(&event),
                             event.get("arguments").map(json_string).transpose()?,
                         )? {
+                            flush_buffered_content(&mut pending_item, &mut committed_items);
+                            push_committed_tool_call(&mut committed_items, &invocation);
                             yield ErasedStructuredTurnEvent::ToolCallReady(invocation);
                         }
                     }
@@ -820,6 +1195,8 @@ where
                                 output_item_tool_name(&event),
                                 event.pointer("/item/arguments").map(json_string).transpose()?,
                             )? {
+                                flush_buffered_content(&mut pending_item, &mut committed_items);
+                                push_committed_tool_call(&mut committed_items, &invocation);
                                 yield ErasedStructuredTurnEvent::ToolCallReady(invocation);
                             }
                         }
@@ -833,16 +1210,26 @@ where
                         {
                             yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
                         }
+                        flush_buffered_content(&mut pending_item, &mut committed_items);
+                        let finish_reason = if saw_tool_call {
+                            FinishReason::ToolCall
+                        } else if saw_refusal {
+                            FinishReason::ContentFilter
+                        } else {
+                            FinishReason::Stop
+                        };
+                        let usage = parse_response_usage(&event["response"]);
                         yield ErasedStructuredTurnEvent::Completed {
                             request_id: request_id.clone(),
-                            finish_reason: if saw_tool_call {
-                                FinishReason::ToolCall
-                            } else if saw_refusal {
-                                FinishReason::ContentFilter
-                            } else {
-                                FinishReason::Stop
-                            },
-                            usage: parse_response_usage(&event["response"]),
+                            finish_reason: finish_reason.clone(),
+                            usage,
+                            committed_turn: Arc::new(OpenAiCommittedTurn {
+                                request_id: request_id.clone(),
+                                model: model.clone(),
+                                items: committed_items.clone(),
+                                finish_reason,
+                                usage,
+                            }),
                         };
                     }
                     _ => {}
@@ -990,14 +1377,17 @@ impl SseParser {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use futures::{StreamExt, executor::block_on};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
     use agents_protocol::{
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
-        ErasedStructuredTurnEvent, ErasedTextTurnEvent, GenerationParams, InputMessageRole,
-        ModelInput, ModelInputItem, ModelName, ReasoningParams, ToolUse,
+        AssistantTurnItem, AssistantTurnView, ErasedStructuredTurnEvent, ErasedTextTurnEvent,
+        GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ReasoningParams,
+        ToolUse,
     };
 
     use super::*;
@@ -1036,6 +1426,71 @@ mod tests {
         assert_eq!(items[4]["type"], "message");
         assert_eq!(items[5]["type"], "function_call");
         assert_eq!(items[6]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn convert_model_input_replays_openai_turn_items_from_turn_variant() {
+        let input = ModelInput::from_items(vec![
+            ModelInputItem::text(InputMessageRole::User, "hello"),
+            ModelInputItem::Turn(Arc::new(OpenAiCommittedTurn {
+                request_id: Some("resp_1".into()),
+                model: "gpt-4.1".into(),
+                items: vec![
+                    OpenAiTurnItem::Reasoning {
+                        content: "think".into(),
+                    },
+                    OpenAiTurnItem::Text {
+                        content: "hi".into(),
+                    },
+                    OpenAiTurnItem::Refusal {
+                        content: "nope".into(),
+                    },
+                    OpenAiTurnItem::ToolCall {
+                        id: "call-1".into(),
+                        name: "weather".into(),
+                        arguments: RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
+                    },
+                ],
+                finish_reason: FinishReason::ToolCall,
+                usage: Usage::zero(),
+            })),
+            ModelInputItem::ToolUse(ToolUse::new(
+                "call-1",
+                "weather",
+                RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
+                RawJson::parse("\"sunny\"").unwrap(),
+            )),
+        ]);
+
+        let items = convert_model_input(&input).unwrap();
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(items[1]["type"], "reasoning");
+        assert_eq!(items[2]["type"], "message");
+        assert_eq!(items[2]["content"][0]["type"], "output_text");
+        assert_eq!(items[2]["content"][1]["type"], "refusal");
+        assert_eq!(items[3]["type"], "function_call");
+        assert_eq!(items[4]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn convert_model_input_projects_non_openai_turns_via_turn_view() {
+        let input = ModelInput::from_items(vec![ModelInputItem::Turn(Arc::new(
+            AssistantTurnView::from_items(&[
+                AssistantTurnItem::Reasoning("think".into()),
+                AssistantTurnItem::Text("hi".into()),
+                AssistantTurnItem::ToolCall {
+                    id: "call-1".into(),
+                    name: "weather".into(),
+                    arguments: RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
+                },
+            ]),
+        ))]);
+
+        let items = convert_model_input(&input).unwrap();
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[1]["type"], "message");
+        assert_eq!(items[1]["content"][0]["type"], "output_text");
+        assert_eq!(items[2]["type"], "function_call");
     }
 
     #[test]
@@ -1178,6 +1633,56 @@ mod tests {
     }
 
     #[test]
+    fn responses_sse_keeps_separate_text_items_by_item_id() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_text_items\",\"model\":\"gpt-4.1\"}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"text_item_0\",\"delta\":\"hel\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.output_text.done\",\"item_id\":\"text_item_0\",\"text\":\"hello\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"text_item_1\",\"delta\":\"bye\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.output_text.done\",\"item_id\":\"text_item_1\",\"text\":\"bye!\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_text_items\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+            )),
+        ];
+
+        let events = block_on(async {
+            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into())
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        let committed_turn = match events.last() {
+            Some(ErasedTextTurnEvent::Completed { committed_turn, .. }) => committed_turn,
+            other => panic!("expected completed event, got {other:?}"),
+        };
+        let committed_turn = committed_turn
+            .as_any()
+            .downcast_ref::<OpenAiCommittedTurn>()
+            .expect("OpenAI committed turn");
+
+        assert!(matches!(
+            committed_turn.items.as_slice(),
+            [
+                OpenAiTurnItem::Text { content: first },
+                OpenAiTurnItem::Text { content: second }
+            ] if first == "hello" && second == "bye!"
+        ));
+    }
+
+    #[test]
     fn structured_sse_waits_until_completion_before_ready_for_scalar_json() {
         let payloads = vec![
             Ok(Bytes::from(
@@ -1260,22 +1765,6 @@ mod tests {
 ///
 /// At runtime, `Session` interacts with committed turns through the erased
 /// `TurnView` trait; serde roundtrip stays centered on this concrete type.
-///
-/// # Not yet wired into `Session`
-///
-/// `Session::commit_text` / `commit_structured` / `commit_tool_round`
-/// currently store a core-provided [`AssistantTurnView`] fallback rather than
-/// an `OpenAiCommittedTurn`.  Wiring the adapter-owned exact turn through the
-/// commit path requires threading an opaque payload through `TextTurnResult`
-/// and related types, which is a planned follow-up task.
-///
-/// `OpenAiCommittedTurn` is published now to establish the ownership boundary
-/// described in `DESIGN-v2.md` ("Transcript storage model", "Adapter
-/// responsibilities").  Users who need exact per-turn storage today can
-/// construct and persist `OpenAiCommittedTurn` values directly from the event
-/// stream outside of `Session`.
-///
-/// [`AssistantTurnView`]: agents_protocol::transcript::AssistantTurnView
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OpenAiCommittedTurn {
     /// The `request_id` returned by the OpenAI API for this turn, if available.
@@ -1321,6 +1810,10 @@ impl TurnView for OpenAiCommittedTurn {
 
     fn item_at(&self, index: usize) -> Option<&dyn ItemView> {
         self.items.get(index).map(|item| item as &dyn ItemView)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

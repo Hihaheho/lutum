@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 
 use agents::{
-    AssistantTurnItem, BudgetManager, CollectError, Context, EventHandler, FinishReason,
-    HandlerContext, HandlerDirective, InputMessageRole, MockError, MockLlmAdapter,
+    AssistantTurnItem, AssistantTurnView, BudgetManager, CollectError, Context, EventHandler,
+    FinishReason, HandlerContext, HandlerDirective, InputMessageRole, MockError, MockLlmAdapter,
     MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, RequestBudget,
     RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind,
     StructuredTurn, StructuredTurnOutcome, TextTurn, TextTurnEvent, TextTurnReducer, ToolMetadata,
@@ -11,6 +11,7 @@ use agents::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[agents::tool_input(name = "weather", output = WeatherResult)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -191,6 +192,7 @@ fn recorded_events_reduce_to_same_result_as_collect() {
                 total_tokens: 5,
                 ..Usage::zero()
             },
+            committed_turn: Arc::new(AssistantTurnView::from_items(&[])),
         },
     ];
 
@@ -269,6 +271,29 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
         }
         other => panic!("unexpected error: {other:?}"),
     }
+
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
+}
+
+#[test]
+fn into_stream_releases_reserved_budget_without_collect() {
+    let budget = test_budget();
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![]));
+    let ctx = Context::new(budget.clone(), adapter);
+    let pending = block_on(ctx.responses_text(
+        extensions(),
+        input(),
+        TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1").unwrap()),
+        UsageEstimate {
+            total_tokens: 10,
+            ..UsageEstimate::zero()
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 90);
+
+    let _stream = pending.into_stream();
 
     assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
 }

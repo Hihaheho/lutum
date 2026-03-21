@@ -1,10 +1,11 @@
-use std::{convert::Infallible, sync::Arc};
+use std::collections::BTreeMap;
+use std::convert::Infallible;
 
 use agents_protocol::{
-    AssistantTurn, AssistantTurnInputError, AssistantTurnView, CommittedTurn, FinishReason,
+    AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
     GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ReasoningParams,
-    RequestBudget, RequestExtensions, StructuredTurn, TextTurn, ToolUse, Toolset, TurnConfig,
-    TurnView, UsageEstimate,
+    RequestBudget, RequestExtensions, StructuredTurn, StructuredTurnEventStream, TextTurn,
+    TextTurnEventStream, ToolUse, Toolset, TurnConfig, TurnView, UsageEstimate,
     budget::Usage,
     reducer::{
         StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, TextTurnResult,
@@ -16,6 +17,7 @@ use crate::{
     CollectError, Context, ContextError, EventHandler, PendingStructuredTurn, PendingTextTurn,
     context::{
         PendingStructuredTurn as CorePendingStructuredTurn, PendingTextTurn as CorePendingTextTurn,
+        StructuredTurnPartial as CoreStructuredTurnPartial,
     },
 };
 
@@ -55,11 +57,6 @@ pub struct Session {
     ctx: Context,
     input: ModelInput,
     defaults: SessionDefaults,
-    /// Committed turns in the order they were added.
-    ///
-    /// Each element is an `Arc` so that cloned sessions share the same turn
-    /// objects cheaply and future commits on one branch do not affect the other.
-    turns: Vec<CommittedTurn>,
 }
 
 impl Session {
@@ -68,21 +65,6 @@ impl Session {
             ctx,
             input: ModelInput::new(),
             defaults: SessionDefaults::default(),
-            turns: Vec::new(),
-        }
-    }
-
-    /// Restores a session from a previously captured [`ModelInput`] snapshot.
-    ///
-    /// This only restores request input. Committed turns are not encoded in the
-    /// snapshot, so a restored session starts with an empty
-    /// [`list_turns`](Self::list_turns) view.
-    pub fn from_snapshot(ctx: Context, input: ModelInput) -> Self {
-        Self {
-            ctx,
-            input,
-            defaults: SessionDefaults::default(),
-            turns: Vec::new(),
         }
     }
 
@@ -109,14 +91,6 @@ impl Session {
 
     pub fn into_input(self) -> ModelInput {
         self.input
-    }
-
-    /// Returns a copy of the current [`ModelInput`].
-    ///
-    /// This snapshot captures only request input and does not include the
-    /// committed-turn list maintained by [`list_turns`](Self::list_turns).
-    pub fn snapshot(&self) -> ModelInput {
-        self.input.clone()
     }
 
     pub fn text_turn<T>(&self) -> Option<TextTurn<T>>
@@ -155,14 +129,6 @@ impl Session {
             .push(ModelInputItem::text(InputMessageRole::User, text));
     }
 
-    pub fn append_assistant_turn(
-        &mut self,
-        turn: AssistantTurn,
-        tool_uses: impl IntoIterator<Item = ToolUse>,
-    ) -> Result<(), AssistantTurnInputError> {
-        self.input.append_assistant_turn(turn, tool_uses)
-    }
-
     pub async fn prepare_text<T>(
         &self,
         extensions: RequestExtensions,
@@ -198,76 +164,32 @@ impl Session {
         Ok(SessionPendingStructured { pending })
     }
 
-    /// Returns an iterator over committed assistant turns in the order they
-    /// were committed.
-    ///
-    /// **Scope:** this iterator covers only turns that were explicitly stored
-    /// via `commit_text`, `commit_structured`, or `commit_tool_round`.  User,
-    /// system, and developer messages pushed via `push_*` are part of the
-    /// request input (`ModelInput`) but are not "committed turns" in the
-    /// design's sense — they are not produced by the model and do not go
-    /// through the commit path.
-    ///
-    /// **Interim storage:** committed turns are currently stored using the
-    /// core-provided [`AssistantTurnView`] fallback, which preserves all
-    /// item data.  Once adapters expose their own exact committed-turn types
-    /// through the commit path, callers will see richer provider-specific
-    /// views here.  See [`OpenAiCommittedTurn`](agents_openai::OpenAiCommittedTurn)
-    /// for the intended adapter-side ownership pattern.
+    /// Returns committed turns stored directly in the ordered `ModelInput`.
     pub fn list_turns(&self) -> impl Iterator<Item = &dyn TurnView> {
-        self.turns.iter().map(|t| t.as_ref() as &dyn TurnView)
+        self.input.items().iter().filter_map(|item| match item {
+            ModelInputItem::Turn(turn) => Some(turn.as_ref() as &dyn TurnView),
+            _ => None,
+        })
     }
 
     /// Commit a completed text turn into the session transcript.
-    ///
-    /// Appends the assistant output to `ModelInput` and records a
-    /// [`TurnView`] entry in the committed-turns list so `list_turns()` can
-    /// surface it.
-    ///
-    /// **Note:** the current implementation stores an [`AssistantTurnView`]
-    /// (core-provided) as the committed turn.  Full exact-turn storage —
-    /// where the adapter supplies its own provider-native type — is a
-    /// planned follow-up that requires threading an opaque payload through
-    /// the result types.
-    pub fn commit_text<T>(
-        &mut self,
-        result: TextTurnResult<T>,
-    ) -> Result<(), AssistantTurnInputError>
+    pub fn commit_text<T>(&mut self, result: TextTurnResult<T>)
     where
         T: Toolset,
     {
-        let view = AssistantTurnView::from_items(result.assistant_turn.items());
-        self.append_assistant_turn(result.assistant_turn, std::iter::empty::<ToolUse>())?;
-        self.turns.push(Arc::new(view));
-        Ok(())
+        self.input.push(ModelInputItem::Turn(result.committed_turn));
     }
 
     /// Commit a completed structured turn into the session transcript.
-    ///
-    /// See [`commit_text`](Self::commit_text) for notes on the interim
-    /// [`AssistantTurnView`] storage.
-    pub fn commit_structured<T, O>(
-        &mut self,
-        result: StructuredTurnResult<T, O>,
-    ) -> Result<(), AssistantTurnInputError>
+    pub fn commit_structured<T, O>(&mut self, result: StructuredTurnResult<T, O>)
     where
         T: Toolset,
         O: StructuredOutput,
     {
-        let view = AssistantTurnView::from_items(result.assistant_turn.items());
-        self.append_assistant_turn(result.assistant_turn, std::iter::empty::<ToolUse>())?;
-        self.turns.push(Arc::new(view));
-        Ok(())
+        self.input.push(ModelInputItem::Turn(result.committed_turn));
     }
 
     /// Commit a completed tool-call round into the session transcript.
-    ///
-    /// Records the assistant output (tool calls) as a committed turn.
-    /// Tool results are stored in `ModelInput` (paired with tool calls) but
-    /// are not separately recorded as committed turns — they are part of the
-    /// same round's assistant output.
-    ///
-    /// See [`commit_text`](Self::commit_text) for notes on interim storage.
     pub fn commit_tool_round<T>(
         &mut self,
         round: ToolRound<T>,
@@ -276,11 +198,69 @@ impl Session {
     where
         T: Toolset,
     {
-        let view = AssistantTurnView::from_items(round.assistant_turn.items());
-        self.append_assistant_turn(round.assistant_turn, tool_uses)?;
-        self.turns.push(Arc::new(view));
+        let ordered_tool_uses = validate_and_order_tool_uses(&round, tool_uses)?;
+        self.input.push(ModelInputItem::Turn(round.committed_turn));
+        for tool_use in ordered_tool_uses {
+            self.input.push(ModelInputItem::ToolUse(tool_use));
+        }
         Ok(())
     }
+}
+
+fn validate_and_order_tool_uses<T>(
+    round: &ToolRound<T>,
+    tool_uses: impl IntoIterator<Item = ToolUse>,
+) -> Result<Vec<ToolUse>, AssistantTurnInputError>
+where
+    T: Toolset,
+{
+    let mut tool_use_map = BTreeMap::new();
+    for tool_use in tool_uses {
+        let duplicate_id = tool_use.id.clone();
+        if tool_use_map
+            .insert(duplicate_id.clone(), tool_use)
+            .is_some()
+        {
+            return Err(AssistantTurnInputError::DuplicateToolUse { id: duplicate_id });
+        }
+    }
+
+    let mut ordered = Vec::new();
+    for item in round.assistant_turn.items() {
+        let AssistantTurnItem::ToolCall {
+            id,
+            name,
+            arguments,
+        } = item
+        else {
+            continue;
+        };
+
+        let Some(tool_use) = tool_use_map.remove(id) else {
+            return Err(AssistantTurnInputError::MissingToolUse { id: id.clone() });
+        };
+        if tool_use.name != *name {
+            return Err(AssistantTurnInputError::MismatchedToolName {
+                id: id.clone(),
+                expected: name.clone(),
+                actual: tool_use.name,
+            });
+        }
+        if tool_use.arguments != *arguments {
+            return Err(AssistantTurnInputError::MismatchedToolArguments {
+                id: id.clone(),
+                expected: arguments.clone(),
+                actual: tool_use.arguments,
+            });
+        }
+        ordered.push(tool_use);
+    }
+
+    if let Some((id, _)) = tool_use_map.into_iter().next() {
+        return Err(AssistantTurnInputError::ExtraToolUse { id });
+    }
+
+    Ok(ordered)
 }
 
 pub struct SessionPendingText<T>
@@ -296,6 +276,10 @@ where
 {
     pub fn into_pending(self) -> PendingTextTurn<T> {
         self.pending
+    }
+
+    pub fn into_stream(self) -> TextTurnEventStream<T> {
+        self.pending.into_stream()
     }
 
     pub async fn collect<H>(
@@ -323,14 +307,15 @@ where
     }
 }
 
+#[allow(clippy::result_large_err, clippy::type_complexity)]
 fn map_structured_result<T, O, HE>(
     raw: Result<
         StructuredTurnResult<T, O>,
-        CollectError<HE, StructuredTurnReductionError, crate::StructuredTurnState<T, O>>,
+        CollectError<HE, StructuredTurnReductionError, CoreStructuredTurnPartial<T, O>>,
     >,
 ) -> Result<
     StructuredStepOutcome<T, O>,
-    CollectError<HE, StructuredTurnReductionError, crate::StructuredTurnState<T, O>>,
+    CollectError<HE, StructuredTurnReductionError, CoreStructuredTurnPartial<T, O>>,
 >
 where
     T: Toolset,
@@ -342,7 +327,11 @@ where
             source: StructuredTurnReductionError::MissingSemantic,
             partial,
         }) => {
-            if let Some(outcome) = StructuredStepOutcome::from_partial(partial.clone()) {
+            let partial_for_outcome = CoreStructuredTurnPartial {
+                state: partial.state.clone(),
+                committed_turn: partial.committed_turn.clone(),
+            };
+            if let Some(outcome) = StructuredStepOutcome::from_partial(partial_for_outcome) {
                 Ok(outcome)
             } else {
                 Err(CollectError::Reduction {
@@ -372,6 +361,10 @@ where
         self.pending
     }
 
+    pub fn into_stream(self) -> StructuredTurnEventStream<T, O> {
+        self.pending.into_stream()
+    }
+
     pub async fn collect<H>(
         self,
         handler: H,
@@ -380,7 +373,7 @@ where
         CollectError<
             H::Error,
             crate::StructuredTurnReductionError,
-            crate::StructuredTurnState<T, O>,
+            CoreStructuredTurnPartial<T, O>,
         >,
     >
     where
@@ -396,14 +389,14 @@ where
         CollectError<
             Infallible,
             crate::StructuredTurnReductionError,
-            crate::StructuredTurnState<T, O>,
+            CoreStructuredTurnPartial<T, O>,
         >,
     > {
         map_structured_result(self.pending.collect_noop().await)
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ToolRound<T: Toolset> {
     pub request_id: Option<String>,
     pub model: String,
@@ -411,21 +404,10 @@ pub struct ToolRound<T: Toolset> {
     pub tool_calls: Vec<T::ToolCall>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub committed_turn: CommittedTurn,
 }
 
-impl<T> ToolRound<T>
-where
-    T: Toolset,
-{
-    pub fn into_input_items(
-        self,
-        tool_uses: impl IntoIterator<Item = ToolUse>,
-    ) -> Result<Vec<ModelInputItem>, AssistantTurnInputError> {
-        self.assistant_turn.into_input_items(tool_uses)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum TextStepOutcome<T: Toolset> {
     Finished(TextTurnResult<T>),
     NeedsToolResults(ToolRound<T>),
@@ -436,22 +418,40 @@ where
     T: Toolset,
 {
     fn from_result(result: TextTurnResult<T>) -> Self {
-        if result.finish_reason == FinishReason::ToolCall && !result.tool_calls.is_empty() {
+        let TextTurnResult {
+            request_id,
+            model,
+            assistant_turn,
+            tool_calls,
+            finish_reason,
+            usage,
+            committed_turn,
+        } = result;
+        if finish_reason == FinishReason::ToolCall && !tool_calls.is_empty() {
             Self::NeedsToolResults(ToolRound {
-                request_id: result.request_id,
-                model: result.model,
-                assistant_turn: result.assistant_turn,
-                tool_calls: result.tool_calls,
-                finish_reason: result.finish_reason,
-                usage: result.usage,
+                request_id,
+                model,
+                assistant_turn,
+                tool_calls,
+                finish_reason,
+                usage,
+                committed_turn,
             })
         } else {
-            Self::Finished(result)
+            Self::Finished(TextTurnResult {
+                request_id,
+                model,
+                assistant_turn,
+                tool_calls,
+                finish_reason,
+                usage,
+                committed_turn,
+            })
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum StructuredStepOutcome<T: Toolset, O: StructuredOutput> {
     Finished(StructuredTurnResult<T, O>),
     NeedsToolResults(ToolRound<T>),
@@ -463,33 +463,67 @@ where
     O: StructuredOutput,
 {
     fn from_result(result: StructuredTurnResult<T, O>) -> Self {
-        if result.finish_reason == FinishReason::ToolCall && !result.tool_calls.is_empty() {
+        let StructuredTurnResult {
+            request_id,
+            model,
+            assistant_turn,
+            tool_calls,
+            semantic,
+            finish_reason,
+            usage,
+            committed_turn,
+        } = result;
+        if finish_reason == FinishReason::ToolCall && !tool_calls.is_empty() {
             Self::NeedsToolResults(ToolRound {
-                request_id: result.request_id,
-                model: result.model,
-                assistant_turn: result.assistant_turn,
-                tool_calls: result.tool_calls,
-                finish_reason: result.finish_reason,
-                usage: result.usage,
+                request_id,
+                model,
+                assistant_turn,
+                tool_calls,
+                finish_reason,
+                usage,
+                committed_turn,
             })
         } else {
-            Self::Finished(result)
+            Self::Finished(StructuredTurnResult {
+                request_id,
+                model,
+                assistant_turn,
+                tool_calls,
+                semantic,
+                finish_reason,
+                usage,
+                committed_turn,
+            })
         }
     }
 
-    fn from_partial(partial: StructuredTurnState<T, O>) -> Option<Self> {
-        if partial.finish_reason != Some(FinishReason::ToolCall) || partial.tool_calls.is_empty() {
+    fn from_partial(partial: CoreStructuredTurnPartial<T, O>) -> Option<Self> {
+        let CoreStructuredTurnPartial {
+            state,
+            committed_turn,
+        } = partial;
+        if state.finish_reason != Some(FinishReason::ToolCall) || state.tool_calls.is_empty() {
             return None;
         }
-        let assistant_turn = AssistantTurn::from_items(partial.assistant_turn).ok()?;
-        let usage = partial.usage?;
-        Some(Self::NeedsToolResults(ToolRound {
-            request_id: partial.request_id,
-            model: partial.model,
+        let committed_turn = committed_turn?;
+        let StructuredTurnState {
+            request_id,
+            model,
             assistant_turn,
-            tool_calls: partial.tool_calls,
+            tool_calls,
+            usage,
+            ..
+        } = state;
+        let assistant_turn = AssistantTurn::from_items(assistant_turn).ok()?;
+        let usage = usage?;
+        Some(Self::NeedsToolResults(ToolRound {
+            request_id,
+            model,
+            assistant_turn,
+            tool_calls,
             finish_reason: FinishReason::ToolCall,
             usage,
+            committed_turn,
         }))
     }
 }

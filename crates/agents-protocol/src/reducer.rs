@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use thiserror::Error;
 
 use crate::{
@@ -6,9 +8,10 @@ use crate::{
     llm::{CompletionEvent, FinishReason, StructuredTurnEvent, TextTurnEvent},
     structured::StructuredOutput,
     toolset::{ToolCallWrapper, Toolset},
+    transcript::CommittedTurn,
 };
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct TextTurnState<T: Toolset> {
     pub request_id: Option<String>,
     pub model: String,
@@ -16,6 +19,7 @@ pub struct TextTurnState<T: Toolset> {
     pub tool_calls: Vec<T::ToolCall>,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
+    pub committed_turn: Option<CommittedTurn>,
 }
 
 impl<T> Default for TextTurnState<T>
@@ -30,6 +34,7 @@ where
             tool_calls: Vec::new(),
             finish_reason: None,
             usage: None,
+            committed_turn: None,
         }
     }
 }
@@ -46,8 +51,32 @@ where
             tool_calls: self.tool_calls.clone(),
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
+            committed_turn: self.committed_turn.clone(),
         }
     }
+}
+
+impl<T> PartialEq for TextTurnState<T>
+where
+    T: Toolset,
+    T::ToolCall: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.request_id == other.request_id
+            && self.model == other.model
+            && self.assistant_turn == other.assistant_turn
+            && self.tool_calls == other.tool_calls
+            && self.finish_reason == other.finish_reason
+            && self.usage == other.usage
+            && committed_turn_option_eq(&self.committed_turn, &other.committed_turn)
+    }
+}
+
+impl<T> Eq for TextTurnState<T>
+where
+    T: Toolset,
+    T::ToolCall: Eq,
+{
 }
 
 impl<T> TextTurnState<T>
@@ -88,12 +117,14 @@ where
                 request_id,
                 finish_reason,
                 usage,
+                committed_turn,
             } => {
                 if let Some(request_id) = request_id.clone() {
                     self.request_id = Some(request_id);
                 }
                 self.finish_reason = Some(finish_reason.clone());
                 self.usage = Some(*usage);
+                self.committed_turn = Some(committed_turn.clone());
             }
         }
 
@@ -113,6 +144,9 @@ where
             .finish_reason
             .ok_or(TextTurnReductionError::Incomplete)?;
         let usage = self.usage.ok_or(TextTurnReductionError::Incomplete)?;
+        let committed_turn = self
+            .committed_turn
+            .ok_or(TextTurnReductionError::Incomplete)?;
         let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
             .map_err(|_| TextTurnReductionError::EmptyAssistantOutput)?;
         Ok(TextTurnResult {
@@ -122,11 +156,12 @@ where
             tool_calls: self.tool_calls,
             finish_reason,
             usage,
+            committed_turn,
         })
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct TextTurnResult<T: Toolset> {
     pub request_id: Option<String>,
     pub model: String,
@@ -134,6 +169,7 @@ pub struct TextTurnResult<T: Toolset> {
     pub tool_calls: Vec<T::ToolCall>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub committed_turn: CommittedTurn,
 }
 
 impl<T> TextTurnResult<T>
@@ -157,11 +193,12 @@ where
             tool_calls: self.tool_calls.clone(),
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
+            committed_turn: self.committed_turn.clone(),
         }
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct StructuredTurnState<T: Toolset, O: StructuredOutput> {
     pub request_id: Option<String>,
     pub model: String,
@@ -171,6 +208,7 @@ pub struct StructuredTurnState<T: Toolset, O: StructuredOutput> {
     pub refusal: Option<String>,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
+    pub committed_turn: Option<CommittedTurn>,
 }
 
 impl<T, O> Default for StructuredTurnState<T, O>
@@ -188,6 +226,7 @@ where
             refusal: None,
             finish_reason: None,
             usage: None,
+            committed_turn: None,
         }
     }
 }
@@ -207,8 +246,36 @@ where
             refusal: self.refusal.clone(),
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
+            committed_turn: self.committed_turn.clone(),
         }
     }
+}
+
+impl<T, O> PartialEq for StructuredTurnState<T, O>
+where
+    T: Toolset,
+    T::ToolCall: PartialEq,
+    O: StructuredOutput + PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.request_id == other.request_id
+            && self.model == other.model
+            && self.assistant_turn == other.assistant_turn
+            && self.tool_calls == other.tool_calls
+            && self.structured == other.structured
+            && self.refusal == other.refusal
+            && self.finish_reason == other.finish_reason
+            && self.usage == other.usage
+            && committed_turn_option_eq(&self.committed_turn, &other.committed_turn)
+    }
+}
+
+impl<T, O> Eq for StructuredTurnState<T, O>
+where
+    T: Toolset,
+    T::ToolCall: Eq,
+    O: StructuredOutput + Eq,
+{
 }
 
 impl<T, O> StructuredTurnState<T, O>
@@ -260,12 +327,14 @@ where
                 request_id,
                 finish_reason,
                 usage,
+                committed_turn,
             } => {
                 if let Some(request_id) = request_id.clone() {
                     self.request_id = Some(request_id);
                 }
                 self.finish_reason = Some(finish_reason.clone());
                 self.usage = Some(*usage);
+                self.committed_turn = Some(committed_turn.clone());
             }
         }
 
@@ -285,6 +354,9 @@ where
             .finish_reason
             .ok_or(StructuredTurnReductionError::Incomplete)?;
         let usage = self.usage.ok_or(StructuredTurnReductionError::Incomplete)?;
+        let committed_turn = self
+            .committed_turn
+            .ok_or(StructuredTurnReductionError::Incomplete)?;
         let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
             .map_err(|_| StructuredTurnReductionError::EmptyAssistantOutput)?;
         let semantic = match (self.structured, self.refusal) {
@@ -302,6 +374,7 @@ where
             semantic,
             finish_reason,
             usage,
+            committed_turn,
         })
     }
 }
@@ -312,7 +385,7 @@ pub enum StructuredTurnOutcome<O> {
     Refusal(String),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct StructuredTurnResult<T: Toolset, O: StructuredOutput> {
     pub request_id: Option<String>,
     pub model: String,
@@ -321,6 +394,7 @@ pub struct StructuredTurnResult<T: Toolset, O: StructuredOutput> {
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub committed_turn: CommittedTurn,
 }
 
 impl<T, O> Clone for StructuredTurnResult<T, O>
@@ -337,6 +411,7 @@ where
             semantic: self.semantic.clone(),
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
+            committed_turn: self.committed_turn.clone(),
         }
     }
 }
@@ -520,8 +595,14 @@ where
         self.state.apply(event)
     }
 
-    pub fn into_result(self) -> Result<StructuredTurnResult<T, O>, StructuredTurnReductionError> {
-        self.state.finish()
+    pub fn into_result(
+        self,
+    ) -> Result<StructuredTurnResult<T, O>, (StructuredTurnReductionError, Option<CommittedTurn>)>
+    {
+        let committed_turn = self.state.committed_turn.clone();
+        self.state
+            .finish()
+            .map_err(|source| (source, committed_turn))
     }
 }
 
@@ -619,6 +700,14 @@ fn assistant_text(items: &[AssistantTurnItem]) -> String {
     text
 }
 
+fn committed_turn_option_eq(lhs: &Option<CommittedTurn>, rhs: &Option<CommittedTurn>) -> bool {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => Arc::ptr_eq(lhs, rhs),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 pub fn assistant_json(items: &[AssistantTurnItem]) -> Option<Result<RawJson, serde_json::Error>> {
     let text = assistant_text(items);
     if text.is_empty() {
@@ -644,6 +733,8 @@ pub fn find_tool_call_arguments<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
@@ -651,6 +742,7 @@ mod tests {
     use crate::{
         ToolCallError, ToolDef, ToolMetadata, ToolName,
         toolset::{ToolCallWrapper, ToolInput, ToolSelector},
+        transcript::AssistantTurnView,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -796,6 +888,7 @@ mod tests {
                     total_tokens: 12,
                     ..Usage::zero()
                 },
+                committed_turn: Arc::new(AssistantTurnView::from_items(&[])),
             })
             .unwrap();
 
@@ -824,6 +917,7 @@ mod tests {
                     total_tokens: 7,
                     ..Usage::zero()
                 },
+                committed_turn: Arc::new(AssistantTurnView::from_items(&[])),
             })
             .unwrap();
 

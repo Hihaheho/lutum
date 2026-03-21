@@ -1,11 +1,11 @@
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, ops::Deref, sync::Arc};
 
 use futures::StreamExt;
 use thiserror::Error;
 use tracing::{Instrument, Span, field};
 
 use agents_protocol::{
-    AgentError,
+    AgentError, CommittedTurn,
     budget::{BudgetLease, BudgetManager, Remaining, Usage, UsageEstimate},
     conversation::ModelInput,
     extensions::RequestExtensions,
@@ -137,15 +137,27 @@ pub enum CollectError<HandlerError, ReductionError, Partial> {
     UnexpectedEof { partial: Partial },
 }
 
+struct OwnedLease {
+    budget: Arc<dyn BudgetManager>,
+    lease: Option<BudgetLease>,
+}
+
+impl Drop for OwnedLease {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            let _ = self.budget.record_used(lease, Usage::zero());
+        }
+    }
+}
+
 pub struct PendingTextTurn<T>
 where
     T: Toolset,
 {
     extensions: RequestExtensions,
-    budget: Arc<dyn BudgetManager>,
+    owned_lease: OwnedLease,
     adapter: Arc<dyn LlmAdapter>,
     span: Span,
-    lease: Option<BudgetLease>,
     stream: TextTurnEventStream<T>,
     reducer: TextTurnReducer<T>,
 }
@@ -156,20 +168,59 @@ where
     O: StructuredOutput,
 {
     extensions: RequestExtensions,
-    budget: Arc<dyn BudgetManager>,
+    owned_lease: OwnedLease,
     adapter: Arc<dyn LlmAdapter>,
     span: Span,
-    lease: Option<BudgetLease>,
     stream: StructuredTurnEventStream<T, O>,
     reducer: StructuredTurnReducer<T, O>,
 }
 
+#[derive(Clone, Debug)]
+pub struct StructuredTurnPartial<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    pub state: StructuredTurnState<T, O>,
+    pub committed_turn: Option<CommittedTurn>,
+}
+
+impl<T, O> StructuredTurnPartial<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    fn from_state(state: StructuredTurnState<T, O>) -> Self {
+        let committed_turn = state.committed_turn.clone();
+        Self {
+            state,
+            committed_turn,
+        }
+    }
+
+    fn with_committed_turn(mut self, committed_turn: CommittedTurn) -> Self {
+        self.committed_turn = Some(committed_turn);
+        self
+    }
+}
+
+impl<T, O> Deref for StructuredTurnPartial<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    type Target = StructuredTurnState<T, O>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
 pub struct PendingCompletion {
     extensions: RequestExtensions,
-    budget: Arc<dyn BudgetManager>,
+    owned_lease: OwnedLease,
     adapter: Arc<dyn LlmAdapter>,
     span: Span,
-    lease: Option<BudgetLease>,
     stream: CompletionEventStream,
     reducer: CompletionReducer,
 }
@@ -196,10 +247,12 @@ impl Context {
             .await?;
         Ok(PendingTextTurn {
             extensions,
-            budget: Arc::clone(&self.budget),
+            owned_lease: OwnedLease {
+                budget: Arc::clone(&self.budget),
+                lease: Some(lease),
+            },
             adapter: Arc::clone(&self.adapter),
             span,
-            lease: Some(lease),
             stream: map_text_stream::<T>(stream),
             reducer: TextTurnReducer::new(),
         })
@@ -227,10 +280,12 @@ impl Context {
             .await?;
         Ok(PendingStructuredTurn {
             extensions,
-            budget: Arc::clone(&self.budget),
+            owned_lease: OwnedLease {
+                budget: Arc::clone(&self.budget),
+                lease: Some(lease),
+            },
             adapter: Arc::clone(&self.adapter),
             span,
-            lease: Some(lease),
             stream: map_structured_stream::<T, O>(stream),
             reducer: StructuredTurnReducer::new(),
         })
@@ -249,10 +304,12 @@ impl Context {
         let stream = self.adapter.completion(request).await?;
         Ok(PendingCompletion {
             extensions,
-            budget: Arc::clone(&self.budget),
+            owned_lease: OwnedLease {
+                budget: Arc::clone(&self.budget),
+                lease: Some(lease),
+            },
             adapter: Arc::clone(&self.adapter),
             span,
-            lease: Some(lease),
             stream,
             reducer: CompletionReducer::new(),
         })
@@ -263,6 +320,14 @@ impl<T> PendingTextTurn<T>
 where
     T: Toolset,
 {
+    /// Returns the raw typed event stream.
+    ///
+    /// Releasing this wrapper commits zero usage and frees any reserved budget.
+    pub fn into_stream(self) -> TextTurnEventStream<T> {
+        let Self { stream, .. } = self;
+        stream
+    }
+
     pub async fn collect<H>(
         mut self,
         mut handler: H,
@@ -282,8 +347,7 @@ where
                     record_request_id(&self.span, self.reducer.state().request_id.as_deref());
                     if let Some(usage) = completed_usage_from_text(&event) {
                         if let Err(source) = finalize_budget(
-                            &mut self.lease,
-                            &*self.budget,
+                            &mut self.owned_lease,
                             &self.span,
                             self.reducer.state().request_id.as_deref(),
                             usage,
@@ -311,8 +375,7 @@ where
                         Ok(HandlerDirective::Stop) => {
                             let partial = self.reducer.state().clone();
                             if let Err(source) = recover_or_release_budget(
-                                &mut self.lease,
-                                &*self.budget,
+                                &mut self.owned_lease,
                                 &*self.adapter,
                                 StreamKind::ResponsesText,
                                 self.reducer.state().request_id.as_deref(),
@@ -328,8 +391,7 @@ where
                         Err(source) => {
                             let partial = self.reducer.state().clone();
                             if let Err(execution_source) = recover_or_release_budget(
-                                &mut self.lease,
-                                &*self.budget,
+                                &mut self.owned_lease,
                                 &*self.adapter,
                                 StreamKind::ResponsesText,
                                 self.reducer.state().request_id.as_deref(),
@@ -351,8 +413,7 @@ where
                 Err(source) => {
                     let partial = self.reducer.state().clone();
                     if let Err(execution_source) = recover_or_release_budget(
-                        &mut self.lease,
-                        &*self.budget,
+                        &mut self.owned_lease,
                         &*self.adapter,
                         StreamKind::ResponsesText,
                         self.reducer.state().request_id.as_deref(),
@@ -374,8 +435,7 @@ where
 
         let partial = self.reducer.state().clone();
         if let Err(source) = recover_or_release_budget(
-            &mut self.lease,
-            &*self.budget,
+            &mut self.owned_lease,
             &*self.adapter,
             StreamKind::ResponsesText,
             self.reducer.state().request_id.as_deref(),
@@ -407,7 +467,7 @@ where
         let cx = HandlerContext {
             extensions: &self.extensions,
             state: self.reducer.state(),
-            remaining_budget: self.budget.remaining(&self.extensions),
+            remaining_budget: self.owned_lease.budget.remaining(&self.extensions),
         };
         handler.on_event(event, &cx).await
     }
@@ -418,12 +478,20 @@ where
     T: Toolset,
     O: StructuredOutput,
 {
+    /// Returns the raw typed event stream.
+    ///
+    /// Releasing this wrapper commits zero usage and frees any reserved budget.
+    pub fn into_stream(self) -> StructuredTurnEventStream<T, O> {
+        let Self { stream, .. } = self;
+        stream
+    }
+
     pub async fn collect<H>(
         mut self,
         mut handler: H,
     ) -> Result<
         StructuredTurnResult<T, O>,
-        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnState<T, O>>,
+        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartial<T, O>>,
     >
     where
         H: EventHandler<StructuredTurnEvent<T, O>, StructuredTurnState<T, O>>,
@@ -434,43 +502,56 @@ where
                     if let Err(source) = self.reducer.apply(&event) {
                         return Err(CollectError::Reduction {
                             source,
-                            partial: self.reducer.state().clone(),
+                            partial: StructuredTurnPartial::from_state(
+                                self.reducer.state().clone(),
+                            ),
                         });
                     }
                     record_request_id(&self.span, self.reducer.state().request_id.as_deref());
                     if let Some(usage) = completed_usage_from_structured(&event) {
                         if let Err(source) = finalize_budget(
-                            &mut self.lease,
-                            &*self.budget,
+                            &mut self.owned_lease,
                             &self.span,
                             self.reducer.state().request_id.as_deref(),
                             usage,
                         ) {
                             return Err(CollectError::Execution {
                                 source,
-                                partial: self.reducer.state().clone(),
+                                partial: StructuredTurnPartial::from_state(
+                                    self.reducer.state().clone(),
+                                ),
                             });
                         }
                         if let Err(source) = self.call_handler(&mut handler, &event).await {
                             return Err(CollectError::Handler {
                                 source,
-                                partial: self.reducer.state().clone(),
+                                partial: StructuredTurnPartial::from_state(
+                                    self.reducer.state().clone(),
+                                ),
                             });
                         }
-                        let partial = self.reducer.state().clone();
+                        let partial =
+                            StructuredTurnPartial::from_state(self.reducer.state().clone());
                         return self
                             .reducer
                             .into_result()
-                            .map_err(|source| CollectError::Reduction { source, partial });
+                            .map_err(|(source, committed_turn)| {
+                                let partial = if let Some(committed_turn) = committed_turn {
+                                    partial.with_committed_turn(committed_turn)
+                                } else {
+                                    partial
+                                };
+                                CollectError::Reduction { source, partial }
+                            });
                     }
 
                     match self.call_handler(&mut handler, &event).await {
                         Ok(HandlerDirective::Continue) => {}
                         Ok(HandlerDirective::Stop) => {
-                            let partial = self.reducer.state().clone();
+                            let partial =
+                                StructuredTurnPartial::from_state(self.reducer.state().clone());
                             if let Err(source) = recover_or_release_budget(
-                                &mut self.lease,
-                                &*self.budget,
+                                &mut self.owned_lease,
                                 &*self.adapter,
                                 StreamKind::ResponsesStructured,
                                 self.reducer.state().request_id.as_deref(),
@@ -480,14 +561,16 @@ where
                                 return Err(CollectError::Execution { source, partial });
                             }
                             return Err(CollectError::Stopped {
-                                partial: self.reducer.into_state(),
+                                partial: StructuredTurnPartial::from_state(
+                                    self.reducer.into_state(),
+                                ),
                             });
                         }
                         Err(source) => {
-                            let partial = self.reducer.state().clone();
+                            let partial =
+                                StructuredTurnPartial::from_state(self.reducer.state().clone());
                             if let Err(execution_source) = recover_or_release_budget(
-                                &mut self.lease,
-                                &*self.budget,
+                                &mut self.owned_lease,
                                 &*self.adapter,
                                 StreamKind::ResponsesStructured,
                                 self.reducer.state().request_id.as_deref(),
@@ -501,16 +584,17 @@ where
                             }
                             return Err(CollectError::Handler {
                                 source,
-                                partial: self.reducer.into_state(),
+                                partial: StructuredTurnPartial::from_state(
+                                    self.reducer.into_state(),
+                                ),
                             });
                         }
                     }
                 }
                 Err(source) => {
-                    let partial = self.reducer.state().clone();
+                    let partial = StructuredTurnPartial::from_state(self.reducer.state().clone());
                     if let Err(execution_source) = recover_or_release_budget(
-                        &mut self.lease,
-                        &*self.budget,
+                        &mut self.owned_lease,
                         &*self.adapter,
                         StreamKind::ResponsesStructured,
                         self.reducer.state().request_id.as_deref(),
@@ -524,16 +608,15 @@ where
                     }
                     return Err(CollectError::Execution {
                         source,
-                        partial: self.reducer.into_state(),
+                        partial: StructuredTurnPartial::from_state(self.reducer.into_state()),
                     });
                 }
             }
         }
 
-        let partial = self.reducer.state().clone();
+        let partial = StructuredTurnPartial::from_state(self.reducer.state().clone());
         if let Err(source) = recover_or_release_budget(
-            &mut self.lease,
-            &*self.budget,
+            &mut self.owned_lease,
             &*self.adapter,
             StreamKind::ResponsesStructured,
             self.reducer.state().request_id.as_deref(),
@@ -543,7 +626,7 @@ where
             return Err(CollectError::Execution { source, partial });
         }
         Err(CollectError::UnexpectedEof {
-            partial: self.reducer.into_state(),
+            partial: StructuredTurnPartial::from_state(self.reducer.into_state()),
         })
     }
 
@@ -551,7 +634,7 @@ where
         self,
     ) -> Result<
         StructuredTurnResult<T, O>,
-        CollectError<Infallible, StructuredTurnReductionError, StructuredTurnState<T, O>>,
+        CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<T, O>>,
     > {
         self.collect(NoopHandler).await
     }
@@ -567,7 +650,7 @@ where
         let cx = HandlerContext {
             extensions: &self.extensions,
             state: self.reducer.state(),
-            remaining_budget: self.budget.remaining(&self.extensions),
+            remaining_budget: self.owned_lease.budget.remaining(&self.extensions),
         };
         handler.on_event(event, &cx).await
     }
@@ -596,8 +679,7 @@ impl PendingCompletion {
                     record_request_id(&self.span, self.reducer.state().request_id.as_deref());
                     if let Some(usage) = completed_usage_from_completion(&event) {
                         if let Err(source) = finalize_budget(
-                            &mut self.lease,
-                            &*self.budget,
+                            &mut self.owned_lease,
                             &self.span,
                             self.reducer.state().request_id.as_deref(),
                             usage,
@@ -625,8 +707,7 @@ impl PendingCompletion {
                         Ok(HandlerDirective::Stop) => {
                             let partial = self.reducer.state().clone();
                             if let Err(source) = recover_or_release_budget(
-                                &mut self.lease,
-                                &*self.budget,
+                                &mut self.owned_lease,
                                 &*self.adapter,
                                 StreamKind::Completion,
                                 self.reducer.state().request_id.as_deref(),
@@ -642,8 +723,7 @@ impl PendingCompletion {
                         Err(source) => {
                             let partial = self.reducer.state().clone();
                             if let Err(execution_source) = recover_or_release_budget(
-                                &mut self.lease,
-                                &*self.budget,
+                                &mut self.owned_lease,
                                 &*self.adapter,
                                 StreamKind::Completion,
                                 self.reducer.state().request_id.as_deref(),
@@ -665,8 +745,7 @@ impl PendingCompletion {
                 Err(source) => {
                     let partial = self.reducer.state().clone();
                     if let Err(execution_source) = recover_or_release_budget(
-                        &mut self.lease,
-                        &*self.budget,
+                        &mut self.owned_lease,
                         &*self.adapter,
                         StreamKind::Completion,
                         self.reducer.state().request_id.as_deref(),
@@ -688,8 +767,7 @@ impl PendingCompletion {
 
         let partial = self.reducer.state().clone();
         if let Err(source) = recover_or_release_budget(
-            &mut self.lease,
-            &*self.budget,
+            &mut self.owned_lease,
             &*self.adapter,
             StreamKind::Completion,
             self.reducer.state().request_id.as_deref(),
@@ -723,7 +801,7 @@ impl PendingCompletion {
         let cx = HandlerContext {
             extensions: &self.extensions,
             state: self.reducer.state(),
-            remaining_budget: self.budget.remaining(&self.extensions),
+            remaining_budget: self.owned_lease.budget.remaining(&self.extensions),
         };
         handler.on_event(event, &cx).await
     }
@@ -864,10 +942,12 @@ where
             request_id,
             finish_reason,
             usage,
+            committed_turn,
         } => Ok(TextTurnEvent::Completed {
             request_id,
             finish_reason,
             usage,
+            committed_turn,
         }),
     }
 }
@@ -916,17 +996,18 @@ where
             request_id,
             finish_reason,
             usage,
+            committed_turn,
         } => Ok(StructuredTurnEvent::Completed {
             request_id,
             finish_reason,
             usage,
+            committed_turn,
         }),
     }
 }
 
 fn finalize_budget(
-    lease: &mut Option<BudgetLease>,
-    budget: &dyn BudgetManager,
+    owned_lease: &mut OwnedLease,
     span: &Span,
     request_id: Option<&str>,
     usage: Usage,
@@ -934,23 +1015,18 @@ fn finalize_budget(
     if let Some(request_id) = request_id {
         span.record("request_id", field::display(request_id));
     }
-    record_budget_usage(lease, budget, usage)
+    record_budget_usage(owned_lease, usage)
 }
 
-fn record_budget_usage(
-    lease: &mut Option<BudgetLease>,
-    budget: &dyn BudgetManager,
-    usage: Usage,
-) -> Result<(), AgentError> {
-    if let Some(lease) = lease.take() {
-        budget.record_used(lease, usage)?;
+fn record_budget_usage(owned_lease: &mut OwnedLease, usage: Usage) -> Result<(), AgentError> {
+    if let Some(lease) = owned_lease.lease.take() {
+        owned_lease.budget.record_used(lease, usage)?;
     }
     Ok(())
 }
 
 async fn recover_or_release_budget(
-    lease: &mut Option<BudgetLease>,
-    budget: &dyn BudgetManager,
+    owned_lease: &mut OwnedLease,
     adapter: &dyn LlmAdapter,
     kind: StreamKind,
     request_id: Option<&str>,
@@ -966,7 +1042,7 @@ async fn recover_or_release_budget(
         Usage::zero()
     };
 
-    record_budget_usage(lease, budget, recovered_usage)
+    record_budget_usage(owned_lease, recovered_usage)
 }
 
 fn turn_span(kind: &'static str, model: &str, estimate: UsageEstimate) -> Span {

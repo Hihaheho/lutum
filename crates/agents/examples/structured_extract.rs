@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match outcome {
         StructuredStepOutcome::Finished(result) => {
             println!("{:?}", result.semantic);
-            session.commit_structured(result)?;
+            session.commit_structured(result);
         }
         StructuredStepOutcome::NeedsToolResults(_) => unreachable!(),
     }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{any::Any, fmt, sync::Arc};
 
 use crate::conversation::{AssistantTurnItem, RawJson, ToolCallId, ToolName};
 
@@ -50,7 +50,7 @@ pub trait ItemView {
 /// Read-only view of a committed turn in the session transcript.
 ///
 /// Object-safe: items are accessed by index so no generic iterators are needed.
-pub trait TurnView: Send + Sync {
+pub trait TurnView: fmt::Debug + Send + Sync {
     /// Role or category of this turn.
     fn role(&self) -> TurnRole;
 
@@ -59,6 +59,15 @@ pub trait TurnView: Send + Sync {
 
     /// Returns a reference to the item at `index`, or `None` if out of bounds.
     fn item_at(&self, index: usize) -> Option<&dyn ItemView>;
+
+    /// Returns this turn as `Any` for adapter-specific downcasting.
+    fn as_any(&self) -> &dyn Any;
+}
+
+impl dyn TurnView {
+    pub fn downcast_ref<T: TurnView + 'static>(&self) -> Option<&T> {
+        self.as_any().downcast_ref::<T>()
+    }
 }
 
 // ── blanket helpers ───────────────────────────────────────────────────────────
@@ -92,6 +101,7 @@ impl<'a> Iterator for TurnItemIter<'a> {
 /// Adapters that produce `AssistantTurn`-backed results can use this type
 /// directly.  Provider-specific adapters may define their own concrete type
 /// instead.
+#[derive(Debug)]
 pub struct AssistantTurnView {
     items: Vec<CoreAssistantItemView>,
 }
@@ -117,8 +127,13 @@ impl TurnView for AssistantTurnView {
     fn item_at(&self, index: usize) -> Option<&dyn ItemView> {
         self.items.get(index).map(|v| v as &dyn ItemView)
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
+#[derive(Debug)]
 enum CoreAssistantItemKind {
     Text(String),
     Reasoning(String),
@@ -130,6 +145,7 @@ enum CoreAssistantItemKind {
     },
 }
 
+#[derive(Debug)]
 struct CoreAssistantItemView {
     kind: CoreAssistantItemKind,
 }

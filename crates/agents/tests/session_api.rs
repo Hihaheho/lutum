@@ -45,7 +45,8 @@ fn prepare_and_collect_do_not_mutate_transcript_before_commit() {
     let ctx = agents::Context::new(budget, adapter);
     let mut session = Session::new(ctx);
     session.push_user("Hi.");
-    let before = session.snapshot();
+    let before_len = session.input().items().len();
+    let before_turns = session.list_turns().count();
 
     let outcome = futures::executor::block_on(async {
         session
@@ -61,14 +62,16 @@ fn prepare_and_collect_do_not_mutate_transcript_before_commit() {
             .unwrap()
     });
 
-    assert_eq!(session.snapshot(), before);
+    assert_eq!(session.input().items().len(), before_len);
+    assert_eq!(session.list_turns().count(), before_turns);
 
     match outcome {
-        TextStepOutcome::Finished(result) => session.commit_text(result).unwrap(),
+        TextStepOutcome::Finished(result) => session.commit_text(result),
         TextStepOutcome::NeedsToolResults(_) => unreachable!(),
     }
 
-    assert!(session.snapshot().items().len() > before.items().len());
+    assert_eq!(session.input().items().len(), before_len + 1);
+    assert_eq!(session.list_turns().count(), 1);
 }
 
 #[test]
@@ -96,7 +99,8 @@ fn tool_round_is_only_applied_on_explicit_commit() {
     let ctx = agents::Context::new(budget, adapter);
     let mut session = Session::new(ctx);
     session.push_user("Check weather.");
-    let before = session.snapshot();
+    let before_len = session.input().items().len();
+    let before_turns = session.list_turns().count();
 
     let outcome = futures::executor::block_on(async {
         session
@@ -117,7 +121,8 @@ fn tool_round_is_only_applied_on_explicit_commit() {
             .unwrap()
     });
 
-    assert_eq!(session.snapshot(), before);
+    assert_eq!(session.input().items().len(), before_len);
+    assert_eq!(session.list_turns().count(), before_turns);
 
     match outcome {
         TextStepOutcome::NeedsToolResults(round) => {
@@ -138,22 +143,8 @@ fn tool_round_is_only_applied_on_explicit_commit() {
         TextStepOutcome::Finished(_) => unreachable!(),
     }
 
-    assert!(session.snapshot().items().len() > before.items().len());
-}
-
-#[test]
-fn snapshot_round_trips_through_session() {
-    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let adapter = MockLlmAdapter::new();
-    let ctx = agents::Context::new(budget, adapter);
-    let mut session = Session::new(ctx.clone());
-    session.push_system("Be exact.");
-    session.push_user("Hello.");
-
-    let snapshot = session.snapshot();
-    let restored = Session::from_snapshot(ctx, snapshot.clone());
-
-    assert_eq!(snapshot, restored.snapshot());
+    assert_eq!(session.input().items().len(), before_len + 2);
+    assert_eq!(session.list_turns().count(), 1);
 }
 
 #[test]
@@ -213,12 +204,22 @@ fn session_can_drive_a_stateful_step_loop() {
                 .unwrap()
         });
         match outcome {
-            TextStepOutcome::Finished(result) => session.commit_text(result).unwrap(),
+            TextStepOutcome::Finished(result) => session.commit_text(result),
             TextStepOutcome::NeedsToolResults(_) => unreachable!(),
         }
     }
 
-    assert!(session.snapshot().items().len() >= 4);
+    assert_eq!(session.input().items().len(), 4);
+    let committed = session
+        .list_turns()
+        .map(|turn| {
+            turn.item_at(0)
+                .and_then(|item| item.as_text())
+                .unwrap()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(committed, vec!["first step", "second step"]);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -252,7 +253,8 @@ fn structured_tool_round_stays_explicit_until_commit() {
     let ctx = agents::Context::new(budget, adapter);
     let mut session = Session::new(ctx);
     session.push_user("Plan with a tool.");
-    let before = session.snapshot();
+    let before_len = session.input().items().len();
+    let before_turns = session.list_turns().count();
 
     let outcome = futures::executor::block_on(async {
         session
@@ -274,7 +276,8 @@ fn structured_tool_round_stays_explicit_until_commit() {
             .unwrap()
     });
 
-    assert_eq!(session.snapshot(), before);
+    assert_eq!(session.input().items().len(), before_len);
+    assert_eq!(session.list_turns().count(), before_turns);
 
     match outcome {
         StructuredStepOutcome::NeedsToolResults(round) => {
@@ -295,5 +298,6 @@ fn structured_tool_round_stays_explicit_until_commit() {
         StructuredStepOutcome::Finished(_) => unreachable!(),
     }
 
-    assert!(session.snapshot().items().len() > before.items().len());
+    assert_eq!(session.input().items().len(), before_len + 2);
+    assert_eq!(session.list_turns().count(), 1);
 }

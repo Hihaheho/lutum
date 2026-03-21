@@ -10,12 +10,13 @@ use thiserror::Error;
 use agents_protocol::{
     AgentError,
     budget::Usage,
-    conversation::{ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
+    conversation::{AssistantTurnItem, ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
     llm::{
         AdapterStructuredTurn, AdapterTextTurn, CompletionEvent, CompletionEventStream,
         CompletionRequest, ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream,
         ErasedTextTurnEvent, ErasedTextTurnEventStream, FinishReason, LlmAdapter, StreamKind,
     },
+    transcript::AssistantTurnView,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -191,6 +192,7 @@ impl LlmAdapter for MockLlmAdapter {
             .pop_front()
             .ok_or_else(|| AgentError::backend(MockError::MissingTextScenario))?;
         let mut tool_buffers: BTreeMap<ToolCallId, (ToolName, String)> = BTreeMap::new();
+        let mut committed_items = Vec::<AssistantTurnItem>::new();
 
         let events = scenario
             .events
@@ -200,12 +202,15 @@ impl LlmAdapter for MockLlmAdapter {
                     vec![Ok(ErasedTextTurnEvent::Started { request_id, model })]
                 }
                 Ok(RawTextTurnEvent::TextDelta { delta }) => {
+                    push_or_extend_text(&mut committed_items, &delta);
                     vec![Ok(ErasedTextTurnEvent::TextDelta { delta })]
                 }
                 Ok(RawTextTurnEvent::ReasoningDelta { delta }) => {
+                    push_or_extend_reasoning(&mut committed_items, &delta);
                     vec![Ok(ErasedTextTurnEvent::ReasoningDelta { delta })]
                 }
                 Ok(RawTextTurnEvent::RefusalDelta { delta }) => {
+                    push_or_extend_refusal(&mut committed_items, &delta);
                     vec![Ok(ErasedTextTurnEvent::RefusalDelta { delta })]
                 }
                 Ok(RawTextTurnEvent::ToolCallChunk {
@@ -225,6 +230,12 @@ impl LlmAdapter for MockLlmAdapter {
                     if is_complete_json(&entry.1) {
                         let arguments =
                             RawJson::parse(entry.1.clone()).expect("complete mock JSON is valid");
+                        push_tool_call(
+                            &mut committed_items,
+                            id.clone(),
+                            entry.0.clone(),
+                            arguments.clone(),
+                        );
                         out.push(Ok(ErasedTextTurnEvent::ToolCallReady(ToolMetadata::new(
                             id.clone(),
                             entry.0.clone(),
@@ -242,6 +253,7 @@ impl LlmAdapter for MockLlmAdapter {
                     request_id,
                     finish_reason,
                     usage,
+                    committed_turn: Arc::new(AssistantTurnView::from_items(&committed_items)),
                 })],
                 Err(err) => vec![Err(AgentError::backend(err))],
             })
@@ -263,6 +275,7 @@ impl LlmAdapter for MockLlmAdapter {
             .ok_or_else(|| AgentError::backend(MockError::MissingStructuredScenario))?;
         let mut structured_buffer = String::new();
         let mut tool_buffers: BTreeMap<ToolCallId, (ToolName, String)> = BTreeMap::new();
+        let mut committed_items = Vec::<AssistantTurnItem>::new();
 
         let events = scenario
             .events
@@ -273,14 +286,17 @@ impl LlmAdapter for MockLlmAdapter {
                 }
                 Ok(RawStructuredTurnEvent::StructuredOutputChunk { json_delta }) => {
                     structured_buffer.push_str(&json_delta);
+                    push_or_extend_text(&mut committed_items, &json_delta);
                     vec![Ok(ErasedStructuredTurnEvent::StructuredOutputChunk {
                         json_delta,
                     })]
                 }
                 Ok(RawStructuredTurnEvent::ReasoningDelta { delta }) => {
+                    push_or_extend_reasoning(&mut committed_items, &delta);
                     vec![Ok(ErasedStructuredTurnEvent::ReasoningDelta { delta })]
                 }
                 Ok(RawStructuredTurnEvent::RefusalDelta { delta }) => {
+                    push_or_extend_refusal(&mut committed_items, &delta);
                     vec![Ok(ErasedStructuredTurnEvent::RefusalDelta { delta })]
                 }
                 Ok(RawStructuredTurnEvent::ToolCallChunk {
@@ -300,6 +316,12 @@ impl LlmAdapter for MockLlmAdapter {
                     if is_complete_json(&entry.1) {
                         let arguments =
                             RawJson::parse(entry.1.clone()).expect("complete mock JSON is valid");
+                        push_tool_call(
+                            &mut committed_items,
+                            id.clone(),
+                            entry.0.clone(),
+                            arguments.clone(),
+                        );
                         out.push(Ok(ErasedStructuredTurnEvent::ToolCallReady(
                             ToolMetadata::new(id.clone(), entry.0.clone(), arguments),
                         )));
@@ -324,6 +346,7 @@ impl LlmAdapter for MockLlmAdapter {
                         request_id,
                         finish_reason,
                         usage,
+                        committed_turn: Arc::new(AssistantTurnView::from_items(&committed_items)),
                     }));
                     out
                 }
@@ -380,4 +403,47 @@ impl LlmAdapter for MockLlmAdapter {
 
 fn is_complete_json(input: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(input).is_ok()
+}
+
+fn push_or_extend_text(items: &mut Vec<AssistantTurnItem>, delta: &str) {
+    if delta.is_empty() {
+        return;
+    }
+    match items.last_mut() {
+        Some(AssistantTurnItem::Text(existing)) => existing.push_str(delta),
+        _ => items.push(AssistantTurnItem::Text(delta.to_string())),
+    }
+}
+
+fn push_or_extend_reasoning(items: &mut Vec<AssistantTurnItem>, delta: &str) {
+    if delta.is_empty() {
+        return;
+    }
+    match items.last_mut() {
+        Some(AssistantTurnItem::Reasoning(existing)) => existing.push_str(delta),
+        _ => items.push(AssistantTurnItem::Reasoning(delta.to_string())),
+    }
+}
+
+fn push_or_extend_refusal(items: &mut Vec<AssistantTurnItem>, delta: &str) {
+    if delta.is_empty() {
+        return;
+    }
+    match items.last_mut() {
+        Some(AssistantTurnItem::Refusal(existing)) => existing.push_str(delta),
+        _ => items.push(AssistantTurnItem::Refusal(delta.to_string())),
+    }
+}
+
+fn push_tool_call(
+    items: &mut Vec<AssistantTurnItem>,
+    id: ToolCallId,
+    name: ToolName,
+    arguments: RawJson,
+) {
+    items.push(AssistantTurnItem::ToolCall {
+        id,
+        name,
+        arguments,
+    });
 }

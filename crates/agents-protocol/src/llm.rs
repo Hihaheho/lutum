@@ -1,4 +1,4 @@
-use std::{fmt, marker::PhantomData, pin::Pin};
+use std::{fmt, marker::PhantomData, pin::Pin, sync::Arc};
 
 use bon::Builder;
 use futures::Stream;
@@ -9,6 +9,7 @@ use crate::{
     conversation::{ModelInput, RawJson, ToolMetadata},
     structured::StructuredOutput,
     toolset::{NoTools, ToolPolicy, Toolset},
+    transcript::CommittedTurn,
 };
 
 pub type TextTurnEventStream<T, E = AgentError> =
@@ -321,7 +322,7 @@ pub struct CompletionOptions {
     pub stop: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum TextTurnEvent<T: Toolset> {
     Started {
         request_id: Option<String>,
@@ -346,10 +347,11 @@ pub enum TextTurnEvent<T: Toolset> {
         request_id: Option<String>,
         finish_reason: FinishReason,
         usage: Usage,
+        committed_turn: CommittedTurn,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum StructuredTurnEvent<T: Toolset, O: StructuredOutput> {
     Started {
         request_id: Option<String>,
@@ -375,10 +377,11 @@ pub enum StructuredTurnEvent<T: Toolset, O: StructuredOutput> {
         request_id: Option<String>,
         finish_reason: FinishReason,
         usage: Usage,
+        committed_turn: CommittedTurn,
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum ErasedTextTurnEvent {
     Started {
         request_id: Option<String>,
@@ -403,10 +406,11 @@ pub enum ErasedTextTurnEvent {
         request_id: Option<String>,
         finish_reason: FinishReason,
         usage: Usage,
+        committed_turn: CommittedTurn,
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum ErasedStructuredTurnEvent {
     Started {
         request_id: Option<String>,
@@ -432,7 +436,243 @@ pub enum ErasedStructuredTurnEvent {
         request_id: Option<String>,
         finish_reason: FinishReason,
         usage: Usage,
+        committed_turn: CommittedTurn,
     },
+}
+
+impl<T> PartialEq for TextTurnEvent<T>
+where
+    T: Toolset,
+    T::ToolCall: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Started {
+                    request_id: lhs_request_id,
+                    model: lhs_model,
+                },
+                Self::Started {
+                    request_id: rhs_request_id,
+                    model: rhs_model,
+                },
+            ) => lhs_request_id == rhs_request_id && lhs_model == rhs_model,
+            (Self::TextDelta { delta: lhs }, Self::TextDelta { delta: rhs }) => lhs == rhs,
+            (Self::ReasoningDelta { delta: lhs }, Self::ReasoningDelta { delta: rhs }) => {
+                lhs == rhs
+            }
+            (Self::RefusalDelta { delta: lhs }, Self::RefusalDelta { delta: rhs }) => lhs == rhs,
+            (
+                Self::ToolCallChunk {
+                    id: lhs_id,
+                    name: lhs_name,
+                    arguments_json_delta: lhs_delta,
+                },
+                Self::ToolCallChunk {
+                    id: rhs_id,
+                    name: rhs_name,
+                    arguments_json_delta: rhs_delta,
+                },
+            ) => lhs_id == rhs_id && lhs_name == rhs_name && lhs_delta == rhs_delta,
+            (Self::ToolCallReady(lhs), Self::ToolCallReady(rhs)) => lhs == rhs,
+            (
+                Self::Completed {
+                    request_id: lhs_request_id,
+                    finish_reason: lhs_finish_reason,
+                    usage: lhs_usage,
+                    committed_turn: lhs_committed_turn,
+                },
+                Self::Completed {
+                    request_id: rhs_request_id,
+                    finish_reason: rhs_finish_reason,
+                    usage: rhs_usage,
+                    committed_turn: rhs_committed_turn,
+                },
+            ) => {
+                lhs_request_id == rhs_request_id
+                    && lhs_finish_reason == rhs_finish_reason
+                    && lhs_usage == rhs_usage
+                    && Arc::ptr_eq(lhs_committed_turn, rhs_committed_turn)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<T, O> PartialEq for StructuredTurnEvent<T, O>
+where
+    T: Toolset,
+    T::ToolCall: PartialEq,
+    O: StructuredOutput + PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Started {
+                    request_id: lhs_request_id,
+                    model: lhs_model,
+                },
+                Self::Started {
+                    request_id: rhs_request_id,
+                    model: rhs_model,
+                },
+            ) => lhs_request_id == rhs_request_id && lhs_model == rhs_model,
+            (
+                Self::StructuredOutputChunk { json_delta: lhs },
+                Self::StructuredOutputChunk { json_delta: rhs },
+            ) => lhs == rhs,
+            (Self::StructuredOutputReady(lhs), Self::StructuredOutputReady(rhs)) => lhs == rhs,
+            (Self::ReasoningDelta { delta: lhs }, Self::ReasoningDelta { delta: rhs }) => {
+                lhs == rhs
+            }
+            (Self::RefusalDelta { delta: lhs }, Self::RefusalDelta { delta: rhs }) => lhs == rhs,
+            (
+                Self::ToolCallChunk {
+                    id: lhs_id,
+                    name: lhs_name,
+                    arguments_json_delta: lhs_delta,
+                },
+                Self::ToolCallChunk {
+                    id: rhs_id,
+                    name: rhs_name,
+                    arguments_json_delta: rhs_delta,
+                },
+            ) => lhs_id == rhs_id && lhs_name == rhs_name && lhs_delta == rhs_delta,
+            (Self::ToolCallReady(lhs), Self::ToolCallReady(rhs)) => lhs == rhs,
+            (
+                Self::Completed {
+                    request_id: lhs_request_id,
+                    finish_reason: lhs_finish_reason,
+                    usage: lhs_usage,
+                    committed_turn: lhs_committed_turn,
+                },
+                Self::Completed {
+                    request_id: rhs_request_id,
+                    finish_reason: rhs_finish_reason,
+                    usage: rhs_usage,
+                    committed_turn: rhs_committed_turn,
+                },
+            ) => {
+                lhs_request_id == rhs_request_id
+                    && lhs_finish_reason == rhs_finish_reason
+                    && lhs_usage == rhs_usage
+                    && Arc::ptr_eq(lhs_committed_turn, rhs_committed_turn)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq for ErasedTextTurnEvent {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Started {
+                    request_id: lhs_request_id,
+                    model: lhs_model,
+                },
+                Self::Started {
+                    request_id: rhs_request_id,
+                    model: rhs_model,
+                },
+            ) => lhs_request_id == rhs_request_id && lhs_model == rhs_model,
+            (Self::TextDelta { delta: lhs }, Self::TextDelta { delta: rhs }) => lhs == rhs,
+            (Self::ReasoningDelta { delta: lhs }, Self::ReasoningDelta { delta: rhs }) => {
+                lhs == rhs
+            }
+            (Self::RefusalDelta { delta: lhs }, Self::RefusalDelta { delta: rhs }) => lhs == rhs,
+            (
+                Self::ToolCallChunk {
+                    id: lhs_id,
+                    name: lhs_name,
+                    arguments_json_delta: lhs_delta,
+                },
+                Self::ToolCallChunk {
+                    id: rhs_id,
+                    name: rhs_name,
+                    arguments_json_delta: rhs_delta,
+                },
+            ) => lhs_id == rhs_id && lhs_name == rhs_name && lhs_delta == rhs_delta,
+            (Self::ToolCallReady(lhs), Self::ToolCallReady(rhs)) => lhs == rhs,
+            (
+                Self::Completed {
+                    request_id: lhs_request_id,
+                    finish_reason: lhs_finish_reason,
+                    usage: lhs_usage,
+                    ..
+                },
+                Self::Completed {
+                    request_id: rhs_request_id,
+                    finish_reason: rhs_finish_reason,
+                    usage: rhs_usage,
+                    ..
+                },
+            ) => {
+                lhs_request_id == rhs_request_id
+                    && lhs_finish_reason == rhs_finish_reason
+                    && lhs_usage == rhs_usage
+            }
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq for ErasedStructuredTurnEvent {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Started {
+                    request_id: lhs_request_id,
+                    model: lhs_model,
+                },
+                Self::Started {
+                    request_id: rhs_request_id,
+                    model: rhs_model,
+                },
+            ) => lhs_request_id == rhs_request_id && lhs_model == rhs_model,
+            (
+                Self::StructuredOutputChunk { json_delta: lhs },
+                Self::StructuredOutputChunk { json_delta: rhs },
+            ) => lhs == rhs,
+            (Self::StructuredOutputReady(lhs), Self::StructuredOutputReady(rhs)) => lhs == rhs,
+            (Self::ReasoningDelta { delta: lhs }, Self::ReasoningDelta { delta: rhs }) => {
+                lhs == rhs
+            }
+            (Self::RefusalDelta { delta: lhs }, Self::RefusalDelta { delta: rhs }) => lhs == rhs,
+            (
+                Self::ToolCallChunk {
+                    id: lhs_id,
+                    name: lhs_name,
+                    arguments_json_delta: lhs_delta,
+                },
+                Self::ToolCallChunk {
+                    id: rhs_id,
+                    name: rhs_name,
+                    arguments_json_delta: rhs_delta,
+                },
+            ) => lhs_id == rhs_id && lhs_name == rhs_name && lhs_delta == rhs_delta,
+            (Self::ToolCallReady(lhs), Self::ToolCallReady(rhs)) => lhs == rhs,
+            (
+                Self::Completed {
+                    request_id: lhs_request_id,
+                    finish_reason: lhs_finish_reason,
+                    usage: lhs_usage,
+                    ..
+                },
+                Self::Completed {
+                    request_id: rhs_request_id,
+                    finish_reason: rhs_finish_reason,
+                    usage: rhs_usage,
+                    ..
+                },
+            ) => {
+                lhs_request_id == rhs_request_id
+                    && lhs_finish_reason == rhs_finish_reason
+                    && lhs_usage == rhs_usage
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -525,5 +765,77 @@ where
         request_id: &str,
     ) -> Result<Option<Usage>, AgentError> {
         (**self).recover_usage(kind, request_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+
+    use super::*;
+    use crate::transcript::AssistantTurnView;
+
+    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+    struct Summary {
+        answer: String,
+    }
+
+    #[test]
+    fn text_completed_equality_checks_committed_turn_identity() {
+        let shared_turn = Arc::new(AssistantTurnView::from_items(&[]));
+        let different_turn = Arc::new(AssistantTurnView::from_items(&[]));
+
+        let lhs = TextTurnEvent::<NoTools>::Completed {
+            request_id: Some("req-1".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage::zero(),
+            committed_turn: shared_turn.clone(),
+        };
+        let same = TextTurnEvent::<NoTools>::Completed {
+            request_id: Some("req-1".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage::zero(),
+            committed_turn: shared_turn,
+        };
+        let different = TextTurnEvent::<NoTools>::Completed {
+            request_id: Some("req-1".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage::zero(),
+            committed_turn: different_turn,
+        };
+
+        assert_eq!(lhs, same);
+        assert_ne!(lhs, different);
+    }
+
+    #[test]
+    fn structured_completed_equality_checks_committed_turn_identity() {
+        let shared_turn = Arc::new(AssistantTurnView::from_items(&[]));
+        let different_turn = Arc::new(AssistantTurnView::from_items(&[]));
+
+        let lhs = StructuredTurnEvent::<NoTools, Summary>::Completed {
+            request_id: Some("req-2".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage::zero(),
+            committed_turn: shared_turn.clone(),
+        };
+        let same = StructuredTurnEvent::<NoTools, Summary>::Completed {
+            request_id: Some("req-2".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage::zero(),
+            committed_turn: shared_turn,
+        };
+        let different = StructuredTurnEvent::<NoTools, Summary>::Completed {
+            request_id: Some("req-2".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage::zero(),
+            committed_turn: different_turn,
+        };
+
+        assert_eq!(lhs, same);
+        assert_ne!(lhs, different);
     }
 }

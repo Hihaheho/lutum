@@ -1,15 +1,17 @@
 use agents::{
     AdapterStructuredTurn, AdapterTextTurn, AgentError, AssistantInputItem, AssistantTurnItem,
-    BudgetLease, BudgetManager, CompletionEventStream, CompletionRequest, Context, ContextError,
-    ErasedStructuredTurnEventStream, ErasedTextTurnEventStream, InputMessageRole, LlmAdapter,
-    MessageContent, ModelInput, ModelInputItem, ModelName, ModelNameError, NonEmpty, RawJson,
-    ReasoningEffort, ReasoningParams, RequestBudget, RequestExtensions, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, StreamKind, StructuredTurn, Temperature, TextTurn, TextTurnReducer,
-    ToolMetadata, ToolPolicy, ToolUse, Usage, UsageEstimate,
+    AssistantTurnView, BudgetLease, BudgetManager, CompletionEventStream, CompletionRequest,
+    Context, ContextError, ErasedStructuredTurnEventStream, ErasedTextTurnEventStream,
+    InputMessageRole, LlmAdapter, MessageContent, ModelInput, ModelInputItem, ModelName,
+    ModelNameError, NonEmpty, RawJson, ReasoningEffort, ReasoningParams, RequestBudget,
+    RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind,
+    StructuredTurn, Temperature, TextTurn, TextTurnReducer, ToolMetadata, ToolPolicy, ToolUse,
+    Usage, UsageEstimate,
 };
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 struct NullAdapter;
 
@@ -193,6 +195,7 @@ fn reducer_is_public_and_directly_usable() {
                 total_tokens: 1,
                 ..Usage::zero()
             },
+            committed_turn: Arc::new(AssistantTurnView::from_items(&[])),
         })
         .unwrap();
     let result = reducer.into_result().unwrap();
@@ -228,6 +231,7 @@ fn reducer_ignores_duplicate_tool_call_ready() {
             request_id: None,
             finish_reason: agents::FinishReason::ToolCall,
             usage: Usage::zero(),
+            committed_turn: Arc::new(AssistantTurnView::from_items(&[])),
         })
         .unwrap();
 

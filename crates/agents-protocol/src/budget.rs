@@ -1,3 +1,9 @@
+//! Core budget primitives intentionally live in the shared protocol crate.
+//!
+//! Budget policy is user-driven through the [`BudgetManager`] trait, so
+//! adapters and higher-level crates can plug in their own accounting and
+//! enforcement strategies without moving budget ownership out of core.
+
 use std::{
     collections::BTreeMap,
     sync::{
