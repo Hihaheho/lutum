@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/agents",
+    "crates/agents", "crates/agents-claude",
     "crates/agents-macros",
     "crates/agents-openai",
     "crates/agents-protocol",
@@ -12,6 +12,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+agents-claude = { path = "crates/agents-claude" }
 agents-macros = { path = "crates/agents-macros" }
 agents-openai = { path = "crates/agents-openai" }
 agents-protocol = { path = "crates/agents-protocol" }

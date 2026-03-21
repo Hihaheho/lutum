@@ -154,7 +154,7 @@ pub struct PendingTextTurn<T>
 where
     T: Toolset,
 {
-    extensions: RequestExtensions,
+    extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
     adapter: Arc<dyn LlmAdapter>,
     span: Span,
@@ -167,7 +167,7 @@ where
     T: Toolset,
     O: StructuredOutput,
 {
-    extensions: RequestExtensions,
+    extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
     adapter: Arc<dyn LlmAdapter>,
     span: Span,
@@ -240,10 +240,11 @@ impl Context {
         let lease = self
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
+        let extensions = Arc::new(extensions);
         let span = turn_span("responses_text", turn.config.model.as_ref(), estimate);
         let stream = self
             .adapter
-            .responses_text(input, erase_text_turn(turn)?)
+            .responses_text(input, erase_text_turn(turn, Arc::clone(&extensions))?)
             .await?;
         Ok(PendingTextTurn {
             extensions,
@@ -273,10 +274,11 @@ impl Context {
         let lease = self
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
+        let extensions = Arc::new(extensions);
         let span = turn_span("responses_structured", turn.config.model.as_ref(), estimate);
         let stream = self
             .adapter
-            .responses_structured(input, erase_structured_turn(turn)?)
+            .responses_structured(input, erase_structured_turn(turn, Arc::clone(&extensions))?)
             .await?;
         Ok(PendingStructuredTurn {
             extensions,
@@ -465,9 +467,9 @@ where
         H: EventHandler<TextTurnEvent<T>, TextTurnState<T>>,
     {
         let cx = HandlerContext {
-            extensions: &self.extensions,
+            extensions: self.extensions.as_ref(),
             state: self.reducer.state(),
-            remaining_budget: self.owned_lease.budget.remaining(&self.extensions),
+            remaining_budget: self.owned_lease.budget.remaining(self.extensions.as_ref()),
         };
         handler.on_event(event, &cx).await
     }
@@ -648,9 +650,9 @@ where
         H: EventHandler<StructuredTurnEvent<T, O>, StructuredTurnState<T, O>>,
     {
         let cx = HandlerContext {
-            extensions: &self.extensions,
+            extensions: self.extensions.as_ref(),
             state: self.reducer.state(),
-            remaining_budget: self.owned_lease.budget.remaining(&self.extensions),
+            remaining_budget: self.owned_lease.budget.remaining(self.extensions.as_ref()),
         };
         handler.on_event(event, &cx).await
     }
@@ -826,17 +828,22 @@ where
     }
 }
 
-fn erase_text_turn<T>(turn: TextTurn<T>) -> Result<AdapterTextTurn, AgentError>
+fn erase_text_turn<T>(
+    turn: TextTurn<T>,
+    extensions: Arc<RequestExtensions>,
+) -> Result<AdapterTextTurn, AgentError>
 where
     T: Toolset,
 {
     Ok(AdapterTextTurn {
         config: erase_turn_config(turn.config)?,
+        extensions,
     })
 }
 
 fn erase_structured_turn<T, O>(
     turn: StructuredTurn<T, O>,
+    extensions: Arc<RequestExtensions>,
 ) -> Result<AdapterStructuredTurn, AgentError>
 where
     T: Toolset,
@@ -844,6 +851,7 @@ where
 {
     Ok(AdapterStructuredTurn {
         config: erase_turn_config(turn.config)?,
+        extensions,
         output: AdapterStructuredOutputSpec {
             schema_name: <O as StructuredOutput>::schema_name().into_owned(),
             schema: serde_json::to_value(<O as StructuredOutput>::json_schema())?,
@@ -855,19 +863,27 @@ fn erase_turn_config<T>(config: TurnConfig<T>) -> Result<AdapterTurnConfig, Agen
 where
     T: Toolset,
 {
-    let tool_choice = if config.tools.requires_tools() {
-        AdapterToolChoice::Required
-    } else if config.tools.uses_tools() {
-        AdapterToolChoice::Auto
-    } else {
-        AdapterToolChoice::None
-    };
     let selected = config.tools.selected().map(|selectors| {
         selectors
             .iter()
             .map(|selector| selector.name())
             .collect::<Vec<_>>()
     });
+    let tool_choice = if config.tools.requires_tools() {
+        if let Some(names) = selected.as_ref() {
+            if names.len() == 1 {
+                AdapterToolChoice::Specific(names[0].to_string())
+            } else {
+                AdapterToolChoice::Required
+            }
+        } else {
+            AdapterToolChoice::Required
+        }
+    } else if config.tools.uses_tools() {
+        AdapterToolChoice::Auto
+    } else {
+        AdapterToolChoice::None
+    };
     let tools = T::definitions()
         .iter()
         .filter(|tool| {
@@ -887,7 +903,6 @@ where
     Ok(AdapterTurnConfig {
         model: config.model,
         generation: config.generation,
-        reasoning: config.reasoning,
         tools,
         tool_choice,
     })

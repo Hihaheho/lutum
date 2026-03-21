@@ -3,10 +3,9 @@ use agents::{
     AssistantTurnView, BudgetLease, BudgetManager, CompletionEventStream, CompletionRequest,
     Context, ContextError, ErasedStructuredTurnEventStream, ErasedTextTurnEventStream,
     InputMessageRole, LlmAdapter, MessageContent, ModelInput, ModelInputItem, ModelName,
-    ModelNameError, NonEmpty, RawJson, ReasoningEffort, ReasoningParams, RequestBudget,
-    RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind,
-    StructuredTurn, Temperature, TextTurn, TextTurnReducer, ToolMetadata, ToolPolicy, ToolUse,
-    Usage, UsageEstimate,
+    ModelNameError, NonEmpty, RawJson, RequestBudget, RequestExtensions, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, StreamKind, StructuredTurn, Temperature, TextTurn, TextTurnReducer,
+    ToolMetadata, ToolPolicy, ToolUse, Usage, UsageEstimate,
 };
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -127,10 +126,6 @@ fn typed_public_api_compiles_and_constructs_requests() {
     _structured.config.generation = agents::GenerationParams {
         temperature: Some(Temperature::try_from(0.3).unwrap()),
         max_output_tokens: Some(512),
-    };
-    _structured.config.reasoning = ReasoningParams {
-        effort: Some(ReasoningEffort::Low),
-        summary: None,
     };
     let _completion = CompletionRequest::builder()
         .model(ModelName::new("gpt-4.1-mini").unwrap())

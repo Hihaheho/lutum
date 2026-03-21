@@ -24,6 +24,8 @@ pub mod llm {
 
 pub mod mock;
 
+#[cfg(feature = "claude")]
+pub use agents_claude as claude;
 #[cfg(feature = "openai")]
 pub use agents_openai as openai;
 
@@ -41,9 +43,15 @@ pub mod toolset {
     pub use agents_protocol::toolset::*;
 }
 
+#[cfg(feature = "claude")]
+pub use agents_claude::{
+    BudgetTokensResolver, ClaudeAdapter, ClaudeCommittedTurn, ClaudeError, ClaudeTurnItem,
+};
 pub use agents_macros::{Toolset, tool_fn, tool_input};
 #[cfg(feature = "openai")]
-pub use agents_openai::{OpenAiAdapter, OpenAiError};
+pub use agents_openai::{
+    OpenAiAdapter, OpenAiError, OpenAiReasoningEffort, ReasoningEffortResolver,
+};
 pub use agents_protocol::{
     AdapterStructuredOutputSpec, AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice,
     AdapterToolDefinition, AdapterTurnConfig, AgentError, AssistantInputItem, AssistantTurn,
@@ -54,17 +62,16 @@ pub use agents_protocol::{
     ErasedTextTurnEvent, ErasedTextTurnEventStream, FinishReason, GenerationParams,
     InputMessageRole, ItemView, LlmAdapter, MessageContent, ModelInput, ModelInputItem,
     ModelInputValidationError, ModelName, ModelNameError, NoToolSelector, NoTools, NonEmpty,
-    RawJson, ReasoningEffort, ReasoningParams, ReasoningSummary, Remaining, RequestBudget,
-    RequestExtensions, SharedPoolBudgetError, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-    StreamKind, StructuredOutput, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
-    StructuredTurnEventStream, StructuredTurnOutcome, StructuredTurnReducer,
-    StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, Temperature,
-    TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TextTurnReducer,
-    TextTurnReductionError, TextTurnResult, TextTurnState, ToolCallError, ToolCallId,
-    ToolCallItemView, ToolCallWrapper, ToolDef, ToolExecutionError, ToolInput, ToolMetadata,
-    ToolName, ToolPolicy, ToolResultItemView, ToolSelector, ToolUse, ToolUseError, Toolset,
-    TurnConfig, TurnItemIter, TurnRole, TurnView, Usage, UsageEstimate, assistant_json,
-    find_tool_call_arguments,
+    RawJson, Remaining, RequestBudget, RequestExtensions, SharedPoolBudgetError,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind, StructuredOutput,
+    StructuredOutputSpec, StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream,
+    StructuredTurnOutcome, StructuredTurnReducer, StructuredTurnReductionError,
+    StructuredTurnResult, StructuredTurnState, Temperature, TemperatureError, TextTurn,
+    TextTurnEvent, TextTurnEventStream, TextTurnReducer, TextTurnReductionError, TextTurnResult,
+    TextTurnState, ToolCallError, ToolCallId, ToolCallItemView, ToolCallWrapper, ToolDef,
+    ToolExecutionError, ToolInput, ToolMetadata, ToolName, ToolPolicy, ToolResultItemView,
+    ToolSelector, ToolUse, ToolUseError, Toolset, TurnConfig, TurnItemIter, TurnRole, TurnView,
+    Usage, UsageEstimate, assistant_json, find_tool_call_arguments,
 };
 pub use context::{
     CollectError, Context, ContextError, EventHandler, HandlerContext, HandlerDirective,

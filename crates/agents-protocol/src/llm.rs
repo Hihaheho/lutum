@@ -94,37 +94,12 @@ pub struct GenerationParams {
     pub max_output_tokens: Option<u32>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ReasoningEffort {
-    Low,
-    #[default]
-    Medium,
-    High,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ReasoningSummary {
-    #[default]
-    Auto,
-    Concise,
-    Detailed,
-}
-
-#[derive(Builder, Clone, Debug, Default, PartialEq, Eq)]
-#[builder(builder_type(name = ReasoningParamsBuilder))]
-pub struct ReasoningParams {
-    pub effort: Option<ReasoningEffort>,
-    pub summary: Option<ReasoningSummary>,
-}
-
 #[derive(Builder, Clone, Debug, PartialEq)]
 #[builder(builder_type(name = TurnConfigBuilder))]
 pub struct TurnConfig<T: Toolset = NoTools> {
     pub model: ModelName,
     #[builder(default)]
     pub generation: GenerationParams,
-    #[builder(default)]
-    pub reasoning: ReasoningParams,
     #[builder(default)]
     pub tools: ToolPolicy<T>,
     #[builder(default = RequestBudget::unlimited())]
@@ -139,7 +114,6 @@ where
         Self {
             model,
             generation: GenerationParams::default(),
-            reasoning: ReasoningParams::default(),
             tools: ToolPolicy::Disabled,
             budget: RequestBudget::unlimited(),
         }
@@ -209,25 +183,26 @@ pub struct AdapterToolDefinition {
     pub input_schema: serde_json::Value,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdapterToolChoice {
     None,
     Auto,
     Required,
+    Specific(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdapterTurnConfig {
     pub model: ModelName,
     pub generation: GenerationParams,
-    pub reasoning: ReasoningParams,
     pub tools: Vec<AdapterToolDefinition>,
     pub tool_choice: AdapterToolChoice,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct AdapterTextTurn {
     pub config: AdapterTurnConfig,
+    pub extensions: Arc<crate::extensions::RequestExtensions>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -236,10 +211,44 @@ pub struct AdapterStructuredOutputSpec {
     pub schema: serde_json::Value,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct AdapterStructuredTurn {
     pub config: AdapterTurnConfig,
+    pub extensions: Arc<crate::extensions::RequestExtensions>,
     pub output: AdapterStructuredOutputSpec,
+}
+
+impl fmt::Debug for AdapterTextTurn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdapterTextTurn")
+            .field("config", &self.config)
+            .field("extensions", &"<opaque>")
+            .finish()
+    }
+}
+
+impl PartialEq for AdapterTextTurn {
+    fn eq(&self, other: &Self) -> bool {
+        self.config == other.config && Arc::ptr_eq(&self.extensions, &other.extensions)
+    }
+}
+
+impl fmt::Debug for AdapterStructuredTurn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdapterStructuredTurn")
+            .field("config", &self.config)
+            .field("extensions", &"<opaque>")
+            .field("output", &self.output)
+            .finish()
+    }
+}
+
+impl PartialEq for AdapterStructuredTurn {
+    fn eq(&self, other: &Self) -> bool {
+        self.config == other.config
+            && Arc::ptr_eq(&self.extensions, &other.extensions)
+            && self.output == other.output
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

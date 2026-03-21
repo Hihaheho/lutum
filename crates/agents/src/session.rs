@@ -3,9 +3,9 @@ use std::convert::Infallible;
 
 use agents_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
-    GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ReasoningParams,
-    RequestBudget, RequestExtensions, StructuredTurn, StructuredTurnEventStream, TextTurn,
-    TextTurnEventStream, ToolUse, Toolset, TurnConfig, TurnView, UsageEstimate,
+    GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, RequestBudget,
+    RequestExtensions, StructuredTurn, StructuredTurnEventStream, TextTurn, TextTurnEventStream,
+    ToolUse, Toolset, TurnConfig, TurnView, UsageEstimate,
     budget::Usage,
     reducer::{
         StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, TextTurnResult,
@@ -25,7 +25,6 @@ use crate::{
 pub struct SessionDefaults {
     pub model: Option<ModelName>,
     pub generation: GenerationParams,
-    pub reasoning: ReasoningParams,
     pub budget: RequestBudget,
 }
 
@@ -39,12 +38,6 @@ impl SessionDefaults {
         }
         if turn.generation.max_output_tokens.is_none() {
             turn.generation.max_output_tokens = self.generation.max_output_tokens;
-        }
-        if turn.reasoning.effort.is_none() {
-            turn.reasoning.effort = self.reasoning.effort;
-        }
-        if turn.reasoning.summary.is_none() {
-            turn.reasoning.summary = self.reasoning.summary;
         }
         if turn.budget == RequestBudget::unlimited() && self.budget != RequestBudget::unlimited() {
             turn.budget = self.budget;

@@ -5,9 +5,11 @@ edition.workspace = true
 
 [features]
 default = ["openai"]
+claude = ["dep:agents-claude"]
 openai = ["dep:agents-openai"]
 
 [dependencies]
+agents-claude = { workspace = true, optional = true }
 agents-macros.workspace = true
 agents-openai = { workspace = true, optional = true }
 agents-protocol.workspace = true

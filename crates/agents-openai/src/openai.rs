@@ -24,20 +24,43 @@ use agents_protocol::{
         AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, RawJson,
         ToolCallId, ToolMetadata, ToolName, ToolUse,
     },
+    extensions::RequestExtensions,
     llm::{
         AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
         CompletionEvent, CompletionEventStream, CompletionRequest, ErasedStructuredTurnEvent,
         ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
-        FinishReason, LlmAdapter, ReasoningEffort, ReasoningParams, ReasoningSummary, StreamKind,
+        FinishReason, LlmAdapter, StreamKind,
     },
     transcript::{ItemView, ToolCallItemView, ToolResultItemView, TurnRole, TurnView},
 };
+
+pub trait ReasoningEffortResolver: Send + Sync + 'static {
+    fn resolve(&self, extensions: &RequestExtensions) -> Option<OpenAiReasoningEffort>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenAiReasoningEffort {
+    Low,
+    Medium,
+    High,
+}
+
+impl OpenAiReasoningEffort {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct OpenAiAdapter {
     client: Arc<Client>,
     api_key: Arc<str>,
     base_url: Arc<str>,
+    reasoning_resolver: Option<Arc<dyn ReasoningEffortResolver>>,
 }
 
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>;
@@ -53,11 +76,17 @@ impl OpenAiAdapter {
             client: Arc::new(Client::new()),
             api_key: Arc::from(api_key.into()),
             base_url: Arc::from("https://api.openai.com/v1"),
+            reasoning_resolver: None,
         }
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = Arc::from(base_url.into());
+        self
+    }
+
+    pub fn with_reasoning_resolver(mut self, r: impl ReasoningEffortResolver + 'static) -> Self {
+        self.reasoning_resolver = Some(Arc::new(r));
         self
     }
 
@@ -132,8 +161,12 @@ impl LlmAdapter for OpenAiAdapter {
         turn: AdapterTextTurn,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
         let model = turn.config.model.to_string();
-        let body =
-            build_responses_request(&input, &turn.config, None).map_err(AgentError::backend)?;
+        let reasoning_effort = self
+            .reasoning_resolver
+            .as_ref()
+            .and_then(|resolver| resolver.resolve(turn.extensions.as_ref()));
+        let body = build_responses_request(&input, &turn.config, reasoning_effort, None)
+            .map_err(AgentError::backend)?;
         let stream = self
             .send_streaming_json("/responses", body)
             .await
@@ -150,13 +183,17 @@ impl LlmAdapter for OpenAiAdapter {
         turn: AdapterStructuredTurn,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
         let model = turn.config.model.to_string();
+        let reasoning_effort = self
+            .reasoning_resolver
+            .as_ref()
+            .and_then(|resolver| resolver.resolve(turn.extensions.as_ref()));
         let output_schema = Some(json!({
             "type": "json_schema",
             "name": turn.output.schema_name,
             "strict": true,
             "schema": turn.output.schema,
         }));
-        let body = build_responses_request(&input, &turn.config, output_schema)
+        let body = build_responses_request(&input, &turn.config, reasoning_effort, output_schema)
             .map_err(AgentError::backend)?;
         let stream = self
             .send_streaming_json("/responses", body)
@@ -203,15 +240,20 @@ impl LlmAdapter for OpenAiAdapter {
 fn build_responses_request(
     input: &ModelInput,
     config: &AdapterTurnConfig,
+    reasoning_effort: Option<OpenAiReasoningEffort>,
     text_format: Option<Value>,
 ) -> Result<Value, OpenAiError> {
     let tools = build_tool_definitions(config);
+    let parallel_tool_calls = match &config.tool_choice {
+        AdapterToolChoice::Required | AdapterToolChoice::Specific(_) => false,
+        AdapterToolChoice::None | AdapterToolChoice::Auto => true,
+    };
     let mut body = json!({
         "model": config.model,
         "input": convert_model_input(input)?,
         "stream": true,
         "tools": tools,
-        "parallel_tool_calls": config.tool_choice != AdapterToolChoice::Required,
+        "parallel_tool_calls": parallel_tool_calls,
     });
 
     if let Some(temperature) = config.generation.temperature {
@@ -220,16 +262,30 @@ fn build_responses_request(
     if let Some(max_output_tokens) = config.generation.max_output_tokens {
         body["max_output_tokens"] = json!(max_output_tokens);
     }
-    if let Some(reasoning) = reasoning_to_json(&config.reasoning) {
-        body["reasoning"] = reasoning;
+    if let Some(reasoning_effort) = reasoning_effort {
+        body["reasoning"] = json!({
+            "effort": reasoning_effort.as_str(),
+        });
     }
     if let Some(text_format) = text_format {
         body["text"] = json!({ "format": text_format });
     }
-    if config.tool_choice == AdapterToolChoice::Required {
-        body["tool_choice"] = json!("required");
-    } else if config.tool_choice == AdapterToolChoice::None {
-        body["tool_choice"] = json!("none");
+    match &config.tool_choice {
+        AdapterToolChoice::Required => {
+            body["tool_choice"] = json!("required");
+        }
+        AdapterToolChoice::None => {
+            body["tool_choice"] = json!("none");
+        }
+        AdapterToolChoice::Specific(name) => {
+            body["tool_choice"] = json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                },
+            });
+        }
+        AdapterToolChoice::Auto => {}
     }
 
     Ok(body)
@@ -566,35 +622,6 @@ fn build_tool_definitions(config: &AdapterTurnConfig) -> Vec<Value> {
             })
         })
         .collect()
-}
-
-fn reasoning_to_json(reasoning: &ReasoningParams) -> Option<Value> {
-    let mut map = serde_json::Map::new();
-    if let Some(effort) = reasoning.effort {
-        map.insert(
-            "effort".into(),
-            json!(match effort {
-                ReasoningEffort::Low => "low",
-                ReasoningEffort::Medium => "medium",
-                ReasoningEffort::High => "high",
-            }),
-        );
-    }
-    if let Some(summary) = reasoning.summary {
-        map.insert(
-            "summary".into(),
-            json!(match summary {
-                ReasoningSummary::Auto => "auto",
-                ReasoningSummary::Concise => "concise",
-                ReasoningSummary::Detailed => "detailed",
-            }),
-        );
-    }
-    if map.is_empty() {
-        None
-    } else {
-        Some(Value::Object(map))
-    }
 }
 
 #[derive(Default)]
@@ -1014,13 +1041,20 @@ where
                             request_id = Some(id.to_string());
                         }
                         flush_buffered_content(&mut pending_item, &mut committed_items);
-                        let finish_reason = if saw_tool_call {
-                            FinishReason::ToolCall
-                        } else if saw_refusal {
-                            FinishReason::ContentFilter
-                        } else {
-                            FinishReason::Stop
-                        };
+                        let finish_reason = event
+                            .pointer("/response/stop_reason")
+                            .and_then(Value::as_str)
+                            .or_else(|| event.pointer("/response/finish_reason").and_then(Value::as_str))
+                            .map(map_responses_finish_reason)
+                            .unwrap_or_else(|| {
+                                if saw_tool_call {
+                                    FinishReason::ToolCall
+                                } else if saw_refusal {
+                                    FinishReason::ContentFilter
+                                } else {
+                                    FinishReason::Stop
+                                }
+                            });
                         let usage = parse_response_usage(&event["response"]);
                         yield ErasedTextTurnEvent::Completed {
                             request_id: request_id.clone(),
@@ -1211,13 +1245,20 @@ where
                             yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
                         }
                         flush_buffered_content(&mut pending_item, &mut committed_items);
-                        let finish_reason = if saw_tool_call {
-                            FinishReason::ToolCall
-                        } else if saw_refusal {
-                            FinishReason::ContentFilter
-                        } else {
-                            FinishReason::Stop
-                        };
+                        let finish_reason = event
+                            .pointer("/response/stop_reason")
+                            .and_then(Value::as_str)
+                            .or_else(|| event.pointer("/response/finish_reason").and_then(Value::as_str))
+                            .map(map_responses_finish_reason)
+                            .unwrap_or_else(|| {
+                                if saw_tool_call {
+                                    FinishReason::ToolCall
+                                } else if saw_refusal {
+                                    FinishReason::ContentFilter
+                                } else {
+                                    FinishReason::Stop
+                                }
+                            });
                         let usage = parse_response_usage(&event["response"]);
                         yield ErasedStructuredTurnEvent::Completed {
                             request_id: request_id.clone(),
@@ -1304,11 +1345,25 @@ where
 
 fn parse_response_usage(value: &Value) -> Usage {
     let usage = value.get("usage").unwrap_or(value);
+    let input_tokens = usage["input_tokens"].as_u64().unwrap_or_default();
+    let output_tokens = usage["output_tokens"].as_u64().unwrap_or_default();
+    let total_tokens = usage["total_tokens"]
+        .as_u64()
+        .unwrap_or(input_tokens + output_tokens);
     Usage {
-        input_tokens: usage["input_tokens"].as_u64().unwrap_or_default(),
-        output_tokens: usage["output_tokens"].as_u64().unwrap_or_default(),
-        total_tokens: usage["total_tokens"].as_u64().unwrap_or_default(),
+        input_tokens,
+        output_tokens,
+        total_tokens,
         cost_micros_usd: 0,
+    }
+}
+
+fn map_responses_finish_reason(reason: &str) -> FinishReason {
+    match reason {
+        "end_turn" | "stop_sequence" => FinishReason::Stop,
+        "max_tokens" => FinishReason::Length,
+        "tool_use" => FinishReason::ToolCall,
+        other => FinishReason::Unknown(other.to_string()),
     }
 }
 
@@ -1386,8 +1441,7 @@ mod tests {
     use agents_protocol::{
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
         AssistantTurnItem, AssistantTurnView, ErasedStructuredTurnEvent, ErasedTextTurnEvent,
-        GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ReasoningParams,
-        ToolUse,
+        GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ToolUse,
     };
 
     use super::*;
@@ -1577,7 +1631,6 @@ mod tests {
         let tools = build_tool_definitions(&AdapterTurnConfig {
             model: ModelName::new("gpt-4.1").unwrap(),
             generation: GenerationParams::default(),
-            reasoning: ReasoningParams::default(),
             tools: Vec::<AdapterToolDefinition>::new(),
             tool_choice: AdapterToolChoice::None,
         });
