@@ -1,19 +1,10 @@
 use agents::{
-    FinishReason, Marker, MockLlmAdapter, MockStructuredScenario, MockTextScenario, NoTools,
-    Session, SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcome,
-    TextStepOutcome, TextTurn, ToolPolicy, Usage, UsageEstimate,
+    FinishReason, MockLlmAdapter, MockStructuredScenario, MockTextScenario, NoTools,
+    RequestExtensions, Session, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    StructuredStepOutcome, TextStepOutcome, TextTurn, ToolPolicy, Usage, UsageEstimate,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug)]
-struct AppMarker;
-
-impl Marker for AppMarker {
-    fn span_name(&self) -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("session_api")
-    }
-}
 
 #[agents::tool_input(name = "weather", output = WeatherResult)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -51,14 +42,15 @@ fn prepare_and_collect_do_not_mutate_transcript_before_commit() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
-    let mut session = Session::new(ctx, AppMarker);
+    let ctx = agents::Context::new(budget, adapter);
+    let mut session = Session::new(ctx);
     session.push_user("Hi.");
     let before = session.snapshot();
 
     let outcome = futures::executor::block_on(async {
         session
             .prepare_text(
+                RequestExtensions::new(),
                 TextTurn::<NoTools>::new(agents::ModelName::new("gpt-4.1-mini").unwrap()),
                 UsageEstimate::zero(),
             )
@@ -101,14 +93,15 @@ fn tool_round_is_only_applied_on_explicit_commit() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
-    let mut session = Session::new(ctx, AppMarker);
+    let ctx = agents::Context::new(budget, adapter);
+    let mut session = Session::new(ctx);
     session.push_user("Check weather.");
     let before = session.snapshot();
 
     let outcome = futures::executor::block_on(async {
         session
             .prepare_text(
+                RequestExtensions::new(),
                 {
                     let mut turn =
                         TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1-mini").unwrap());
@@ -152,13 +145,13 @@ fn tool_round_is_only_applied_on_explicit_commit() {
 fn snapshot_round_trips_through_session() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let adapter = MockLlmAdapter::new();
-    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
-    let mut session = Session::new(ctx.clone(), AppMarker);
+    let ctx = agents::Context::new(budget, adapter);
+    let mut session = Session::new(ctx.clone());
     session.push_system("Be exact.");
     session.push_user("Hello.");
 
     let snapshot = session.snapshot();
-    let restored = Session::from_snapshot(ctx, AppMarker, snapshot.clone());
+    let restored = Session::from_snapshot(ctx, snapshot.clone());
 
     assert_eq!(snapshot, restored.snapshot());
 }
@@ -201,14 +194,15 @@ fn session_can_drive_a_stateful_step_loop() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
-    let mut session = Session::new(ctx, AppMarker);
+    let ctx = agents::Context::new(budget, adapter);
+    let mut session = Session::new(ctx);
 
     for prompt in ["step one", "step two"] {
         session.push_user(prompt);
         let outcome = futures::executor::block_on(async {
             session
                 .prepare_text(
+                    RequestExtensions::new(),
                     TextTurn::<NoTools>::new(agents::ModelName::new("gpt-4.1-mini").unwrap()),
                     UsageEstimate::zero(),
                 )
@@ -255,14 +249,15 @@ fn structured_tool_round_stays_explicit_until_commit() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
-    let mut session = Session::new(ctx, AppMarker);
+    let ctx = agents::Context::new(budget, adapter);
+    let mut session = Session::new(ctx);
     session.push_user("Plan with a tool.");
     let before = session.snapshot();
 
     let outcome = futures::executor::block_on(async {
         session
             .prepare_structured(
+                RequestExtensions::new(),
                 {
                     let mut turn = agents::StructuredTurn::<Tools, Summary>::new(
                         agents::ModelName::new("gpt-4.1-mini").unwrap(),

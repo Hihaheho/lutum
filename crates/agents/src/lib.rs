@@ -14,12 +14,12 @@ pub mod error {
     pub use agents_protocol::error::*;
 }
 
-pub mod llm {
-    pub use agents_protocol::llm::*;
+pub mod extensions {
+    pub use agents_protocol::extensions::*;
 }
 
-pub mod marker {
-    pub use agents_protocol::marker::*;
+pub mod llm {
+    pub use agents_protocol::llm::*;
 }
 
 pub mod mock;
@@ -47,21 +47,23 @@ pub use agents_openai::{OpenAiAdapter, OpenAiError};
 pub use agents_protocol::{
     AdapterStructuredOutputSpec, AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice,
     AdapterToolDefinition, AdapterTurnConfig, AgentError, AssistantInputItem, AssistantTurn,
-    AssistantTurnInputError, AssistantTurnItem, BudgetLease, BudgetManager, CompletionEvent,
-    CompletionEventStream, CompletionOptions, CompletionReducer, CompletionReductionError,
-    CompletionRequest, CompletionTurnResult, CompletionTurnState, EmptyNonEmptyError,
-    ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-    ErasedTextTurnEventStream, FinishReason, GenerationParams, InputMessageRole, LlmAdapter,
-    Marker, MessageContent, ModelInput, ModelInputItem, ModelInputValidationError, ModelName,
-    ModelNameError, NoToolSelector, NoTools, NonEmpty, RawJson, ReasoningEffort, ReasoningParams,
-    ReasoningSummary, Remaining, RequestBudget, SharedPoolBudgetError, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, StreamKind, StructuredOutput, StructuredOutputSpec, StructuredTurn,
+    AssistantTurnInputError, AssistantTurnItem, AssistantTurnView, BudgetLease, BudgetManager,
+    CommittedTurn, CompletionEvent, CompletionEventStream, CompletionOptions, CompletionReducer,
+    CompletionReductionError, CompletionRequest, CompletionTurnResult, CompletionTurnState,
+    EmptyNonEmptyError, ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream,
+    ErasedTextTurnEvent, ErasedTextTurnEventStream, FinishReason, GenerationParams,
+    InputMessageRole, ItemView, LlmAdapter, MessageContent, ModelInput, ModelInputItem,
+    ModelInputValidationError, ModelName, ModelNameError, NoToolSelector, NoTools, NonEmpty,
+    RawJson, ReasoningEffort, ReasoningParams, ReasoningSummary, Remaining, RequestBudget,
+    RequestExtensions, SharedPoolBudgetError, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    StreamKind, StructuredOutput, StructuredOutputSpec, StructuredTurn,
     StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnOutcome, StructuredTurnReducer,
     StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, Temperature,
     TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TextTurnReducer,
     TextTurnReductionError, TextTurnResult, TextTurnState, ToolCallError, ToolCallId,
-    ToolCallWrapper, ToolDef, ToolExecutionError, ToolInput, ToolMetadata, ToolName, ToolPolicy,
-    ToolSelector, ToolUse, ToolUseError, Toolset, TurnConfig, Usage, UsageEstimate, assistant_json,
+    ToolCallItemView, ToolCallWrapper, ToolDef, ToolExecutionError, ToolInput, ToolMetadata,
+    ToolName, ToolPolicy, ToolResultItemView, ToolSelector, ToolUse, ToolUseError, Toolset,
+    TurnConfig, TurnItemIter, TurnRole, TurnView, Usage, UsageEstimate, assistant_json,
     find_tool_call_arguments,
 };
 pub use context::{

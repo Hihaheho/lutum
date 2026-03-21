@@ -1,17 +1,8 @@
 use agents::{
-    FinishReason, Marker, MockLlmAdapter, MockTextScenario, NoTools, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcome, TextTurn, TurnConfig, Usage,
-    UsageEstimate,
+    FinishReason, MockLlmAdapter, MockTextScenario, NoTools, RequestExtensions, Session,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcome, TextTurn, TurnConfig,
+    Usage, UsageEstimate,
 };
-
-#[derive(Clone, Debug)]
-struct AppMarker;
-
-impl Marker for AppMarker {
-    fn span_name(&self) -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("text_session")
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,13 +24,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
-    let mut session = Session::new(ctx, AppMarker);
+    let ctx = agents::Context::new(budget, adapter);
+    let mut session = Session::new(ctx);
     session.push_system("You are concise.");
     session.push_user("Reply in two words.");
 
     let outcome = session
         .prepare_text(
+            RequestExtensions::new(),
             TextTurn::<NoTools> {
                 config: TurnConfig::<NoTools>::new(agents::ModelName::new("gpt-4.1-mini")?),
             },

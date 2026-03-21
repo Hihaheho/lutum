@@ -8,7 +8,7 @@ use std::{
 
 use thiserror::Error;
 
-use crate::AgentError;
+use crate::{AgentError, RequestExtensions};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct UsageEstimate {
@@ -29,7 +29,7 @@ impl UsageEstimate {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -99,18 +99,16 @@ impl RequestBudget {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BudgetLease<M> {
+pub struct BudgetLease {
     id: u64,
-    marker: M,
     reserved: UsageEstimate,
     request_budget: RequestBudget,
 }
 
-impl<M> BudgetLease<M> {
-    pub fn new(id: u64, marker: M, reserved: UsageEstimate, request_budget: RequestBudget) -> Self {
+impl BudgetLease {
+    pub fn new(id: u64, reserved: UsageEstimate, request_budget: RequestBudget) -> Self {
         Self {
             id,
-            marker,
             reserved,
             request_budget,
         }
@@ -118,10 +116,6 @@ impl<M> BudgetLease<M> {
 
     pub fn id(&self) -> u64 {
         self.id
-    }
-
-    pub fn marker(&self) -> &M {
-        &self.marker
     }
 
     pub fn reserved(&self) -> UsageEstimate {
@@ -133,35 +127,35 @@ impl<M> BudgetLease<M> {
     }
 }
 
-pub trait BudgetManager<M>: Send + Sync + 'static {
-    fn remaining(&self, marker: &M) -> Remaining;
+pub trait BudgetManager: Send + Sync + 'static {
+    fn remaining(&self, extensions: &RequestExtensions) -> Remaining;
     fn reserve(
         &self,
-        marker: &M,
+        extensions: &RequestExtensions,
         estimate: &UsageEstimate,
         request_budget: RequestBudget,
-    ) -> Result<BudgetLease<M>, AgentError>;
-    fn record_used(&self, lease: BudgetLease<M>, usage: Usage) -> Result<(), AgentError>;
+    ) -> Result<BudgetLease, AgentError>;
+    fn record_used(&self, lease: BudgetLease, usage: Usage) -> Result<(), AgentError>;
 }
 
-impl<M, T> BudgetManager<M> for Arc<T>
+impl<T> BudgetManager for Arc<T>
 where
-    T: BudgetManager<M> + ?Sized,
+    T: BudgetManager + ?Sized,
 {
-    fn remaining(&self, marker: &M) -> Remaining {
-        (**self).remaining(marker)
+    fn remaining(&self, extensions: &RequestExtensions) -> Remaining {
+        (**self).remaining(extensions)
     }
 
     fn reserve(
         &self,
-        marker: &M,
+        extensions: &RequestExtensions,
         estimate: &UsageEstimate,
         request_budget: RequestBudget,
-    ) -> Result<BudgetLease<M>, AgentError> {
-        (**self).reserve(marker, estimate, request_budget)
+    ) -> Result<BudgetLease, AgentError> {
+        (**self).reserve(extensions, estimate, request_budget)
     }
 
-    fn record_used(&self, lease: BudgetLease<M>, usage: Usage) -> Result<(), AgentError> {
+    fn record_used(&self, lease: BudgetLease, usage: Usage) -> Result<(), AgentError> {
         (**self).record_used(lease, usage)
     }
 }
@@ -256,11 +250,8 @@ impl SharedPoolBudgetManager {
     }
 }
 
-impl<M> BudgetManager<M> for SharedPoolBudgetManager
-where
-    M: Clone + Send + Sync + 'static,
-{
-    fn remaining(&self, _marker: &M) -> Remaining {
+impl BudgetManager for SharedPoolBudgetManager {
+    fn remaining(&self, _extensions: &RequestExtensions) -> Remaining {
         let state = self
             .state
             .lock()
@@ -277,10 +268,10 @@ where
 
     fn reserve(
         &self,
-        marker: &M,
+        _extensions: &RequestExtensions,
         estimate: &UsageEstimate,
         request_budget: RequestBudget,
-    ) -> Result<BudgetLease<M>, AgentError> {
+    ) -> Result<BudgetLease, AgentError> {
         if !request_budget.allows(estimate.total_tokens, estimate.cost_micros_usd) {
             return Err(AgentError::budget(
                 SharedPoolBudgetError::RequestBudgetExceeded {
@@ -325,15 +316,10 @@ where
             .saturating_add(estimate.cost_micros_usd);
         state.leases.insert(id, (*estimate, request_budget));
 
-        Ok(BudgetLease::new(
-            id,
-            marker.clone(),
-            *estimate,
-            request_budget,
-        ))
+        Ok(BudgetLease::new(id, *estimate, request_budget))
     }
 
-    fn record_used(&self, lease: BudgetLease<M>, usage: Usage) -> Result<(), AgentError> {
+    fn record_used(&self, lease: BudgetLease, usage: Usage) -> Result<(), AgentError> {
         let mut state = self
             .state
             .lock()
@@ -390,10 +376,10 @@ mod tests {
             stop_threshold_cost_micros_usd: 100,
         });
 
-        let marker = "chat";
+        let extensions = RequestExtensions::new();
         let lease = manager
             .reserve(
-                &marker,
+                &extensions,
                 &UsageEstimate {
                     total_tokens: 20,
                     cost_micros_usd: 200,
@@ -402,7 +388,7 @@ mod tests {
                 RequestBudget::unlimited(),
             )
             .unwrap();
-        assert_eq!(manager.remaining(&marker).tokens, 80);
+        assert_eq!(manager.remaining(&extensions).tokens, 80);
 
         manager
             .record_used(
@@ -415,7 +401,7 @@ mod tests {
             )
             .unwrap();
 
-        let remaining = manager.remaining(&marker);
+        let remaining = manager.remaining(&extensions);
         assert_eq!(remaining.tokens, 88);
         assert_eq!(remaining.cost_micros_usd, 880);
     }
@@ -431,7 +417,7 @@ mod tests {
 
         let err = manager
             .reserve(
-                &"chat",
+                &RequestExtensions::new(),
                 &UsageEstimate {
                     total_tokens: 91,
                     ..UsageEstimate::zero()
@@ -452,7 +438,7 @@ mod tests {
 
         let err = manager
             .reserve(
-                &"chat",
+                &RequestExtensions::new(),
                 &UsageEstimate {
                     total_tokens: 32,
                     ..UsageEstimate::zero()
@@ -477,7 +463,7 @@ mod tests {
 
         let lease = manager
             .reserve(
-                &"chat",
+                &RequestExtensions::new(),
                 &UsageEstimate {
                     total_tokens: 8,
                     ..UsageEstimate::zero()

@@ -1,17 +1,8 @@
 use agents::{
-    Context, FinishReason, InputMessageRole, Marker, MockLlmAdapter, MockTextScenario, ModelInput,
-    ModelInputItem, NoTools, SharedPoolBudgetManager, SharedPoolBudgetOptions, TextTurn,
-    TurnConfig, Usage, UsageEstimate,
+    Context, FinishReason, InputMessageRole, MockLlmAdapter, MockTextScenario, ModelInput,
+    ModelInputItem, NoTools, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    TextTurn, TurnConfig, Usage, UsageEstimate,
 };
-
-#[derive(Clone, Debug)]
-struct AppMarker;
-
-impl Marker for AppMarker {
-    fn span_name(&self) -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("context_direct_control")
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,14 +24,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::<AppMarker>::new(budget, adapter);
+    let ctx = Context::new(budget, adapter);
     let input = ModelInput::from_items(vec![ModelInputItem::text(
         InputMessageRole::User,
         "Run without session helpers.",
     )]);
+    let extensions = RequestExtensions::new();
     let result = ctx
         .responses_text(
-            AppMarker,
+            extensions,
             input,
             TextTurn::<NoTools> {
                 config: TurnConfig::<NoTools>::new(agents::ModelName::new("gpt-4.1-mini")?),

@@ -1,11 +1,12 @@
 pub mod budget;
 pub mod conversation;
 pub mod error;
+pub mod extensions;
 pub mod llm;
-pub mod marker;
 pub mod reducer;
 pub mod structured;
 pub mod toolset;
+pub mod transcript;
 
 pub use budget::{
     BudgetLease, BudgetManager, Remaining, RequestBudget, SharedPoolBudgetError,
@@ -17,6 +18,7 @@ pub use conversation::{
     ModelInputValidationError, NonEmpty, RawJson, ToolCallId, ToolMetadata, ToolName, ToolUse,
 };
 pub use error::{AgentError, BoxError};
+pub use extensions::RequestExtensions;
 pub use llm::{
     AdapterStructuredOutputSpec, AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice,
     AdapterToolDefinition, AdapterTurnConfig, CompletionEvent, CompletionEventStream,
@@ -27,7 +29,6 @@ pub use llm::{
     StructuredTurnEventStream, Temperature, TemperatureError, TextTurn, TextTurnEvent,
     TextTurnEventStream, TurnConfig,
 };
-pub use marker::Marker;
 pub use reducer::{
     CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
     StructuredTurnOutcome, StructuredTurnReducer, StructuredTurnReductionError,
@@ -38,4 +39,8 @@ pub use structured::StructuredOutput;
 pub use toolset::{
     NoToolSelector, NoTools, ToolCallError, ToolCallWrapper, ToolDef, ToolExecutionError,
     ToolInput, ToolPolicy, ToolSelector, ToolUseError, Toolset,
+};
+pub use transcript::{
+    AssistantTurnView, CommittedTurn, ItemView, ToolCallItemView, ToolResultItemView, TurnItemIter,
+    TurnRole, TurnView,
 };

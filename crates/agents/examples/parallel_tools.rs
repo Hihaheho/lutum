@@ -1,18 +1,10 @@
 use agents::{
-    FinishReason, Marker, MockLlmAdapter, MockTextScenario, Session, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, TextStepOutcome, TextTurn, ToolPolicy, Usage, UsageEstimate,
+    FinishReason, MockLlmAdapter, MockTextScenario, RequestExtensions, Session,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcome, TextTurn, ToolPolicy,
+    Usage, UsageEstimate,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug)]
-struct AppMarker;
-
-impl Marker for AppMarker {
-    fn span_name(&self) -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("parallel_tools")
-    }
-}
 
 #[agents::tool_input(name = "weather", output = WeatherResult)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -69,12 +61,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
-    let mut session = Session::new(ctx, AppMarker);
+    let ctx = agents::Context::new(budget, adapter);
+    let mut session = Session::new(ctx);
     session.push_user("Get the weather and search for ramen.");
 
     let outcome = session
         .prepare_text(
+            RequestExtensions::new(),
             {
                 let mut turn = TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1-mini")?);
                 turn.config.tools =

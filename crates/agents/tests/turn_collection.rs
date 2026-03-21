@@ -3,23 +3,14 @@ use futures::executor::block_on;
 
 use agents::{
     AssistantTurnItem, BudgetManager, CollectError, Context, EventHandler, FinishReason,
-    HandlerContext, HandlerDirective, InputMessageRole, Marker, MockError, MockLlmAdapter,
+    HandlerContext, HandlerDirective, InputMessageRole, MockError, MockLlmAdapter,
     MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, RequestBudget,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind, StructuredTurn,
-    StructuredTurnOutcome, TextTurn, TextTurnEvent, TextTurnReducer, ToolMetadata, ToolPolicy,
-    Usage, UsageEstimate,
+    RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind,
+    StructuredTurn, StructuredTurnOutcome, TextTurn, TextTurnEvent, TextTurnReducer, ToolMetadata,
+    ToolPolicy, Usage, UsageEstimate,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug)]
-struct AppMarker;
-
-impl Marker for AppMarker {
-    fn span_name(&self) -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("turn")
-    }
-}
 
 #[agents::tool_input(name = "weather", output = WeatherResult)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -70,18 +61,20 @@ fn test_budget() -> SharedPoolBudgetManager {
     })
 }
 
+fn extensions() -> RequestExtensions {
+    RequestExtensions::new()
+}
+
 struct StopOnTextDelta;
 
 #[async_trait]
-impl EventHandler<TextTurnEvent<Tools>, AppMarker, agents::TextTurnState<Tools>>
-    for StopOnTextDelta
-{
+impl EventHandler<TextTurnEvent<Tools>, agents::TextTurnState<Tools>> for StopOnTextDelta {
     type Error = std::convert::Infallible;
 
     async fn on_event(
         &mut self,
         event: &TextTurnEvent<Tools>,
-        _cx: &HandlerContext<AppMarker, agents::TextTurnState<Tools>>,
+        _cx: &HandlerContext<agents::TextTurnState<Tools>>,
     ) -> Result<HandlerDirective, Self::Error> {
         Ok(if matches!(event, TextTurnEvent::TextDelta { .. }) {
             HandlerDirective::Stop
@@ -116,10 +109,10 @@ fn text_turn_collects_assistant_output_and_tool_calls() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker> = Context::new(budget, adapter);
+    let ctx = Context::new(budget, adapter);
     let turn = weather_turn("gpt-4.1");
     let pending =
-        block_on(ctx.responses_text(AppMarker, input(), turn, UsageEstimate::zero())).unwrap();
+        block_on(ctx.responses_text(extensions(), input(), turn, UsageEstimate::zero())).unwrap();
     let result = block_on(pending.collect_noop()).unwrap();
 
     assert_eq!(result.assistant_text(), "looking up ");
@@ -157,10 +150,10 @@ fn structured_turn_collects_typed_output_and_appends_assistant_item() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker> = Context::new(budget, adapter);
+    let ctx = Context::new(budget, adapter);
     let turn = StructuredTurn::<Tools, Summary>::new(agents::ModelName::new("gpt-4.1").unwrap());
     let pending =
-        block_on(ctx.responses_structured(AppMarker, input(), turn, UsageEstimate::zero()))
+        block_on(ctx.responses_structured(extensions(), input(), turn, UsageEstimate::zero()))
             .unwrap();
     let result = block_on(pending.collect_noop()).unwrap();
 
@@ -230,9 +223,9 @@ fn recorded_events_reduce_to_same_result_as_collect() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker> = Context::new(budget, adapter);
+    let ctx = Context::new(budget, adapter);
     let pending = block_on(ctx.responses_text(
-        AppMarker,
+        extensions(),
         input(),
         weather_turn("gpt-4.1"),
         UsageEstimate::zero(),
@@ -256,9 +249,9 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
         }),
         Ok(agents::mock::RawTextTurnEvent::TextDelta { delta: "he".into() }),
     ]));
-    let ctx: Context<AppMarker> = Context::new(budget.clone(), adapter);
+    let ctx = Context::new(budget.clone(), adapter);
     let pending = block_on(ctx.responses_text(
-        AppMarker,
+        extensions(),
         input(),
         TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1").unwrap()),
         UsageEstimate {
@@ -277,7 +270,7 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
         other => panic!("unexpected error: {other:?}"),
     }
 
-    assert_eq!(budget.remaining(&AppMarker).tokens, 100);
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
 }
 
 #[test]
@@ -301,9 +294,9 @@ fn adapter_error_uses_recovered_usage_when_available() {
                 ..Usage::zero()
             },
         );
-    let ctx: Context<AppMarker> = Context::new(budget.clone(), adapter);
+    let ctx = Context::new(budget.clone(), adapter);
     let pending = block_on(ctx.responses_text(
-        AppMarker,
+        extensions(),
         input(),
         TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1").unwrap()),
         UsageEstimate {
@@ -315,7 +308,7 @@ fn adapter_error_uses_recovered_usage_when_available() {
 
     let err = block_on(pending.collect_noop()).unwrap_err();
     assert!(matches!(err, CollectError::Execution { .. }));
-    assert_eq!(budget.remaining(&AppMarker).tokens, 95);
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 95);
 }
 
 #[test]
@@ -335,9 +328,9 @@ fn tool_call_deserialize_error_surfaces_as_execution_error() {
             arguments_json_delta: "{}".into(),
         }),
     ]));
-    let ctx: Context<AppMarker> = Context::new(budget.clone(), adapter);
+    let ctx = Context::new(budget.clone(), adapter);
     let pending = block_on(ctx.responses_text(
-        AppMarker,
+        extensions(),
         input(),
         weather_turn("gpt-4.1"),
         UsageEstimate {
@@ -364,7 +357,7 @@ fn tool_call_deserialize_error_surfaces_as_execution_error() {
         other => panic!("unexpected error: {other:?}"),
     }
 
-    assert_eq!(budget.remaining(&AppMarker).tokens, 100);
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
 }
 
 #[test]
@@ -390,9 +383,9 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
                 },
             }),
         ]));
-    let ctx: Context<AppMarker> = Context::new(budget.clone(), adapter);
+    let ctx = Context::new(budget.clone(), adapter);
     let pending = block_on(ctx.responses_structured(
-        AppMarker,
+        extensions(),
         input(),
         StructuredTurn::<Tools, Summary>::new(agents::ModelName::new("gpt-4.1").unwrap()),
         UsageEstimate {
@@ -418,17 +411,17 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
         other => panic!("unexpected error: {other:?}"),
     }
 
-    assert_eq!(budget.remaining(&AppMarker).tokens, 100);
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
 }
 
 #[test]
 fn request_budget_is_enforced_per_turn() {
     let adapter = MockLlmAdapter::new();
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker> = Context::new(budget, adapter);
+    let ctx = Context::new(budget, adapter);
 
     let err = match block_on(ctx.responses_text(
-        AppMarker,
+        extensions(),
         input(),
         {
             let mut turn = TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1").unwrap());

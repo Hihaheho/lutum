@@ -1,19 +1,10 @@
 use agents::{
-    FinishReason, Marker, MockLlmAdapter, MockStructuredScenario, NoTools, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcome, StructuredTurn, Usage,
-    UsageEstimate,
+    FinishReason, MockLlmAdapter, MockStructuredScenario, NoTools, RequestExtensions, Session,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcome, StructuredTurn,
+    Usage, UsageEstimate,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug)]
-struct AppMarker;
-
-impl Marker for AppMarker {
-    fn span_name(&self) -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("structured_extract")
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Contact {
@@ -41,12 +32,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::<AppMarker>::new(budget, adapter);
-    let mut session = Session::new(ctx, AppMarker);
+    let ctx = agents::Context::new(budget, adapter);
+    let mut session = Session::new(ctx);
     session.push_user("Extract the email address.");
 
     let outcome = session
         .prepare_structured(
+            RequestExtensions::new(),
             StructuredTurn::<NoTools, Contact>::new(agents::ModelName::new("gpt-4.1-mini")?),
             UsageEstimate::zero(),
         )

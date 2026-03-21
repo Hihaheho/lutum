@@ -57,6 +57,73 @@ where
     pub fn assistant_text(&self) -> String {
         assistant_text(&self.assistant_turn)
     }
+
+    /// Apply a streaming event to advance this turn state.
+    ///
+    /// Returns an error if the turn has already completed.
+    pub fn apply(&mut self, event: &TextTurnEvent<T>) -> Result<(), TextTurnReductionError> {
+        if self.finish_reason.is_some() {
+            return Err(TextTurnReductionError::AlreadyCompleted);
+        }
+
+        match event {
+            TextTurnEvent::Started { request_id, model } => {
+                self.request_id = request_id.clone();
+                self.model = model.clone();
+            }
+            TextTurnEvent::TextDelta { delta } => {
+                push_or_extend_text(&mut self.assistant_turn, delta);
+            }
+            TextTurnEvent::ReasoningDelta { delta } => {
+                push_or_extend_reasoning(&mut self.assistant_turn, delta);
+            }
+            TextTurnEvent::RefusalDelta { delta } => {
+                push_or_extend_refusal(&mut self.assistant_turn, delta);
+            }
+            TextTurnEvent::ToolCallChunk { .. } => {}
+            TextTurnEvent::ToolCallReady(tool_call) => {
+                push_tool_call(&mut self.assistant_turn, &mut self.tool_calls, tool_call);
+            }
+            TextTurnEvent::Completed {
+                request_id,
+                finish_reason,
+                usage,
+            } => {
+                if let Some(request_id) = request_id.clone() {
+                    self.request_id = Some(request_id);
+                }
+                self.finish_reason = Some(finish_reason.clone());
+                self.usage = Some(*usage);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Finalize the accumulated state into a completed turn result.
+    ///
+    /// Returns [`TextTurnReductionError::Incomplete`] if the turn has not yet
+    /// received a `Completed` event, and
+    /// [`TextTurnReductionError::EmptyAssistantOutput`] if the completed turn
+    /// produced no assistant items.
+    pub fn finish(self) -> Result<TextTurnResult<T>, TextTurnReductionError> {
+        // Check completion first so callers get Incomplete (not EmptyAssistantOutput)
+        // when finish() is called on a fresh or mid-stream state.
+        let finish_reason = self
+            .finish_reason
+            .ok_or(TextTurnReductionError::Incomplete)?;
+        let usage = self.usage.ok_or(TextTurnReductionError::Incomplete)?;
+        let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
+            .map_err(|_| TextTurnReductionError::EmptyAssistantOutput)?;
+        Ok(TextTurnResult {
+            request_id: self.request_id,
+            model: self.model,
+            assistant_turn,
+            tool_calls: self.tool_calls,
+            finish_reason,
+            usage,
+        })
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -144,6 +211,101 @@ where
     }
 }
 
+impl<T, O> StructuredTurnState<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    /// Apply a streaming event to advance this turn state.
+    ///
+    /// Returns an error if the turn has already completed.
+    pub fn apply(
+        &mut self,
+        event: &StructuredTurnEvent<T, O>,
+    ) -> Result<(), StructuredTurnReductionError> {
+        if self.finish_reason.is_some() {
+            return Err(StructuredTurnReductionError::AlreadyCompleted);
+        }
+
+        match event {
+            StructuredTurnEvent::Started { request_id, model } => {
+                self.request_id = request_id.clone();
+                self.model = model.clone();
+            }
+            StructuredTurnEvent::StructuredOutputChunk { json_delta } => {
+                push_or_extend_text(&mut self.assistant_turn, json_delta);
+            }
+            StructuredTurnEvent::StructuredOutputReady(value) => {
+                if self.structured.is_some() {
+                    return Err(StructuredTurnReductionError::DuplicateStructuredOutput);
+                }
+                self.structured = Some(value.clone());
+            }
+            StructuredTurnEvent::ReasoningDelta { delta } => {
+                push_or_extend_reasoning(&mut self.assistant_turn, delta);
+            }
+            StructuredTurnEvent::RefusalDelta { delta } => {
+                push_or_extend_refusal(&mut self.assistant_turn, delta);
+                if let Some(existing) = self.refusal.as_mut() {
+                    existing.push_str(delta);
+                } else {
+                    self.refusal = Some(delta.clone());
+                }
+            }
+            StructuredTurnEvent::ToolCallChunk { .. } => {}
+            StructuredTurnEvent::ToolCallReady(tool_call) => {
+                push_tool_call(&mut self.assistant_turn, &mut self.tool_calls, tool_call);
+            }
+            StructuredTurnEvent::Completed {
+                request_id,
+                finish_reason,
+                usage,
+            } => {
+                if let Some(request_id) = request_id.clone() {
+                    self.request_id = Some(request_id);
+                }
+                self.finish_reason = Some(finish_reason.clone());
+                self.usage = Some(*usage);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Finalize the accumulated state into a completed turn result.
+    ///
+    /// Returns [`StructuredTurnReductionError::Incomplete`] if the turn has
+    /// not yet received a `Completed` event, and
+    /// [`StructuredTurnReductionError::EmptyAssistantOutput`] if the completed
+    /// turn produced no assistant items.
+    pub fn finish(self) -> Result<StructuredTurnResult<T, O>, StructuredTurnReductionError> {
+        // Check completion first so callers get Incomplete (not EmptyAssistantOutput)
+        // when finish() is called on a fresh or mid-stream state.
+        let finish_reason = self
+            .finish_reason
+            .ok_or(StructuredTurnReductionError::Incomplete)?;
+        let usage = self.usage.ok_or(StructuredTurnReductionError::Incomplete)?;
+        let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
+            .map_err(|_| StructuredTurnReductionError::EmptyAssistantOutput)?;
+        let semantic = match (self.structured, self.refusal) {
+            (Some(value), None) => StructuredTurnOutcome::Structured(value),
+            (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
+            (None, None) => return Err(StructuredTurnReductionError::MissingSemantic),
+            (Some(_), Some(_)) => return Err(StructuredTurnReductionError::ConflictingSemantic),
+        };
+
+        Ok(StructuredTurnResult {
+            request_id: self.request_id,
+            model: self.model,
+            assistant_turn,
+            tool_calls: self.tool_calls,
+            semantic,
+            finish_reason,
+            usage,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StructuredTurnOutcome<O> {
     Structured(O),
@@ -186,6 +348,53 @@ pub struct CompletionTurnState {
     pub text: String,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
+}
+
+impl CompletionTurnState {
+    /// Apply a streaming event to advance this turn state.
+    ///
+    /// Returns an error if the turn has already completed.
+    pub fn apply(&mut self, event: &CompletionEvent) -> Result<(), CompletionReductionError> {
+        if self.finish_reason.is_some() {
+            return Err(CompletionReductionError::AlreadyCompleted);
+        }
+
+        match event {
+            CompletionEvent::Started { request_id, model } => {
+                self.request_id = request_id.clone();
+                self.model = model.clone();
+            }
+            CompletionEvent::TextDelta(delta) => {
+                self.text.push_str(delta);
+            }
+            CompletionEvent::Completed {
+                request_id,
+                finish_reason,
+                usage,
+            } => {
+                if let Some(request_id) = request_id.clone() {
+                    self.request_id = Some(request_id);
+                }
+                self.finish_reason = Some(finish_reason.clone());
+                self.usage = Some(*usage);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Finalize the accumulated state into a completed turn result.
+    pub fn finish(self) -> Result<CompletionTurnResult, CompletionReductionError> {
+        Ok(CompletionTurnResult {
+            request_id: self.request_id,
+            model: self.model,
+            text: self.text,
+            finish_reason: self
+                .finish_reason
+                .ok_or(CompletionReductionError::Incomplete)?,
+            usage: self.usage.ok_or(CompletionReductionError::Incomplete)?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -263,64 +472,11 @@ where
     }
 
     pub fn apply(&mut self, event: &TextTurnEvent<T>) -> Result<(), TextTurnReductionError> {
-        if self.state.finish_reason.is_some() {
-            return Err(TextTurnReductionError::AlreadyCompleted);
-        }
-
-        match event {
-            TextTurnEvent::Started { request_id, model } => {
-                self.state.request_id = request_id.clone();
-                self.state.model = model.clone();
-            }
-            TextTurnEvent::TextDelta { delta } => {
-                push_or_extend_text(&mut self.state.assistant_turn, delta);
-            }
-            TextTurnEvent::ReasoningDelta { delta } => {
-                push_or_extend_reasoning(&mut self.state.assistant_turn, delta);
-            }
-            TextTurnEvent::RefusalDelta { delta } => {
-                push_or_extend_refusal(&mut self.state.assistant_turn, delta);
-            }
-            TextTurnEvent::ToolCallChunk { .. } => {}
-            TextTurnEvent::ToolCallReady(tool_call) => {
-                push_tool_call(
-                    &mut self.state.assistant_turn,
-                    &mut self.state.tool_calls,
-                    tool_call,
-                );
-            }
-            TextTurnEvent::Completed {
-                request_id,
-                finish_reason,
-                usage,
-            } => {
-                if let Some(request_id) = request_id.clone() {
-                    self.state.request_id = Some(request_id);
-                }
-                self.state.finish_reason = Some(finish_reason.clone());
-                self.state.usage = Some(*usage);
-            }
-        }
-
-        Ok(())
+        self.state.apply(event)
     }
 
     pub fn into_result(self) -> Result<TextTurnResult<T>, TextTurnReductionError> {
-        let assistant_turn = AssistantTurn::from_items(self.state.assistant_turn)
-            .map_err(|_| TextTurnReductionError::EmptyAssistantOutput)?;
-        let finish_reason = self
-            .state
-            .finish_reason
-            .ok_or(TextTurnReductionError::Incomplete)?;
-        let usage = self.state.usage.ok_or(TextTurnReductionError::Incomplete)?;
-        Ok(TextTurnResult {
-            request_id: self.state.request_id,
-            model: self.state.model,
-            assistant_turn,
-            tool_calls: self.state.tool_calls,
-            finish_reason,
-            usage,
-        })
+        self.state.finish()
     }
 }
 
@@ -361,86 +517,11 @@ where
         &mut self,
         event: &StructuredTurnEvent<T, O>,
     ) -> Result<(), StructuredTurnReductionError> {
-        if self.state.finish_reason.is_some() {
-            return Err(StructuredTurnReductionError::AlreadyCompleted);
-        }
-
-        match event {
-            StructuredTurnEvent::Started { request_id, model } => {
-                self.state.request_id = request_id.clone();
-                self.state.model = model.clone();
-            }
-            StructuredTurnEvent::StructuredOutputChunk { json_delta } => {
-                push_or_extend_text(&mut self.state.assistant_turn, json_delta);
-            }
-            StructuredTurnEvent::StructuredOutputReady(value) => {
-                if self.state.structured.is_some() {
-                    return Err(StructuredTurnReductionError::DuplicateStructuredOutput);
-                }
-                self.state.structured = Some(value.clone());
-            }
-            StructuredTurnEvent::ReasoningDelta { delta } => {
-                push_or_extend_reasoning(&mut self.state.assistant_turn, delta);
-            }
-            StructuredTurnEvent::RefusalDelta { delta } => {
-                push_or_extend_refusal(&mut self.state.assistant_turn, delta);
-                if let Some(existing) = self.state.refusal.as_mut() {
-                    existing.push_str(delta);
-                } else {
-                    self.state.refusal = Some(delta.clone());
-                }
-            }
-            StructuredTurnEvent::ToolCallChunk { .. } => {}
-            StructuredTurnEvent::ToolCallReady(tool_call) => {
-                push_tool_call(
-                    &mut self.state.assistant_turn,
-                    &mut self.state.tool_calls,
-                    tool_call,
-                );
-            }
-            StructuredTurnEvent::Completed {
-                request_id,
-                finish_reason,
-                usage,
-            } => {
-                if let Some(request_id) = request_id.clone() {
-                    self.state.request_id = Some(request_id);
-                }
-                self.state.finish_reason = Some(finish_reason.clone());
-                self.state.usage = Some(*usage);
-            }
-        }
-
-        Ok(())
+        self.state.apply(event)
     }
 
     pub fn into_result(self) -> Result<StructuredTurnResult<T, O>, StructuredTurnReductionError> {
-        let assistant_turn = AssistantTurn::from_items(self.state.assistant_turn)
-            .map_err(|_| StructuredTurnReductionError::EmptyAssistantOutput)?;
-        let finish_reason = self
-            .state
-            .finish_reason
-            .ok_or(StructuredTurnReductionError::Incomplete)?;
-        let usage = self
-            .state
-            .usage
-            .ok_or(StructuredTurnReductionError::Incomplete)?;
-        let semantic = match (self.state.structured, self.state.refusal) {
-            (Some(value), None) => StructuredTurnOutcome::Structured(value),
-            (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
-            (None, None) => return Err(StructuredTurnReductionError::MissingSemantic),
-            (Some(_), Some(_)) => return Err(StructuredTurnReductionError::ConflictingSemantic),
-        };
-
-        Ok(StructuredTurnResult {
-            request_id: self.state.request_id,
-            model: self.state.model,
-            assistant_turn,
-            tool_calls: self.state.tool_calls,
-            semantic,
-            finish_reason,
-            usage,
-        })
+        self.state.finish()
     }
 }
 
@@ -470,48 +551,11 @@ impl CompletionReducer {
     }
 
     pub fn apply(&mut self, event: &CompletionEvent) -> Result<(), CompletionReductionError> {
-        if self.state.finish_reason.is_some() {
-            return Err(CompletionReductionError::AlreadyCompleted);
-        }
-
-        match event {
-            CompletionEvent::Started { request_id, model } => {
-                self.state.request_id = request_id.clone();
-                self.state.model = model.clone();
-            }
-            CompletionEvent::TextDelta(delta) => {
-                self.state.text.push_str(delta);
-            }
-            CompletionEvent::Completed {
-                request_id,
-                finish_reason,
-                usage,
-            } => {
-                if let Some(request_id) = request_id.clone() {
-                    self.state.request_id = Some(request_id);
-                }
-                self.state.finish_reason = Some(finish_reason.clone());
-                self.state.usage = Some(*usage);
-            }
-        }
-
-        Ok(())
+        self.state.apply(event)
     }
 
     pub fn into_result(self) -> Result<CompletionTurnResult, CompletionReductionError> {
-        Ok(CompletionTurnResult {
-            request_id: self.state.request_id,
-            model: self.state.model,
-            text: self.state.text,
-            finish_reason: self
-                .state
-                .finish_reason
-                .ok_or(CompletionReductionError::Incomplete)?,
-            usage: self
-                .state
-                .usage
-                .ok_or(CompletionReductionError::Incomplete)?,
-        })
+        self.state.finish()
     }
 }
 

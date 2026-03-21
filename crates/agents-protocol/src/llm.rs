@@ -449,7 +449,7 @@ pub enum CompletionEvent {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FinishReason {
     Stop,
     Length,

@@ -10,6 +10,8 @@ use reqwest::{
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use serde::{Deserialize, Serialize};
+
 use agents_protocol::{
     AgentError,
     budget::Usage,
@@ -23,6 +25,7 @@ use agents_protocol::{
         ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
         FinishReason, LlmAdapter, ReasoningEffort, ReasoningParams, ReasoningSummary, StreamKind,
     },
+    transcript::{ItemView, ToolCallItemView, ToolResultItemView, TurnRole, TurnView},
 };
 
 #[derive(Clone)]
@@ -1244,5 +1247,121 @@ mod tests {
         assert!(matches!(events[0], CompletionEvent::Started { .. }));
         assert!(matches!(events[1], CompletionEvent::TextDelta(_)));
         assert!(matches!(events[2], CompletionEvent::Completed { .. }));
+    }
+}
+
+// ── OpenAiCommittedTurn ───────────────────────────────────────────────────────
+
+/// A serializable, replayable representation of a completed OpenAI assistant turn.
+///
+/// This is the adapter-owned exact committed turn for the OpenAI provider.
+/// It derives `Serialize` and `Deserialize` so it can be persisted and
+/// restored without lossy normalization through a shared library IR.
+///
+/// At runtime, `Session` interacts with committed turns through the erased
+/// `TurnView` trait; serde roundtrip stays centered on this concrete type.
+///
+/// # Not yet wired into `Session`
+///
+/// `Session::commit_text` / `commit_structured` / `commit_tool_round`
+/// currently store a core-provided [`AssistantTurnView`] fallback rather than
+/// an `OpenAiCommittedTurn`.  Wiring the adapter-owned exact turn through the
+/// commit path requires threading an opaque payload through `TextTurnResult`
+/// and related types, which is a planned follow-up task.
+///
+/// `OpenAiCommittedTurn` is published now to establish the ownership boundary
+/// described in `DESIGN-v2.md` ("Transcript storage model", "Adapter
+/// responsibilities").  Users who need exact per-turn storage today can
+/// construct and persist `OpenAiCommittedTurn` values directly from the event
+/// stream outside of `Session`.
+///
+/// [`AssistantTurnView`]: agents_protocol::transcript::AssistantTurnView
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OpenAiCommittedTurn {
+    /// The `request_id` returned by the OpenAI API for this turn, if available.
+    pub request_id: Option<String>,
+    /// The model name that produced this turn.
+    pub model: String,
+    /// The ordered list of items produced by the assistant during this turn.
+    pub items: Vec<OpenAiTurnItem>,
+    /// The reason the turn ended.
+    pub finish_reason: FinishReason,
+    /// Token usage reported by the API for this turn.
+    pub usage: Usage,
+}
+
+/// A single item within an [`OpenAiCommittedTurn`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OpenAiTurnItem {
+    /// Plain assistant text output.
+    Text { content: String },
+    /// Reasoning / chain-of-thought text (o-series models).
+    Reasoning { content: String },
+    /// Refusal text emitted by the model.
+    Refusal { content: String },
+    /// A tool call requested by the assistant.
+    ToolCall {
+        id: ToolCallId,
+        name: ToolName,
+        arguments: RawJson,
+    },
+}
+
+// ── TurnView impl for OpenAiCommittedTurn ─────────────────────────────────────
+
+impl TurnView for OpenAiCommittedTurn {
+    fn role(&self) -> TurnRole {
+        TurnRole::Assistant
+    }
+
+    fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
+    fn item_at(&self, index: usize) -> Option<&dyn ItemView> {
+        self.items.get(index).map(|item| item as &dyn ItemView)
+    }
+}
+
+impl ItemView for OpenAiTurnItem {
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { content } => Some(content),
+            _ => None,
+        }
+    }
+
+    fn as_reasoning(&self) -> Option<&str> {
+        match self {
+            Self::Reasoning { content } => Some(content),
+            _ => None,
+        }
+    }
+
+    fn as_refusal(&self) -> Option<&str> {
+        match self {
+            Self::Refusal { content } => Some(content),
+            _ => None,
+        }
+    }
+
+    fn as_tool_call(&self) -> Option<ToolCallItemView<'_>> {
+        match self {
+            Self::ToolCall {
+                id,
+                name,
+                arguments,
+            } => Some(ToolCallItemView {
+                id,
+                name,
+                arguments,
+            }),
+            _ => None,
+        }
+    }
+
+    fn as_tool_result(&self) -> Option<ToolResultItemView<'_>> {
+        None // OpenAI assistant turns do not carry tool results
     }
 }

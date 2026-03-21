@@ -2,23 +2,14 @@ use agents::{
     AdapterStructuredTurn, AdapterTextTurn, AgentError, AssistantInputItem, AssistantTurnItem,
     BudgetLease, BudgetManager, CompletionEventStream, CompletionRequest, Context, ContextError,
     ErasedStructuredTurnEventStream, ErasedTextTurnEventStream, InputMessageRole, LlmAdapter,
-    Marker, MessageContent, ModelInput, ModelInputItem, ModelName, ModelNameError, NonEmpty,
-    RawJson, ReasoningEffort, ReasoningParams, RequestBudget, SharedPoolBudgetManager,
+    MessageContent, ModelInput, ModelInputItem, ModelName, ModelNameError, NonEmpty, RawJson,
+    ReasoningEffort, ReasoningParams, RequestBudget, RequestExtensions, SharedPoolBudgetManager,
     SharedPoolBudgetOptions, StreamKind, StructuredTurn, Temperature, TextTurn, TextTurnReducer,
     ToolMetadata, ToolPolicy, ToolUse, Usage, UsageEstimate,
 };
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug)]
-struct AppMarker;
-
-impl Marker for AppMarker {
-    fn span_name(&self) -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("typed")
-    }
-}
 
 struct NullAdapter;
 
@@ -58,26 +49,21 @@ impl LlmAdapter for NullAdapter {
 
 struct NonCloneBudget;
 
-impl BudgetManager<AppMarker> for NonCloneBudget {
-    fn remaining(&self, _marker: &AppMarker) -> agents::Remaining {
+impl BudgetManager for NonCloneBudget {
+    fn remaining(&self, _extensions: &RequestExtensions) -> agents::Remaining {
         agents::Remaining::default()
     }
 
     fn reserve(
         &self,
-        marker: &AppMarker,
+        _extensions: &RequestExtensions,
         estimate: &UsageEstimate,
         request_budget: RequestBudget,
-    ) -> Result<BudgetLease<AppMarker>, AgentError> {
-        Ok(BudgetLease::new(
-            1,
-            marker.clone(),
-            *estimate,
-            request_budget,
-        ))
+    ) -> Result<BudgetLease, AgentError> {
+        Ok(BudgetLease::new(1, *estimate, request_budget))
     }
 
-    fn record_used(&self, _lease: BudgetLease<AppMarker>, _usage: Usage) -> Result<(), AgentError> {
+    fn record_used(&self, _lease: BudgetLease, _usage: Usage) -> Result<(), AgentError> {
         Ok(())
     }
 }
@@ -111,7 +97,7 @@ enum Tools {
 #[test]
 fn typed_public_api_compiles_and_constructs_requests() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker> = Context::new(budget, NullAdapter);
+    let ctx = Context::new(budget, NullAdapter);
     let _ = ctx;
 
     let input = ModelInput::from_items(vec![
@@ -150,13 +136,13 @@ fn typed_public_api_compiles_and_constructs_requests() {
         .budget(RequestBudget::from_tokens(128))
         .build();
     let _estimate = UsageEstimate::zero();
-    let _marker = AppMarker;
+    let _extensions = RequestExtensions::new();
     let _input = input;
 }
 
 #[test]
 fn context_accepts_non_clone_budget_and_adapter() {
-    let ctx: Context<AppMarker> = Context::new(NonCloneBudget, NullAdapter);
+    let ctx = Context::new(NonCloneBudget, NullAdapter);
     let _ = ctx;
 }
 
@@ -252,7 +238,7 @@ fn reducer_ignores_duplicate_tool_call_ready() {
 #[test]
 fn context_rejects_invalid_model_input_before_adapter_call() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx: Context<AppMarker> = Context::new(budget, NullAdapter);
+    let ctx = Context::new(budget, NullAdapter);
     let input = ModelInput::from_items(vec![
         ModelInputItem::text(InputMessageRole::User, "hello"),
         ModelInputItem::tool_use_parts(
@@ -270,7 +256,7 @@ fn context_rejects_invalid_model_input_before_adapter_call() {
     ]);
 
     let err = futures::executor::block_on(ctx.responses_text(
-        AppMarker,
+        RequestExtensions::new(),
         input,
         TextTurn::<Tools>::new(ModelName::new("gpt-4.1").unwrap()),
         UsageEstimate::zero(),

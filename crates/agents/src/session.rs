@@ -1,11 +1,11 @@
-use std::convert::Infallible;
+use std::{convert::Infallible, sync::Arc};
 
 use agents_protocol::{
-    AssistantTurn, AssistantTurnInputError, FinishReason, GenerationParams, InputMessageRole,
-    ModelInput, ModelInputItem, ModelName, ReasoningParams, RequestBudget, StructuredTurn,
-    TextTurn, ToolUse, Toolset, TurnConfig, UsageEstimate,
+    AssistantTurn, AssistantTurnInputError, AssistantTurnView, CommittedTurn, FinishReason,
+    GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ReasoningParams,
+    RequestBudget, RequestExtensions, StructuredTurn, TextTurn, ToolUse, Toolset, TurnConfig,
+    TurnView, UsageEstimate,
     budget::Usage,
-    marker::Marker,
     reducer::{
         StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, TextTurnResult,
     },
@@ -51,32 +51,38 @@ impl SessionDefaults {
 }
 
 #[derive(Clone)]
-pub struct Session<M> {
-    ctx: Context<M>,
-    marker: M,
+pub struct Session {
+    ctx: Context,
     input: ModelInput,
     defaults: SessionDefaults,
+    /// Committed turns in the order they were added.
+    ///
+    /// Each element is an `Arc` so that cloned sessions share the same turn
+    /// objects cheaply and future commits on one branch do not affect the other.
+    turns: Vec<CommittedTurn>,
 }
 
-impl<M> Session<M>
-where
-    M: Marker + Clone,
-{
-    pub fn new(ctx: Context<M>, marker: M) -> Self {
+impl Session {
+    pub fn new(ctx: Context) -> Self {
         Self {
             ctx,
-            marker,
             input: ModelInput::new(),
             defaults: SessionDefaults::default(),
+            turns: Vec::new(),
         }
     }
 
-    pub fn from_snapshot(ctx: Context<M>, marker: M, input: ModelInput) -> Self {
+    /// Restores a session from a previously captured [`ModelInput`] snapshot.
+    ///
+    /// This only restores request input. Committed turns are not encoded in the
+    /// snapshot, so a restored session starts with an empty
+    /// [`list_turns`](Self::list_turns) view.
+    pub fn from_snapshot(ctx: Context, input: ModelInput) -> Self {
         Self {
             ctx,
-            marker,
             input,
             defaults: SessionDefaults::default(),
+            turns: Vec::new(),
         }
     }
 
@@ -89,12 +95,8 @@ where
         &self.defaults
     }
 
-    pub fn context(&self) -> &Context<M> {
+    pub fn context(&self) -> &Context {
         &self.ctx
-    }
-
-    pub fn marker(&self) -> &M {
-        &self.marker
     }
 
     pub fn input(&self) -> &ModelInput {
@@ -109,6 +111,10 @@ where
         self.input
     }
 
+    /// Returns a copy of the current [`ModelInput`].
+    ///
+    /// This snapshot captures only request input and does not include the
+    /// committed-turn list maintained by [`list_turns`](Self::list_turns).
     pub fn snapshot(&self) -> ModelInput {
         self.input.clone()
     }
@@ -159,25 +165,27 @@ where
 
     pub async fn prepare_text<T>(
         &self,
+        extensions: RequestExtensions,
         mut turn: TextTurn<T>,
         estimate: UsageEstimate,
-    ) -> Result<SessionPendingText<M, T>, ContextError>
+    ) -> Result<SessionPendingText<T>, ContextError>
     where
         T: Toolset,
     {
         self.defaults.apply(&mut turn.config);
         let pending = self
             .ctx
-            .responses_text(self.marker.clone(), self.input.clone(), turn, estimate)
+            .responses_text(extensions, self.input.clone(), turn, estimate)
             .await?;
         Ok(SessionPendingText { pending })
     }
 
     pub async fn prepare_structured<T, O>(
         &self,
+        extensions: RequestExtensions,
         mut turn: StructuredTurn<T, O>,
         estimate: UsageEstimate,
-    ) -> Result<SessionPendingStructured<M, T, O>, ContextError>
+    ) -> Result<SessionPendingStructured<T, O>, ContextError>
     where
         T: Toolset,
         O: StructuredOutput,
@@ -185,11 +193,42 @@ where
         self.defaults.apply(&mut turn.config);
         let pending = self
             .ctx
-            .responses_structured(self.marker.clone(), self.input.clone(), turn, estimate)
+            .responses_structured(extensions, self.input.clone(), turn, estimate)
             .await?;
         Ok(SessionPendingStructured { pending })
     }
 
+    /// Returns an iterator over committed assistant turns in the order they
+    /// were committed.
+    ///
+    /// **Scope:** this iterator covers only turns that were explicitly stored
+    /// via `commit_text`, `commit_structured`, or `commit_tool_round`.  User,
+    /// system, and developer messages pushed via `push_*` are part of the
+    /// request input (`ModelInput`) but are not "committed turns" in the
+    /// design's sense — they are not produced by the model and do not go
+    /// through the commit path.
+    ///
+    /// **Interim storage:** committed turns are currently stored using the
+    /// core-provided [`AssistantTurnView`] fallback, which preserves all
+    /// item data.  Once adapters expose their own exact committed-turn types
+    /// through the commit path, callers will see richer provider-specific
+    /// views here.  See [`OpenAiCommittedTurn`](agents_openai::OpenAiCommittedTurn)
+    /// for the intended adapter-side ownership pattern.
+    pub fn list_turns(&self) -> impl Iterator<Item = &dyn TurnView> {
+        self.turns.iter().map(|t| t.as_ref() as &dyn TurnView)
+    }
+
+    /// Commit a completed text turn into the session transcript.
+    ///
+    /// Appends the assistant output to `ModelInput` and records a
+    /// [`TurnView`] entry in the committed-turns list so `list_turns()` can
+    /// surface it.
+    ///
+    /// **Note:** the current implementation stores an [`AssistantTurnView`]
+    /// (core-provided) as the committed turn.  Full exact-turn storage —
+    /// where the adapter supplies its own provider-native type — is a
+    /// planned follow-up that requires threading an opaque payload through
+    /// the result types.
     pub fn commit_text<T>(
         &mut self,
         result: TextTurnResult<T>,
@@ -197,9 +236,16 @@ where
     where
         T: Toolset,
     {
-        self.append_assistant_turn(result.assistant_turn, std::iter::empty::<ToolUse>())
+        let view = AssistantTurnView::from_items(result.assistant_turn.items());
+        self.append_assistant_turn(result.assistant_turn, std::iter::empty::<ToolUse>())?;
+        self.turns.push(Arc::new(view));
+        Ok(())
     }
 
+    /// Commit a completed structured turn into the session transcript.
+    ///
+    /// See [`commit_text`](Self::commit_text) for notes on the interim
+    /// [`AssistantTurnView`] storage.
     pub fn commit_structured<T, O>(
         &mut self,
         result: StructuredTurnResult<T, O>,
@@ -208,9 +254,20 @@ where
         T: Toolset,
         O: StructuredOutput,
     {
-        self.append_assistant_turn(result.assistant_turn, std::iter::empty::<ToolUse>())
+        let view = AssistantTurnView::from_items(result.assistant_turn.items());
+        self.append_assistant_turn(result.assistant_turn, std::iter::empty::<ToolUse>())?;
+        self.turns.push(Arc::new(view));
+        Ok(())
     }
 
+    /// Commit a completed tool-call round into the session transcript.
+    ///
+    /// Records the assistant output (tool calls) as a committed turn.
+    /// Tool results are stored in `ModelInput` (paired with tool calls) but
+    /// are not separately recorded as committed turns — they are part of the
+    /// same round's assistant output.
+    ///
+    /// See [`commit_text`](Self::commit_text) for notes on interim storage.
     pub fn commit_tool_round<T>(
         &mut self,
         round: ToolRound<T>,
@@ -219,23 +276,25 @@ where
     where
         T: Toolset,
     {
-        self.append_assistant_turn(round.assistant_turn, tool_uses)
+        let view = AssistantTurnView::from_items(round.assistant_turn.items());
+        self.append_assistant_turn(round.assistant_turn, tool_uses)?;
+        self.turns.push(Arc::new(view));
+        Ok(())
     }
 }
 
-pub struct SessionPendingText<M, T>
+pub struct SessionPendingText<T>
 where
     T: Toolset,
 {
-    pending: CorePendingTextTurn<M, T>,
+    pending: CorePendingTextTurn<T>,
 }
 
-impl<M, T> SessionPendingText<M, T>
+impl<T> SessionPendingText<T>
 where
-    M: Marker,
     T: Toolset,
 {
-    pub fn into_pending(self) -> PendingTextTurn<M, T> {
+    pub fn into_pending(self) -> PendingTextTurn<T> {
         self.pending
     }
 
@@ -247,7 +306,7 @@ where
         CollectError<H::Error, crate::TextTurnReductionError, crate::TextTurnState<T>>,
     >
     where
-        H: EventHandler<crate::TextTurnEvent<T>, M, crate::TextTurnState<T>>,
+        H: EventHandler<crate::TextTurnEvent<T>, crate::TextTurnState<T>>,
     {
         let result = self.pending.collect(handler).await?;
         Ok(TextStepOutcome::from_result(result))
@@ -296,21 +355,20 @@ where
     }
 }
 
-pub struct SessionPendingStructured<M, T, O>
+pub struct SessionPendingStructured<T, O>
 where
     T: Toolset,
     O: StructuredOutput,
 {
-    pending: CorePendingStructuredTurn<M, T, O>,
+    pending: CorePendingStructuredTurn<T, O>,
 }
 
-impl<M, T, O> SessionPendingStructured<M, T, O>
+impl<T, O> SessionPendingStructured<T, O>
 where
-    M: Marker,
     T: Toolset,
     O: StructuredOutput,
 {
-    pub fn into_pending(self) -> PendingStructuredTurn<M, T, O> {
+    pub fn into_pending(self) -> PendingStructuredTurn<T, O> {
         self.pending
     }
 
@@ -326,7 +384,7 @@ where
         >,
     >
     where
-        H: EventHandler<crate::StructuredTurnEvent<T, O>, M, crate::StructuredTurnState<T, O>>,
+        H: EventHandler<crate::StructuredTurnEvent<T, O>, crate::StructuredTurnState<T, O>>,
     {
         map_structured_result(self.pending.collect(handler).await)
     }
