@@ -1,6 +1,6 @@
 mod openai;
 
 pub use openai::{
-    OpenAiAdapter, OpenAiCommittedTurn, OpenAiError, OpenAiReasoningEffort, OpenAiTurnItem,
-    ReasoningEffortResolver,
+    CompletionRequest, FallbackSerializer, OpenAiAdapter, OpenAiCommittedTurn, OpenAiError,
+    OpenAiReasoningEffort, OpenAiTurnItem, ReasoningEffortResolver, ResponsesRequest,
 };

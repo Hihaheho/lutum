@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, env, pin::Pin, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, env, pin::Pin, sync::Arc};
 
 use agents_protocol::{
     AgentError,
@@ -10,9 +10,9 @@ use agents_protocol::{
     extensions::RequestExtensions,
     llm::{
         AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
-        CompletionEvent, CompletionEventStream, CompletionRequest, ErasedStructuredTurnEvent,
-        ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
-        FinishReason, LlmAdapter, StreamKind,
+        CompletionEvent, CompletionEventStream, CompletionRequest as ProtocolCompletionRequest,
+        ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
+        ErasedTextTurnEventStream, FinishReason, LlmAdapter, ModelSelector, StreamKind,
     },
     transcript::{ItemView, ToolCallItemView, ToolResultItemView, TurnRole, TurnView},
 };
@@ -41,12 +41,60 @@ pub trait BudgetTokensResolver: Send + Sync + 'static {
     fn resolve(&self, extensions: &RequestExtensions) -> Option<u32>;
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MessagesRequest {
+    pub model: String,
+    pub max_tokens: u32,
+    pub messages: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_sequences: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ThinkingConfig {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub budget_tokens: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct OutputConfig {
+    pub format: Value,
+}
+
+pub trait FallbackSerializer: Send + Sync {
+    fn apply(&self, fallbacks: &[Cow<'static, str>], request: &mut MessagesRequest);
+}
+
 #[derive(Clone)]
 pub struct ClaudeAdapter {
     client: Arc<Client>,
     api_key: Arc<str>,
     base_url: Arc<str>,
     budget_tokens_resolver: Option<Arc<dyn BudgetTokensResolver>>,
+    model_selector: Option<Arc<dyn ModelSelector>>,
+    fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
+}
+
+struct ResolvedModelSelection {
+    primary: String,
+    fallbacks: Vec<Cow<'static, str>>,
 }
 
 impl ClaudeAdapter {
@@ -61,6 +109,8 @@ impl ClaudeAdapter {
             api_key: Arc::from(api_key.into()),
             base_url: normalize_base_url(DEFAULT_BASE_URL),
             budget_tokens_resolver: None,
+            model_selector: None,
+            fallback_serializer: None,
         }
     }
 
@@ -77,6 +127,14 @@ impl ClaudeAdapter {
         self
     }
 
+    pub fn set_model_selector(&mut self, s: Box<dyn ModelSelector>) {
+        self.model_selector = Some(s.into());
+    }
+
+    pub fn set_fallback_serializer(&mut self, s: Box<dyn FallbackSerializer>) {
+        self.fallback_serializer = Some(s.into());
+    }
+
     fn request_headers(&self) -> Result<HeaderMap, ClaudeError> {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -91,28 +149,90 @@ impl ClaudeAdapter {
         Ok(headers)
     }
 
-    async fn send_streaming_json(
+    fn resolve_model_selection(
         &self,
-        path: &str,
-        body: Value,
-    ) -> Result<ByteStream, ClaudeError> {
+        extensions: &RequestExtensions,
+        default_model: &str,
+    ) -> ResolvedModelSelection {
+        let selection = self
+            .model_selector
+            .as_ref()
+            .map(|selector| selector.select_model(extensions))
+            .unwrap_or_default();
+        ResolvedModelSelection {
+            primary: selection
+                .primary
+                .map(Cow::into_owned)
+                .unwrap_or_else(|| default_model.to_string()),
+            fallbacks: selection.fallbacks.unwrap_or_default(),
+        }
+    }
+
+    fn prepare_messages_request(
+        &self,
+        input: &ModelInput,
+        config: &AdapterTurnConfig,
+        extensions: &RequestExtensions,
+        thinking_budget: Option<u32>,
+        format: Option<Value>,
+        stream: bool,
+    ) -> Result<(MessagesRequest, String), ClaudeError> {
+        let selection = self.resolve_model_selection(extensions, config.model.as_ref());
+        let mut request = build_messages_request(
+            input,
+            config,
+            &selection.primary,
+            thinking_budget,
+            format,
+            stream,
+        )?;
+        if !selection.fallbacks.is_empty()
+            && let Some(serializer) = self.fallback_serializer.as_ref()
+        {
+            serializer.apply(&selection.fallbacks, &mut request);
+        }
+        Ok((request, selection.primary))
+    }
+
+    fn prepare_completion_request(
+        &self,
+        request: &ProtocolCompletionRequest,
+        extensions: &RequestExtensions,
+    ) -> (MessagesRequest, String) {
+        let selection = self.resolve_model_selection(extensions, request.model.as_ref());
+        let mut body = build_completion_request(request, &selection.primary);
+        if !selection.fallbacks.is_empty()
+            && let Some(serializer) = self.fallback_serializer.as_ref()
+        {
+            serializer.apply(&selection.fallbacks, &mut body);
+        }
+        (body, selection.primary)
+    }
+
+    async fn send_streaming_json<T>(&self, path: &str, body: &T) -> Result<ByteStream, ClaudeError>
+    where
+        T: Serialize + ?Sized,
+    {
         let response = self
             .client
             .post(format!("{}{}", self.base_url, path))
             .headers(self.request_headers()?)
-            .json(&body)
+            .json(body)
             .send()
             .await?;
         let response = error_for_status_with_body(response).await?;
         Ok(Box::pin(response.bytes_stream()))
     }
 
-    async fn post_json(&self, path: &str, body: Value) -> Result<Value, ClaudeError> {
+    async fn post_json<T>(&self, path: &str, body: &T) -> Result<Value, ClaudeError>
+    where
+        T: Serialize + ?Sized,
+    {
         let response = self
             .client
             .post(format!("{}{}", self.base_url, path))
             .headers(self.request_headers()?)
-            .json(&body)
+            .json(body)
             .send()
             .await?;
         let value = error_for_status_with_body(response)
@@ -155,16 +275,23 @@ impl LlmAdapter for ClaudeAdapter {
         input: ModelInput,
         turn: AdapterTextTurn,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
-        let model = turn.config.model.to_string();
         let thinking_budget = self
             .budget_tokens_resolver
             .as_ref()
             .and_then(|resolver| resolver.resolve(turn.extensions.as_ref()))
             .map(|budget| budget.max(MIN_THINKING_BUDGET_TOKENS));
-        let body = build_messages_request(&input, &turn.config, thinking_budget, None, true)
+        let (body, model) = self
+            .prepare_messages_request(
+                &input,
+                &turn.config,
+                turn.extensions.as_ref(),
+                thinking_budget,
+                None,
+                true,
+            )
             .map_err(AgentError::backend)?;
         let stream = self
-            .send_streaming_json("/v1/messages", body)
+            .send_streaming_json("/v1/messages", &body)
             .await
             .map_err(AgentError::backend)?;
         Ok(
@@ -178,7 +305,6 @@ impl LlmAdapter for ClaudeAdapter {
         input: ModelInput,
         turn: AdapterStructuredTurn,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
-        let model = turn.config.model.to_string();
         let thinking_budget = self
             .budget_tokens_resolver
             .as_ref()
@@ -188,10 +314,18 @@ impl LlmAdapter for ClaudeAdapter {
             "type": "json_schema",
             "schema": turn.output.schema,
         }));
-        let body = build_messages_request(&input, &turn.config, thinking_budget, format, true)
+        let (body, model) = self
+            .prepare_messages_request(
+                &input,
+                &turn.config,
+                turn.extensions.as_ref(),
+                thinking_budget,
+                format,
+                true,
+            )
             .map_err(AgentError::backend)?;
         let stream = self
-            .send_streaming_json("/v1/messages", body)
+            .send_streaming_json("/v1/messages", &body)
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
@@ -201,11 +335,12 @@ impl LlmAdapter for ClaudeAdapter {
 
     async fn completion(
         &self,
-        request: CompletionRequest,
+        request: ProtocolCompletionRequest,
+        extensions: &RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError> {
-        let fallback_model = request.model.to_string();
+        let (body, fallback_model) = self.prepare_completion_request(&request, extensions);
         let value = self
-            .post_json("/v1/messages", build_completion_request(&request))
+            .post_json("/v1/messages", &body)
             .await
             .map_err(AgentError::backend)?;
 
@@ -337,65 +472,62 @@ impl CompiledClaudeConversation {
 fn build_messages_request(
     input: &ModelInput,
     config: &AdapterTurnConfig,
+    model: &str,
     thinking_budget: Option<u32>,
     format: Option<Value>,
     stream: bool,
-) -> Result<Value, ClaudeError> {
+) -> Result<MessagesRequest, ClaudeError> {
     let compiled = compile_model_input(input)?;
-    let system = compiled.system.clone();
+    let system = (!compiled.system.is_empty()).then_some(compiled.system.clone());
     let max_tokens = resolve_max_tokens(config.generation.max_output_tokens, thinking_budget);
-    let mut body = json!({
-        "model": config.model,
-        "max_tokens": max_tokens,
-        "messages": compiled.into_json_messages(),
-        "stream": stream,
-    });
+    let tools = (!config.tools.is_empty()).then(|| build_tool_definitions(config));
 
-    if !system.is_empty() {
-        body["system"] = Value::Array(system);
-    }
-    if let Some(temperature) = config.generation.temperature {
-        body["temperature"] = json!(temperature.get());
-    }
-    if !config.tools.is_empty() {
-        body["tools"] = Value::Array(build_tool_definitions(config));
-    }
-    if let Some(tool_choice) = build_tool_choice(config) {
-        body["tool_choice"] = tool_choice;
-    }
-    if let Some(budget_tokens) = thinking_budget {
-        body["thinking"] = json!({
-            "type": "enabled",
-            "budget_tokens": budget_tokens,
-        });
-    }
-    if let Some(format) = format {
-        body["output_config"] = json!({
-            "format": format,
-        });
-    }
-
-    Ok(body)
+    Ok(MessagesRequest {
+        model: model.to_string(),
+        max_tokens,
+        messages: compiled.into_json_messages(),
+        stream: Some(stream),
+        system,
+        temperature: config
+            .generation
+            .temperature
+            .map(|temperature| temperature.get()),
+        tools,
+        tool_choice: build_tool_choice(config),
+        thinking: thinking_budget.map(|budget_tokens| ThinkingConfig {
+            kind: "enabled",
+            budget_tokens,
+        }),
+        output_config: format.map(|format| OutputConfig { format }),
+        stop_sequences: None,
+        models: None,
+    })
 }
 
-fn build_completion_request(request: &CompletionRequest) -> Value {
-    let mut body = json!({
-        "model": request.model,
-        "max_tokens": request.options.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        "messages": [{
+fn build_completion_request(request: &ProtocolCompletionRequest, model: &str) -> MessagesRequest {
+    MessagesRequest {
+        model: model.to_string(),
+        max_tokens: request
+            .options
+            .max_output_tokens
+            .unwrap_or(DEFAULT_MAX_TOKENS),
+        messages: vec![json!({
             "role": "user",
             "content": [text_block(&request.prompt)],
-        }],
-    });
-
-    if let Some(temperature) = request.options.temperature {
-        body["temperature"] = json!(temperature.get());
+        })],
+        stream: None,
+        system: None,
+        temperature: request
+            .options
+            .temperature
+            .map(|temperature| temperature.get()),
+        tools: None,
+        tool_choice: None,
+        thinking: None,
+        output_config: None,
+        stop_sequences: (!request.options.stop.is_empty()).then(|| request.options.stop.clone()),
+        models: None,
     }
-    if !request.options.stop.is_empty() {
-        body["stop_sequences"] = json!(request.options.stop);
-    }
-
-    body
 }
 
 fn resolve_max_tokens(explicit: Option<u32>, thinking_budget: Option<u32>) -> u32 {
@@ -1462,5 +1594,150 @@ impl ItemView for ClaudeTurnItem {
 
     fn as_tool_result(&self) -> Option<ToolResultItemView<'_>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use futures::{StreamExt, executor::block_on};
+
+    use agents_protocol::{
+        AdapterToolChoice, AdapterTurnConfig, ErasedTextTurnEvent, GenerationParams, ModelInput,
+        ModelInputItem, ModelName, ModelSelection, ModelSelector, RequestExtensions,
+    };
+
+    use super::*;
+
+    struct TestModelSelector;
+
+    impl ModelSelector for TestModelSelector {
+        fn select_model(&self, extensions: &RequestExtensions) -> ModelSelection {
+            extensions
+                .get::<TestSelection>()
+                .map(|selection| selection.0.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TestSelection(ModelSelection);
+
+    struct OpenRouterFallbackSerializer;
+
+    impl FallbackSerializer for OpenRouterFallbackSerializer {
+        fn apply(&self, fallbacks: &[Cow<'static, str>], request: &mut MessagesRequest) {
+            request.models = Some(fallbacks.iter().map(ToString::to_string).collect());
+        }
+    }
+
+    #[test]
+    fn prepare_messages_request_overrides_primary_model_and_propagates_fallback_model() {
+        let mut adapter = ClaudeAdapter::new("test-key");
+        adapter.set_model_selector(Box::new(TestModelSelector));
+
+        let input = ModelInput::from_items(vec![ModelInputItem::text(
+            agents_protocol::InputMessageRole::User,
+            "hello",
+        )]);
+        let config = AdapterTurnConfig {
+            model: ModelName::new("claude-sonnet").unwrap(),
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(TestSelection(ModelSelection {
+            primary: Some(Cow::Borrowed("openrouter/claude-primary")),
+            fallbacks: None,
+        }));
+
+        let (request, fallback_model) = adapter
+            .prepare_messages_request(&input, &config, &extensions, None, None, true)
+            .unwrap();
+
+        assert_eq!(request.model, "openrouter/claude-primary");
+        assert_eq!(fallback_model, "openrouter/claude-primary");
+
+        let payloads = vec![Ok(Bytes::from("event: message_stop\ndata: {}\n\n"))];
+        let events = block_on(async {
+            map_text_stream(futures::stream::iter(payloads), fallback_model)
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert!(matches!(
+            &events[0],
+            ErasedTextTurnEvent::Started { model, .. } if model == "openrouter/claude-primary"
+        ));
+    }
+
+    #[test]
+    fn prepare_completion_request_serializes_fallback_models() {
+        let mut adapter = ClaudeAdapter::new("test-key");
+        adapter.set_model_selector(Box::new(TestModelSelector));
+        adapter.set_fallback_serializer(Box::new(OpenRouterFallbackSerializer));
+
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(TestSelection(ModelSelection {
+            primary: Some(Cow::Borrowed("openrouter/claude-primary")),
+            fallbacks: Some(vec![
+                Cow::Borrowed("openrouter/claude-fallback-1"),
+                Cow::Borrowed("openrouter/claude-fallback-2"),
+            ]),
+        }));
+
+        let (request, fallback_model) = adapter.prepare_completion_request(
+            &ProtocolCompletionRequest::new(ModelName::new("claude-sonnet").unwrap(), "hello"),
+            &extensions,
+        );
+
+        assert_eq!(request.model, "openrouter/claude-primary");
+        assert_eq!(
+            request.models,
+            Some(vec![
+                "openrouter/claude-fallback-1".to_string(),
+                "openrouter/claude-fallback-2".to_string(),
+            ])
+        );
+        assert_eq!(fallback_model, "openrouter/claude-primary");
+    }
+
+    #[test]
+    fn prepare_requests_fall_back_to_config_model_when_selector_returns_none() {
+        let mut adapter = ClaudeAdapter::new("test-key");
+        adapter.set_model_selector(Box::new(TestModelSelector));
+        adapter.set_fallback_serializer(Box::new(OpenRouterFallbackSerializer));
+
+        let input = ModelInput::from_items(vec![ModelInputItem::text(
+            agents_protocol::InputMessageRole::User,
+            "hello",
+        )]);
+        let config = AdapterTurnConfig {
+            model: ModelName::new("claude-sonnet").unwrap(),
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let extensions = RequestExtensions::new();
+
+        let (messages_request, messages_model) = adapter
+            .prepare_messages_request(&input, &config, &extensions, None, None, true)
+            .unwrap();
+        let (completion_request, completion_model) = adapter.prepare_completion_request(
+            &ProtocolCompletionRequest::new(ModelName::new("claude-sonnet").unwrap(), "hello"),
+            &extensions,
+        );
+
+        assert_eq!(messages_request.model, "claude-sonnet");
+        assert_eq!(messages_request.models, None);
+        assert_eq!(messages_model, "claude-sonnet");
+        assert_eq!(completion_request.model, "claude-sonnet");
+        assert_eq!(completion_request.models, None);
+        assert_eq!(completion_model, "claude-sonnet");
     }
 }

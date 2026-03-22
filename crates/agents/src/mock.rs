@@ -360,6 +360,7 @@ impl LlmAdapter for MockLlmAdapter {
     async fn completion(
         &self,
         _request: CompletionRequest,
+        _extensions: &agents_protocol::RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError> {
         let scenario = self
             .completions

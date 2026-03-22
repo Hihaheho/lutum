@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     env,
     pin::Pin,
@@ -27,15 +28,66 @@ use agents_protocol::{
     extensions::RequestExtensions,
     llm::{
         AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
-        CompletionEvent, CompletionEventStream, CompletionRequest, ErasedStructuredTurnEvent,
-        ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
-        FinishReason, LlmAdapter, StreamKind,
+        CompletionEvent, CompletionEventStream, CompletionRequest as ProtocolCompletionRequest,
+        ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
+        ErasedTextTurnEventStream, FinishReason, LlmAdapter, ModelSelector, StreamKind,
     },
     transcript::{ItemView, ToolCallItemView, ToolResultItemView, TurnRole, TurnView},
 };
 
 pub trait ReasoningEffortResolver: Send + Sync + 'static {
     fn resolve(&self, extensions: &RequestExtensions) -> Option<OpenAiReasoningEffort>;
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ResponsesRequest {
+    pub model: String,
+    pub input: Vec<Value>,
+    pub stream: bool,
+    pub tools: Vec<Value>,
+    pub parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ResponsesReasoningConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<ResponsesTextConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ResponsesReasoningConfig {
+    pub effort: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ResponsesTextConfig {
+    pub format: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CompletionRequest {
+    pub model: String,
+    pub prompt: String,
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub stop: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+}
+
+pub trait FallbackSerializer: Send + Sync {
+    fn apply_to_responses(&self, fallbacks: &[Cow<'static, str>], request: &mut ResponsesRequest);
+    fn apply_to_completion(&self, fallbacks: &[Cow<'static, str>], request: &mut CompletionRequest);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,9 +113,16 @@ pub struct OpenAiAdapter {
     api_key: Arc<str>,
     base_url: Arc<str>,
     reasoning_resolver: Option<Arc<dyn ReasoningEffortResolver>>,
+    model_selector: Option<Arc<dyn ModelSelector>>,
+    fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
 }
 
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>;
+
+struct ResolvedModelSelection {
+    primary: String,
+    fallbacks: Vec<Cow<'static, str>>,
+}
 
 impl OpenAiAdapter {
     pub fn from_env() -> Result<Self, OpenAiError> {
@@ -77,6 +136,8 @@ impl OpenAiAdapter {
             api_key: Arc::from(api_key.into()),
             base_url: Arc::from("https://api.openai.com/v1"),
             reasoning_resolver: None,
+            model_selector: None,
+            fallback_serializer: None,
         }
     }
 
@@ -90,6 +151,14 @@ impl OpenAiAdapter {
         self
     }
 
+    pub fn set_model_selector(&mut self, s: Box<dyn ModelSelector>) {
+        self.model_selector = Some(s.into());
+    }
+
+    pub fn set_fallback_serializer(&mut self, s: Box<dyn FallbackSerializer>) {
+        self.fallback_serializer = Some(s.into());
+    }
+
     fn request_headers(&self) -> Result<HeaderMap, OpenAiError> {
         let mut headers = HeaderMap::new();
         let bearer = format!("Bearer {}", self.api_key);
@@ -101,16 +170,73 @@ impl OpenAiAdapter {
         Ok(headers)
     }
 
-    async fn send_streaming_json(
+    fn resolve_model_selection(
         &self,
-        path: &str,
-        body: Value,
-    ) -> Result<ByteStream, OpenAiError> {
+        extensions: &RequestExtensions,
+        default_model: &str,
+    ) -> ResolvedModelSelection {
+        let selection = self
+            .model_selector
+            .as_ref()
+            .map(|selector| selector.select_model(extensions))
+            .unwrap_or_default();
+        ResolvedModelSelection {
+            primary: selection
+                .primary
+                .map(Cow::into_owned)
+                .unwrap_or_else(|| default_model.to_string()),
+            fallbacks: selection.fallbacks.unwrap_or_default(),
+        }
+    }
+
+    fn prepare_responses_request(
+        &self,
+        input: &ModelInput,
+        config: &AdapterTurnConfig,
+        extensions: &RequestExtensions,
+        reasoning_effort: Option<OpenAiReasoningEffort>,
+        text_format: Option<Value>,
+    ) -> Result<(ResponsesRequest, String), OpenAiError> {
+        let selection = self.resolve_model_selection(extensions, config.model.as_ref());
+        let mut request = build_responses_request(
+            input,
+            config,
+            &selection.primary,
+            reasoning_effort,
+            text_format,
+        )?;
+        if !selection.fallbacks.is_empty()
+            && let Some(serializer) = self.fallback_serializer.as_ref()
+        {
+            serializer.apply_to_responses(&selection.fallbacks, &mut request);
+        }
+        Ok((request, selection.primary))
+    }
+
+    fn prepare_completion_request(
+        &self,
+        request: &ProtocolCompletionRequest,
+        extensions: &RequestExtensions,
+    ) -> (CompletionRequest, String) {
+        let selection = self.resolve_model_selection(extensions, request.model.as_ref());
+        let mut body = build_completion_request(request, &selection.primary);
+        if !selection.fallbacks.is_empty()
+            && let Some(serializer) = self.fallback_serializer.as_ref()
+        {
+            serializer.apply_to_completion(&selection.fallbacks, &mut body);
+        }
+        (body, selection.primary)
+    }
+
+    async fn send_streaming_json<T>(&self, path: &str, body: &T) -> Result<ByteStream, OpenAiError>
+    where
+        T: Serialize + ?Sized,
+    {
         let response = self
             .client
             .post(format!("{}{}", self.base_url, path))
             .headers(self.request_headers()?)
-            .json(&body)
+            .json(body)
             .send()
             .await?;
         let response = error_for_status_with_body(response).await?;
@@ -160,15 +286,21 @@ impl LlmAdapter for OpenAiAdapter {
         input: ModelInput,
         turn: AdapterTextTurn,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
-        let model = turn.config.model.to_string();
         let reasoning_effort = self
             .reasoning_resolver
             .as_ref()
             .and_then(|resolver| resolver.resolve(turn.extensions.as_ref()));
-        let body = build_responses_request(&input, &turn.config, reasoning_effort, None)
+        let (body, model) = self
+            .prepare_responses_request(
+                &input,
+                &turn.config,
+                turn.extensions.as_ref(),
+                reasoning_effort,
+                None,
+            )
             .map_err(AgentError::backend)?;
         let stream = self
-            .send_streaming_json("/responses", body)
+            .send_streaming_json("/responses", &body)
             .await
             .map_err(AgentError::backend)?;
         Ok(
@@ -182,7 +314,6 @@ impl LlmAdapter for OpenAiAdapter {
         input: ModelInput,
         turn: AdapterStructuredTurn,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
-        let model = turn.config.model.to_string();
         let reasoning_effort = self
             .reasoning_resolver
             .as_ref()
@@ -193,10 +324,17 @@ impl LlmAdapter for OpenAiAdapter {
             "strict": true,
             "schema": turn.output.schema,
         }));
-        let body = build_responses_request(&input, &turn.config, reasoning_effort, output_schema)
+        let (body, model) = self
+            .prepare_responses_request(
+                &input,
+                &turn.config,
+                turn.extensions.as_ref(),
+                reasoning_effort,
+                output_schema,
+            )
             .map_err(AgentError::backend)?;
         let stream = self
-            .send_streaming_json("/responses", body)
+            .send_streaming_json("/responses", &body)
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
@@ -206,16 +344,16 @@ impl LlmAdapter for OpenAiAdapter {
 
     async fn completion(
         &self,
-        request: CompletionRequest,
+        request: ProtocolCompletionRequest,
+        extensions: &RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError> {
-        let body = build_completion_request(&request);
+        let (body, model) = self.prepare_completion_request(&request, extensions);
         let stream = self
-            .send_streaming_json("/completions", body)
+            .send_streaming_json("/completions", &body)
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
-            map_completion_stream(stream, request.model.to_string())
-                .map(|item| item.map_err(AgentError::backend)),
+            map_completion_stream(stream, model).map(|item| item.map_err(AgentError::backend)),
         ) as CompletionEventStream)
     }
 
@@ -240,73 +378,60 @@ impl LlmAdapter for OpenAiAdapter {
 fn build_responses_request(
     input: &ModelInput,
     config: &AdapterTurnConfig,
+    model: &str,
     reasoning_effort: Option<OpenAiReasoningEffort>,
     text_format: Option<Value>,
-) -> Result<Value, OpenAiError> {
+) -> Result<ResponsesRequest, OpenAiError> {
     let tools = build_tool_definitions(config);
     let parallel_tool_calls = match &config.tool_choice {
         AdapterToolChoice::Required | AdapterToolChoice::Specific(_) => false,
         AdapterToolChoice::None | AdapterToolChoice::Auto => true,
     };
-    let mut body = json!({
-        "model": config.model,
-        "input": convert_model_input(input)?,
-        "stream": true,
-        "tools": tools,
-        "parallel_tool_calls": parallel_tool_calls,
-    });
+    let tool_choice = match &config.tool_choice {
+        AdapterToolChoice::Required => Some(json!("required")),
+        AdapterToolChoice::None => Some(json!("none")),
+        AdapterToolChoice::Specific(name) => Some(json!({
+            "type": "function",
+            "function": {
+                "name": name,
+            },
+        })),
+        AdapterToolChoice::Auto => None,
+    };
 
-    if let Some(temperature) = config.generation.temperature {
-        body["temperature"] = json!(temperature.get());
-    }
-    if let Some(max_output_tokens) = config.generation.max_output_tokens {
-        body["max_output_tokens"] = json!(max_output_tokens);
-    }
-    if let Some(reasoning_effort) = reasoning_effort {
-        body["reasoning"] = json!({
-            "effort": reasoning_effort.as_str(),
-        });
-    }
-    if let Some(text_format) = text_format {
-        body["text"] = json!({ "format": text_format });
-    }
-    match &config.tool_choice {
-        AdapterToolChoice::Required => {
-            body["tool_choice"] = json!("required");
-        }
-        AdapterToolChoice::None => {
-            body["tool_choice"] = json!("none");
-        }
-        AdapterToolChoice::Specific(name) => {
-            body["tool_choice"] = json!({
-                "type": "function",
-                "function": {
-                    "name": name,
-                },
-            });
-        }
-        AdapterToolChoice::Auto => {}
-    }
-
-    Ok(body)
+    Ok(ResponsesRequest {
+        model: model.to_string(),
+        input: convert_model_input(input)?,
+        stream: true,
+        tools,
+        parallel_tool_calls,
+        temperature: config
+            .generation
+            .temperature
+            .map(|temperature| temperature.get()),
+        max_output_tokens: config.generation.max_output_tokens,
+        reasoning: reasoning_effort.map(|effort| ResponsesReasoningConfig {
+            effort: effort.as_str(),
+        }),
+        text: text_format.map(|format| ResponsesTextConfig { format }),
+        tool_choice,
+        models: None,
+    })
 }
 
-fn build_completion_request(request: &CompletionRequest) -> Value {
-    let mut body = json!({
-        "model": request.model,
-        "prompt": request.prompt,
-        "stream": true,
-    });
-    if let Some(temperature) = request.options.temperature {
-        body["temperature"] = json!(temperature.get());
+fn build_completion_request(request: &ProtocolCompletionRequest, model: &str) -> CompletionRequest {
+    CompletionRequest {
+        model: model.to_string(),
+        prompt: request.prompt.clone(),
+        stream: true,
+        temperature: request
+            .options
+            .temperature
+            .map(|temperature| temperature.get()),
+        max_tokens: request.options.max_output_tokens,
+        stop: request.options.stop.clone(),
+        models: None,
     }
-    if let Some(max_output_tokens) = request.options.max_output_tokens {
-        body["max_tokens"] = json!(max_output_tokens);
-    }
-    if !request.options.stop.is_empty() {
-        body["stop"] = json!(request.options.stop);
-    }
-    body
 }
 
 async fn error_for_status_with_body(
@@ -1432,7 +1557,7 @@ impl SseParser {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{borrow::Cow, sync::Arc};
 
     use futures::{StreamExt, executor::block_on};
     use schemars::JsonSchema;
@@ -1441,7 +1566,8 @@ mod tests {
     use agents_protocol::{
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
         AssistantTurnItem, AssistantTurnView, ErasedStructuredTurnEvent, ErasedTextTurnEvent,
-        GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ToolUse,
+        GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ModelSelection,
+        ModelSelector, RequestExtensions, ToolUse,
     };
 
     use super::*;
@@ -1454,6 +1580,145 @@ mod tests {
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
     struct Summary {
         answer: String,
+    }
+
+    struct TestModelSelector;
+
+    impl ModelSelector for TestModelSelector {
+        fn select_model(&self, extensions: &RequestExtensions) -> ModelSelection {
+            extensions
+                .get::<TestSelection>()
+                .map(|selection| selection.0.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TestSelection(ModelSelection);
+
+    struct OpenRouterFallbackSerializer;
+
+    impl FallbackSerializer for OpenRouterFallbackSerializer {
+        fn apply_to_responses(
+            &self,
+            fallbacks: &[Cow<'static, str>],
+            request: &mut ResponsesRequest,
+        ) {
+            request.models = Some(fallbacks.iter().map(ToString::to_string).collect());
+        }
+
+        fn apply_to_completion(
+            &self,
+            fallbacks: &[Cow<'static, str>],
+            request: &mut CompletionRequest,
+        ) {
+            request.models = Some(fallbacks.iter().map(ToString::to_string).collect());
+        }
+    }
+
+    #[test]
+    fn prepare_responses_request_overrides_primary_model_and_propagates_fallback_model() {
+        let mut adapter = OpenAiAdapter::new("test-key");
+        adapter.set_model_selector(Box::new(TestModelSelector));
+
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            model: ModelName::new("gpt-4.1").unwrap(),
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(TestSelection(ModelSelection {
+            primary: Some(Cow::Borrowed("openrouter/primary")),
+            fallbacks: None,
+        }));
+
+        let (request, fallback_model) = adapter
+            .prepare_responses_request(&input, &config, &extensions, None, None)
+            .unwrap();
+
+        assert_eq!(request.model, "openrouter/primary");
+        assert_eq!(fallback_model, "openrouter/primary");
+
+        let payloads = vec![Ok(Bytes::from(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        ))];
+        let events = block_on(async {
+            map_text_stream(futures::stream::iter(payloads), fallback_model)
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert!(matches!(
+            &events[0],
+            ErasedTextTurnEvent::Started { model, .. } if model == "openrouter/primary"
+        ));
+    }
+
+    #[test]
+    fn prepare_completion_request_serializes_fallback_models() {
+        let mut adapter = OpenAiAdapter::new("test-key");
+        adapter.set_model_selector(Box::new(TestModelSelector));
+        adapter.set_fallback_serializer(Box::new(OpenRouterFallbackSerializer));
+
+        let request = ProtocolCompletionRequest::new(ModelName::new("gpt-4.1").unwrap(), "hello");
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(TestSelection(ModelSelection {
+            primary: Some(Cow::Borrowed("openrouter/primary")),
+            fallbacks: Some(vec![
+                Cow::Borrowed("openrouter/fallback-1"),
+                Cow::Borrowed("openrouter/fallback-2"),
+            ]),
+        }));
+
+        let (request, fallback_model) = adapter.prepare_completion_request(&request, &extensions);
+
+        assert_eq!(request.model, "openrouter/primary");
+        assert_eq!(
+            request.models,
+            Some(vec![
+                "openrouter/fallback-1".to_string(),
+                "openrouter/fallback-2".to_string(),
+            ])
+        );
+        assert_eq!(fallback_model, "openrouter/primary");
+    }
+
+    #[test]
+    fn prepare_requests_fall_back_to_config_model_when_selector_returns_none() {
+        let mut adapter = OpenAiAdapter::new("test-key");
+        adapter.set_model_selector(Box::new(TestModelSelector));
+        adapter.set_fallback_serializer(Box::new(OpenRouterFallbackSerializer));
+
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            model: ModelName::new("gpt-4.1").unwrap(),
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let extensions = RequestExtensions::new();
+
+        let (responses_request, responses_model) = adapter
+            .prepare_responses_request(&input, &config, &extensions, None, None)
+            .unwrap();
+        let (completion_request, completion_model) = adapter.prepare_completion_request(
+            &ProtocolCompletionRequest::new(ModelName::new("gpt-4.1").unwrap(), "hello"),
+            &extensions,
+        );
+
+        assert_eq!(responses_request.model, "gpt-4.1");
+        assert_eq!(responses_request.models, None);
+        assert_eq!(responses_model, "gpt-4.1");
+        assert_eq!(completion_request.model, "gpt-4.1");
+        assert_eq!(completion_request.models, None);
+        assert_eq!(completion_model, "gpt-4.1");
     }
 
     #[test]

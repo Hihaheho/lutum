@@ -35,6 +35,7 @@ impl LlmAdapter for NullAdapter {
     async fn completion(
         &self,
         _request: CompletionRequest,
+        _extensions: &RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as CompletionEventStream)
     }

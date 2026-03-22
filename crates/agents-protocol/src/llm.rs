@@ -1,4 +1,4 @@
-use std::{fmt, marker::PhantomData, pin::Pin, sync::Arc};
+use std::{borrow::Cow, fmt, marker::PhantomData, pin::Pin, sync::Arc};
 
 use bon::Builder;
 use futures::Stream;
@@ -197,6 +197,20 @@ pub struct AdapterTurnConfig {
     pub generation: GenerationParams,
     pub tools: Vec<AdapterToolDefinition>,
     pub tool_choice: AdapterToolChoice,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ModelSelection {
+    /// Borrowed model names must be truly `'static`; runtime-derived values
+    /// should use `Cow::Owned`.
+    pub primary: Option<Cow<'static, str>>,
+    /// Borrowed model names must be truly `'static`; runtime-derived values
+    /// should use `Cow::Owned`.
+    pub fallbacks: Option<Vec<Cow<'static, str>>>,
+}
+
+pub trait ModelSelector: Send + Sync {
+    fn select_model(&self, extensions: &crate::extensions::RequestExtensions) -> ModelSelection;
 }
 
 #[derive(Clone)]
@@ -731,6 +745,7 @@ pub trait LlmAdapter: Send + Sync + 'static {
     async fn completion(
         &self,
         request: CompletionRequest,
+        extensions: &crate::extensions::RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError>;
 
     async fn recover_usage(
@@ -764,8 +779,9 @@ where
     async fn completion(
         &self,
         request: CompletionRequest,
+        extensions: &crate::extensions::RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError> {
-        (**self).completion(request).await
+        (**self).completion(request, extensions).await
     }
 
     async fn recover_usage(

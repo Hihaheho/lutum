@@ -303,7 +303,7 @@ impl Context {
             .budget
             .reserve(&extensions, &estimate, request.budget)?;
         let span = turn_span("completion", request.model.as_ref(), estimate);
-        let stream = self.adapter.completion(request).await?;
+        let stream = self.adapter.completion(request, &extensions).await?;
         Ok(PendingCompletion {
             extensions,
             owned_lease: OwnedLease {
