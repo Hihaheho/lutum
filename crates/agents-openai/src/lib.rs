@@ -1,6 +1,10 @@
-mod openai;
+pub mod adapter;
+pub mod completion;
+pub mod error;
+pub mod responses;
+pub mod sse;
 
-pub use openai::{
-    CompletionRequest, FallbackSerializer, OpenAiAdapter, OpenAiCommittedTurn, OpenAiError,
-    OpenAiReasoningEffort, OpenAiTurnItem, ReasoningEffortResolver, ResponsesRequest,
-};
+pub use adapter::{FallbackSerializer, OpenAiAdapter, ReasoningEffortResolver};
+pub use completion::CompletionRequest;
+pub use error::OpenAiError;
+pub use responses::{OpenAiCommittedTurn, OpenAiReasoningEffort, OpenAiTurnItem, ResponsesRequest};

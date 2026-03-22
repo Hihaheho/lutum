@@ -6,20 +6,8 @@ use std::{
     sync::Arc,
 };
 
-use async_stream::try_stream;
-use bytes::Bytes;
-use futures::{Stream, StreamExt};
-use reqwest::{
-    Client,
-    header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
-};
-use serde_json::{Value, json};
-use thiserror::Error;
-
-use serde::{Deserialize, Serialize};
-
 use agents_protocol::{
-    AgentError,
+    AgentError, FinishReason,
     budget::Usage,
     conversation::{
         AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, RawJson,
@@ -30,81 +18,44 @@ use agents_protocol::{
         AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
         CompletionEvent, CompletionEventStream, CompletionRequest as ProtocolCompletionRequest,
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-        ErasedTextTurnEventStream, FinishReason, LlmAdapter, ModelSelector, StreamKind,
+        ErasedTextTurnEventStream, LlmAdapter, ModelSelector, StreamKind,
     },
-    transcript::{ItemView, ToolCallItemView, ToolResultItemView, TurnRole, TurnView},
+    transcript::{TurnRole, TurnView},
+};
+use async_stream::try_stream;
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
+use reqwest::{
+    Client,
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::{
+    completion::CompletionRequest,
+    error::OpenAiError,
+    responses::{
+        FunctionCallItem, FunctionCallOutputItem, FunctionToolChoice, InputContent, InputItem,
+        InputMessage, InputTextContent, MessageRole, OpenAiCommittedTurn, OpenAiReasoningEffort,
+        OpenAiTool, OpenAiTurnItem, OutputTextContent, ReasoningItem, RefusalContent,
+        ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent, SseEvent,
+        SummaryText, TextFormat, ToolChoice,
+    },
+    sse::SseParser,
 };
 
 pub trait ReasoningEffortResolver: Send + Sync + 'static {
     fn resolve(&self, extensions: &RequestExtensions) -> Option<OpenAiReasoningEffort>;
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct ResponsesRequest {
-    pub model: String,
-    pub input: Vec<Value>,
-    pub stream: bool,
-    pub tools: Vec<Value>,
-    pub parallel_tool_calls: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<ResponsesReasoningConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<ResponsesTextConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub models: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct ResponsesReasoningConfig {
-    pub effort: &'static str,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct ResponsesTextConfig {
-    pub format: Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct CompletionRequest {
-    pub model: String,
-    pub prompt: String,
-    pub stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub stop: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub models: Option<Vec<String>>,
-}
-
 pub trait FallbackSerializer: Send + Sync {
-    fn apply_to_responses(&self, fallbacks: &[Cow<'static, str>], request: &mut ResponsesRequest);
+    fn apply_to_responses(
+        &self,
+        fallbacks: &[Cow<'static, str>],
+        request: &mut crate::responses::ResponsesRequest,
+    );
     fn apply_to_completion(&self, fallbacks: &[Cow<'static, str>], request: &mut CompletionRequest);
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OpenAiReasoningEffort {
-    Low,
-    Medium,
-    High,
-}
-
-impl OpenAiReasoningEffort {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -146,17 +97,20 @@ impl OpenAiAdapter {
         self
     }
 
-    pub fn with_reasoning_resolver(mut self, r: impl ReasoningEffortResolver + 'static) -> Self {
-        self.reasoning_resolver = Some(Arc::new(r));
+    pub fn with_reasoning_resolver(
+        mut self,
+        resolver: impl ReasoningEffortResolver + 'static,
+    ) -> Self {
+        self.reasoning_resolver = Some(Arc::new(resolver));
         self
     }
 
-    pub fn set_model_selector(&mut self, s: Box<dyn ModelSelector>) {
-        self.model_selector = Some(s.into());
+    pub fn set_model_selector(&mut self, selector: Box<dyn ModelSelector>) {
+        self.model_selector = Some(selector.into());
     }
 
-    pub fn set_fallback_serializer(&mut self, s: Box<dyn FallbackSerializer>) {
-        self.fallback_serializer = Some(s.into());
+    pub fn set_fallback_serializer(&mut self, serializer: Box<dyn FallbackSerializer>) {
+        self.fallback_serializer = Some(serializer.into());
     }
 
     fn request_headers(&self) -> Result<HeaderMap, OpenAiError> {
@@ -195,8 +149,8 @@ impl OpenAiAdapter {
         config: &AdapterTurnConfig,
         extensions: &RequestExtensions,
         reasoning_effort: Option<OpenAiReasoningEffort>,
-        text_format: Option<Value>,
-    ) -> Result<(ResponsesRequest, String), OpenAiError> {
+        text_format: Option<TextFormat>,
+    ) -> Result<(crate::responses::ResponsesRequest, String), OpenAiError> {
         let selection = self.resolve_model_selection(extensions, config.model.as_ref());
         let mut request = build_responses_request(
             input,
@@ -258,27 +212,6 @@ impl OpenAiAdapter {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum OpenAiError {
-    #[error("OPENAI_API_KEY is not set: {0}")]
-    MissingApiKey(#[source] env::VarError),
-    #[error("invalid HTTP header: {0}")]
-    InvalidHeader(#[source] reqwest::header::InvalidHeaderValue),
-    #[error("request failed: {0}")]
-    Request(#[from] reqwest::Error),
-    #[error("request failed with status {status}: {message}")]
-    HttpStatus {
-        status: reqwest::StatusCode,
-        message: String,
-    },
-    #[error("failed to encode or decode JSON: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("failed to parse structured output: {0}")]
-    StructuredOutput(serde_json::Error),
-    #[error("unexpected SSE payload: {message}")]
-    Sse { message: String },
-}
-
 #[async_trait::async_trait]
 impl LlmAdapter for OpenAiAdapter {
     async fn responses_text(
@@ -318,19 +251,19 @@ impl LlmAdapter for OpenAiAdapter {
             .reasoning_resolver
             .as_ref()
             .and_then(|resolver| resolver.resolve(turn.extensions.as_ref()));
-        let output_schema = Some(json!({
-            "type": "json_schema",
-            "name": turn.output.schema_name,
-            "strict": true,
-            "schema": turn.output.schema,
-        }));
+        let text_format = Some(TextFormat::JsonSchema {
+            name: turn.output.schema_name.clone(),
+            schema: turn.output.schema.clone(),
+            description: None,
+            strict: Some(true),
+        });
         let (body, model) = self
             .prepare_responses_request(
                 &input,
                 &turn.config,
                 turn.extensions.as_ref(),
                 reasoning_effort,
-                output_schema,
+                text_format,
             )
             .map_err(AgentError::backend)?;
         let stream = self
@@ -380,26 +313,23 @@ fn build_responses_request(
     config: &AdapterTurnConfig,
     model: &str,
     reasoning_effort: Option<OpenAiReasoningEffort>,
-    text_format: Option<Value>,
-) -> Result<ResponsesRequest, OpenAiError> {
+    text_format: Option<TextFormat>,
+) -> Result<crate::responses::ResponsesRequest, OpenAiError> {
     let tools = build_tool_definitions(config);
     let parallel_tool_calls = match &config.tool_choice {
         AdapterToolChoice::Required | AdapterToolChoice::Specific(_) => false,
         AdapterToolChoice::None | AdapterToolChoice::Auto => true,
     };
     let tool_choice = match &config.tool_choice {
-        AdapterToolChoice::Required => Some(json!("required")),
-        AdapterToolChoice::None => Some(json!("none")),
-        AdapterToolChoice::Specific(name) => Some(json!({
-            "type": "function",
-            "function": {
-                "name": name,
-            },
-        })),
+        AdapterToolChoice::Required => Some(ToolChoice::Required),
+        AdapterToolChoice::None => Some(ToolChoice::None),
+        AdapterToolChoice::Specific(name) => {
+            Some(ToolChoice::Function(FunctionToolChoice::new(name.clone())))
+        }
         AdapterToolChoice::Auto => None,
     };
 
-    Ok(ResponsesRequest {
+    Ok(crate::responses::ResponsesRequest {
         model: model.to_string(),
         input: convert_model_input(input)?,
         stream: true,
@@ -410,10 +340,9 @@ fn build_responses_request(
             .temperature
             .map(|temperature| temperature.get()),
         max_output_tokens: config.generation.max_output_tokens,
-        reasoning: reasoning_effort.map(|effort| ResponsesReasoningConfig {
-            effort: effort.as_str(),
-        }),
-        text: text_format.map(|format| ResponsesTextConfig { format }),
+        reasoning: reasoning_effort
+            .map(|effort| crate::responses::ResponsesReasoningConfig { effort }),
+        text: text_format.map(|format| crate::responses::ResponsesTextConfig { format }),
         tool_choice,
         models: None,
     })
@@ -456,7 +385,7 @@ async fn error_for_status_with_body(
     Err(OpenAiError::HttpStatus { status, message })
 }
 
-fn convert_model_input(input: &ModelInput) -> Result<Vec<Value>, OpenAiError> {
+fn convert_model_input(input: &ModelInput) -> Result<Vec<InputItem>, OpenAiError> {
     let mut items = Vec::new();
     let mut assistant_message_content = Vec::new();
     let mut replayed_tool_call_ids = BTreeSet::new();
@@ -465,14 +394,10 @@ fn convert_model_input(input: &ModelInput) -> Result<Vec<Value>, OpenAiError> {
         match item {
             ModelInputItem::Message { role, content } => {
                 flush_assistant_message(&mut assistant_message_content, &mut items);
-                items.push(json!({
-                    "type": "message",
-                    "role": message_role(role),
-                    "content": content
-                        .iter()
-                        .map(message_content)
-                        .collect::<Vec<_>>(),
-                }));
+                items.push(InputItem::Message(InputMessage::new(
+                    message_role(role),
+                    content.iter().map(message_content).collect(),
+                )));
             }
             ModelInputItem::Assistant(assistant) => {
                 lower_assistant_input_item(assistant, &mut assistant_message_content, &mut items)?;
@@ -509,22 +434,23 @@ fn convert_model_input(input: &ModelInput) -> Result<Vec<Value>, OpenAiError> {
 
 fn lower_assistant_input_item(
     item: &AssistantInputItem,
-    message_content: &mut Vec<Value>,
-    out: &mut Vec<Value>,
+    message_content: &mut Vec<InputContent>,
+    out: &mut Vec<InputItem>,
 ) -> Result<(), OpenAiError> {
     match item {
         AssistantInputItem::Text(text) => {
-            message_content.push(json!({ "type": "output_text", "text": text }));
+            message_content.push(InputContent::OutputText(OutputTextContent::new(
+                text.clone(),
+            )));
         }
         AssistantInputItem::Refusal(text) => {
-            message_content.push(json!({ "type": "refusal", "text": text }));
+            message_content.push(InputContent::Refusal(RefusalContent::new(text.clone())));
         }
         AssistantInputItem::Reasoning(text) => {
             flush_assistant_message(message_content, out);
-            out.push(json!({
-                "type": "reasoning",
-                "summary": [{ "type": "summary_text", "text": text }],
-            }));
+            out.push(InputItem::Reasoning(ReasoningItem::new(vec![
+                SummaryText::new(text.clone()),
+            ])));
         }
     }
     Ok(())
@@ -533,44 +459,44 @@ fn lower_assistant_input_item(
 fn lower_tool_use(
     tool_use: &ToolUse,
     emit_call: bool,
-    out: &mut Vec<Value>,
+    out: &mut Vec<InputItem>,
 ) -> Result<(), OpenAiError> {
     if emit_call {
-        out.push(json!({
-            "type": "function_call",
-            "call_id": tool_use.id.as_str(),
-            "name": tool_use.name.as_str(),
-            "arguments": serde_json::from_str::<Value>(tool_use.arguments.get())?,
-        }));
+        out.push(InputItem::FunctionCall(FunctionCallItem::new(
+            tool_use.id.as_str(),
+            tool_use.name.as_str(),
+            tool_use.arguments.get(),
+        )));
     }
-    out.push(json!({
-        "type": "function_call_output",
-        "call_id": tool_use.id.as_str(),
-        "output": tool_use.result.get(),
-    }));
+    out.push(InputItem::FunctionCallOutput(FunctionCallOutputItem::new(
+        tool_use.id.as_str(),
+        Value::String(tool_use.result.get().to_string()),
+    )));
     Ok(())
 }
 
 fn emit_openai_turn_exact(
     turn: &OpenAiCommittedTurn,
-    out: &mut Vec<Value>,
+    out: &mut Vec<InputItem>,
     replayed_tool_call_ids: &mut BTreeSet<ToolCallId>,
 ) -> Result<(), OpenAiError> {
     let mut assistant_message_content = Vec::new();
     for item in &turn.items {
         match item {
             OpenAiTurnItem::Text { content } => {
-                assistant_message_content.push(json!({ "type": "output_text", "text": content }));
+                assistant_message_content.push(InputContent::OutputText(OutputTextContent::new(
+                    content.clone(),
+                )));
             }
             OpenAiTurnItem::Reasoning { content } => {
                 flush_assistant_message(&mut assistant_message_content, out);
-                out.push(json!({
-                    "type": "reasoning",
-                    "summary": [{ "type": "summary_text", "text": content }],
-                }));
+                out.push(InputItem::Reasoning(ReasoningItem::new(vec![
+                    SummaryText::new(content.clone()),
+                ])));
             }
             OpenAiTurnItem::Refusal { content } => {
-                assistant_message_content.push(json!({ "type": "refusal", "text": content }));
+                assistant_message_content
+                    .push(InputContent::Refusal(RefusalContent::new(content.clone())));
             }
             OpenAiTurnItem::ToolCall {
                 id,
@@ -579,12 +505,11 @@ fn emit_openai_turn_exact(
             } => {
                 replayed_tool_call_ids.insert(id.clone());
                 flush_assistant_message(&mut assistant_message_content, out);
-                out.push(json!({
-                    "type": "function_call",
-                    "call_id": id.as_str(),
-                    "name": name.as_str(),
-                    "arguments": serde_json::from_str::<Value>(arguments.get())?,
-                }));
+                out.push(InputItem::FunctionCall(FunctionCallItem::new(
+                    id.as_str(),
+                    name.as_str(),
+                    arguments.get(),
+                )));
             }
         }
     }
@@ -594,7 +519,7 @@ fn emit_openai_turn_exact(
 
 fn emit_turn_from_view(
     turn: &dyn TurnView,
-    out: &mut Vec<Value>,
+    out: &mut Vec<InputItem>,
     replayed_tool_call_ids: &mut BTreeSet<ToolCallId>,
 ) -> Result<(), OpenAiError> {
     match turn.role() {
@@ -605,7 +530,7 @@ fn emit_turn_from_view(
 
 fn emit_assistant_turn_from_view(
     turn: &dyn TurnView,
-    out: &mut Vec<Value>,
+    out: &mut Vec<InputItem>,
     replayed_tool_call_ids: &mut BTreeSet<ToolCallId>,
 ) -> Result<(), OpenAiError> {
     let mut assistant_message_content = Vec::new();
@@ -614,30 +539,28 @@ fn emit_assistant_turn_from_view(
             continue;
         };
         if let Some(text) = item.as_text() {
-            assistant_message_content.push(json!({ "type": "output_text", "text": text }));
+            assistant_message_content.push(InputContent::OutputText(OutputTextContent::new(text)));
             continue;
         }
         if let Some(text) = item.as_reasoning() {
             flush_assistant_message(&mut assistant_message_content, out);
-            out.push(json!({
-                "type": "reasoning",
-                "summary": [{ "type": "summary_text", "text": text }],
-            }));
+            out.push(InputItem::Reasoning(ReasoningItem::new(vec![
+                SummaryText::new(text.to_string()),
+            ])));
             continue;
         }
         if let Some(text) = item.as_refusal() {
-            assistant_message_content.push(json!({ "type": "refusal", "text": text }));
+            assistant_message_content.push(InputContent::Refusal(RefusalContent::new(text)));
             continue;
         }
         if let Some(tool_call) = item.as_tool_call() {
             replayed_tool_call_ids.insert(tool_call.id.clone());
             flush_assistant_message(&mut assistant_message_content, out);
-            out.push(json!({
-                "type": "function_call",
-                "call_id": tool_call.id.as_str(),
-                "name": tool_call.name.as_str(),
-                "arguments": serde_json::from_str::<Value>(tool_call.arguments.get())?,
-            }));
+            out.push(InputItem::FunctionCall(FunctionCallItem::new(
+                tool_call.id.as_str(),
+                tool_call.name.as_str(),
+                tool_call.arguments.get(),
+            )));
         }
     }
     flush_assistant_message(&mut assistant_message_content, out);
@@ -647,7 +570,7 @@ fn emit_assistant_turn_from_view(
 fn emit_message_turn_from_view(
     role: TurnRole,
     turn: &dyn TurnView,
-    out: &mut Vec<Value>,
+    out: &mut Vec<InputItem>,
     replayed_tool_call_ids: &mut BTreeSet<ToolCallId>,
 ) -> Result<(), OpenAiError> {
     let mut message_content = Vec::new();
@@ -656,96 +579,86 @@ fn emit_message_turn_from_view(
             continue;
         };
         if let Some(text) = item.as_text() {
-            message_content.push(json!({ "type": "input_text", "text": text }));
+            message_content.push(InputContent::InputText(InputTextContent::new(text)));
             continue;
         }
         if let Some(text) = item.as_reasoning().or_else(|| item.as_refusal()) {
-            message_content.push(json!({ "type": "input_text", "text": text }));
+            message_content.push(InputContent::InputText(InputTextContent::new(text)));
             continue;
         }
         if let Some(tool_call) = item.as_tool_call() {
             replayed_tool_call_ids.insert(tool_call.id.clone());
             flush_message(turn_role(role), &mut message_content, out);
-            out.push(json!({
-                "type": "function_call",
-                "call_id": tool_call.id.as_str(),
-                "name": tool_call.name.as_str(),
-                "arguments": serde_json::from_str::<Value>(tool_call.arguments.get())?,
-            }));
+            out.push(InputItem::FunctionCall(FunctionCallItem::new(
+                tool_call.id.as_str(),
+                tool_call.name.as_str(),
+                tool_call.arguments.get(),
+            )));
         }
         if let Some(tool_result) = item.as_tool_result() {
             replayed_tool_call_ids.insert(tool_result.id.clone());
             flush_message(turn_role(role), &mut message_content, out);
-            out.push(json!({
-                "type": "function_call",
-                "call_id": tool_result.id.as_str(),
-                "name": tool_result.name.as_str(),
-                "arguments": serde_json::from_str::<Value>(tool_result.arguments.get())?,
-            }));
-            out.push(json!({
-                "type": "function_call_output",
-                "call_id": tool_result.id.as_str(),
-                "output": tool_result.result.get(),
-            }));
+            out.push(InputItem::FunctionCall(FunctionCallItem::new(
+                tool_result.id.as_str(),
+                tool_result.name.as_str(),
+                tool_result.arguments.get(),
+            )));
+            out.push(InputItem::FunctionCallOutput(FunctionCallOutputItem::new(
+                tool_result.id.as_str(),
+                Value::String(tool_result.result.get().to_string()),
+            )));
         }
     }
     flush_message(turn_role(role), &mut message_content, out);
     Ok(())
 }
 
-fn flush_assistant_message(message_content: &mut Vec<Value>, out: &mut Vec<Value>) {
-    flush_message("assistant", message_content, out);
+fn flush_assistant_message(message_content: &mut Vec<InputContent>, out: &mut Vec<InputItem>) {
+    flush_message(MessageRole::Assistant, message_content, out);
 }
 
-fn flush_message(role: &str, message_content: &mut Vec<Value>, out: &mut Vec<Value>) {
+fn flush_message(
+    role: MessageRole,
+    message_content: &mut Vec<InputContent>,
+    out: &mut Vec<InputItem>,
+) {
     if message_content.is_empty() {
         return;
     }
-    out.push(json!({
-        "type": "message",
-        "role": role,
-        "content": std::mem::take(message_content),
-    }));
+    out.push(InputItem::Message(InputMessage::new(
+        role,
+        std::mem::take(message_content),
+    )));
 }
 
-fn message_role(role: &InputMessageRole) -> &'static str {
+fn message_role(role: &InputMessageRole) -> MessageRole {
     match role {
-        InputMessageRole::System => "system",
-        InputMessageRole::Developer => "developer",
-        InputMessageRole::User => "user",
+        InputMessageRole::System => MessageRole::System,
+        InputMessageRole::Developer => MessageRole::Developer,
+        InputMessageRole::User => MessageRole::User,
     }
 }
 
-fn turn_role(role: TurnRole) -> &'static str {
+fn turn_role(role: TurnRole) -> MessageRole {
     match role {
-        TurnRole::System => "system",
-        TurnRole::Developer => "developer",
-        TurnRole::User => "user",
-        TurnRole::Assistant => "assistant",
+        TurnRole::System => MessageRole::System,
+        TurnRole::Developer => MessageRole::Developer,
+        TurnRole::User => MessageRole::User,
+        TurnRole::Assistant => MessageRole::Assistant,
     }
 }
 
-fn message_content(content: &MessageContent) -> Value {
+fn message_content(content: &MessageContent) -> InputContent {
     match content {
-        MessageContent::Text(text) => json!({
-            "type": "input_text",
-            "text": text,
-        }),
+        MessageContent::Text(text) => InputContent::InputText(InputTextContent::new(text.clone())),
     }
 }
 
-fn build_tool_definitions(config: &AdapterTurnConfig) -> Vec<Value> {
+fn build_tool_definitions(config: &AdapterTurnConfig) -> Vec<OpenAiTool> {
     config
         .tools
         .iter()
-        .map(|tool| {
-            json!({
-                "type": "function",
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.input_schema,
-            })
-        })
+        .map(|tool| OpenAiTool::function(&tool.name, &tool.description, tool.input_schema.clone()))
         .collect()
 }
 
@@ -832,60 +745,62 @@ impl ToolCallTracker {
     }
 }
 
-fn response_tool_key(event: &Value) -> String {
-    event["call_id"]
-        .as_str()
-        .or_else(|| event["item_id"].as_str())
-        .unwrap_or_default()
-        .to_string()
-}
-
-fn response_tool_id(event: &Value) -> ToolCallId {
-    ToolCallId::from(
-        event["call_id"]
-            .as_str()
-            .or_else(|| event["item_id"].as_str())
-            .unwrap_or_default(),
-    )
-}
-
-fn response_tool_name(event: &Value) -> ToolName {
-    ToolName::from(event["name"].as_str().unwrap_or_default())
-}
-
-fn output_item_tool_key(event: &Value) -> String {
+fn response_tool_key_from_delta(event: &ResponseFunctionCallArgumentsDeltaEvent) -> String {
     event
-        .pointer("/item/call_id")
-        .and_then(Value::as_str)
-        .or_else(|| event.pointer("/item/id").and_then(Value::as_str))
+        .call_id
+        .as_deref()
+        .or(event.item_id.as_deref())
         .unwrap_or_default()
         .to_string()
 }
 
-fn output_item_tool_id(event: &Value) -> ToolCallId {
+fn response_tool_id_from_delta(event: &ResponseFunctionCallArgumentsDeltaEvent) -> ToolCallId {
     ToolCallId::from(
         event
-            .pointer("/item/call_id")
-            .and_then(Value::as_str)
-            .or_else(|| event.pointer("/item/id").and_then(Value::as_str))
+            .call_id
+            .as_deref()
+            .or(event.item_id.as_deref())
             .unwrap_or_default(),
     )
 }
 
-fn output_item_tool_name(event: &Value) -> ToolName {
-    ToolName::from(
+fn response_tool_key_from_done(event: &ResponseFunctionCallArgumentsDoneEvent) -> String {
+    event
+        .call_id
+        .as_deref()
+        .or(event.item_id.as_deref())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn response_tool_id_from_done(event: &ResponseFunctionCallArgumentsDoneEvent) -> ToolCallId {
+    ToolCallId::from(
         event
-            .pointer("/item/name")
-            .and_then(Value::as_str)
+            .call_id
+            .as_deref()
+            .or(event.item_id.as_deref())
             .unwrap_or_default(),
     )
 }
 
-fn json_string(value: &Value) -> Result<String, OpenAiError> {
-    match value {
-        Value::String(value) => Ok(value.clone()),
-        other => Ok(serde_json::to_string(other)?),
+fn output_item_tool_key(item: &FunctionCallItem) -> String {
+    if !item.call_id.is_empty() {
+        item.call_id.clone()
+    } else {
+        item.id.clone().unwrap_or_default()
     }
+}
+
+fn output_item_tool_id(item: &FunctionCallItem) -> ToolCallId {
+    ToolCallId::from(if !item.call_id.is_empty() {
+        item.call_id.as_str()
+    } else {
+        item.id.as_deref().unwrap_or_default()
+    })
+}
+
+fn output_item_tool_name(item: &FunctionCallItem) -> ToolName {
+    ToolName::from(item.name.as_str())
 }
 
 fn maybe_parse_structured_output(
@@ -1037,14 +952,11 @@ where
                 if payload == "[DONE]" {
                     break;
                 }
-                let event = serde_json::from_str::<Value>(&payload)?;
-                let event_type = event["type"].as_str().unwrap_or_default();
-                if event_type == "response.created" {
-                    if let Some(id) = event.pointer("/response/id").and_then(Value::as_str) {
-                        request_id = Some(id.to_string());
-                    }
-                    if let Some(event_model) = event.pointer("/response/model").and_then(Value::as_str) {
-                        model = event_model.to_string();
+                let event = serde_json::from_str::<SseEvent>(&payload)?;
+                if let SseEvent::ResponseCreated(created) = &event {
+                    request_id = Some(created.response.id.clone());
+                    if let Some(event_model) = created.response.model.as_ref() {
+                        model = event_model.clone();
                     }
                     if !started {
                         started = true;
@@ -1064,96 +976,99 @@ where
                     };
                 }
 
-                match event_type {
-                    "response.output_text.delta" => {
-                        if let Some(delta) = event["delta"].as_str() {
-                            push_buffered_content(
-                                &mut pending_item,
-                                &mut committed_items,
-                                BufferedTurnItemKind::Text,
-                                event["item_id"].as_str().unwrap_or(""),
-                                delta,
-                            );
-                            yield ErasedTextTurnEvent::TextDelta {
-                                delta: delta.to_string(),
-                            };
-                        }
+                match event {
+                    SseEvent::ResponseOutputTextDelta(event) => {
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Text,
+                            &event.item_id,
+                            &event.delta,
+                        );
+                        yield ErasedTextTurnEvent::TextDelta {
+                            delta: event.delta,
+                        };
                     }
-                    "response.reasoning_summary_text.delta" | "response.reasoning.delta" => {
-                        if let Some(delta) = event["delta"].as_str() {
-                            push_buffered_content(
-                                &mut pending_item,
-                                &mut committed_items,
-                                BufferedTurnItemKind::Reasoning,
-                                event["item_id"].as_str().unwrap_or(""),
-                                delta,
-                            );
-                            yield ErasedTextTurnEvent::ReasoningDelta {
-                                delta: delta.to_string(),
-                            };
-                        }
+                    SseEvent::ResponseReasoningSummaryTextDelta(event) => {
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Reasoning,
+                            event.item_id.as_deref().unwrap_or(""),
+                            &event.delta,
+                        );
+                        yield ErasedTextTurnEvent::ReasoningDelta {
+                            delta: event.delta,
+                        };
                     }
-                    "response.refusal.delta" => {
+                    SseEvent::ResponseReasoningDelta(event) => {
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Reasoning,
+                            event.item_id.as_deref().unwrap_or(""),
+                            &event.delta,
+                        );
+                        yield ErasedTextTurnEvent::ReasoningDelta {
+                            delta: event.delta,
+                        };
+                    }
+                    SseEvent::ResponseRefusalDelta(event) => {
                         saw_refusal = true;
-                        if let Some(delta) = event["delta"].as_str() {
-                            push_buffered_content(
-                                &mut pending_item,
-                                &mut committed_items,
-                                BufferedTurnItemKind::Refusal,
-                                event["item_id"].as_str().unwrap_or(""),
-                                delta,
-                            );
-                            yield ErasedTextTurnEvent::RefusalDelta {
-                                delta: delta.to_string(),
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Refusal,
+                            event.item_id.as_deref().unwrap_or(""),
+                            &event.delta,
+                        );
+                        yield ErasedTextTurnEvent::RefusalDelta {
+                            delta: event.delta,
+                        };
+                    }
+                    SseEvent::ResponseOutputTextDone(event) => {
+                        replace_buffered_text(
+                            &mut pending_item,
+                            &mut committed_items,
+                            &event.item_id,
+                            &event.text,
+                        );
+                    }
+                    SseEvent::ResponseFunctionCallArgumentsDelta(event) => {
+                        if let Some((id, name, delta)) = tool_calls.record_delta(
+                            response_tool_key_from_delta(&event),
+                            response_tool_id_from_delta(&event),
+                            ToolName::from(event.name.as_str()),
+                            &event.delta,
+                        ) {
+                            yield ErasedTextTurnEvent::ToolCallChunk {
+                                id,
+                                name,
+                                arguments_json_delta: delta,
                             };
                         }
                     }
-                    "response.output_text.done" => {
-                        if let Some(text) = event["text"].as_str() {
-                            replace_buffered_text(
-                                &mut pending_item,
-                                &mut committed_items,
-                                event["item_id"].as_str().unwrap_or(""),
-                                text,
-                            );
-                        }
-                    }
-                    "response.function_call_arguments.delta" => {
-                        if let Some(delta) = event["delta"].as_str()
-                            && let Some((id, name, delta)) = tool_calls.record_delta(
-                                response_tool_key(&event),
-                                response_tool_id(&event),
-                            response_tool_name(&event),
-                            delta,
-                        ) {
-                                yield ErasedTextTurnEvent::ToolCallChunk {
-                                    id,
-                                    name,
-                                    arguments_json_delta: delta,
-                                };
-                            }
-                    }
-                    "response.function_call_arguments.done" => {
+                    SseEvent::ResponseFunctionCallArgumentsDone(event) => {
                         saw_tool_call = true;
                         if let Some(invocation) = tool_calls.finish(
-                            response_tool_key(&event),
-                            response_tool_id(&event),
-                            response_tool_name(&event),
-                            event.get("arguments").map(json_string).transpose()?,
+                            response_tool_key_from_done(&event),
+                            response_tool_id_from_done(&event),
+                            ToolName::from(event.name.as_str()),
+                            event.arguments.clone(),
                         )? {
                             flush_buffered_content(&mut pending_item, &mut committed_items);
                             push_committed_tool_call(&mut committed_items, &invocation);
                             yield ErasedTextTurnEvent::ToolCallReady(invocation);
                         }
                     }
-                    "response.output_item.done" => {
-                        if event.pointer("/item/type").and_then(Value::as_str) == Some("function_call") {
+                    SseEvent::ResponseOutputItemDone(event) => {
+                        if let InputItem::FunctionCall(item) = event.item {
                             saw_tool_call = true;
                             if let Some(invocation) = tool_calls.finish(
-                                output_item_tool_key(&event),
-                                output_item_tool_id(&event),
-                                output_item_tool_name(&event),
-                                event.pointer("/item/arguments").map(json_string).transpose()?,
+                                output_item_tool_key(&item),
+                                output_item_tool_id(&item),
+                                output_item_tool_name(&item),
+                                Some(item.arguments),
                             )? {
                                 flush_buffered_content(&mut pending_item, &mut committed_items);
                                 push_committed_tool_call(&mut committed_items, &invocation);
@@ -1161,15 +1076,14 @@ where
                             }
                         }
                     }
-                    "response.completed" => {
-                        if let Some(id) = event.pointer("/response/id").and_then(Value::as_str) {
-                            request_id = Some(id.to_string());
-                        }
+                    SseEvent::ResponseCompleted(event) => {
+                        request_id = Some(event.response.id.clone());
                         flush_buffered_content(&mut pending_item, &mut committed_items);
                         let finish_reason = event
-                            .pointer("/response/stop_reason")
-                            .and_then(Value::as_str)
-                            .or_else(|| event.pointer("/response/finish_reason").and_then(Value::as_str))
+                            .response
+                            .stop_reason
+                            .as_deref()
+                            .or(event.response.finish_reason.as_deref())
                             .map(map_responses_finish_reason)
                             .unwrap_or_else(|| {
                                 if saw_tool_call {
@@ -1180,7 +1094,7 @@ where
                                     FinishReason::Stop
                                 }
                             });
-                        let usage = parse_response_usage(&event["response"]);
+                        let usage = parse_response_usage_value(&event.response.usage);
                         yield ErasedTextTurnEvent::Completed {
                             request_id: request_id.clone(),
                             finish_reason: finish_reason.clone(),
@@ -1194,7 +1108,11 @@ where
                             }),
                         };
                     }
-                    _ => {}
+                    SseEvent::ResponseInProgress(_)
+                    | SseEvent::ResponseOutputItemAdded(_)
+                    | SseEvent::ResponseContentPartAdded(_)
+                    | SseEvent::ResponseContentPartDone(_) => {}
+                    SseEvent::ResponseCreated(_) => {}
                 }
             }
         }
@@ -1228,14 +1146,11 @@ where
                 if payload == "[DONE]" {
                     break;
                 }
-                let event = serde_json::from_str::<Value>(&payload)?;
-                let event_type = event["type"].as_str().unwrap_or_default();
-                if event_type == "response.created" {
-                    if let Some(id) = event.pointer("/response/id").and_then(Value::as_str) {
-                        request_id = Some(id.to_string());
-                    }
-                    if let Some(event_model) = event.pointer("/response/model").and_then(Value::as_str) {
-                        model = event_model.to_string();
+                let event = serde_json::from_str::<SseEvent>(&payload)?;
+                if let SseEvent::ResponseCreated(created) = &event {
+                    request_id = Some(created.response.id.clone());
+                    if let Some(event_model) = created.response.model.as_ref() {
+                        model = event_model.clone();
                     }
                     if !started {
                         started = true;
@@ -1255,104 +1170,107 @@ where
                     };
                 }
 
-                match event_type {
-                    "response.output_text.delta" => {
-                        if let Some(delta) = event["delta"].as_str() {
-                            structured_buffer.push_str(delta);
-                            push_buffered_content(
-                                &mut pending_item,
-                                &mut committed_items,
-                                BufferedTurnItemKind::Text,
-                                event["item_id"].as_str().unwrap_or(""),
-                                delta,
-                            );
-                            yield ErasedStructuredTurnEvent::StructuredOutputChunk {
-                                json_delta: delta.to_string(),
-                            };
-                        }
+                match event {
+                    SseEvent::ResponseOutputTextDelta(event) => {
+                        structured_buffer.push_str(&event.delta);
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Text,
+                            &event.item_id,
+                            &event.delta,
+                        );
+                        yield ErasedStructuredTurnEvent::StructuredOutputChunk {
+                            json_delta: event.delta,
+                        };
                     }
-                    "response.output_text.done" => {
-                        if let Some(text) = event["text"].as_str() {
-                            structured_buffer.clear();
-                            structured_buffer.push_str(text);
-                            replace_buffered_text(
-                                &mut pending_item,
-                                &mut committed_items,
-                                event["item_id"].as_str().unwrap_or(""),
-                                text,
-                            );
-                        }
+                    SseEvent::ResponseOutputTextDone(event) => {
+                        structured_buffer.clear();
+                        structured_buffer.push_str(&event.text);
+                        replace_buffered_text(
+                            &mut pending_item,
+                            &mut committed_items,
+                            &event.item_id,
+                            &event.text,
+                        );
                         if let Some(value) =
                             maybe_parse_structured_output(&structured_buffer, &mut emitted_ready)?
                         {
                             yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
                         }
                     }
-                    "response.reasoning_summary_text.delta" | "response.reasoning.delta" => {
-                        if let Some(delta) = event["delta"].as_str() {
-                            push_buffered_content(
-                                &mut pending_item,
-                                &mut committed_items,
-                                BufferedTurnItemKind::Reasoning,
-                                event["item_id"].as_str().unwrap_or(""),
-                                delta,
-                            );
-                            yield ErasedStructuredTurnEvent::ReasoningDelta {
-                                delta: delta.to_string(),
-                            };
-                        }
+                    SseEvent::ResponseReasoningSummaryTextDelta(event) => {
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Reasoning,
+                            event.item_id.as_deref().unwrap_or(""),
+                            &event.delta,
+                        );
+                        yield ErasedStructuredTurnEvent::ReasoningDelta {
+                            delta: event.delta,
+                        };
                     }
-                    "response.refusal.delta" => {
+                    SseEvent::ResponseReasoningDelta(event) => {
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Reasoning,
+                            event.item_id.as_deref().unwrap_or(""),
+                            &event.delta,
+                        );
+                        yield ErasedStructuredTurnEvent::ReasoningDelta {
+                            delta: event.delta,
+                        };
+                    }
+                    SseEvent::ResponseRefusalDelta(event) => {
                         saw_refusal = true;
-                        if let Some(delta) = event["delta"].as_str() {
-                            push_buffered_content(
-                                &mut pending_item,
-                                &mut committed_items,
-                                BufferedTurnItemKind::Refusal,
-                                event["item_id"].as_str().unwrap_or(""),
-                                delta,
-                            );
-                            yield ErasedStructuredTurnEvent::RefusalDelta {
-                                delta: delta.to_string(),
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Refusal,
+                            event.item_id.as_deref().unwrap_or(""),
+                            &event.delta,
+                        );
+                        yield ErasedStructuredTurnEvent::RefusalDelta {
+                            delta: event.delta,
+                        };
+                    }
+                    SseEvent::ResponseFunctionCallArgumentsDelta(event) => {
+                        if let Some((id, name, delta)) = tool_calls.record_delta(
+                            response_tool_key_from_delta(&event),
+                            response_tool_id_from_delta(&event),
+                            ToolName::from(event.name.as_str()),
+                            &event.delta,
+                        ) {
+                            yield ErasedStructuredTurnEvent::ToolCallChunk {
+                                id,
+                                name,
+                                arguments_json_delta: delta,
                             };
                         }
                     }
-                    "response.function_call_arguments.delta" => {
-                        if let Some(delta) = event["delta"].as_str()
-                            && let Some((id, name, delta)) = tool_calls.record_delta(
-                                response_tool_key(&event),
-                                response_tool_id(&event),
-                            response_tool_name(&event),
-                            delta,
-                        ) {
-                                yield ErasedStructuredTurnEvent::ToolCallChunk {
-                                    id,
-                                    name,
-                                    arguments_json_delta: delta,
-                                };
-                            }
-                    }
-                    "response.function_call_arguments.done" => {
+                    SseEvent::ResponseFunctionCallArgumentsDone(event) => {
                         saw_tool_call = true;
                         if let Some(invocation) = tool_calls.finish(
-                            response_tool_key(&event),
-                            response_tool_id(&event),
-                            response_tool_name(&event),
-                            event.get("arguments").map(json_string).transpose()?,
+                            response_tool_key_from_done(&event),
+                            response_tool_id_from_done(&event),
+                            ToolName::from(event.name.as_str()),
+                            event.arguments.clone(),
                         )? {
                             flush_buffered_content(&mut pending_item, &mut committed_items);
                             push_committed_tool_call(&mut committed_items, &invocation);
                             yield ErasedStructuredTurnEvent::ToolCallReady(invocation);
                         }
                     }
-                    "response.output_item.done" => {
-                        if event.pointer("/item/type").and_then(Value::as_str) == Some("function_call") {
+                    SseEvent::ResponseOutputItemDone(event) => {
+                        if let InputItem::FunctionCall(item) = event.item {
                             saw_tool_call = true;
                             if let Some(invocation) = tool_calls.finish(
-                                output_item_tool_key(&event),
-                                output_item_tool_id(&event),
-                                output_item_tool_name(&event),
-                                event.pointer("/item/arguments").map(json_string).transpose()?,
+                                output_item_tool_key(&item),
+                                output_item_tool_id(&item),
+                                output_item_tool_name(&item),
+                                Some(item.arguments),
                             )? {
                                 flush_buffered_content(&mut pending_item, &mut committed_items);
                                 push_committed_tool_call(&mut committed_items, &invocation);
@@ -1360,10 +1278,8 @@ where
                             }
                         }
                     }
-                    "response.completed" => {
-                        if let Some(id) = event.pointer("/response/id").and_then(Value::as_str) {
-                            request_id = Some(id.to_string());
-                        }
+                    SseEvent::ResponseCompleted(event) => {
+                        request_id = Some(event.response.id.clone());
                         if let Some(value) =
                             maybe_parse_structured_output(&structured_buffer, &mut emitted_ready)?
                         {
@@ -1371,9 +1287,10 @@ where
                         }
                         flush_buffered_content(&mut pending_item, &mut committed_items);
                         let finish_reason = event
-                            .pointer("/response/stop_reason")
-                            .and_then(Value::as_str)
-                            .or_else(|| event.pointer("/response/finish_reason").and_then(Value::as_str))
+                            .response
+                            .stop_reason
+                            .as_deref()
+                            .or(event.response.finish_reason.as_deref())
                             .map(map_responses_finish_reason)
                             .unwrap_or_else(|| {
                                 if saw_tool_call {
@@ -1384,7 +1301,7 @@ where
                                     FinishReason::Stop
                                 }
                             });
-                        let usage = parse_response_usage(&event["response"]);
+                        let usage = parse_response_usage_value(&event.response.usage);
                         yield ErasedStructuredTurnEvent::Completed {
                             request_id: request_id.clone(),
                             finish_reason: finish_reason.clone(),
@@ -1398,11 +1315,43 @@ where
                             }),
                         };
                     }
-                    _ => {}
+                    SseEvent::ResponseInProgress(_)
+                    | SseEvent::ResponseOutputItemAdded(_)
+                    | SseEvent::ResponseContentPartAdded(_)
+                    | SseEvent::ResponseContentPartDone(_) => {}
+                    SseEvent::ResponseCreated(_) => {}
                 }
             }
         }
     }
+}
+
+#[derive(Deserialize)]
+struct CompletionChunk {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    choices: Vec<CompletionChoice>,
+    #[serde(default)]
+    usage: Option<CompletionUsage>,
+}
+
+#[derive(Deserialize)]
+struct CompletionChoice {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CompletionUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    total_tokens: u64,
 }
 
 fn map_completion_stream<S>(
@@ -1435,11 +1384,11 @@ where
                     finished = true;
                     break;
                 }
-                let event = serde_json::from_str::<Value>(&payload)?;
+                let event = serde_json::from_str::<CompletionChunk>(&payload)?;
                 if !started {
-                    request_id = event["id"].as_str().map(ToOwned::to_owned);
-                    if let Some(event_model) = event["model"].as_str() {
-                        model = event_model.to_string();
+                    request_id = event.id.clone();
+                    if let Some(event_model) = event.model.clone() {
+                        model = event_model;
                     }
                     started = true;
                     yield CompletionEvent::Started {
@@ -1448,20 +1397,21 @@ where
                     };
                 }
 
-                if let Some(delta) = event.pointer("/choices/0/text").and_then(Value::as_str)
-                    && !delta.is_empty() {
-                        yield CompletionEvent::TextDelta(delta.to_string());
+                if let Some(choice) = event.choices.first() {
+                    if !choice.text.is_empty() {
+                        yield CompletionEvent::TextDelta(choice.text.clone());
                     }
-                if let Some(usage) = event.get("usage") {
-                    last_usage = parse_completion_usage(usage);
+                    if let Some(finish_reason) = choice.finish_reason.as_deref() {
+                        finished = true;
+                        yield CompletionEvent::Completed {
+                            request_id: request_id.clone(),
+                            finish_reason: map_completion_finish_reason(finish_reason),
+                            usage: last_usage,
+                        };
+                    }
                 }
-                if let Some(finish_reason) = event.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
-                    finished = true;
-                    yield CompletionEvent::Completed {
-                        request_id: request_id.clone(),
-                        finish_reason: map_completion_finish_reason(finish_reason),
-                        usage: last_usage,
-                    };
+                if let Some(usage) = event.usage {
+                    last_usage = parse_completion_usage(&usage);
                 }
             }
         }
@@ -1470,6 +1420,10 @@ where
 
 fn parse_response_usage(value: &Value) -> Usage {
     let usage = value.get("usage").unwrap_or(value);
+    parse_response_usage_value(usage)
+}
+
+fn parse_response_usage_value(usage: &Value) -> Usage {
     let input_tokens = usage["input_tokens"].as_u64().unwrap_or_default();
     let output_tokens = usage["output_tokens"].as_u64().unwrap_or_default();
     let total_tokens = usage["total_tokens"]
@@ -1492,13 +1446,11 @@ fn map_responses_finish_reason(reason: &str) -> FinishReason {
     }
 }
 
-fn parse_completion_usage(value: &Value) -> Usage {
-    let prompt_tokens = value["prompt_tokens"].as_u64().unwrap_or_default();
-    let total_tokens = value["total_tokens"].as_u64().unwrap_or_default();
+fn parse_completion_usage(value: &CompletionUsage) -> Usage {
     Usage {
-        input_tokens: prompt_tokens,
-        output_tokens: total_tokens.saturating_sub(prompt_tokens),
-        total_tokens,
+        input_tokens: value.prompt_tokens,
+        output_tokens: value.total_tokens.saturating_sub(value.prompt_tokens),
+        total_tokens: value.total_tokens,
         cost_micros_usd: 0,
     }
 }
@@ -1512,49 +1464,6 @@ fn map_completion_finish_reason(reason: &str) -> FinishReason {
     }
 }
 
-#[derive(Default)]
-struct SseParser {
-    buffer: Vec<u8>,
-    data_lines: Vec<String>,
-}
-
-impl SseParser {
-    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, OpenAiError> {
-        self.buffer.extend_from_slice(chunk);
-        let mut frames = Vec::new();
-
-        while let Some(pos) = self.buffer.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.buffer.drain(..=pos).collect::<Vec<_>>();
-            if matches!(line.last(), Some(b'\n')) {
-                line.pop();
-            }
-            if matches!(line.last(), Some(b'\r')) {
-                line.pop();
-            }
-            if line.is_empty() {
-                if !self.data_lines.is_empty() {
-                    frames.push(self.data_lines.join("\n"));
-                    self.data_lines.clear();
-                }
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix(b"data:") {
-                let rest = if rest.first() == Some(&b' ') {
-                    &rest[1..]
-                } else {
-                    rest
-                };
-                let text = String::from_utf8(rest.to_vec()).map_err(|err| OpenAiError::Sse {
-                    message: err.to_string(),
-                })?;
-                self.data_lines.push(text);
-            }
-        }
-
-        Ok(frames)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{borrow::Cow, sync::Arc};
@@ -1562,6 +1471,7 @@ mod tests {
     use futures::{StreamExt, executor::block_on};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
+    use serde_json::Value;
 
     use agents_protocol::{
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
@@ -1602,7 +1512,7 @@ mod tests {
         fn apply_to_responses(
             &self,
             fallbacks: &[Cow<'static, str>],
-            request: &mut ResponsesRequest,
+            request: &mut crate::responses::ResponsesRequest,
         ) {
             request.models = Some(fallbacks.iter().map(ToString::to_string).collect());
         }
@@ -1643,7 +1553,7 @@ mod tests {
         assert_eq!(fallback_model, "openrouter/primary");
 
         let payloads = vec![Ok(Bytes::from(
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"openrouter/primary\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
         ))];
         let events = block_on(async {
             map_text_stream(futures::stream::iter(payloads), fallback_model)
@@ -1738,13 +1648,31 @@ mod tests {
         ]);
 
         let items = convert_model_input(&input).unwrap();
-        assert_eq!(items[0]["role"], "system");
-        assert_eq!(items[1]["role"], "developer");
-        assert_eq!(items[2]["role"], "user");
-        assert_eq!(items[3]["type"], "reasoning");
-        assert_eq!(items[4]["type"], "message");
-        assert_eq!(items[5]["type"], "function_call");
-        assert_eq!(items[6]["type"], "function_call_output");
+        assert!(matches!(
+            &items[0],
+            InputItem::Message(InputMessage {
+                role: MessageRole::System,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &items[1],
+            InputItem::Message(InputMessage {
+                role: MessageRole::Developer,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &items[2],
+            InputItem::Message(InputMessage {
+                role: MessageRole::User,
+                ..
+            })
+        ));
+        assert!(matches!(&items[3], InputItem::Reasoning(_)));
+        assert!(matches!(&items[4], InputItem::Message(_)));
+        assert!(matches!(&items[5], InputItem::FunctionCall(_)));
+        assert!(matches!(&items[6], InputItem::FunctionCallOutput(_)));
     }
 
     #[test]
@@ -1782,13 +1710,11 @@ mod tests {
         ]);
 
         let items = convert_model_input(&input).unwrap();
-        assert_eq!(items[0]["role"], "user");
-        assert_eq!(items[1]["type"], "reasoning");
-        assert_eq!(items[2]["type"], "message");
-        assert_eq!(items[2]["content"][0]["type"], "output_text");
-        assert_eq!(items[2]["content"][1]["type"], "refusal");
-        assert_eq!(items[3]["type"], "function_call");
-        assert_eq!(items[4]["type"], "function_call_output");
+        assert!(matches!(&items[0], InputItem::Message(_)));
+        assert!(matches!(&items[1], InputItem::Reasoning(_)));
+        assert!(matches!(&items[2], InputItem::Message(_)));
+        assert!(matches!(&items[3], InputItem::FunctionCall(_)));
+        assert!(matches!(&items[4], InputItem::FunctionCallOutput(_)));
     }
 
     #[test]
@@ -1806,17 +1732,16 @@ mod tests {
         ))]);
 
         let items = convert_model_input(&input).unwrap();
-        assert_eq!(items[0]["type"], "reasoning");
-        assert_eq!(items[1]["type"], "message");
-        assert_eq!(items[1]["content"][0]["type"], "output_text");
-        assert_eq!(items[2]["type"], "function_call");
+        assert!(matches!(&items[0], InputItem::Reasoning(_)));
+        assert!(matches!(&items[1], InputItem::Message(_)));
+        assert!(matches!(&items[2], InputItem::FunctionCall(_)));
     }
 
     #[test]
     fn responses_sse_maps_reasoning_refusal_tool_and_completion() {
         let payloads = vec![
             Ok(Bytes::from(
-                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4.1\"}}\n\n",
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
             )),
             Ok(Bytes::from(
                 "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}\n\n",
@@ -1828,7 +1753,7 @@ mod tests {
                 "data: {\"type\":\"response.function_call_arguments.done\",\"call_id\":\"call-1\",\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
             )),
         ];
 
@@ -1865,13 +1790,13 @@ mod tests {
     fn structured_sse_emits_ready_when_json_completes() {
         let payloads = vec![
             Ok(Bytes::from(
-                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-4.1\"}}\n\n",
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"answer\\\":\\\"42\\\"}\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"{\\\"answer\\\":\\\"42\\\"}\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
             )),
         ];
 
@@ -1906,7 +1831,7 @@ mod tests {
     fn responses_sse_deduplicates_tool_call_completion_and_uses_consistent_key() {
         let payloads = vec![
             Ok(Bytes::from(
-                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool\",\"model\":\"gpt-4.1\"}}\n\n",
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
             )),
             Ok(Bytes::from(
                 "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"weather\",\"delta\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}\n\n",
@@ -1915,10 +1840,10 @@ mod tests {
                 "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"weather\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
             )),
         ];
 
@@ -1954,22 +1879,22 @@ mod tests {
     fn responses_sse_keeps_separate_text_items_by_item_id() {
         let payloads = vec![
             Ok(Bytes::from(
-                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_text_items\",\"model\":\"gpt-4.1\"}}\n\n",
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_text_items\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"text_item_0\",\"delta\":\"hel\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"text_item_0\",\"output_index\":0,\"content_index\":0,\"delta\":\"hel\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.output_text.done\",\"item_id\":\"text_item_0\",\"text\":\"hello\"}\n\n",
+                "data: {\"type\":\"response.output_text.done\",\"item_id\":\"text_item_0\",\"output_index\":0,\"content_index\":0,\"text\":\"hello\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"text_item_1\",\"delta\":\"bye\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"text_item_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"bye\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.output_text.done\",\"item_id\":\"text_item_1\",\"text\":\"bye!\"}\n\n",
+                "data: {\"type\":\"response.output_text.done\",\"item_id\":\"text_item_1\",\"output_index\":0,\"content_index\":0,\"text\":\"bye!\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_text_items\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_text_items\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
             )),
         ];
 
@@ -2004,16 +1929,16 @@ mod tests {
     fn structured_sse_waits_until_completion_before_ready_for_scalar_json() {
         let payloads = vec![
             Ok(Bytes::from(
-                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_scalar\",\"model\":\"gpt-4.1\"}}\n\n",
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_scalar\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"1\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"1\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"2\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"2\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_scalar\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_scalar\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
             )),
         ];
 
@@ -2071,108 +1996,21 @@ mod tests {
         assert!(matches!(events[1], CompletionEvent::TextDelta(_)));
         assert!(matches!(events[2], CompletionEvent::Completed { .. }));
     }
-}
 
-// ── OpenAiCommittedTurn ───────────────────────────────────────────────────────
-
-/// A serializable, replayable representation of a completed OpenAI assistant turn.
-///
-/// This is the adapter-owned exact committed turn for the OpenAI provider.
-/// It derives `Serialize` and `Deserialize` so it can be persisted and
-/// restored without lossy normalization through a shared library IR.
-///
-/// At runtime, `Session` interacts with committed turns through the erased
-/// `TurnView` trait; serde roundtrip stays centered on this concrete type.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OpenAiCommittedTurn {
-    /// The `request_id` returned by the OpenAI API for this turn, if available.
-    pub request_id: Option<String>,
-    /// The model name that produced this turn.
-    pub model: String,
-    /// The ordered list of items produced by the assistant during this turn.
-    pub items: Vec<OpenAiTurnItem>,
-    /// The reason the turn ended.
-    pub finish_reason: FinishReason,
-    /// Token usage reported by the API for this turn.
-    pub usage: Usage,
-}
-
-/// A single item within an [`OpenAiCommittedTurn`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum OpenAiTurnItem {
-    /// Plain assistant text output.
-    Text { content: String },
-    /// Reasoning / chain-of-thought text (o-series models).
-    Reasoning { content: String },
-    /// Refusal text emitted by the model.
-    Refusal { content: String },
-    /// A tool call requested by the assistant.
-    ToolCall {
-        id: ToolCallId,
-        name: ToolName,
-        arguments: RawJson,
-    },
-}
-
-// ── TurnView impl for OpenAiCommittedTurn ─────────────────────────────────────
-
-impl TurnView for OpenAiCommittedTurn {
-    fn role(&self) -> TurnRole {
-        TurnRole::Assistant
+    #[test]
+    fn parses_response_created_event_through_typed_enum() {
+        let payload = r#"{"type":"response.created","response":{"id":"resp_1","model":"gpt-4.1","output":[],"usage":null}}"#;
+        let event = serde_json::from_str::<SseEvent>(payload).unwrap();
+        assert!(matches!(event, SseEvent::ResponseCreated(_)));
     }
 
-    fn item_count(&self) -> usize {
-        self.items.len()
-    }
-
-    fn item_at(&self, index: usize) -> Option<&dyn ItemView> {
-        self.items.get(index).map(|item| item as &dyn ItemView)
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl ItemView for OpenAiTurnItem {
-    fn as_text(&self) -> Option<&str> {
-        match self {
-            Self::Text { content } => Some(content),
-            _ => None,
-        }
-    }
-
-    fn as_reasoning(&self) -> Option<&str> {
-        match self {
-            Self::Reasoning { content } => Some(content),
-            _ => None,
-        }
-    }
-
-    fn as_refusal(&self) -> Option<&str> {
-        match self {
-            Self::Refusal { content } => Some(content),
-            _ => None,
-        }
-    }
-
-    fn as_tool_call(&self) -> Option<ToolCallItemView<'_>> {
-        match self {
-            Self::ToolCall {
-                id,
-                name,
-                arguments,
-            } => Some(ToolCallItemView {
-                id,
-                name,
-                arguments,
-            }),
-            _ => None,
-        }
-    }
-
-    fn as_tool_result(&self) -> Option<ToolResultItemView<'_>> {
-        None // OpenAI assistant turns do not carry tool results
+    #[test]
+    fn function_call_item_accepts_string_arguments_from_sse() {
+        let value = serde_json::from_str::<Value>(
+            r#"{"type":"function_call","id":"fc_1","call_id":"call_1","name":"weather","arguments":"{\"city\":\"Tokyo\"}"}"#,
+        )
+        .unwrap();
+        let item = serde_json::from_value::<FunctionCallItem>(value).unwrap();
+        assert_eq!(item.arguments, "{\"city\":\"Tokyo\"}".to_string());
     }
 }
