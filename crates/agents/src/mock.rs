@@ -8,13 +8,14 @@ use futures::stream;
 use thiserror::Error;
 
 use agents_protocol::{
-    AgentError,
+    AgentError, RequestExtensions,
     budget::Usage,
     conversation::{AssistantTurnItem, ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
     llm::{
-        AdapterStructuredTurn, AdapterTextTurn, CompletionEvent, CompletionEventStream,
-        CompletionRequest, ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream,
-        ErasedTextTurnEvent, ErasedTextTurnEventStream, FinishReason, LlmAdapter, StreamKind,
+        AdapterStructuredTurn, AdapterTextTurn, CompletionAdapter, CompletionEvent,
+        CompletionEventStream, CompletionRequest, ErasedStructuredTurnEvent,
+        ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
+        FinishReason, OperationKind, TurnAdapter, UsageRecoveryAdapter,
     },
     transcript::AssistantTurnView,
 };
@@ -141,7 +142,7 @@ pub struct MockLlmAdapter {
     text_turns: Arc<Mutex<VecDeque<MockTextScenario>>>,
     structured_turns: Arc<Mutex<VecDeque<MockStructuredScenario>>>,
     completions: Arc<Mutex<VecDeque<MockCompletionScenario>>>,
-    recovered_usage: Arc<Mutex<BTreeMap<(StreamKind, String), Usage>>>,
+    recovered_usage: Arc<Mutex<BTreeMap<(OperationKind, String), Usage>>>,
 }
 
 impl MockLlmAdapter {
@@ -166,7 +167,7 @@ impl MockLlmAdapter {
 
     pub fn with_recovered_usage(
         self,
-        kind: StreamKind,
+        kind: OperationKind,
         request_id: impl Into<String>,
         usage: Usage,
     ) -> Self {
@@ -179,8 +180,8 @@ impl MockLlmAdapter {
 }
 
 #[async_trait::async_trait]
-impl LlmAdapter for MockLlmAdapter {
-    async fn responses_text(
+impl TurnAdapter for MockLlmAdapter {
+    async fn text_turn(
         &self,
         _input: ModelInput,
         _turn: AdapterTextTurn,
@@ -262,7 +263,7 @@ impl LlmAdapter for MockLlmAdapter {
         Ok(Box::pin(stream::iter(events)) as ErasedTextTurnEventStream)
     }
 
-    async fn responses_structured(
+    async fn structured_turn(
         &self,
         _input: ModelInput,
         _turn: AdapterStructuredTurn,
@@ -356,11 +357,14 @@ impl LlmAdapter for MockLlmAdapter {
 
         Ok(Box::pin(stream::iter(events)) as ErasedStructuredTurnEventStream)
     }
+}
 
+#[async_trait::async_trait]
+impl CompletionAdapter for MockLlmAdapter {
     async fn completion(
         &self,
         _request: CompletionRequest,
-        _extensions: &agents_protocol::RequestExtensions,
+        _extensions: &RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError> {
         let scenario = self
             .completions
@@ -387,10 +391,13 @@ impl LlmAdapter for MockLlmAdapter {
 
         Ok(Box::pin(stream::iter(events.collect::<Vec<_>>())) as CompletionEventStream)
     }
+}
 
+#[async_trait::async_trait]
+impl UsageRecoveryAdapter for MockLlmAdapter {
     async fn recover_usage(
         &self,
-        kind: StreamKind,
+        kind: OperationKind,
         request_id: &str,
     ) -> Result<Option<Usage>, AgentError> {
         Ok(self

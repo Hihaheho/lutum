@@ -16,9 +16,10 @@ use agents_protocol::{
     extensions::RequestExtensions,
     llm::{
         AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
-        CompletionEvent, CompletionEventStream, CompletionRequest as ProtocolCompletionRequest,
-        ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-        ErasedTextTurnEventStream, FinishReason, LlmAdapter, ModelSelector, StreamKind,
+        CompletionAdapter, CompletionEvent, CompletionEventStream,
+        CompletionRequest as ProtocolCompletionRequest, ErasedStructuredTurnEvent,
+        ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
+        FinishReason, ModelSelector, OperationKind, TurnAdapter, UsageRecoveryAdapter,
     },
     transcript::{ToolResultItemView, TurnRole, TurnView},
 };
@@ -252,8 +253,8 @@ impl ClaudeAdapter {
 }
 
 #[async_trait::async_trait]
-impl LlmAdapter for ClaudeAdapter {
-    async fn responses_text(
+impl TurnAdapter for ClaudeAdapter {
+    async fn text_turn(
         &self,
         input: ModelInput,
         turn: AdapterTextTurn,
@@ -283,7 +284,7 @@ impl LlmAdapter for ClaudeAdapter {
         ) as ErasedTextTurnEventStream)
     }
 
-    async fn responses_structured(
+    async fn structured_turn(
         &self,
         input: ModelInput,
         turn: AdapterStructuredTurn,
@@ -315,7 +316,10 @@ impl LlmAdapter for ClaudeAdapter {
                 .map(|item| item.map_err(AgentError::backend)),
         ) as ErasedStructuredTurnEventStream)
     }
+}
 
+#[async_trait::async_trait]
+impl CompletionAdapter for ClaudeAdapter {
     async fn completion(
         &self,
         request: ProtocolCompletionRequest,
@@ -353,14 +357,17 @@ impl LlmAdapter for ClaudeAdapter {
             };
         }) as CompletionEventStream)
     }
+}
 
+#[async_trait::async_trait]
+impl UsageRecoveryAdapter for ClaudeAdapter {
     async fn recover_usage(
         &self,
-        kind: StreamKind,
+        kind: OperationKind,
         request_id: &str,
     ) -> Result<Option<Usage>, AgentError> {
         match kind {
-            StreamKind::ResponsesText | StreamKind::ResponsesStructured => {
+            OperationKind::TextTurn | OperationKind::StructuredTurn => {
                 let usage = take_cached_usage(&self.usage_cache, request_id);
                 trace!(
                     ?kind,
@@ -370,7 +377,7 @@ impl LlmAdapter for ClaudeAdapter {
                 );
                 Ok(usage)
             }
-            StreamKind::Completion => Ok(None),
+            OperationKind::Completion => Ok(None),
         }
     }
 }
@@ -1317,8 +1324,8 @@ mod tests {
 
     use agents_protocol::{
         AdapterToolChoice, AdapterTurnConfig, ErasedTextTurnEvent, GenerationParams, ModelInput,
-        ModelInputItem, ModelName, ModelSelection, ModelSelector, RequestExtensions, budget::Usage,
-        llm::StreamKind,
+        ModelInputItem, ModelName, ModelSelection, ModelSelector, OperationKind, RequestExtensions,
+        UsageRecoveryAdapter, budget::Usage,
     };
 
     use super::*;
@@ -1494,7 +1501,7 @@ mod tests {
         ));
 
         let recovered =
-            block_on(adapter.recover_usage(StreamKind::ResponsesText, "msg_interrupted")).unwrap();
+            block_on(adapter.recover_usage(OperationKind::TextTurn, "msg_interrupted")).unwrap();
         assert_eq!(
             recovered,
             Some(Usage {
@@ -1505,7 +1512,7 @@ mod tests {
             })
         );
         assert_eq!(
-            block_on(adapter.recover_usage(StreamKind::ResponsesText, "msg_interrupted")).unwrap(),
+            block_on(adapter.recover_usage(OperationKind::TextTurn, "msg_interrupted")).unwrap(),
             None
         );
     }
@@ -1552,7 +1559,7 @@ mod tests {
             }
         ));
         assert_eq!(
-            block_on(adapter.recover_usage(StreamKind::ResponsesText, "msg_done")).unwrap(),
+            block_on(adapter.recover_usage(OperationKind::TextTurn, "msg_done")).unwrap(),
             None
         );
     }

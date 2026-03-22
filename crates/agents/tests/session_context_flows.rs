@@ -7,6 +7,7 @@ use agents::{
 use futures::executor::block_on;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Contact {
@@ -61,13 +62,13 @@ fn direct_context_text_turn_collects_without_session_helpers() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(budget, adapter);
+    let ctx = Context::new(Arc::new(adapter), budget);
     let input = ModelInput::from_items(vec![ModelInputItem::text(
         InputMessageRole::User,
         "Run without session helpers.",
     )]);
 
-    let pending = block_on(ctx.responses_text(
+    let pending = block_on(ctx.text_turn(
         RequestExtensions::new(),
         input,
         TextTurn::<NoTools>::new(agents::ModelName::new("gpt-4.1-mini").unwrap()),
@@ -102,7 +103,7 @@ fn structured_session_turn_is_only_applied_after_commit() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::new(budget, adapter);
+    let ctx = agents::Context::new(Arc::new(adapter), budget);
     let mut session = Session::new(ctx);
     session.push_user("Extract the email address.");
     let before_len = session.input().items().len();
@@ -170,7 +171,7 @@ fn session_commits_parallel_tool_results_in_order() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::new(budget, adapter);
+    let ctx = agents::Context::new(Arc::new(adapter), budget);
     let mut session = Session::new(ctx);
     session.push_user("Get the weather and search for ramen.");
     let before_len = session.input().items().len();

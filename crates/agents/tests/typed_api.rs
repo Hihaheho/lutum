@@ -1,11 +1,12 @@
 use agents::{
     AdapterStructuredTurn, AdapterTextTurn, AgentError, AssistantInputItem, AssistantTurnItem,
-    AssistantTurnView, BudgetLease, BudgetManager, CompletionEventStream, CompletionRequest,
-    Context, ContextError, ErasedStructuredTurnEventStream, ErasedTextTurnEventStream,
-    InputMessageRole, LlmAdapter, MessageContent, ModelInput, ModelInputItem, ModelName,
-    ModelNameError, NonEmpty, RawJson, RequestBudget, RequestExtensions, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, StreamKind, StructuredTurn, Temperature, TextTurn, TextTurnReducer,
-    ToolMetadata, ToolPolicy, ToolUse, Usage, UsageEstimate,
+    AssistantTurnView, BudgetLease, BudgetManager, CompletionAdapter, CompletionEventStream,
+    CompletionRequest, Context, ContextError, ErasedStructuredTurnEventStream,
+    ErasedTextTurnEventStream, InputMessageRole, MessageContent, ModelInput, ModelInputItem,
+    ModelName, ModelNameError, NonEmpty, OperationKind, RawJson, RequestBudget, RequestExtensions,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredTurn, Temperature, TextTurn,
+    TextTurnReducer, ToolMetadata, ToolPolicy, ToolUse, TurnAdapter, Usage, UsageEstimate,
+    UsageRecoveryAdapter,
 };
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -15,8 +16,8 @@ use std::sync::Arc;
 struct NullAdapter;
 
 #[async_trait]
-impl LlmAdapter for NullAdapter {
-    async fn responses_text(
+impl TurnAdapter for NullAdapter {
+    async fn text_turn(
         &self,
         _input: ModelInput,
         _turn: AdapterTextTurn,
@@ -24,14 +25,17 @@ impl LlmAdapter for NullAdapter {
         Ok(Box::pin(futures::stream::empty()) as ErasedTextTurnEventStream)
     }
 
-    async fn responses_structured(
+    async fn structured_turn(
         &self,
         _input: ModelInput,
         _turn: AdapterStructuredTurn,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedStructuredTurnEventStream)
     }
+}
 
+#[async_trait]
+impl CompletionAdapter for NullAdapter {
     async fn completion(
         &self,
         _request: CompletionRequest,
@@ -39,10 +43,13 @@ impl LlmAdapter for NullAdapter {
     ) -> Result<CompletionEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as CompletionEventStream)
     }
+}
 
+#[async_trait]
+impl UsageRecoveryAdapter for NullAdapter {
     async fn recover_usage(
         &self,
-        _kind: StreamKind,
+        _kind: OperationKind,
         _request_id: &str,
     ) -> Result<Option<Usage>, AgentError> {
         Ok(None)
@@ -99,7 +106,7 @@ enum Tools {
 #[test]
 fn typed_public_api_compiles_and_constructs_requests() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(budget, NullAdapter);
+    let ctx = Context::new(Arc::new(NullAdapter), budget);
     let _ = ctx;
 
     let input = ModelInput::from_items(vec![
@@ -140,7 +147,7 @@ fn typed_public_api_compiles_and_constructs_requests() {
 
 #[test]
 fn context_accepts_non_clone_budget_and_adapter() {
-    let ctx = Context::new(NonCloneBudget, NullAdapter);
+    let ctx = Context::new(Arc::new(NullAdapter), NonCloneBudget);
     let _ = ctx;
 }
 
@@ -238,7 +245,7 @@ fn reducer_ignores_duplicate_tool_call_ready() {
 #[test]
 fn context_rejects_invalid_model_input_before_adapter_call() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(budget, NullAdapter);
+    let ctx = Context::new(Arc::new(NullAdapter), budget);
     let input = ModelInput::from_items(vec![
         ModelInputItem::text(InputMessageRole::User, "hello"),
         ModelInputItem::tool_use_parts(
@@ -255,7 +262,7 @@ fn context_rejects_invalid_model_input_before_adapter_call() {
         ),
     ]);
 
-    let err = futures::executor::block_on(ctx.responses_text(
+    let err = futures::executor::block_on(ctx.text_turn(
         RequestExtensions::new(),
         input,
         TextTurn::<Tools>::new(ModelName::new("gpt-4.1").unwrap()),

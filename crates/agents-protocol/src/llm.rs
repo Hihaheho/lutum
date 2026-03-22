@@ -722,60 +722,72 @@ pub enum FinishReason {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum StreamKind {
-    ResponsesText,
-    ResponsesStructured,
+pub enum OperationKind {
+    TextTurn,
+    StructuredTurn,
     Completion,
 }
 
 #[async_trait::async_trait]
-pub trait LlmAdapter: Send + Sync + 'static {
-    async fn responses_text(
+pub trait TurnAdapter: Send + Sync + 'static {
+    async fn text_turn(
         &self,
         input: ModelInput,
         turn: AdapterTextTurn,
     ) -> Result<ErasedTextTurnEventStream, AgentError>;
 
-    async fn responses_structured(
+    async fn structured_turn(
         &self,
         input: ModelInput,
         turn: AdapterStructuredTurn,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError>;
+}
 
+#[async_trait::async_trait]
+pub trait CompletionAdapter: Send + Sync + 'static {
     async fn completion(
         &self,
         request: CompletionRequest,
         extensions: &crate::extensions::RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError>;
+}
 
+#[async_trait::async_trait]
+pub trait UsageRecoveryAdapter: Send + Sync + 'static {
     async fn recover_usage(
         &self,
-        kind: StreamKind,
+        kind: OperationKind,
         request_id: &str,
     ) -> Result<Option<Usage>, AgentError>;
 }
 
 #[async_trait::async_trait]
-impl<T> LlmAdapter for std::sync::Arc<T>
+impl<T> TurnAdapter for Arc<T>
 where
-    T: LlmAdapter + ?Sized,
+    T: TurnAdapter + ?Sized,
 {
-    async fn responses_text(
+    async fn text_turn(
         &self,
         input: ModelInput,
         turn: AdapterTextTurn,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
-        (**self).responses_text(input, turn).await
+        (**self).text_turn(input, turn).await
     }
 
-    async fn responses_structured(
+    async fn structured_turn(
         &self,
         input: ModelInput,
         turn: AdapterStructuredTurn,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
-        (**self).responses_structured(input, turn).await
+        (**self).structured_turn(input, turn).await
     }
+}
 
+#[async_trait::async_trait]
+impl<T> CompletionAdapter for Arc<T>
+where
+    T: CompletionAdapter + ?Sized,
+{
     async fn completion(
         &self,
         request: CompletionRequest,
@@ -783,10 +795,16 @@ where
     ) -> Result<CompletionEventStream, AgentError> {
         (**self).completion(request, extensions).await
     }
+}
 
+#[async_trait::async_trait]
+impl<T> UsageRecoveryAdapter for Arc<T>
+where
+    T: UsageRecoveryAdapter + ?Sized,
+{
     async fn recover_usage(
         &self,
-        kind: StreamKind,
+        kind: OperationKind,
         request_id: &str,
     ) -> Result<Option<Usage>, AgentError> {
         (**self).recover_usage(kind, request_id).await

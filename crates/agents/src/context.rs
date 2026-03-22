@@ -11,11 +11,11 @@ use agents_protocol::{
     extensions::RequestExtensions,
     llm::{
         AdapterStructuredOutputSpec, AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice,
-        AdapterToolDefinition, AdapterTurnConfig, CompletionEvent, CompletionEventStream,
-        CompletionRequest, ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream,
-        ErasedTextTurnEvent, ErasedTextTurnEventStream, LlmAdapter, StreamKind, StructuredTurn,
-        StructuredTurnEvent, StructuredTurnEventStream, TextTurn, TextTurnEvent,
-        TextTurnEventStream, TurnConfig,
+        AdapterToolDefinition, AdapterTurnConfig, CompletionAdapter, CompletionEvent,
+        CompletionEventStream, CompletionRequest, ErasedStructuredTurnEvent,
+        ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
+        OperationKind, StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream, TextTurn,
+        TextTurnEvent, TextTurnEventStream, TurnAdapter, TurnConfig, UsageRecoveryAdapter,
     },
     reducer::{
         CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
@@ -32,27 +32,40 @@ pub type ContextError = AgentError;
 #[derive(Clone)]
 pub struct Context {
     budget: Arc<dyn BudgetManager>,
-    adapter: Arc<dyn LlmAdapter>,
+    turns: Arc<dyn TurnAdapter>,
+    completion: Arc<dyn CompletionAdapter>,
+    recovery: Arc<dyn UsageRecoveryAdapter>,
 }
 
 impl Context {
-    pub fn new<B, L>(budget: B, adapter: L) -> Self
+    pub fn new<T>(adapter: Arc<T>, budget: impl BudgetManager + 'static) -> Self
     where
-        B: BudgetManager,
-        L: LlmAdapter,
+        T: TurnAdapter + CompletionAdapter + UsageRecoveryAdapter + 'static,
     {
         Self {
             budget: Arc::new(budget),
-            adapter: Arc::new(adapter),
+            turns: adapter.clone(),
+            completion: adapter.clone(),
+            recovery: adapter,
+        }
+    }
+
+    pub fn from_parts(
+        turns: Arc<dyn TurnAdapter>,
+        completion: Arc<dyn CompletionAdapter>,
+        recovery: Arc<dyn UsageRecoveryAdapter>,
+        budget: impl BudgetManager + 'static,
+    ) -> Self {
+        Self {
+            budget: Arc::new(budget),
+            turns,
+            completion,
+            recovery,
         }
     }
 
     pub fn budget(&self) -> &dyn BudgetManager {
         self.budget.as_ref()
-    }
-
-    pub fn adapter(&self) -> &dyn LlmAdapter {
-        self.adapter.as_ref()
     }
 }
 
@@ -156,7 +169,7 @@ where
 {
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
-    adapter: Arc<dyn LlmAdapter>,
+    recovery: Arc<dyn UsageRecoveryAdapter>,
     span: Span,
     stream: TextTurnEventStream<T>,
     reducer: TextTurnReducer<T>,
@@ -169,7 +182,7 @@ where
 {
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
-    adapter: Arc<dyn LlmAdapter>,
+    recovery: Arc<dyn UsageRecoveryAdapter>,
     span: Span,
     stream: StructuredTurnEventStream<T, O>,
     reducer: StructuredTurnReducer<T, O>,
@@ -219,14 +232,14 @@ where
 pub struct PendingCompletion {
     extensions: RequestExtensions,
     owned_lease: OwnedLease,
-    adapter: Arc<dyn LlmAdapter>,
+    recovery: Arc<dyn UsageRecoveryAdapter>,
     span: Span,
     stream: CompletionEventStream,
     reducer: CompletionReducer,
 }
 
 impl Context {
-    pub async fn responses_text<T>(
+    pub async fn text_turn<T>(
         &self,
         extensions: RequestExtensions,
         input: ModelInput,
@@ -241,10 +254,10 @@ impl Context {
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
         let extensions = Arc::new(extensions);
-        let span = turn_span("responses_text", turn.config.model.as_ref(), estimate);
+        let span = turn_span("text_turn", turn.config.model.as_ref(), estimate);
         let stream = self
-            .adapter
-            .responses_text(input, erase_text_turn(turn, Arc::clone(&extensions))?)
+            .turns
+            .text_turn(input, erase_text_turn(turn, Arc::clone(&extensions))?)
             .await?;
         Ok(PendingTextTurn {
             extensions,
@@ -252,14 +265,14 @@ impl Context {
                 budget: Arc::clone(&self.budget),
                 lease: Some(lease),
             },
-            adapter: Arc::clone(&self.adapter),
+            recovery: Arc::clone(&self.recovery),
             span,
             stream: map_text_stream::<T>(stream),
             reducer: TextTurnReducer::new(),
         })
     }
 
-    pub async fn responses_structured<T, O>(
+    pub async fn structured_turn<T, O>(
         &self,
         extensions: RequestExtensions,
         input: ModelInput,
@@ -275,10 +288,10 @@ impl Context {
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
         let extensions = Arc::new(extensions);
-        let span = turn_span("responses_structured", turn.config.model.as_ref(), estimate);
+        let span = turn_span("structured_turn", turn.config.model.as_ref(), estimate);
         let stream = self
-            .adapter
-            .responses_structured(input, erase_structured_turn(turn, Arc::clone(&extensions))?)
+            .turns
+            .structured_turn(input, erase_structured_turn(turn, Arc::clone(&extensions))?)
             .await?;
         Ok(PendingStructuredTurn {
             extensions,
@@ -286,7 +299,7 @@ impl Context {
                 budget: Arc::clone(&self.budget),
                 lease: Some(lease),
             },
-            adapter: Arc::clone(&self.adapter),
+            recovery: Arc::clone(&self.recovery),
             span,
             stream: map_structured_stream::<T, O>(stream),
             reducer: StructuredTurnReducer::new(),
@@ -303,14 +316,14 @@ impl Context {
             .budget
             .reserve(&extensions, &estimate, request.budget)?;
         let span = turn_span("completion", request.model.as_ref(), estimate);
-        let stream = self.adapter.completion(request, &extensions).await?;
+        let stream = self.completion.completion(request, &extensions).await?;
         Ok(PendingCompletion {
             extensions,
             owned_lease: OwnedLease {
                 budget: Arc::clone(&self.budget),
                 lease: Some(lease),
             },
-            adapter: Arc::clone(&self.adapter),
+            recovery: Arc::clone(&self.recovery),
             span,
             stream,
             reducer: CompletionReducer::new(),
@@ -378,8 +391,8 @@ where
                             let partial = self.reducer.state().clone();
                             if let Err(source) = recover_or_release_budget(
                                 &mut self.owned_lease,
-                                &*self.adapter,
-                                StreamKind::ResponsesText,
+                                &*self.recovery,
+                                OperationKind::TextTurn,
                                 self.reducer.state().request_id.as_deref(),
                             )
                             .await
@@ -394,8 +407,8 @@ where
                             let partial = self.reducer.state().clone();
                             if let Err(execution_source) = recover_or_release_budget(
                                 &mut self.owned_lease,
-                                &*self.adapter,
-                                StreamKind::ResponsesText,
+                                &*self.recovery,
+                                OperationKind::TextTurn,
                                 self.reducer.state().request_id.as_deref(),
                             )
                             .await
@@ -416,8 +429,8 @@ where
                     let partial = self.reducer.state().clone();
                     if let Err(execution_source) = recover_or_release_budget(
                         &mut self.owned_lease,
-                        &*self.adapter,
-                        StreamKind::ResponsesText,
+                        &*self.recovery,
+                        OperationKind::TextTurn,
                         self.reducer.state().request_id.as_deref(),
                     )
                     .await
@@ -438,8 +451,8 @@ where
         let partial = self.reducer.state().clone();
         if let Err(source) = recover_or_release_budget(
             &mut self.owned_lease,
-            &*self.adapter,
-            StreamKind::ResponsesText,
+            &*self.recovery,
+            OperationKind::TextTurn,
             self.reducer.state().request_id.as_deref(),
         )
         .await
@@ -554,8 +567,8 @@ where
                                 StructuredTurnPartial::from_state(self.reducer.state().clone());
                             if let Err(source) = recover_or_release_budget(
                                 &mut self.owned_lease,
-                                &*self.adapter,
-                                StreamKind::ResponsesStructured,
+                                &*self.recovery,
+                                OperationKind::StructuredTurn,
                                 self.reducer.state().request_id.as_deref(),
                             )
                             .await
@@ -573,8 +586,8 @@ where
                                 StructuredTurnPartial::from_state(self.reducer.state().clone());
                             if let Err(execution_source) = recover_or_release_budget(
                                 &mut self.owned_lease,
-                                &*self.adapter,
-                                StreamKind::ResponsesStructured,
+                                &*self.recovery,
+                                OperationKind::StructuredTurn,
                                 self.reducer.state().request_id.as_deref(),
                             )
                             .await
@@ -597,8 +610,8 @@ where
                     let partial = StructuredTurnPartial::from_state(self.reducer.state().clone());
                     if let Err(execution_source) = recover_or_release_budget(
                         &mut self.owned_lease,
-                        &*self.adapter,
-                        StreamKind::ResponsesStructured,
+                        &*self.recovery,
+                        OperationKind::StructuredTurn,
                         self.reducer.state().request_id.as_deref(),
                     )
                     .await
@@ -619,8 +632,8 @@ where
         let partial = StructuredTurnPartial::from_state(self.reducer.state().clone());
         if let Err(source) = recover_or_release_budget(
             &mut self.owned_lease,
-            &*self.adapter,
-            StreamKind::ResponsesStructured,
+            &*self.recovery,
+            OperationKind::StructuredTurn,
             self.reducer.state().request_id.as_deref(),
         )
         .await
@@ -710,8 +723,8 @@ impl PendingCompletion {
                             let partial = self.reducer.state().clone();
                             if let Err(source) = recover_or_release_budget(
                                 &mut self.owned_lease,
-                                &*self.adapter,
-                                StreamKind::Completion,
+                                &*self.recovery,
+                                OperationKind::Completion,
                                 self.reducer.state().request_id.as_deref(),
                             )
                             .await
@@ -726,8 +739,8 @@ impl PendingCompletion {
                             let partial = self.reducer.state().clone();
                             if let Err(execution_source) = recover_or_release_budget(
                                 &mut self.owned_lease,
-                                &*self.adapter,
-                                StreamKind::Completion,
+                                &*self.recovery,
+                                OperationKind::Completion,
                                 self.reducer.state().request_id.as_deref(),
                             )
                             .await
@@ -748,8 +761,8 @@ impl PendingCompletion {
                     let partial = self.reducer.state().clone();
                     if let Err(execution_source) = recover_or_release_budget(
                         &mut self.owned_lease,
-                        &*self.adapter,
-                        StreamKind::Completion,
+                        &*self.recovery,
+                        OperationKind::Completion,
                         self.reducer.state().request_id.as_deref(),
                     )
                     .await
@@ -770,8 +783,8 @@ impl PendingCompletion {
         let partial = self.reducer.state().clone();
         if let Err(source) = recover_or_release_budget(
             &mut self.owned_lease,
-            &*self.adapter,
-            StreamKind::Completion,
+            &*self.recovery,
+            OperationKind::Completion,
             self.reducer.state().request_id.as_deref(),
         )
         .await
@@ -1042,12 +1055,12 @@ fn record_budget_usage(owned_lease: &mut OwnedLease, usage: Usage) -> Result<(),
 
 async fn recover_or_release_budget(
     owned_lease: &mut OwnedLease,
-    adapter: &dyn LlmAdapter,
-    kind: StreamKind,
+    recovery: &dyn UsageRecoveryAdapter,
+    kind: OperationKind,
     request_id: Option<&str>,
 ) -> Result<(), AgentError> {
     let recovered_usage = if let Some(request_id) = request_id {
-        adapter
+        recovery
             .recover_usage(kind, request_id)
             .await
             .ok()

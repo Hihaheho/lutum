@@ -4,8 +4,8 @@ use futures::executor::block_on;
 use agents::{
     AssistantTurnItem, AssistantTurnView, BudgetManager, CollectError, Context, EventHandler,
     FinishReason, HandlerContext, HandlerDirective, InputMessageRole, MockError, MockLlmAdapter,
-    MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, RequestBudget,
-    RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions, StreamKind,
+    MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, OperationKind,
+    RequestBudget, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
     StructuredTurn, StructuredTurnOutcome, TextTurn, TextTurnEvent, TextTurnReducer, ToolMetadata,
     ToolPolicy, Usage, UsageEstimate,
 };
@@ -110,10 +110,10 @@ fn text_turn_collects_assistant_output_and_tool_calls() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(budget, adapter);
+    let ctx = Context::new(Arc::new(adapter), budget);
     let turn = weather_turn("gpt-4.1");
     let pending =
-        block_on(ctx.responses_text(extensions(), input(), turn, UsageEstimate::zero())).unwrap();
+        block_on(ctx.text_turn(extensions(), input(), turn, UsageEstimate::zero())).unwrap();
     let result = block_on(pending.collect_noop()).unwrap();
 
     assert_eq!(result.assistant_text(), "looking up ");
@@ -151,11 +151,10 @@ fn structured_turn_collects_typed_output_and_appends_assistant_item() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(budget, adapter);
+    let ctx = Context::new(Arc::new(adapter), budget);
     let turn = StructuredTurn::<Tools, Summary>::new(agents::ModelName::new("gpt-4.1").unwrap());
     let pending =
-        block_on(ctx.responses_structured(extensions(), input(), turn, UsageEstimate::zero()))
-            .unwrap();
+        block_on(ctx.structured_turn(extensions(), input(), turn, UsageEstimate::zero())).unwrap();
     let result = block_on(pending.collect_noop()).unwrap();
 
     assert!(matches!(
@@ -225,8 +224,8 @@ fn recorded_events_reduce_to_same_result_as_collect() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(budget, adapter);
-    let pending = block_on(ctx.responses_text(
+    let ctx = Context::new(Arc::new(adapter), budget);
+    let pending = block_on(ctx.text_turn(
         extensions(),
         input(),
         weather_turn("gpt-4.1"),
@@ -251,8 +250,8 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
         }),
         Ok(agents::mock::RawTextTurnEvent::TextDelta { delta: "he".into() }),
     ]));
-    let ctx = Context::new(budget.clone(), adapter);
-    let pending = block_on(ctx.responses_text(
+    let ctx = Context::new(Arc::new(adapter), budget.clone());
+    let pending = block_on(ctx.text_turn(
         extensions(),
         input(),
         TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1").unwrap()),
@@ -279,8 +278,8 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
 fn into_stream_releases_reserved_budget_without_collect() {
     let budget = test_budget();
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![]));
-    let ctx = Context::new(budget.clone(), adapter);
-    let pending = block_on(ctx.responses_text(
+    let ctx = Context::new(Arc::new(adapter), budget.clone());
+    let pending = block_on(ctx.text_turn(
         extensions(),
         input(),
         TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1").unwrap()),
@@ -312,15 +311,15 @@ fn adapter_error_uses_recovered_usage_when_available() {
             }),
         ]))
         .with_recovered_usage(
-            StreamKind::ResponsesText,
+            OperationKind::TextTurn,
             "req-recover",
             Usage {
                 total_tokens: 5,
                 ..Usage::zero()
             },
         );
-    let ctx = Context::new(budget.clone(), adapter);
-    let pending = block_on(ctx.responses_text(
+    let ctx = Context::new(Arc::new(adapter), budget.clone());
+    let pending = block_on(ctx.text_turn(
         extensions(),
         input(),
         TextTurn::<Tools>::new(agents::ModelName::new("gpt-4.1").unwrap()),
@@ -353,8 +352,8 @@ fn tool_call_deserialize_error_surfaces_as_execution_error() {
             arguments_json_delta: "{}".into(),
         }),
     ]));
-    let ctx = Context::new(budget.clone(), adapter);
-    let pending = block_on(ctx.responses_text(
+    let ctx = Context::new(Arc::new(adapter), budget.clone());
+    let pending = block_on(ctx.text_turn(
         extensions(),
         input(),
         weather_turn("gpt-4.1"),
@@ -408,8 +407,8 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
                 },
             }),
         ]));
-    let ctx = Context::new(budget.clone(), adapter);
-    let pending = block_on(ctx.responses_structured(
+    let ctx = Context::new(Arc::new(adapter), budget.clone());
+    let pending = block_on(ctx.structured_turn(
         extensions(),
         input(),
         StructuredTurn::<Tools, Summary>::new(agents::ModelName::new("gpt-4.1").unwrap()),
@@ -443,9 +442,9 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
 fn request_budget_is_enforced_per_turn() {
     let adapter = MockLlmAdapter::new();
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(budget, adapter);
+    let ctx = Context::new(Arc::new(adapter), budget);
 
-    let err = match block_on(ctx.responses_text(
+    let err = match block_on(ctx.text_turn(
         extensions(),
         input(),
         {

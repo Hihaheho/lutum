@@ -16,9 +16,10 @@ use agents_protocol::{
     extensions::RequestExtensions,
     llm::{
         AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
-        CompletionEvent, CompletionEventStream, CompletionRequest as ProtocolCompletionRequest,
-        ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-        ErasedTextTurnEventStream, LlmAdapter, ModelSelector, StreamKind,
+        CompletionAdapter, CompletionEvent, CompletionEventStream,
+        CompletionRequest as ProtocolCompletionRequest, ErasedStructuredTurnEvent,
+        ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
+        ModelSelector, OperationKind, TurnAdapter, UsageRecoveryAdapter,
     },
     transcript::{TurnRole, TurnView},
 };
@@ -213,8 +214,8 @@ impl OpenAiAdapter {
 }
 
 #[async_trait::async_trait]
-impl LlmAdapter for OpenAiAdapter {
-    async fn responses_text(
+impl TurnAdapter for OpenAiAdapter {
+    async fn text_turn(
         &self,
         input: ModelInput,
         turn: AdapterTextTurn,
@@ -242,7 +243,7 @@ impl LlmAdapter for OpenAiAdapter {
         )
     }
 
-    async fn responses_structured(
+    async fn structured_turn(
         &self,
         input: ModelInput,
         turn: AdapterStructuredTurn,
@@ -274,7 +275,10 @@ impl LlmAdapter for OpenAiAdapter {
             map_structured_stream(stream, model).map(|item| item.map_err(AgentError::backend)),
         ) as ErasedStructuredTurnEventStream)
     }
+}
 
+#[async_trait::async_trait]
+impl CompletionAdapter for OpenAiAdapter {
     async fn completion(
         &self,
         request: ProtocolCompletionRequest,
@@ -289,21 +293,24 @@ impl LlmAdapter for OpenAiAdapter {
             map_completion_stream(stream, model).map(|item| item.map_err(AgentError::backend)),
         ) as CompletionEventStream)
     }
+}
 
+#[async_trait::async_trait]
+impl UsageRecoveryAdapter for OpenAiAdapter {
     async fn recover_usage(
         &self,
-        kind: StreamKind,
+        kind: OperationKind,
         request_id: &str,
     ) -> Result<Option<Usage>, AgentError> {
         match kind {
-            StreamKind::ResponsesText | StreamKind::ResponsesStructured => {
+            OperationKind::TextTurn | OperationKind::StructuredTurn => {
                 let value = self
                     .get_json(&format!("/responses/{request_id}"))
                     .await
                     .map_err(AgentError::backend)?;
                 Ok(Some(parse_response_usage(&value)))
             }
-            StreamKind::Completion => Ok(None),
+            OperationKind::Completion => Ok(None),
         }
     }
 }

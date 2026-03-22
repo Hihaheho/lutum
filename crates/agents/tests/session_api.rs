@@ -5,6 +5,7 @@ use agents::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[agents::tool_input(name = "weather", output = WeatherResult)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -42,7 +43,7 @@ fn prepare_and_collect_do_not_mutate_transcript_before_commit() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::new(budget, adapter);
+    let ctx = agents::Context::new(Arc::new(adapter), budget);
     let mut session = Session::new(ctx);
     session.push_user("Hi.");
     let before_len = session.input().items().len();
@@ -96,7 +97,7 @@ fn tool_round_is_only_applied_on_explicit_commit() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::new(budget, adapter);
+    let ctx = agents::Context::new(Arc::new(adapter), budget);
     let mut session = Session::new(ctx);
     session.push_user("Check weather.");
     let before_len = session.input().items().len();
@@ -185,7 +186,7 @@ fn session_can_drive_a_stateful_step_loop() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::new(budget, adapter);
+    let ctx = agents::Context::new(Arc::new(adapter), budget);
     let mut session = Session::new(ctx);
 
     for prompt in ["step one", "step two"] {
@@ -250,7 +251,7 @@ fn structured_tool_round_stays_explicit_until_commit() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = agents::Context::new(budget, adapter);
+    let ctx = agents::Context::new(Arc::new(adapter), budget);
     let mut session = Session::new(ctx);
     session.push_user("Plan with a tool.");
     let before_len = session.input().items().len();

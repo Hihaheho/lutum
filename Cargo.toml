@@ -3,6 +3,7 @@ members = [
     "crates/agents", "crates/agents-claude",
     "crates/agents-macros",
     "crates/agents-openai",
+    "crates/agents-openrouter",
     "crates/agents-protocol",
 ]
 resolver = "2"
@@ -15,6 +16,7 @@ edition = "2024"
 agents-claude = { path = "crates/agents-claude" }
 agents-macros = { path = "crates/agents-macros" }
 agents-openai = { path = "crates/agents-openai" }
+agents-openrouter = { path = "crates/agents-openrouter" }
 agents-protocol = { path = "crates/agents-protocol" }
 async-stream = "0.3"
 async-trait = "0.1.89"

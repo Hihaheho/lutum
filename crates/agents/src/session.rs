@@ -134,7 +134,7 @@ impl Session {
         self.defaults.apply(&mut turn.config);
         let pending = self
             .ctx
-            .responses_text(extensions, self.input.clone(), turn, estimate)
+            .text_turn(extensions, self.input.clone(), turn, estimate)
             .await?;
         Ok(SessionPendingText { pending })
     }
@@ -152,7 +152,7 @@ impl Session {
         self.defaults.apply(&mut turn.config);
         let pending = self
             .ctx
-            .responses_structured(extensions, self.input.clone(), turn, estimate)
+            .structured_turn(extensions, self.input.clone(), turn, estimate)
             .await?;
         Ok(SessionPendingStructured { pending })
     }

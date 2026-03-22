@@ -65,6 +65,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agents-openrouter"
+version = "0.1.0"
+dependencies = [
+ "agents-protocol",
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "agents-protocol"
 version = "0.1.0"
 dependencies = [

@@ -21,13 +21,13 @@ pub use error::{AgentError, BoxError};
 pub use extensions::RequestExtensions;
 pub use llm::{
     AdapterStructuredOutputSpec, AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice,
-    AdapterToolDefinition, AdapterTurnConfig, CompletionEvent, CompletionEventStream,
-    CompletionOptions, CompletionRequest, ErasedStructuredTurnEvent,
+    AdapterToolDefinition, AdapterTurnConfig, CompletionAdapter, CompletionEvent,
+    CompletionEventStream, CompletionOptions, CompletionRequest, ErasedStructuredTurnEvent,
     ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream, FinishReason,
-    GenerationParams, LlmAdapter, ModelName, ModelNameError, ModelSelection, ModelSelector,
-    StreamKind, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
-    StructuredTurnEventStream, Temperature, TemperatureError, TextTurn, TextTurnEvent,
-    TextTurnEventStream, TurnConfig,
+    GenerationParams, ModelName, ModelNameError, ModelSelection, ModelSelector, OperationKind,
+    StructuredOutputSpec, StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream,
+    Temperature, TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TurnAdapter,
+    TurnConfig, UsageRecoveryAdapter,
 };
 pub use reducer::{
     CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
