@@ -134,6 +134,7 @@ fn typed_public_api_compiles_and_constructs_requests() {
     _structured.config.generation = agents::GenerationParams {
         temperature: Some(Temperature::try_from(0.3).unwrap()),
         max_output_tokens: Some(512),
+        seed: None,
     };
     let _completion = CompletionRequest::builder()
         .model(ModelName::new("gpt-4.1-mini").unwrap())

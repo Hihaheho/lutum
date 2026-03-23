@@ -352,6 +352,7 @@ fn build_responses_request(
         text: text_format.map(|format| crate::responses::ResponsesTextConfig { format }),
         tool_choice,
         models: None,
+        seed: config.generation.seed,
     })
 }
 
@@ -1118,7 +1119,9 @@ where
                     SseEvent::ResponseInProgress(_)
                     | SseEvent::ResponseOutputItemAdded(_)
                     | SseEvent::ResponseContentPartAdded(_)
-                    | SseEvent::ResponseContentPartDone(_) => {}
+                    | SseEvent::ResponseContentPartDone(_)
+                    | SseEvent::ResponseReasoningSummaryTextDone(_)
+                    | SseEvent::Unknown => {}
                     SseEvent::ResponseCreated(_) => {}
                 }
             }
@@ -1325,7 +1328,9 @@ where
                     SseEvent::ResponseInProgress(_)
                     | SseEvent::ResponseOutputItemAdded(_)
                     | SseEvent::ResponseContentPartAdded(_)
-                    | SseEvent::ResponseContentPartDone(_) => {}
+                    | SseEvent::ResponseContentPartDone(_)
+                    | SseEvent::ResponseReasoningSummaryTextDone(_)
+                    | SseEvent::Unknown => {}
                     SseEvent::ResponseCreated(_) => {}
                 }
             }
@@ -1636,6 +1641,30 @@ mod tests {
         assert_eq!(completion_request.model, "gpt-4.1");
         assert_eq!(completion_request.models, None);
         assert_eq!(completion_model, "gpt-4.1");
+    }
+
+    #[test]
+    fn prepare_responses_request_propagates_seed() {
+        let adapter = OpenAiAdapter::new("test-key");
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            model: ModelName::new("gpt-4.1").unwrap(),
+            generation: GenerationParams {
+                temperature: None,
+                max_output_tokens: Some(128),
+                seed: Some(42),
+            },
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let extensions = RequestExtensions::new();
+
+        let (request, _) = adapter
+            .prepare_responses_request(&input, &config, &extensions, None, None)
+            .unwrap();
+
+        assert_eq!(request.seed, Some(42));
     }
 
     #[test]

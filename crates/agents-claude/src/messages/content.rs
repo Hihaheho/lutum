@@ -175,5 +175,12 @@ pub struct ToolResultBlock {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ThinkingBlock {
     pub thinking: String,
+    /// Anthropic's spec requires this field. Ollama's Anthropic-compat endpoint omits it,
+    /// so we accept a missing field as an empty string.
+    ///
+    /// **Important:** do not round-trip thinking blocks with an empty signature back to
+    /// Anthropic (e.g. in multi-turn tool loops) — Anthropic uses the signature for
+    /// integrity verification and will reject an empty value.
+    #[serde(default)]
     pub signature: String,
 }

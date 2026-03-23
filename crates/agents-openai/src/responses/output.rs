@@ -35,11 +35,13 @@ pub enum SseEvent {
     ResponseContentPartDone(ResponseContentPartDoneEvent),
     ResponseOutputItemDone(ResponseOutputItemDoneEvent),
     ResponseReasoningSummaryTextDelta(ResponseReasoningSummaryTextDeltaEvent),
+    ResponseReasoningSummaryTextDone(ResponseReasoningSummaryTextDoneEvent),
     ResponseReasoningDelta(ResponseReasoningDeltaEvent),
     ResponseRefusalDelta(ResponseRefusalDeltaEvent),
     ResponseFunctionCallArgumentsDelta(ResponseFunctionCallArgumentsDeltaEvent),
     ResponseFunctionCallArgumentsDone(ResponseFunctionCallArgumentsDoneEvent),
     ResponseCompleted(ResponseCompletedEvent),
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -93,6 +95,14 @@ enum SseEventWire {
         #[serde(skip_serializing_if = "Option::is_none")]
         item_id: Option<String>,
     },
+    #[serde(rename = "response.reasoning_summary_text.done")]
+    ReasoningSummaryTextDone {
+        item_id: String,
+        output_index: usize,
+        summary_index: usize,
+        text: String,
+        sequence_number: u64,
+    },
     #[serde(rename = "response.reasoning.delta")]
     ReasoningDelta {
         delta: String,
@@ -126,6 +136,9 @@ enum SseEventWire {
     },
     #[serde(rename = "response.completed")]
     Completed { response: ResponseObject },
+    /// Catch-all for any event types not yet handled by this crate.
+    #[serde(other)]
+    Unknown,
 }
 
 impl From<SseEventWire> for SseEvent {
@@ -210,6 +223,23 @@ impl From<SseEventWire> for SseEvent {
                     event_type: "response.reasoning_summary_text.delta".to_string(),
                 })
             }
+            SseEventWire::ReasoningSummaryTextDone {
+                item_id,
+                output_index,
+                summary_index,
+                text,
+                sequence_number,
+            } => {
+                Self::ResponseReasoningSummaryTextDone(ResponseReasoningSummaryTextDoneEvent {
+                    item_id,
+                    output_index,
+                    summary_index,
+                    text,
+                    sequence_number,
+                    event_type: "response.reasoning_summary_text.done".to_string(),
+                })
+            }
+            SseEventWire::Unknown => Self::Unknown,
             SseEventWire::ReasoningDelta { delta, item_id } => {
                 Self::ResponseReasoningDelta(ResponseReasoningDeltaEvent {
                     delta,
@@ -330,6 +360,23 @@ impl From<SseEvent> for SseEventWire {
             SseEvent::ResponseReasoningSummaryTextDelta(
                 ResponseReasoningSummaryTextDeltaEvent { delta, item_id, .. },
             ) => Self::ReasoningSummaryTextDelta { delta, item_id },
+            SseEvent::ResponseReasoningSummaryTextDone(
+                ResponseReasoningSummaryTextDoneEvent {
+                    item_id,
+                    output_index,
+                    summary_index,
+                    text,
+                    sequence_number,
+                    ..
+                },
+            ) => Self::ReasoningSummaryTextDone {
+                item_id,
+                output_index,
+                summary_index,
+                text,
+                sequence_number,
+            },
+            SseEvent::Unknown => Self::Unknown,
             SseEvent::ResponseReasoningDelta(ResponseReasoningDeltaEvent {
                 delta,
                 item_id,
@@ -717,6 +764,17 @@ pub struct ResponseReasoningSummaryTextDeltaEvent {
     pub delta: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
+    #[serde(rename = "type")]
+    pub event_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResponseReasoningSummaryTextDoneEvent {
+    pub item_id: String,
+    pub output_index: usize,
+    pub summary_index: usize,
+    pub text: String,
+    pub sequence_number: u64,
     #[serde(rename = "type")]
     pub event_type: String,
 }

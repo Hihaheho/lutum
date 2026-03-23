@@ -490,10 +490,8 @@ impl ContentBlockState {
                 *finalized_arguments = Some(arguments.clone());
                 Ok(Some(ToolMetadata::new(id.clone(), name.clone(), arguments)))
             }
-            Self::Unsupported => Ok(None),
-            other => Err(ClaudeError::Sse {
-                message: format!("received content_block_stop for non-tool block: {other:?}"),
-            }),
+            // Text and Thinking blocks are finalized via flush_blocks; nothing to yield here.
+            Self::Unsupported | Self::Text { .. } | Self::Thinking { .. } => Ok(None),
         }
     }
 }

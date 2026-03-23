@@ -44,11 +44,13 @@ use crate::responses::{InputItem, OpenAiTool, ToolChoice};
 ///       "parallel_tool_calls": true,
 ///       "reasoning": { "effort": "xhigh" },
 ///       "text": { "format": { "type": "text" } },
-///       "tool_choice": "required"
+///       "tool_choice": "required",
+///       "seed": 42
 ///     }"#,
 /// )
 /// .unwrap();
 /// let request = serde_json::from_value::<ResponsesRequest>(json.clone()).unwrap();
+/// assert_eq!(request.seed, Some(42));
 /// assert_eq!(serde_json::to_value(&request).unwrap(), json);
 /// assert_eq!(serde_json::from_value::<ResponsesRequest>(json).unwrap(), request);
 /// ```
@@ -71,6 +73,8 @@ pub struct ResponsesRequest {
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
 }
 
 /// ```

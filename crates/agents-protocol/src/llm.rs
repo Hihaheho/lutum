@@ -92,6 +92,7 @@ pub enum ModelNameError {
 pub struct GenerationParams {
     pub temperature: Option<Temperature>,
     pub max_output_tokens: Option<u32>,
+    pub seed: Option<u64>,
 }
 
 #[derive(Builder, Clone, Debug, PartialEq)]

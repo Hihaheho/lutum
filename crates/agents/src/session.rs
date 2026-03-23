@@ -39,6 +39,9 @@ impl SessionDefaults {
         if turn.generation.max_output_tokens.is_none() {
             turn.generation.max_output_tokens = self.generation.max_output_tokens;
         }
+        if turn.generation.seed.is_none() {
+            turn.generation.seed = self.generation.seed;
+        }
         if turn.budget == RequestBudget::unlimited() && self.budget != RequestBudget::unlimited() {
             turn.budget = self.budget;
         }
