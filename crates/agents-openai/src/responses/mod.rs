@@ -12,7 +12,8 @@ pub use output::{
     ResponseCompletedEvent, ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
     ResponseCreatedEvent, ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseObject,
-    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseOutputTextDeltaEvent,
+    ResponseOutputContent, ResponseOutputItem, ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent, ResponseOutputMessage, ResponseOutputTextDeltaEvent,
     ResponseOutputTextDoneEvent, ResponseReasoningDeltaEvent,
     ResponseReasoningSummaryTextDeltaEvent, ResponseRefusalDeltaEvent, SseEvent,
 };

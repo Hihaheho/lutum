@@ -14,6 +14,7 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+monostate.workspace = true
 
 [dev-dependencies]
 anyhow = "1"

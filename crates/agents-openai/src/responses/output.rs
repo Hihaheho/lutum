@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
+use monostate::MustBe;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::responses::{InputItem, OutputTextContent};
+use crate::responses::{MessageRole, OutputTextContent, SummaryText};
 
 /// ```
 /// use agents_openai::responses::SseEvent;
@@ -46,6 +47,73 @@ pub enum SseEvent {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
+pub enum ResponseOutputItem {
+    #[serde(rename = "message")]
+    Message(ResponseOutputMessage),
+    #[serde(rename = "function_call")]
+    FunctionCall {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        call_id: String,
+        name: String,
+        arguments: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+    #[serde(rename = "function_call_output")]
+    FunctionCallOutput {
+        call_id: String,
+        output: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+    #[serde(rename = "reasoning")]
+    Reasoning {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        summary: Vec<SummaryText>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Vec<Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResponseOutputMessage {
+    pub content: Vec<ResponseOutputContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub role: MessageRole,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ResponseOutputContent {
+    #[serde(rename = "output_text")]
+    OutputText {
+        text: String,
+        #[serde(default)]
+        annotations: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        logprobs: Option<Vec<Value>>,
+    },
+    #[serde(rename = "refusal")]
+    Refusal { refusal: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 enum SseEventWire {
     #[serde(rename = "response.created")]
     Created { response: ResponseObject },
@@ -54,7 +122,9 @@ enum SseEventWire {
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
         output_index: usize,
-        item: InputItem,
+        #[serde(default)]
+        sequence_number: u64,
+        item: ResponseOutputItem,
     },
     #[serde(rename = "response.content_part.added")]
     ContentPartAdded {
@@ -87,7 +157,9 @@ enum SseEventWire {
     #[serde(rename = "response.output_item.done")]
     OutputItemDone {
         output_index: usize,
-        item: InputItem,
+        #[serde(default)]
+        sequence_number: u64,
+        item: ResponseOutputItem,
     },
     #[serde(rename = "response.reasoning_summary_text.delta")]
     ReasoningSummaryTextDelta {
@@ -121,7 +193,10 @@ enum SseEventWire {
         item_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
-        name: String,
+        #[serde(default)]
+        output_index: usize,
+        #[serde(default)]
+        sequence_number: u64,
         delta: String,
     },
     #[serde(rename = "response.function_call_arguments.done")]
@@ -130,6 +205,10 @@ enum SseEventWire {
         item_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
+        #[serde(default)]
+        output_index: usize,
+        #[serde(default)]
+        sequence_number: u64,
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         arguments: Option<String>,
@@ -146,21 +225,24 @@ impl From<SseEventWire> for SseEvent {
         match value {
             SseEventWire::Created { response } => Self::ResponseCreated(ResponseCreatedEvent {
                 response,
-                event_type: "response.created".to_string(),
+                event_type: Default::default(),
             }),
             SseEventWire::InProgress { response } => {
                 Self::ResponseInProgress(ResponseInProgressEvent {
                     response,
-                    event_type: "response.in_progress".to_string(),
+                    event_type: Default::default(),
                 })
             }
-            SseEventWire::OutputItemAdded { output_index, item } => {
-                Self::ResponseOutputItemAdded(ResponseOutputItemAddedEvent {
-                    output_index,
-                    item,
-                    event_type: "response.output_item.added".to_string(),
-                })
-            }
+            SseEventWire::OutputItemAdded {
+                output_index,
+                sequence_number,
+                item,
+            } => Self::ResponseOutputItemAdded(ResponseOutputItemAddedEvent {
+                output_index,
+                sequence_number,
+                item,
+                event_type: Default::default(),
+            }),
             SseEventWire::ContentPartAdded {
                 item_id,
                 output_index,
@@ -171,7 +253,7 @@ impl From<SseEventWire> for SseEvent {
                 output_index,
                 content_index,
                 part,
-                event_type: "response.content_part.added".to_string(),
+                event_type: Default::default(),
             }),
             SseEventWire::OutputTextDelta {
                 item_id,
@@ -183,7 +265,7 @@ impl From<SseEventWire> for SseEvent {
                 output_index,
                 content_index,
                 delta,
-                event_type: "response.output_text.delta".to_string(),
+                event_type: Default::default(),
             }),
             SseEventWire::OutputTextDone {
                 item_id,
@@ -195,7 +277,7 @@ impl From<SseEventWire> for SseEvent {
                 output_index,
                 content_index,
                 text,
-                event_type: "response.output_text.done".to_string(),
+                event_type: Default::default(),
             }),
             SseEventWire::ContentPartDone {
                 item_id,
@@ -207,20 +289,23 @@ impl From<SseEventWire> for SseEvent {
                 output_index,
                 content_index,
                 part,
-                event_type: "response.content_part.done".to_string(),
+                event_type: Default::default(),
             }),
-            SseEventWire::OutputItemDone { output_index, item } => {
-                Self::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
-                    output_index,
-                    item,
-                    event_type: "response.output_item.done".to_string(),
-                })
-            }
+            SseEventWire::OutputItemDone {
+                output_index,
+                sequence_number,
+                item,
+            } => Self::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+                output_index,
+                sequence_number,
+                item,
+                event_type: Default::default(),
+            }),
             SseEventWire::ReasoningSummaryTextDelta { delta, item_id } => {
                 Self::ResponseReasoningSummaryTextDelta(ResponseReasoningSummaryTextDeltaEvent {
                     delta,
                     item_id,
-                    event_type: "response.reasoning_summary_text.delta".to_string(),
+                    event_type: Default::default(),
                 })
             }
             SseEventWire::ReasoningSummaryTextDone {
@@ -229,61 +314,65 @@ impl From<SseEventWire> for SseEvent {
                 summary_index,
                 text,
                 sequence_number,
-            } => {
-                Self::ResponseReasoningSummaryTextDone(ResponseReasoningSummaryTextDoneEvent {
-                    item_id,
-                    output_index,
-                    summary_index,
-                    text,
-                    sequence_number,
-                    event_type: "response.reasoning_summary_text.done".to_string(),
-                })
-            }
+            } => Self::ResponseReasoningSummaryTextDone(ResponseReasoningSummaryTextDoneEvent {
+                item_id,
+                output_index,
+                summary_index,
+                text,
+                sequence_number,
+                event_type: Default::default(),
+            }),
             SseEventWire::Unknown => Self::Unknown,
             SseEventWire::ReasoningDelta { delta, item_id } => {
                 Self::ResponseReasoningDelta(ResponseReasoningDeltaEvent {
                     delta,
                     item_id,
-                    event_type: "response.reasoning.delta".to_string(),
+                    event_type: Default::default(),
                 })
             }
             SseEventWire::RefusalDelta { delta, item_id } => {
                 Self::ResponseRefusalDelta(ResponseRefusalDeltaEvent {
                     delta,
                     item_id,
-                    event_type: "response.refusal.delta".to_string(),
+                    event_type: Default::default(),
                 })
             }
             SseEventWire::FunctionCallArgumentsDelta {
                 item_id,
                 call_id,
-                name,
+                output_index,
+                sequence_number,
                 delta,
             } => {
                 Self::ResponseFunctionCallArgumentsDelta(ResponseFunctionCallArgumentsDeltaEvent {
                     item_id,
                     call_id,
-                    name,
+                    output_index,
+                    sequence_number,
                     delta,
-                    event_type: "response.function_call_arguments.delta".to_string(),
+                    event_type: Default::default(),
                 })
             }
             SseEventWire::FunctionCallArgumentsDone {
                 item_id,
                 call_id,
+                output_index,
+                sequence_number,
                 name,
                 arguments,
             } => Self::ResponseFunctionCallArgumentsDone(ResponseFunctionCallArgumentsDoneEvent {
                 item_id,
                 call_id,
+                output_index,
+                sequence_number,
                 name,
                 arguments,
-                event_type: "response.function_call_arguments.done".to_string(),
+                event_type: Default::default(),
             }),
             SseEventWire::Completed { response } => {
                 Self::ResponseCompleted(ResponseCompletedEvent {
                     response,
-                    event_type: "response.completed".to_string(),
+                    event_type: Default::default(),
                 })
             }
         }
@@ -301,9 +390,14 @@ impl From<SseEvent> for SseEventWire {
             }
             SseEvent::ResponseOutputItemAdded(ResponseOutputItemAddedEvent {
                 output_index,
+                sequence_number,
                 item,
                 ..
-            }) => Self::OutputItemAdded { output_index, item },
+            }) => Self::OutputItemAdded {
+                output_index,
+                sequence_number,
+                item,
+            },
             SseEvent::ResponseContentPartAdded(ResponseContentPartAddedEvent {
                 item_id,
                 output_index,
@@ -354,22 +448,25 @@ impl From<SseEvent> for SseEventWire {
             },
             SseEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
                 output_index,
+                sequence_number,
                 item,
                 ..
-            }) => Self::OutputItemDone { output_index, item },
+            }) => Self::OutputItemDone {
+                output_index,
+                sequence_number,
+                item,
+            },
             SseEvent::ResponseReasoningSummaryTextDelta(
                 ResponseReasoningSummaryTextDeltaEvent { delta, item_id, .. },
             ) => Self::ReasoningSummaryTextDelta { delta, item_id },
-            SseEvent::ResponseReasoningSummaryTextDone(
-                ResponseReasoningSummaryTextDoneEvent {
-                    item_id,
-                    output_index,
-                    summary_index,
-                    text,
-                    sequence_number,
-                    ..
-                },
-            ) => Self::ReasoningSummaryTextDone {
+            SseEvent::ResponseReasoningSummaryTextDone(ResponseReasoningSummaryTextDoneEvent {
+                item_id,
+                output_index,
+                summary_index,
+                text,
+                sequence_number,
+                ..
+            }) => Self::ReasoningSummaryTextDone {
                 item_id,
                 output_index,
                 summary_index,
@@ -389,20 +486,24 @@ impl From<SseEvent> for SseEventWire {
                 ResponseFunctionCallArgumentsDeltaEvent {
                     item_id,
                     call_id,
-                    name,
+                    output_index,
+                    sequence_number,
                     delta,
                     ..
                 },
             ) => Self::FunctionCallArgumentsDelta {
                 item_id,
                 call_id,
-                name,
+                output_index,
+                sequence_number,
                 delta,
             },
             SseEvent::ResponseFunctionCallArgumentsDone(
                 ResponseFunctionCallArgumentsDoneEvent {
                     item_id,
                     call_id,
+                    output_index,
+                    sequence_number,
                     name,
                     arguments,
                     ..
@@ -410,6 +511,8 @@ impl From<SseEvent> for SseEventWire {
             ) => Self::FunctionCallArgumentsDone {
                 item_id,
                 call_id,
+                output_index,
+                sequence_number,
                 name,
                 arguments,
             },
@@ -462,7 +565,7 @@ pub struct ResponseObject {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
-    pub output: Vec<InputItem>,
+    pub output: Vec<ResponseOutputItem>,
     #[serde(default)]
     pub usage: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -516,7 +619,7 @@ pub struct ResponseObject {
 pub struct ResponseCreatedEvent {
     pub response: ResponseObject,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.created"),
 }
 
 /// ```
@@ -562,7 +665,7 @@ pub struct ResponseCreatedEvent {
 pub struct ResponseInProgressEvent {
     pub response: ResponseObject,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.in_progress"),
 }
 
 /// ```
@@ -573,6 +676,7 @@ pub struct ResponseInProgressEvent {
 ///     r#"{
 ///       "type":"response.output_item.added",
 ///       "output_index":0,
+///       "sequence_number":0,
 ///       "item":{
 ///         "id":"msg_67c9fdcf37fc8190ba82116e33fb28c507b8b0ad4e5eb654",
 ///         "type":"message",
@@ -590,9 +694,11 @@ pub struct ResponseInProgressEvent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResponseOutputItemAddedEvent {
     pub output_index: usize,
-    pub item: InputItem,
+    #[serde(default)]
+    pub sequence_number: u64,
+    pub item: ResponseOutputItem,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.output_item.added"),
 }
 
 /// ```
@@ -620,7 +726,7 @@ pub struct ResponseContentPartAddedEvent {
     pub content_index: usize,
     pub part: OutputTextContent,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.content_part.added"),
 }
 
 /// ```
@@ -648,7 +754,7 @@ pub struct ResponseOutputTextDeltaEvent {
     pub content_index: usize,
     pub delta: String,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.output_text.delta"),
 }
 
 /// ```
@@ -676,7 +782,7 @@ pub struct ResponseOutputTextDoneEvent {
     pub content_index: usize,
     pub text: String,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.output_text.done"),
 }
 
 /// ```
@@ -708,7 +814,7 @@ pub struct ResponseContentPartDoneEvent {
     pub content_index: usize,
     pub part: OutputTextContent,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.content_part.done"),
 }
 
 /// ```
@@ -719,6 +825,7 @@ pub struct ResponseContentPartDoneEvent {
 ///     r#"{
 ///       "type":"response.output_item.done",
 ///       "output_index":0,
+///       "sequence_number":0,
 ///       "item":{
 ///         "id":"msg_67c9fdcf37fc8190ba82116e33fb28c507b8b0ad4e5eb654",
 ///         "type":"message",
@@ -742,9 +849,11 @@ pub struct ResponseContentPartDoneEvent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResponseOutputItemDoneEvent {
     pub output_index: usize,
-    pub item: InputItem,
+    #[serde(default)]
+    pub sequence_number: u64,
+    pub item: ResponseOutputItem,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.output_item.done"),
 }
 
 /// ```
@@ -765,7 +874,7 @@ pub struct ResponseReasoningSummaryTextDeltaEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.reasoning_summary_text.delta"),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -776,7 +885,7 @@ pub struct ResponseReasoningSummaryTextDoneEvent {
     pub text: String,
     pub sequence_number: u64,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.reasoning_summary_text.done"),
 }
 
 /// ```
@@ -797,7 +906,7 @@ pub struct ResponseReasoningDeltaEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.reasoning.delta"),
 }
 
 /// ```
@@ -818,7 +927,7 @@ pub struct ResponseRefusalDeltaEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.refusal.delta"),
 }
 
 /// ```
@@ -830,7 +939,8 @@ pub struct ResponseRefusalDeltaEvent {
 ///       "type": "response.function_call_arguments.delta",
 ///       "item_id": "fc_67ca09c6bedc8190a7abfec07b1a1332096610f474011cc0",
 ///       "call_id": "call_unLAR8MvFNptuiZK6K6HCy5k",
-///       "name": "get_current_weather",
+///       "output_index": 0,
+///       "sequence_number": 0,
 ///       "delta": "{\"location\":\"Boston, MA\""
 ///     }"#,
 /// )
@@ -845,10 +955,13 @@ pub struct ResponseFunctionCallArgumentsDeltaEvent {
     pub item_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
-    pub name: String,
+    #[serde(default)]
+    pub output_index: usize,
+    #[serde(default)]
+    pub sequence_number: u64,
     pub delta: String,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.function_call_arguments.delta"),
 }
 
 /// ```
@@ -860,6 +973,8 @@ pub struct ResponseFunctionCallArgumentsDeltaEvent {
 ///       "type": "response.function_call_arguments.done",
 ///       "item_id": "fc_67ca09c6bedc8190a7abfec07b1a1332096610f474011cc0",
 ///       "call_id": "call_unLAR8MvFNptuiZK6K6HCy5k",
+///       "output_index": 0,
+///       "sequence_number": 0,
 ///       "name": "get_current_weather",
 ///       "arguments": "{\"location\":\"Boston, MA\",\"unit\":\"celsius\"}"
 ///     }"#,
@@ -875,11 +990,15 @@ pub struct ResponseFunctionCallArgumentsDoneEvent {
     pub item_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
+    #[serde(default)]
+    pub output_index: usize,
+    #[serde(default)]
+    pub sequence_number: u64,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arguments: Option<String>,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.function_call_arguments.done"),
 }
 
 /// ```
@@ -939,5 +1058,5 @@ pub struct ResponseFunctionCallArgumentsDoneEvent {
 pub struct ResponseCompletedEvent {
     pub response: ResponseObject,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: MustBe!("response.completed"),
 }

@@ -22,7 +22,7 @@ use agents_protocol::{
 use console::style;
 use futures::StreamExt;
 
-const MODEL: &str = "qwen3.5";
+const MODEL: &str = "qwen3.5:2b";
 const BASE_URL: &str = "http://localhost:11434";
 
 struct TurnRecord {

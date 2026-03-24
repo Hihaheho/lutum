@@ -40,8 +40,8 @@ use crate::{
         FunctionCallItem, FunctionCallOutputItem, FunctionToolChoice, InputContent, InputItem,
         InputMessage, InputTextContent, MessageRole, OpenAiCommittedTurn, OpenAiReasoningEffort,
         OpenAiTool, OpenAiTurnItem, OutputTextContent, ReasoningItem, RefusalContent,
-        ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent, SseEvent,
-        SummaryText, TextFormat, ToolChoice,
+        ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
+        ResponseOutputItem, SseEvent, SummaryText, TextFormat, ToolChoice,
     },
     sse::SseParser,
 };
@@ -59,6 +59,33 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply_to_completion(&self, fallbacks: &[Cow<'static, str>], request: &mut CompletionRequest);
 }
 
+/// A snapshot of tool name information available at the time an SSE decode error occurred.
+/// Passed to [`SseEventRecoveryHook`] so implementations can reconstruct missing fields.
+pub struct SseHints {
+    tool_names: BTreeMap<String, String>,
+}
+
+impl SseHints {
+    /// Look up the tool name for a given key (call_id or item_id).
+    pub fn tool_name_for(&self, key: &str) -> Option<&str> {
+        self.tool_names.get(key).map(String::as_str)
+    }
+}
+
+/// Hook called when an SSE event payload fails to deserialize.
+/// Implementations can attempt to recover by supplying a reconstructed [`SseEvent`].
+///
+/// The primary use case is compensating for provider-specific SSE format deviations
+/// (e.g. OpenRouter omitting `name` from `response.function_call_arguments.done`).
+pub trait SseEventRecoveryHook: Send + Sync {
+    fn recover_event(
+        &self,
+        payload: &str,
+        error: &serde_json::Error,
+        hints: &SseHints,
+    ) -> Result<Option<SseEvent>, OpenAiError>;
+}
+
 #[derive(Clone)]
 pub struct OpenAiAdapter {
     client: Arc<Client>,
@@ -67,6 +94,7 @@ pub struct OpenAiAdapter {
     reasoning_resolver: Option<Arc<dyn ReasoningEffortResolver>>,
     model_selector: Option<Arc<dyn ModelSelector>>,
     fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
+    sse_event_recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
 }
 
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>;
@@ -90,6 +118,7 @@ impl OpenAiAdapter {
             reasoning_resolver: None,
             model_selector: None,
             fallback_serializer: None,
+            sse_event_recovery_hook: None,
         }
     }
 
@@ -112,6 +141,18 @@ impl OpenAiAdapter {
 
     pub fn set_fallback_serializer(&mut self, serializer: Box<dyn FallbackSerializer>) {
         self.fallback_serializer = Some(serializer.into());
+    }
+
+    pub fn with_sse_event_recovery_hook(
+        mut self,
+        hook: impl SseEventRecoveryHook + 'static,
+    ) -> Self {
+        self.sse_event_recovery_hook = Some(Arc::new(hook));
+        self
+    }
+
+    pub fn set_sse_event_recovery_hook(&mut self, hook: Box<dyn SseEventRecoveryHook>) {
+        self.sse_event_recovery_hook = Some(hook.into());
     }
 
     fn request_headers(&self) -> Result<HeaderMap, OpenAiError> {
@@ -237,10 +278,10 @@ impl TurnAdapter for OpenAiAdapter {
             .send_streaming_json("/responses", &body)
             .await
             .map_err(AgentError::backend)?;
-        Ok(
-            Box::pin(map_text_stream(stream, model).map(|item| item.map_err(AgentError::backend)))
-                as ErasedTextTurnEventStream,
-        )
+        Ok(Box::pin(
+            map_text_stream(stream, model, self.sse_event_recovery_hook.clone())
+                .map(|item| item.map_err(AgentError::backend)),
+        ) as ErasedTextTurnEventStream)
     }
 
     async fn structured_turn(
@@ -272,7 +313,8 @@ impl TurnAdapter for OpenAiAdapter {
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
-            map_structured_stream(stream, model).map(|item| item.map_err(AgentError::backend)),
+            map_structured_stream(stream, model, self.sse_event_recovery_hook.clone())
+                .map(|item| item.map_err(AgentError::backend)),
         ) as ErasedStructuredTurnEventStream)
     }
 }
@@ -678,7 +720,7 @@ struct ToolCallTracker {
 
 struct ToolCallBuffer {
     id: ToolCallId,
-    name: ToolName,
+    name: Option<ToolName>,
     arguments_json: String,
 }
 
@@ -689,11 +731,29 @@ struct FinalizedToolCall {
 }
 
 impl ToolCallTracker {
+    fn observe_call(&mut self, key: String, id: ToolCallId, name: ToolName) {
+        let entry = self.buffers.entry(key).or_insert_with(|| ToolCallBuffer {
+            id: id.clone(),
+            name: Some(name.clone()),
+            arguments_json: String::new(),
+        });
+        if entry.name.is_none() {
+            entry.name = Some(name);
+        }
+    }
+
+    fn peek_name(&self, key: &str) -> Option<&ToolName> {
+        self.buffers
+            .get(key)
+            .and_then(|buffer| buffer.name.as_ref())
+            .or_else(|| self.finalized.get(key).map(|finalized| &finalized.name))
+    }
+
     fn record_delta(
         &mut self,
         key: String,
         id: ToolCallId,
-        name: ToolName,
+        name: Option<ToolName>,
         delta: &str,
     ) -> Option<(ToolCallId, ToolName, String)> {
         if delta.is_empty() {
@@ -701,32 +761,58 @@ impl ToolCallTracker {
         }
 
         let entry = self.buffers.entry(key).or_insert_with(|| ToolCallBuffer {
-            id,
-            name,
+            id: id.clone(),
+            name: name.clone(),
             arguments_json: String::new(),
         });
+        if entry.name.is_none()
+            && let Some(name) = name
+        {
+            entry.name = Some(name);
+        }
         entry.arguments_json.push_str(delta);
-        Some((entry.id.clone(), entry.name.clone(), delta.to_string()))
+        entry
+            .name
+            .as_ref()
+            .map(|name| (entry.id.clone(), name.clone(), delta.to_string()))
     }
 
     fn finish(
         &mut self,
         key: String,
         id: ToolCallId,
-        name: ToolName,
+        name: Option<ToolName>,
         explicit_arguments_json: Option<String>,
     ) -> Result<Option<ToolMetadata>, OpenAiError> {
-        let arguments_json = explicit_arguments_json
-            .or_else(|| {
-                self.buffers
-                    .remove(&key)
-                    .map(|buffer| buffer.arguments_json)
-            })
-            .unwrap_or_else(|| "{}".to_string());
+        let arguments_json = if let Some(args) = explicit_arguments_json {
+            self.buffers.remove(&key);
+            args
+        } else {
+            self.buffers
+                .remove(&key)
+                .and_then(|buffer| {
+                    if buffer.arguments_json.is_empty() {
+                        None
+                    } else {
+                        Some(buffer.arguments_json)
+                    }
+                })
+                .unwrap_or_else(|| "{}".to_string())
+        };
+
+        let resolved_name = name.or_else(|| {
+            self.finalized
+                .get(&key)
+                .map(|finalized| finalized.name.clone())
+        });
+
+        let Some(resolved_name) = resolved_name else {
+            return Ok(None);
+        };
 
         if let Some(existing) = self.finalized.get(&key) {
             if existing.id == id
-                && existing.name == name
+                && existing.name == resolved_name
                 && existing.arguments_json == arguments_json
             {
                 return Ok(None);
@@ -740,16 +826,31 @@ impl ToolCallTracker {
         }
 
         let arguments = RawJson::parse(arguments_json.clone())?;
-        let metadata = ToolMetadata::new(id.clone(), name.clone(), arguments);
+        let metadata = ToolMetadata::new(id.clone(), resolved_name.clone(), arguments);
         self.finalized.insert(
             key,
             FinalizedToolCall {
                 id,
-                name,
+                name: resolved_name,
                 arguments_json,
             },
         );
         Ok(Some(metadata))
+    }
+
+    fn to_hints(&self) -> SseHints {
+        let mut tool_names = BTreeMap::new();
+        for (key, buffer) in &self.buffers {
+            if let Some(name) = &buffer.name {
+                tool_names.insert(key.clone(), name.as_str().to_string());
+            }
+        }
+        for (key, finalized) in &self.finalized {
+            tool_names
+                .entry(key.clone())
+                .or_insert_with(|| finalized.name.as_str().to_string());
+        }
+        SseHints { tool_names }
     }
 }
 
@@ -809,6 +910,59 @@ fn output_item_tool_id(item: &FunctionCallItem) -> ToolCallId {
 
 fn output_item_tool_name(item: &FunctionCallItem) -> ToolName {
     ToolName::from(item.name.as_str())
+}
+
+fn response_output_item_function_call(item: ResponseOutputItem) -> Option<FunctionCallItem> {
+    match item {
+        ResponseOutputItem::FunctionCall {
+            id,
+            call_id,
+            name,
+            arguments,
+            namespace,
+            status,
+        } => Some(FunctionCallItem {
+            arguments,
+            call_id,
+            name,
+            item_type: "function_call".to_string(),
+            id,
+            namespace,
+            status,
+        }),
+        _ => None,
+    }
+}
+
+fn sse_decode_error(payload: &str, err: serde_json::Error) -> OpenAiError {
+    const MAX_LEN: usize = 400;
+    let snippet = if payload.len() > MAX_LEN {
+        format!("{}...", &payload[..MAX_LEN])
+    } else {
+        payload.to_string()
+    };
+    OpenAiError::Sse {
+        message: format!("{err}; payload={snippet}"),
+    }
+}
+
+fn decode_sse_event(
+    payload: &str,
+    recovery_hook: Option<&Arc<dyn SseEventRecoveryHook>>,
+    tool_calls: &ToolCallTracker,
+) -> Result<SseEvent, OpenAiError> {
+    match serde_json::from_str::<SseEvent>(payload) {
+        Ok(event) => Ok(event),
+        Err(err) => {
+            if let Some(hook) = recovery_hook {
+                let hints = tool_calls.to_hints();
+                if let Some(event) = hook.recover_event(payload, &err, &hints)? {
+                    return Ok(event);
+                }
+            }
+            Err(sse_decode_error(payload, err))
+        }
+    }
 }
 
 fn maybe_parse_structured_output(
@@ -938,6 +1092,7 @@ fn push_committed_tool_call(committed_items: &mut Vec<OpenAiTurnItem>, metadata:
 fn map_text_stream<S>(
     stream: S,
     fallback_model: String,
+    recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
 ) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + Send + 'static
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -960,7 +1115,7 @@ where
                 if payload == "[DONE]" {
                     break;
                 }
-                let event = serde_json::from_str::<SseEvent>(&payload)?;
+                let event = decode_sse_event(&payload, recovery_hook.as_ref(), &tool_calls)?;
                 if let SseEvent::ResponseCreated(created) = &event {
                     request_id = Some(created.response.id.clone());
                     if let Some(event_model) = created.response.model.as_ref() {
@@ -1043,10 +1198,11 @@ where
                         );
                     }
                     SseEvent::ResponseFunctionCallArgumentsDelta(event) => {
+                        let key = response_tool_key_from_delta(&event);
                         if let Some((id, name, delta)) = tool_calls.record_delta(
-                            response_tool_key_from_delta(&event),
+                            key.clone(),
                             response_tool_id_from_delta(&event),
-                            ToolName::from(event.name.as_str()),
+                            tool_calls.peek_name(&key).cloned(),
                             &event.delta,
                         ) {
                             yield ErasedTextTurnEvent::ToolCallChunk {
@@ -1061,7 +1217,7 @@ where
                         if let Some(invocation) = tool_calls.finish(
                             response_tool_key_from_done(&event),
                             response_tool_id_from_done(&event),
-                            ToolName::from(event.name.as_str()),
+                            Some(ToolName::from(event.name.as_str())),
                             event.arguments.clone(),
                         )? {
                             flush_buffered_content(&mut pending_item, &mut committed_items);
@@ -1069,13 +1225,22 @@ where
                             yield ErasedTextTurnEvent::ToolCallReady(invocation);
                         }
                     }
+                    SseEvent::ResponseOutputItemAdded(event) => {
+                        if let Some(item) = response_output_item_function_call(event.item) {
+                            tool_calls.observe_call(
+                                output_item_tool_key(&item),
+                                output_item_tool_id(&item),
+                                output_item_tool_name(&item),
+                            );
+                        }
+                    }
                     SseEvent::ResponseOutputItemDone(event) => {
-                        if let InputItem::FunctionCall(item) = event.item {
+                        if let Some(item) = response_output_item_function_call(event.item) {
                             saw_tool_call = true;
                             if let Some(invocation) = tool_calls.finish(
                                 output_item_tool_key(&item),
                                 output_item_tool_id(&item),
-                                output_item_tool_name(&item),
+                                Some(output_item_tool_name(&item)),
                                 Some(item.arguments),
                             )? {
                                 flush_buffered_content(&mut pending_item, &mut committed_items);
@@ -1117,7 +1282,6 @@ where
                         };
                     }
                     SseEvent::ResponseInProgress(_)
-                    | SseEvent::ResponseOutputItemAdded(_)
                     | SseEvent::ResponseContentPartAdded(_)
                     | SseEvent::ResponseContentPartDone(_)
                     | SseEvent::ResponseReasoningSummaryTextDone(_)
@@ -1132,6 +1296,7 @@ where
 fn map_structured_stream<S>(
     stream: S,
     fallback_model: String,
+    recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
 ) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, OpenAiError>> + Send + 'static
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -1156,7 +1321,7 @@ where
                 if payload == "[DONE]" {
                     break;
                 }
-                let event = serde_json::from_str::<SseEvent>(&payload)?;
+                let event = decode_sse_event(&payload, recovery_hook.as_ref(), &tool_calls)?;
                 if let SseEvent::ResponseCreated(created) = &event {
                     request_id = Some(created.response.id.clone());
                     if let Some(event_model) = created.response.model.as_ref() {
@@ -1247,10 +1412,11 @@ where
                         };
                     }
                     SseEvent::ResponseFunctionCallArgumentsDelta(event) => {
+                        let key = response_tool_key_from_delta(&event);
                         if let Some((id, name, delta)) = tool_calls.record_delta(
-                            response_tool_key_from_delta(&event),
+                            key.clone(),
                             response_tool_id_from_delta(&event),
-                            ToolName::from(event.name.as_str()),
+                            tool_calls.peek_name(&key).cloned(),
                             &event.delta,
                         ) {
                             yield ErasedStructuredTurnEvent::ToolCallChunk {
@@ -1265,7 +1431,7 @@ where
                         if let Some(invocation) = tool_calls.finish(
                             response_tool_key_from_done(&event),
                             response_tool_id_from_done(&event),
-                            ToolName::from(event.name.as_str()),
+                            Some(ToolName::from(event.name.as_str())),
                             event.arguments.clone(),
                         )? {
                             flush_buffered_content(&mut pending_item, &mut committed_items);
@@ -1273,13 +1439,22 @@ where
                             yield ErasedStructuredTurnEvent::ToolCallReady(invocation);
                         }
                     }
+                    SseEvent::ResponseOutputItemAdded(event) => {
+                        if let Some(item) = response_output_item_function_call(event.item) {
+                            tool_calls.observe_call(
+                                output_item_tool_key(&item),
+                                output_item_tool_id(&item),
+                                output_item_tool_name(&item),
+                            );
+                        }
+                    }
                     SseEvent::ResponseOutputItemDone(event) => {
-                        if let InputItem::FunctionCall(item) = event.item {
+                        if let Some(item) = response_output_item_function_call(event.item) {
                             saw_tool_call = true;
                             if let Some(invocation) = tool_calls.finish(
                                 output_item_tool_key(&item),
                                 output_item_tool_id(&item),
-                                output_item_tool_name(&item),
+                                Some(output_item_tool_name(&item)),
                                 Some(item.arguments),
                             )? {
                                 flush_buffered_content(&mut pending_item, &mut committed_items);
@@ -1326,7 +1501,6 @@ where
                         };
                     }
                     SseEvent::ResponseInProgress(_)
-                    | SseEvent::ResponseOutputItemAdded(_)
                     | SseEvent::ResponseContentPartAdded(_)
                     | SseEvent::ResponseContentPartDone(_)
                     | SseEvent::ResponseReasoningSummaryTextDone(_)
@@ -1568,7 +1742,7 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"openrouter/primary\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
         ))];
         let events = block_on(async {
-            map_text_stream(futures::stream::iter(payloads), fallback_model)
+            map_text_stream(futures::stream::iter(payloads), fallback_model, None)
                 .collect::<Vec<_>>()
                 .await
         })
@@ -1786,7 +1960,7 @@ mod tests {
                 "data: {\"type\":\"response.refusal.delta\",\"delta\":\"no\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.function_call_arguments.done\",\"call_id\":\"call-1\",\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}\n\n",
+                "data: {\"type\":\"response.function_call_arguments.done\",\"call_id\":\"call-1\",\"output_index\":0,\"sequence_number\":0,\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}\n\n",
             )),
             Ok(Bytes::from(
                 "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
@@ -1794,7 +1968,7 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into())
+            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
                 .collect::<Vec<_>>()
                 .await
         })
@@ -1837,7 +2011,7 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_structured_stream(futures::stream::iter(payloads), "gpt-4.1".into())
+            map_structured_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
                 .collect::<Vec<_>>()
                 .await
         })
@@ -1870,13 +2044,13 @@ mod tests {
                 "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"weather\",\"delta\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}\n\n",
+                "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"item-1\",\"call_id\":\"call-1\",\"output_index\":0,\"sequence_number\":0,\"delta\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"weather\"}\n\n",
+                "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"item-1\",\"call_id\":\"call-1\",\"output_index\":0,\"sequence_number\":0,\"name\":\"weather\"}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"sequence_number\":0,\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}\n\n",
             )),
             Ok(Bytes::from(
                 "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
@@ -1884,7 +2058,7 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into())
+            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
                 .collect::<Vec<_>>()
                 .await
         })
@@ -1912,6 +2086,112 @@ mod tests {
     }
 
     #[test]
+    fn responses_sse_recovery_hook_can_restore_missing_tool_name() {
+        struct TestRecoveryHook;
+
+        impl SseEventRecoveryHook for TestRecoveryHook {
+            fn recover_event(
+                &self,
+                payload: &str,
+                _error: &serde_json::Error,
+                hints: &SseHints,
+            ) -> Result<Option<SseEvent>, OpenAiError> {
+                #[derive(Deserialize)]
+                #[serde(tag = "type")]
+                enum Wire {
+                    #[serde(rename = "response.function_call_arguments.done")]
+                    Done {
+                        #[serde(default)]
+                        item_id: Option<String>,
+                        #[serde(default)]
+                        call_id: Option<String>,
+                        #[serde(default)]
+                        output_index: usize,
+                        #[serde(default)]
+                        sequence_number: u64,
+                        #[serde(default)]
+                        arguments: Option<String>,
+                    },
+                }
+
+                let Ok(wire) = serde_json::from_str::<Wire>(payload) else {
+                    return Ok(None);
+                };
+
+                match wire {
+                    Wire::Done {
+                        item_id,
+                        call_id,
+                        output_index,
+                        sequence_number,
+                        arguments,
+                    } => {
+                        let key = call_id
+                            .as_deref()
+                            .or(item_id.as_deref())
+                            .unwrap_or_default();
+                        let Some(name) = hints.tool_name_for(key).map(ToOwned::to_owned) else {
+                            return Ok(None);
+                        };
+
+                        use crate::responses::ResponseFunctionCallArgumentsDoneEvent;
+
+                        Ok(Some(SseEvent::ResponseFunctionCallArgumentsDone(
+                            ResponseFunctionCallArgumentsDoneEvent {
+                                item_id,
+                                call_id,
+                                output_index,
+                                sequence_number,
+                                name,
+                                arguments,
+                                event_type: Default::default(),
+                            },
+                        )))
+                    }
+                }
+            }
+        }
+
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_recover\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"sequence_number\":0,\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"weather\",\"arguments\":\"\"}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"item-1\",\"call_id\":\"call-1\",\"output_index\":0,\"sequence_number\":1,\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_recover\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+            )),
+        ];
+
+        let events = block_on(async {
+            map_text_stream(
+                futures::stream::iter(payloads),
+                "gpt-4.1".into(),
+                Some(Arc::new(TestRecoveryHook)),
+            )
+            .collect::<Vec<_>>()
+            .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        let ready: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ErasedTextTurnEvent::ToolCallReady(invocation) => Some(invocation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].name.as_str(), "weather");
+    }
+
+    #[test]
     fn responses_sse_keeps_separate_text_items_by_item_id() {
         let payloads = vec![
             Ok(Bytes::from(
@@ -1935,7 +2215,7 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into())
+            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
                 .collect::<Vec<_>>()
                 .await
         })
@@ -1979,7 +2259,7 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_structured_stream(futures::stream::iter(payloads), "gpt-4.1".into())
+            map_structured_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
                 .collect::<Vec<_>>()
                 .await
         })

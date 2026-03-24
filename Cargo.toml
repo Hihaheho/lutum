@@ -35,3 +35,4 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
+monostate = "1.0"
