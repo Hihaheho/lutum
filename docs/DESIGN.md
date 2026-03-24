@@ -39,8 +39,10 @@ That is where:
 - streamed events are reduced into completed results
 
 Adapters are public because providers need an SPI boundary, but adapter-direct execution
-bypasses the library's execution contract. `Context::new(...)` erases concrete budget and
-adapter implementations behind `dyn BudgetManager` and `dyn LlmAdapter`.
+bypasses the library's execution contract. `Context::new(adapter, budget)` erases all three
+adapter traits behind `dyn TurnAdapter`, `dyn CompletionAdapter`, and `dyn UsageRecoveryAdapter`.
+`Context::from_parts(turns, completion, recovery, budget)` allows mixing providers — for
+example OpenAI turns with OpenRouter usage recovery.
 
 ## Canonical request surface
 
@@ -138,12 +140,19 @@ Core does not attempt `common event projection → exact transcript turn`.
 
 ## Adapter responsibilities
 
-An adapter is responsible for:
+A `TurnAdapter` is responsible for:
 
 1. translating canonical request facades into provider transport requests
-2. handling `ModelInputItem::Turn` in request compilation — exact downcast first (`OpenAiCommittedTurn`), `ItemView` projection fallback for cross-adapter turns
+2. handling `ModelInputItem::Turn` in request compilation — exact downcast first (`OpenAiCommittedTurn` / `ClaudeCommittedTurn`), `ItemView` projection fallback for cross-adapter turns
 3. emitting exact committed turn values in `Completed` events
 4. implementing `TurnView` / `ItemView` / `as_any()` over those exact values
+5. accepting a `ModelSelector` for pluggable model routing
+6. accepting a provider-specific `FallbackSerializer` for custom serialization of unrecognized fields
+
+A `UsageRecoveryAdapter` is responsible for:
+
+1. recovering `Usage` for a completed request by `request_id` and `OperationKind`
+2. returning `None` when usage is unavailable rather than failing
 
 Adapters are thin in the sense that they do not own hidden runtime behavior, but they do own
 exact transport translation and transcript exactness.
@@ -202,8 +211,7 @@ graph semantics or first-class branch structure at this stage.
 
 Shared config replaces the old duplicated request structs:
 
-- `GenerationParams`
-- `ReasoningParams`
+- `GenerationParams` — temperature, max_output_tokens, seed
 - `TurnConfig<T>`
 - `ToolPolicy<T>`
 
@@ -211,6 +219,10 @@ Thin facades:
 
 - `TextTurn<T>`
 - `StructuredTurn<T, O>`
+
+`ReasoningParams` no longer exists in core. Reasoning is provider-owned: `OpenAiAdapter`
+accepts a `ReasoningEffortResolver`; `ClaudeAdapter` accepts a `BudgetTokensResolver` for
+extended thinking. Provider-specific reasoning config is passed via `RequestExtensions`.
 
 ## Tool selection
 
@@ -249,9 +261,30 @@ The reducer stores the `committed_turn` from the `Completed` event during `apply
 Budget leases are held by `OwnedLease`. When `into_stream()` is called and the stream is
 abandoned, `OwnedLease::drop()` releases the reserved capacity by recording zero usage.
 
+## Completion API
+
+`Context::completion` is a lower-level, non-turn API for raw text generation.
+
+It uses:
+
+- `CompletionRequest` — model, prompt, `CompletionOptions` (temperature, max_output_tokens, stop), budget
+- `CompletionEvent` — `Started`, `TextDelta(String)`, `Completed { finish_reason, usage }`
+- `CompletionAdapter::completion(request, &extensions) -> CompletionEventStream`
+
+Unlike turn-based execution, completion produces no `CommittedTurn` and is not integrated with
+the transcript model. It is intended for single-shot generation tasks that do not require
+session history — embedding, summarization prompts, or auxiliary calls to a different model.
+
+Budget reservation, tracing, and usage recovery follow the same path as turn execution.
+
 ## Provider boundary
 
-Provider-specific wire formats live behind `LlmAdapter`.
+Provider-specific wire formats live behind three focused traits:
+
+- `TurnAdapter` — `text_turn` / `structured_turn`: streaming conversation turns
+- `CompletionAdapter` — `completion`: non-turn raw text completion
+- `UsageRecoveryAdapter` — `recover_usage`: async usage recovery for providers (e.g.
+  OpenRouter) that return usage out-of-band
 
 The adapter boundary is intentionally object-safe and erased. Typed tool decoding, structured
 output decoding, and canonical reduction stay in core; adapters only translate between the
@@ -260,25 +293,61 @@ provider transport and erased canonical events.
 The core algebra is not shrunk for adapter convenience. If a provider cannot represent the
 canonical request faithfully, that remains an adapter limitation.
 
+### Available adapters
+
+- `agents-openai` — OpenAI Responses API (also used as Ollama backend)
+- `agents-claude` — Anthropic Claude Messages API with lossless thinking-block replay
+- `agents-openrouter` — `OpenRouterGenerationClient` implements `UsageRecoveryAdapter`
+  via `GET /api/v1/generation`; can be composed with any `TurnAdapter` via `Context::from_parts`
+
+## RequestExtensions
+
+`RequestExtensions` is a per-request type-map for execution metadata.
+
+The library treats entries as opaque. It passes `Arc<RequestExtensions>` to:
+
+- `BudgetManager` methods so implementors can extract identity, routing keys, or cost centers
+- `EventHandler` so handlers can inspect request metadata during streaming
+- `CompletionAdapter::completion` for routing context
+- `AdapterTextTurn` / `AdapterStructuredTurn` so adapters can inspect extensions at request compilation time
+- `ModelSelector::select_model` to drive dynamic model routing
+
+Users insert typed values; adapters read typed values. There is no shared schema.
+
+## ModelSelector and FallbackSerializer
+
+Both `OpenAiAdapter` and `ClaudeAdapter` accept a pluggable `ModelSelector`:
+
+- `ModelSelector::select_model(&RequestExtensions) -> ModelSelection` returns an optional primary model override and optional fallback models
+- The selected model is threaded through SSE/completion fallback mapping
+- `ModelSelection` contains `primary: Option<Cow<'static, str>>` and `fallbacks: Option<Vec<Cow<'static, str>>>`
+
+Each adapter also accepts a provider-specific `FallbackSerializer` for serializing unrecognized request fields without serde_json::Value mutation.
+
 ## Core vs edge
 
 ### Core owns
 
-- `Context` — canonical execution boundary
+- `Context` — canonical execution boundary; holds `TurnAdapter`, `CompletionAdapter`, `UsageRecoveryAdapter`
 - `ModelInput` / `ModelInputItem` — canonical request algebra
 - `TurnView` / `ItemView` — transcript view traits
 - `BudgetManager` / `OwnedLease` — budget lifecycle
 - `Session` — transcript helper and explicit commit model
+- `RequestExtensions` — per-request opaque type-map
+- `ModelSelector` / `ModelSelection` — pluggable model routing protocol
 - public event, state, and result types
 - typed tools and turn config
+- `TurnAdapter` / `CompletionAdapter` / `UsageRecoveryAdapter` — provider SPI traits
 
 ### Edge adapters own
 
 - exact transport request/response mapping
-- exact committed transcript turn representation (`OpenAiCommittedTurn`, etc.)
+- exact committed transcript turn representation (`OpenAiCommittedTurn`, `ClaudeCommittedTurn`, etc.)
 - `TurnView` / `ItemView` / `as_any()` implementations
 - replay request compilation from exact committed turns
 - provider-specific transport and metadata handling
+- provider-specific reasoning config resolution (`ReasoningEffortResolver`, `BudgetTokensResolver`)
+- adapter-local `FallbackSerializer` for unrecognized fields
 
 ### Core does not own
 
@@ -288,3 +357,4 @@ canonical request faithfully, that remains an adapter limitation.
 - eager lossy canonicalization at commit
 - transcript branch graph semantics (for now)
 - a universal app-facing transcript IR
+- reasoning configuration (provider-owned)
