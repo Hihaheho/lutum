@@ -4,9 +4,9 @@
 
 The library is built around three layers:
 
-- `Context<M, B, L>`: the exact execution contract
+- `Context`: the exact execution contract
 - `TextTurn` / `StructuredTurn`: thin turn facades over shared config
-- `Session<M, B, L>`: transcript and replay convenience without hidden control flow
+- `Session`: transcript and replay convenience without hidden control flow
 
 If you want the design rationale rather than just the public surface, read
 [docs/DESIGN.md](docs/DESIGN.md).
@@ -15,7 +15,9 @@ If you want the design rationale rather than just the public surface, read
 
 - `crates/agents` - public facade crate, `Context`, `Session`, mocks
 - `crates/agents-protocol` - canonical request/response algebras and core traits
-- `crates/agents-openai` - OpenAI-compatible adapter
+- `crates/agents-openai` - OpenAI Responses API adapter (also used as Ollama backend)
+- `crates/agents-claude` - Anthropic Claude Messages API adapter
+- `crates/agents-openrouter` - OpenRouter usage-recovery adapter
 - `crates/agents-macros` - proc-macros for tools
 
 ## Core ideas
@@ -32,37 +34,22 @@ If you want the design rationale rather than just the public surface, read
 
 ```rust
 use agents::{
-    Context, InputMessageRole, ModelInput, ModelInputItem, NoTools, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, TextTurn, TurnConfig, UsageEstimate,
+    Context, ModelInput, NoTools, RequestExtensions, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, TextTurn, UsageEstimate,
 };
 
-#[derive(Clone, Debug)]
-struct AppMarker;
+async fn run(ctx: Context) -> Result<(), Box<dyn std::error::Error>> {
+    let input = ModelInput::new()
+        .system("You are concise.")
+        .user("Say hello.");
 
-impl agents::Marker for AppMarker {
-    fn span_name(&self) -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("example")
-    }
-}
-
-async fn run<L: agents::LlmAdapter>(
-    ctx: Context<AppMarker, agents::SharedPoolBudgetManager, L>,
-) -> Result<(), Box<dyn std::error::Error>>
-where
-    L::Error: std::error::Error + 'static,
-{
-    let input = ModelInput::from_items(vec![
-        ModelInputItem::text(InputMessageRole::System, "You are concise."),
-        ModelInputItem::text(InputMessageRole::User, "Say hello."),
-    ]);
+    let turn = TextTurn::<NoTools>::new(agents::ModelName::new("gpt-4.1-mini")?);
 
     let result = ctx
-        .responses_text(
-            AppMarker,
+        .text_turn(
+            RequestExtensions::default(),
             input,
-            TextTurn::<NoTools> {
-                config: TurnConfig::<NoTools>::new(agents::ModelName::new("gpt-4.1-mini")?),
-            },
+            turn,
             UsageEstimate::zero(),
         )
         .await?
@@ -83,7 +70,6 @@ where
 Turn-level configuration lives in plain structs:
 
 - `GenerationParams`
-- `ReasoningParams`
 - `TurnConfig<T>`
 - `ToolPolicy<T>`
 
@@ -154,14 +140,14 @@ This makes branching and tool replay explicit:
 
 ```rust
 let outcome = session
-    .prepare_text(turn, UsageEstimate::zero())
+    .prepare_text(RequestExtensions::default(), turn, UsageEstimate::zero())
     .await?
     .collect_noop()
     .await?;
 
 match outcome {
     agents::TextStepOutcome::Finished(result) => {
-        session.commit_text(result)?;
+        session.commit_text(result);
     }
     agents::TextStepOutcome::NeedsToolResults(round) => {
         let tool_uses = execute_tools(round.tool_calls.clone())?;
@@ -172,12 +158,8 @@ match outcome {
 
 ## Examples
 
-- `text_minimal.rs`
-- `text_session.rs`
-- `structured_extract.rs`
-- `single_tool_roundtrip.rs`
-- `parallel_tools.rs`
-- `context_direct_control.rs`
+- `crates/agents-openai/examples/ollama_transcript.rs`
+- `crates/agents-claude/examples/ollama_transcript.rs`
 
 ## Development
 
