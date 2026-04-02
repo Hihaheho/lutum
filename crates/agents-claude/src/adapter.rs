@@ -53,7 +53,7 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 const MIN_THINKING_BUDGET_TOKENS: u32 = 1024;
 const MIN_RESPONSE_TOKENS_WITH_THINKING: u32 = 1024;
 
-type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>;
+type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync + 'static>>;
 type UsageCache = Arc<Mutex<HashMap<String, Usage>>>;
 
 pub trait BudgetTokensResolver: Send + Sync + 'static {

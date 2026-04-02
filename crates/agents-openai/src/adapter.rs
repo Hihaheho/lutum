@@ -97,7 +97,7 @@ pub struct OpenAiAdapter {
     sse_event_recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
 }
 
-type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>;
+type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync + 'static>>;
 
 struct ResolvedModelSelection {
     primary: String,

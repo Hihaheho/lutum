@@ -1118,3 +1118,11 @@ fn completed_usage_from_completion(event: &CompletionEvent) -> Option<Usage> {
         _ => None,
     }
 }
+
+#[test]
+fn test_pending_turns_are_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<PendingTextTurn<agents_protocol::toolset::NoTools>>();
+    assert_send_sync::<PendingStructuredTurn<agents_protocol::toolset::NoTools, ()>>();
+    assert_send_sync::<PendingCompletion>();
+}

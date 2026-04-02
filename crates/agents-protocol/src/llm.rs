@@ -13,15 +13,15 @@ use crate::{
 };
 
 pub type TextTurnEventStream<T, E = AgentError> =
-    Pin<Box<dyn Stream<Item = Result<TextTurnEvent<T>, E>> + Send + 'static>>;
+    Pin<Box<dyn Stream<Item = Result<TextTurnEvent<T>, E>> + Send + Sync + 'static>>;
 pub type StructuredTurnEventStream<T, O, E = AgentError> =
-    Pin<Box<dyn Stream<Item = Result<StructuredTurnEvent<T, O>, E>> + Send + 'static>>;
+    Pin<Box<dyn Stream<Item = Result<StructuredTurnEvent<T, O>, E>> + Send + Sync + 'static>>;
 pub type CompletionEventStream<E = AgentError> =
-    Pin<Box<dyn Stream<Item = Result<CompletionEvent, E>> + Send + 'static>>;
+    Pin<Box<dyn Stream<Item = Result<CompletionEvent, E>> + Send + Sync + 'static>>;
 pub type ErasedTextTurnEventStream<E = AgentError> =
-    Pin<Box<dyn Stream<Item = Result<ErasedTextTurnEvent, E>> + Send + 'static>>;
+    Pin<Box<dyn Stream<Item = Result<ErasedTextTurnEvent, E>> + Send + Sync + 'static>>;
 pub type ErasedStructuredTurnEventStream<E = AgentError> =
-    Pin<Box<dyn Stream<Item = Result<ErasedStructuredTurnEvent, E>> + Send + 'static>>;
+    Pin<Box<dyn Stream<Item = Result<ErasedStructuredTurnEvent, E>> + Send + Sync + 'static>>;
 
 #[derive(
     Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
@@ -810,6 +810,21 @@ where
     ) -> Result<Option<Usage>, AgentError> {
         (**self).recover_usage(kind, request_id).await
     }
+}
+
+#[test]
+fn test_stream_types_are_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<TextTurnEventStream<NoTools>>();
+    assert_send_sync::<StructuredTurnEventStream<NoTools, ()>>();
+    assert_send_sync::<CompletionEventStream>();
+    assert_send_sync::<ErasedTextTurnEventStream>();
+    assert_send_sync::<ErasedStructuredTurnEventStream>();
+    assert_send_sync::<TextTurnEvent<NoTools>>();
+    assert_send_sync::<StructuredTurnEvent<NoTools, ()>>();
+    assert_send_sync::<ErasedTextTurnEvent>();
+    assert_send_sync::<ErasedStructuredTurnEvent>();
+    assert_send_sync::<CompletionEvent>();
 }
 
 #[cfg(test)]
