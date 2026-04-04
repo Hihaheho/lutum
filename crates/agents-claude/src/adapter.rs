@@ -16,10 +16,9 @@ use agents_protocol::{
     extensions::RequestExtensions,
     llm::{
         AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
-        CompletionAdapter, CompletionEvent, CompletionEventStream,
-        CompletionRequest as ProtocolCompletionRequest, ErasedStructuredTurnEvent,
-        ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
-        FinishReason, ModelSelector, OperationKind, TurnAdapter, UsageRecoveryAdapter,
+        ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
+        ErasedTextTurnEventStream, FinishReason, ModelSelector, OperationKind, TurnAdapter,
+        UsageRecoveryAdapter,
     },
     transcript::{ToolResultItemView, TurnRole, TurnView},
 };
@@ -53,7 +52,8 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 const MIN_THINKING_BUDGET_TOKENS: u32 = 1024;
 const MIN_RESPONSE_TOKENS_WITH_THINKING: u32 = 1024;
 
-type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync + 'static>>;
+type ByteStream =
+    Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync + 'static>>;
 type UsageCache = Arc<Mutex<HashMap<String, Usage>>>;
 
 pub trait BudgetTokensResolver: Send + Sync + 'static {
@@ -203,21 +203,6 @@ impl ClaudeAdapter {
         Ok((request, selection.primary))
     }
 
-    fn prepare_completion_request(
-        &self,
-        request: &ProtocolCompletionRequest,
-        extensions: &RequestExtensions,
-    ) -> (MessagesRequest, String) {
-        let selection = self.resolve_model_selection(extensions, request.model.as_ref());
-        let mut body = build_completion_request(request, &selection.primary);
-        if !selection.fallbacks.is_empty()
-            && let Some(serializer) = self.fallback_serializer.as_ref()
-        {
-            serializer.apply(&selection.fallbacks, &mut body);
-        }
-        (body, selection.primary)
-    }
-
     async fn send_streaming_json<T>(&self, path: &str, body: &T) -> Result<ByteStream, ClaudeError>
     where
         T: Serialize + ?Sized,
@@ -231,24 +216,6 @@ impl ClaudeAdapter {
             .await?;
         let response = error_for_status_with_body(response).await?;
         Ok(Box::pin(response.bytes_stream()))
-    }
-
-    async fn post_json<T>(&self, path: &str, body: &T) -> Result<Value, ClaudeError>
-    where
-        T: Serialize + ?Sized,
-    {
-        let response = self
-            .client
-            .post(format!("{}{}", self.base_url, path))
-            .headers(self.request_headers()?)
-            .json(body)
-            .send()
-            .await?;
-        let value = error_for_status_with_body(response)
-            .await?
-            .json::<Value>()
-            .await?;
-        Ok(value)
     }
 }
 
@@ -319,47 +286,6 @@ impl TurnAdapter for ClaudeAdapter {
 }
 
 #[async_trait::async_trait]
-impl CompletionAdapter for ClaudeAdapter {
-    async fn completion(
-        &self,
-        request: ProtocolCompletionRequest,
-        extensions: &RequestExtensions,
-    ) -> Result<CompletionEventStream, AgentError> {
-        let (body, fallback_model) = self.prepare_completion_request(&request, extensions);
-        let value = self
-            .post_json("/v1/messages", &body)
-            .await
-            .map_err(AgentError::backend)?;
-
-        Ok(Box::pin(try_stream! {
-            let request_id = value["id"].as_str().map(ToOwned::to_owned);
-            let model = value["model"]
-                .as_str()
-                .map(ToOwned::to_owned)
-                .unwrap_or(fallback_model);
-            let finish_reason = map_claude_stop_reason(value["stop_reason"].as_str());
-            let usage = parse_claude_usage_value(value.get("usage").unwrap_or(&Value::Null));
-
-            yield CompletionEvent::Started {
-                request_id: request_id.clone(),
-                model,
-            };
-
-            let text = extract_completion_text(&value);
-            if !text.is_empty() {
-                yield CompletionEvent::TextDelta(text);
-            }
-
-            yield CompletionEvent::Completed {
-                request_id,
-                finish_reason,
-                usage,
-            };
-        }) as CompletionEventStream)
-    }
-}
-
-#[async_trait::async_trait]
 impl UsageRecoveryAdapter for ClaudeAdapter {
     async fn recover_usage(
         &self,
@@ -367,7 +293,9 @@ impl UsageRecoveryAdapter for ClaudeAdapter {
         request_id: &str,
     ) -> Result<Option<Usage>, AgentError> {
         match kind {
-            OperationKind::TextTurn | OperationKind::StructuredTurn => {
+            OperationKind::TextTurn
+            | OperationKind::StructuredTurn
+            | OperationKind::StructuredCompletion => {
                 let usage = take_cached_usage(&self.usage_cache, request_id);
                 trace!(
                     ?kind,
@@ -529,34 +457,6 @@ fn build_messages_request(
         stop_sequences: None,
         models: None,
     })
-}
-
-fn build_completion_request(request: &ProtocolCompletionRequest, model: &str) -> MessagesRequest {
-    MessagesRequest {
-        model: model.to_string(),
-        max_tokens: request
-            .options
-            .max_output_tokens
-            .unwrap_or(DEFAULT_MAX_TOKENS),
-        messages: vec![ClaudeMessage {
-            role: ClaudeRole::User,
-            content: vec![ClaudeContentBlock::Text(TextBlock {
-                text: request.prompt.clone(),
-            })],
-        }],
-        stream: None,
-        system: None,
-        temperature: request
-            .options
-            .temperature
-            .map(|temperature| temperature.get()),
-        tools: None,
-        tool_choice: None,
-        thinking: None,
-        output_config: None,
-        stop_sequences: (!request.options.stop.is_empty()).then(|| request.options.stop.clone()),
-        models: None,
-    }
 }
 
 fn resolve_max_tokens(explicit: Option<u32>, thinking_budget: Option<u32>) -> u32 {
@@ -1274,24 +1174,6 @@ fn usage_cache_lock(usage_cache: &UsageCache) -> std::sync::MutexGuard<'_, HashM
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn parse_claude_usage_value(value: &Value) -> Usage {
-    let input_tokens = value["input_tokens"].as_u64().unwrap_or_default()
-        + value["cache_creation_input_tokens"]
-            .as_u64()
-            .unwrap_or_default()
-        + value["cache_read_input_tokens"]
-            .as_u64()
-            .unwrap_or_default();
-    let output_tokens = value["output_tokens"].as_u64().unwrap_or_default();
-
-    Usage {
-        input_tokens,
-        output_tokens,
-        total_tokens: input_tokens + output_tokens,
-        cost_micros_usd: 0,
-    }
-}
-
 fn map_claude_stop_reason(reason: Option<&str>) -> FinishReason {
     match reason {
         Some("end_turn") | Some("stop_sequence") | None => FinishReason::Stop,
@@ -1300,18 +1182,6 @@ fn map_claude_stop_reason(reason: Option<&str>) -> FinishReason {
         Some("refusal") => FinishReason::ContentFilter,
         Some(other) => FinishReason::Unknown(other.to_string()),
     }
-}
-
-fn extract_completion_text(value: &Value) -> String {
-    let mut text = String::new();
-    for block in value["content"].as_array().into_iter().flatten() {
-        if block["type"].as_str() == Some("text")
-            && let Some(delta) = block["text"].as_str()
-        {
-            text.push_str(delta);
-        }
-    }
-    text
 }
 
 #[cfg(test)]
@@ -1401,37 +1271,6 @@ mod tests {
     }
 
     #[test]
-    fn prepare_completion_request_serializes_fallback_models() {
-        let mut adapter = ClaudeAdapter::new("test-key");
-        adapter.set_model_selector(Box::new(TestModelSelector));
-        adapter.set_fallback_serializer(Box::new(OpenRouterFallbackSerializer));
-
-        let mut extensions = RequestExtensions::new();
-        extensions.insert(TestSelection(ModelSelection {
-            primary: Some(Cow::Borrowed("openrouter/claude-primary")),
-            fallbacks: Some(vec![
-                Cow::Borrowed("openrouter/claude-fallback-1"),
-                Cow::Borrowed("openrouter/claude-fallback-2"),
-            ]),
-        }));
-
-        let (request, fallback_model) = adapter.prepare_completion_request(
-            &ProtocolCompletionRequest::new(ModelName::new("claude-sonnet").unwrap(), "hello"),
-            &extensions,
-        );
-
-        assert_eq!(request.model, "openrouter/claude-primary");
-        assert_eq!(
-            request.models,
-            Some(vec![
-                "openrouter/claude-fallback-1".to_string(),
-                "openrouter/claude-fallback-2".to_string(),
-            ])
-        );
-        assert_eq!(fallback_model, "openrouter/claude-primary");
-    }
-
-    #[test]
     fn prepare_requests_fall_back_to_config_model_when_selector_returns_none() {
         let mut adapter = ClaudeAdapter::new("test-key");
         adapter.set_model_selector(Box::new(TestModelSelector));
@@ -1452,17 +1291,10 @@ mod tests {
         let (messages_request, messages_model) = adapter
             .prepare_messages_request(&input, &config, &extensions, None, None, true)
             .unwrap();
-        let (completion_request, completion_model) = adapter.prepare_completion_request(
-            &ProtocolCompletionRequest::new(ModelName::new("claude-sonnet").unwrap(), "hello"),
-            &extensions,
-        );
 
         assert_eq!(messages_request.model, "claude-sonnet");
         assert_eq!(messages_request.models, None);
         assert_eq!(messages_model, "claude-sonnet");
-        assert_eq!(completion_request.model, "claude-sonnet");
-        assert_eq!(completion_request.models, None);
-        assert_eq!(completion_model, "claude-sonnet");
     }
 
     #[test]

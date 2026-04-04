@@ -53,19 +53,23 @@ pub use agents_openai::{
     OpenAiAdapter, OpenAiError, OpenAiReasoningEffort, ReasoningEffortResolver,
 };
 pub use agents_protocol::{
-    AdapterStructuredOutputSpec, AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice,
-    AdapterToolDefinition, AdapterTurnConfig, AgentError, AssistantInputItem, AssistantTurn,
-    AssistantTurnInputError, AssistantTurnItem, AssistantTurnView, BudgetLease, BudgetManager,
-    CommittedTurn, CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionOptions,
-    CompletionReducer, CompletionReductionError, CompletionRequest, CompletionTurnResult,
-    CompletionTurnState, EmptyNonEmptyError, ErasedStructuredTurnEvent,
-    ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream, FinishReason,
-    GenerationParams, InputMessageRole, ItemView, MessageContent, ModelInput, ModelInputItem,
-    ModelInputValidationError, ModelName, ModelNameError, ModelSelection, ModelSelector,
-    NoToolSelector, NoTools, NonEmpty, OperationKind, RawJson, Remaining, RequestBudget,
-    RequestExtensions, SharedPoolBudgetError, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-    StructuredOutput, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
-    StructuredTurnEventStream, StructuredTurnOutcome, StructuredTurnReducer,
+    AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
+    AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AgentError,
+    AssistantInputItem, AssistantTurn, AssistantTurnInputError, AssistantTurnItem,
+    AssistantTurnView, BudgetLease, BudgetManager, CommittedTurn, CompletionAdapter,
+    CompletionEvent, CompletionEventStream, CompletionOptions, CompletionReducer,
+    CompletionReductionError, CompletionRequest, CompletionTurnResult, CompletionTurnState,
+    EmptyNonEmptyError, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
+    ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
+    ErasedTextTurnEventStream, FinishReason, GenerationParams, InputMessageRole, ItemView,
+    MessageContent, ModelInput, ModelInputItem, ModelInputValidationError, ModelName,
+    ModelNameError, ModelSelection, ModelSelector, NoToolSelector, NoTools, NonEmpty,
+    OperationKind, RawJson, Remaining, RequestBudget, RequestExtensions, SharedPoolBudgetError,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredCompletionEvent,
+    StructuredCompletionEventStream, StructuredCompletionReducer,
+    StructuredCompletionReductionError, StructuredCompletionRequest, StructuredCompletionResult,
+    StructuredCompletionState, StructuredOutput, StructuredOutputSpec, StructuredTurn,
+    StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnOutcome, StructuredTurnReducer,
     StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, Temperature,
     TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TextTurnReducer,
     TextTurnReductionError, TextTurnResult, TextTurnState, ToolCallError, ToolCallId,
@@ -76,13 +80,15 @@ pub use agents_protocol::{
 };
 pub use context::{
     CollectError, Context, ContextError, EventHandler, HandlerContext, HandlerDirective,
-    PendingCompletion, PendingStructuredTurn, PendingTextTurn, StructuredTurnPartial,
+    PendingCompletion, PendingStructuredCompletion, PendingStructuredTurn, PendingTextTurn,
+    StructuredTurnPartial,
 };
 pub use mock::{
-    MockCompletionScenario, MockError, MockLlmAdapter, MockStructuredScenario, MockTextScenario,
-    RawCompletionEvent, RawStructuredTurnEvent, RawTextTurnEvent,
+    MockCompletionScenario, MockError, MockLlmAdapter, MockStructuredCompletionScenario,
+    MockStructuredScenario, MockTextScenario, RawCompletionEvent, RawStructuredCompletionEvent,
+    RawStructuredTurnEvent, RawTextTurnEvent,
 };
 pub use session::{
     Session, SessionDefaults, SessionPendingStructured, SessionPendingText, StructuredStepOutcome,
-    TextStepOutcome, ToolRound,
+    TextStepOutcome, ToolRound, ToolRoundArityError,
 };

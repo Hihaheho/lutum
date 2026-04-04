@@ -39,10 +39,10 @@ That is where:
 - streamed events are reduced into completed results
 
 Adapters are public because providers need an SPI boundary, but adapter-direct execution
-bypasses the library's execution contract. `Context::new(adapter, budget)` erases all three
-adapter traits behind `dyn TurnAdapter`, `dyn CompletionAdapter`, and `dyn UsageRecoveryAdapter`.
-`Context::from_parts(turns, completion, recovery, budget)` allows mixing providers — for
-example OpenAI turns with OpenRouter usage recovery.
+bypasses the library's execution contract. `Context::new(adapter, budget)` erases only
+`dyn TurnAdapter` and `dyn UsageRecoveryAdapter`. Completion is wired explicitly through
+`Context::from_parts(turns, completion, recovery, budget)`, which allows mixing providers —
+for example Claude turns with an OpenAI-compatible completion adapter.
 
 ## Canonical request surface
 
@@ -243,6 +243,11 @@ Because selectors are schema-bearing public types, a model can return `Vec<AppTo
 and a later turn can feed that directly into `ToolPolicy::AllowOnly(...)`. That supports
 explicit multi-turn planning without a framework-owned agent model.
 
+Selectors also retain a typed path back to `ToolDef`:
+
+- `selector.definition()`
+- `Toolset::definitions_for(selectors)`
+
 ## Streaming and reducers
 
 Execution is streaming-first.
@@ -261,19 +266,33 @@ The reducer stores the `committed_turn` from the `Completed` event during `apply
 Budget leases are held by `OwnedLease`. When `into_stream()` is called and the stream is
 abandoned, `OwnedLease::drop()` releases the reserved capacity by recording zero usage.
 
-## Completion API
+## Completion APIs
 
-`Context::completion` is a lower-level, non-turn API for raw text generation.
+There are now two completion-style APIs:
 
-It uses:
+- `Context::completion` — raw text completion
+- `Context::structured_completion` — prompt-based structured output without tools
+
+`Context::completion` is the lower-level raw text path. It uses:
 
 - `CompletionRequest` — model, prompt, `CompletionOptions` (temperature, max_output_tokens, stop), budget
 - `CompletionEvent` — `Started`, `TextDelta(String)`, `Completed { finish_reason, usage }`
 - `CompletionAdapter::completion(request, &extensions) -> CompletionEventStream`
 
-Unlike turn-based execution, completion produces no `CommittedTurn` and is not integrated with
-the transcript model. It is intended for single-shot generation tasks that do not require
-session history — embedding, summarization prompts, or auxiliary calls to a different model.
+`Context::structured_completion` is the tool-less structured path for prompt-based tasks that do
+not need transcript integration. It uses:
+
+- `StructuredCompletionRequest<O>` — model, optional system prompt, prompt, `GenerationParams`, budget
+- `StructuredCompletionEvent<O>` — `Started`, `StructuredOutputChunk`, `StructuredOutputReady`, `ReasoningDelta`, `RefusalDelta`, `Completed`
+- `CompletionAdapter::structured_completion(request, &extensions) -> ErasedStructuredCompletionEventStream`
+
+Unlike turn-based execution, neither completion API produces a `CommittedTurn` or integrates with
+the transcript model.
+
+`Context::new(...)` does not configure a completion adapter. Calling either completion API on that
+context returns an error; use `Context::from_parts(...)` when completion is needed.
+
+If you need transcript/session/replay but still do not need tools, use `StructuredTurn::<NoTools, O>`.
 
 Budget reservation, tracing, and usage recovery follow the same path as turn execution.
 
@@ -295,7 +314,7 @@ canonical request faithfully, that remains an adapter limitation.
 
 ### Available adapters
 
-- `agents-openai` — OpenAI Responses API (also used as Ollama backend)
+- `agents-openai` — OpenAI Responses API plus OpenAI-compatible raw completion support
 - `agents-claude` — Anthropic Claude Messages API with lossless thinking-block replay
 - `agents-openrouter` — `OpenRouterGenerationClient` implements `UsageRecoveryAdapter`
   via `GET /api/v1/generation`; can be composed with any `TurnAdapter` via `Context::from_parts`
@@ -328,7 +347,7 @@ Each adapter also accepts a provider-specific `FallbackSerializer` for serializi
 
 ### Core owns
 
-- `Context` — canonical execution boundary; holds `TurnAdapter`, `CompletionAdapter`, `UsageRecoveryAdapter`
+- `Context` — canonical execution boundary; holds `TurnAdapter`, an explicitly supplied `CompletionAdapter`, and `UsageRecoveryAdapter`
 - `ModelInput` / `ModelInputItem` — canonical request algebra
 - `TurnView` / `ItemView` — transcript view traits
 - `BudgetManager` / `OwnedLease` — budget lifecycle

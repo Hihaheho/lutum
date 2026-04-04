@@ -12,10 +12,11 @@ use agents_protocol::{
     budget::Usage,
     conversation::{AssistantTurnItem, ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
     llm::{
-        AdapterStructuredTurn, AdapterTextTurn, CompletionAdapter, CompletionEvent,
-        CompletionEventStream, CompletionRequest, ErasedStructuredTurnEvent,
-        ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
-        FinishReason, OperationKind, TurnAdapter, UsageRecoveryAdapter,
+        AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn,
+        CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionRequest,
+        ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
+        ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
+        ErasedTextTurnEventStream, FinishReason, OperationKind, TurnAdapter, UsageRecoveryAdapter,
     },
     transcript::AssistantTurnView,
 };
@@ -88,6 +89,28 @@ pub enum RawCompletionEvent {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RawStructuredCompletionEvent {
+    Started {
+        request_id: Option<String>,
+        model: String,
+    },
+    StructuredOutputChunk {
+        json_delta: String,
+    },
+    ReasoningDelta {
+        delta: String,
+    },
+    RefusalDelta {
+        delta: String,
+    },
+    Completed {
+        request_id: Option<String>,
+        finish_reason: FinishReason,
+        usage: Usage,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct MockTextScenario {
     events: Vec<Result<RawTextTurnEvent, MockError>>,
@@ -121,6 +144,17 @@ impl MockCompletionScenario {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct MockStructuredCompletionScenario {
+    events: Vec<Result<RawStructuredCompletionEvent, MockError>>,
+}
+
+impl MockStructuredCompletionScenario {
+    pub fn events(events: Vec<Result<RawStructuredCompletionEvent, MockError>>) -> Self {
+        Self { events }
+    }
+}
+
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum MockError {
     #[error("no mock text scenario configured")]
@@ -129,6 +163,8 @@ pub enum MockError {
     MissingStructuredScenario,
     #[error("no mock completion scenario configured")]
     MissingCompletionScenario,
+    #[error("no mock structured completion scenario configured")]
+    MissingStructuredCompletionScenario,
     #[error("failed to deserialize structured output: {0}")]
     StructuredOutput(String),
     #[error("failed to deserialize tool call: {0}")]
@@ -142,6 +178,7 @@ pub struct MockLlmAdapter {
     text_turns: Arc<Mutex<VecDeque<MockTextScenario>>>,
     structured_turns: Arc<Mutex<VecDeque<MockStructuredScenario>>>,
     completions: Arc<Mutex<VecDeque<MockCompletionScenario>>>,
+    structured_completions: Arc<Mutex<VecDeque<MockStructuredCompletionScenario>>>,
     recovered_usage: Arc<Mutex<BTreeMap<(OperationKind, String), Usage>>>,
 }
 
@@ -162,6 +199,17 @@ impl MockLlmAdapter {
 
     pub fn with_completion_scenario(self, scenario: MockCompletionScenario) -> Self {
         self.completions.lock().unwrap().push_back(scenario);
+        self
+    }
+
+    pub fn with_structured_completion_scenario(
+        self,
+        scenario: MockStructuredCompletionScenario,
+    ) -> Self {
+        self.structured_completions
+            .lock()
+            .unwrap()
+            .push_back(scenario);
         self
     }
 
@@ -390,6 +438,64 @@ impl CompletionAdapter for MockLlmAdapter {
         });
 
         Ok(Box::pin(stream::iter(events.collect::<Vec<_>>())) as CompletionEventStream)
+    }
+
+    async fn structured_completion(
+        &self,
+        _request: AdapterStructuredCompletionRequest,
+        _extensions: &RequestExtensions,
+    ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
+        let scenario = self
+            .structured_completions
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| AgentError::backend(MockError::MissingStructuredCompletionScenario))?;
+        let mut structured_buffer = String::new();
+        let events = scenario.events.into_iter().flat_map(|event| match event {
+            Ok(RawStructuredCompletionEvent::Started { request_id, model }) => {
+                vec![Ok(ErasedStructuredCompletionEvent::Started {
+                    request_id,
+                    model,
+                })]
+            }
+            Ok(RawStructuredCompletionEvent::StructuredOutputChunk { json_delta }) => {
+                structured_buffer.push_str(&json_delta);
+                let mut out = vec![Ok(ErasedStructuredCompletionEvent::StructuredOutputChunk {
+                    json_delta,
+                })];
+                if is_complete_json(&structured_buffer) {
+                    match RawJson::parse(structured_buffer.clone()) {
+                        Ok(value) => out.push(Ok(
+                            ErasedStructuredCompletionEvent::StructuredOutputReady(value),
+                        )),
+                        Err(err) => out.push(Err(AgentError::structured_output(err))),
+                    }
+                }
+                out
+            }
+            Ok(RawStructuredCompletionEvent::ReasoningDelta { delta }) => {
+                vec![Ok(ErasedStructuredCompletionEvent::ReasoningDelta {
+                    delta,
+                })]
+            }
+            Ok(RawStructuredCompletionEvent::RefusalDelta { delta }) => {
+                vec![Ok(ErasedStructuredCompletionEvent::RefusalDelta { delta })]
+            }
+            Ok(RawStructuredCompletionEvent::Completed {
+                request_id,
+                finish_reason,
+                usage,
+            }) => vec![Ok(ErasedStructuredCompletionEvent::Completed {
+                request_id,
+                finish_reason,
+                usage,
+            })],
+            Err(err) => vec![Err(AgentError::backend(err))],
+        });
+
+        Ok(Box::pin(stream::iter(events.collect::<Vec<_>>()))
+            as ErasedStructuredCompletionEventStream)
     }
 }
 

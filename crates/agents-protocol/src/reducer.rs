@@ -5,7 +5,10 @@ use thiserror::Error;
 use crate::{
     budget::Usage,
     conversation::{AssistantTurn, AssistantTurnItem, RawJson, ToolCallId},
-    llm::{CompletionEvent, FinishReason, StructuredTurnEvent, TextTurnEvent},
+    llm::{
+        CompletionEvent, FinishReason, StructuredCompletionEvent, StructuredTurnEvent,
+        TextTurnEvent,
+    },
     structured::StructuredOutput,
     toolset::{ToolCallWrapper, Toolset},
     transcript::CommittedTurn,
@@ -481,6 +484,112 @@ pub struct CompletionTurnResult {
     pub usage: Usage,
 }
 
+#[derive(Clone, Debug)]
+pub struct StructuredCompletionState<O: StructuredOutput> {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub structured: Option<O>,
+    pub refusal: Option<String>,
+    pub finish_reason: Option<FinishReason>,
+    pub usage: Option<Usage>,
+}
+
+impl<O> Default for StructuredCompletionState<O>
+where
+    O: StructuredOutput,
+{
+    fn default() -> Self {
+        Self {
+            request_id: None,
+            model: String::new(),
+            structured: None,
+            refusal: None,
+            finish_reason: None,
+            usage: None,
+        }
+    }
+}
+
+impl<O> StructuredCompletionState<O>
+where
+    O: StructuredOutput,
+{
+    pub fn apply(
+        &mut self,
+        event: &StructuredCompletionEvent<O>,
+    ) -> Result<(), StructuredCompletionReductionError> {
+        if self.finish_reason.is_some() {
+            return Err(StructuredCompletionReductionError::AlreadyCompleted);
+        }
+
+        match event {
+            StructuredCompletionEvent::Started { request_id, model } => {
+                self.request_id = request_id.clone();
+                self.model = model.clone();
+            }
+            StructuredCompletionEvent::StructuredOutputChunk { .. } => {}
+            StructuredCompletionEvent::StructuredOutputReady(value) => {
+                if self.structured.is_some() {
+                    return Err(StructuredCompletionReductionError::DuplicateStructuredOutput);
+                }
+                self.structured = Some(value.clone());
+            }
+            StructuredCompletionEvent::ReasoningDelta { .. } => {}
+            StructuredCompletionEvent::RefusalDelta { delta } => match self.refusal.as_mut() {
+                Some(existing) => existing.push_str(delta),
+                None => self.refusal = Some(delta.clone()),
+            },
+            StructuredCompletionEvent::Completed {
+                request_id,
+                finish_reason,
+                usage,
+            } => {
+                if let Some(request_id) = request_id.clone() {
+                    self.request_id = Some(request_id);
+                }
+                self.finish_reason = Some(finish_reason.clone());
+                self.usage = Some(*usage);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn finish(
+        self,
+    ) -> Result<StructuredCompletionResult<O>, StructuredCompletionReductionError> {
+        let semantic = match (self.structured, self.refusal) {
+            (Some(value), None) => StructuredTurnOutcome::Structured(value),
+            (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
+            (None, None) => return Err(StructuredCompletionReductionError::MissingSemantic),
+            (Some(_), Some(_)) => {
+                return Err(StructuredCompletionReductionError::ConflictingSemantic);
+            }
+        };
+
+        Ok(StructuredCompletionResult {
+            request_id: self.request_id,
+            model: self.model,
+            semantic,
+            finish_reason: self
+                .finish_reason
+                .ok_or(StructuredCompletionReductionError::Incomplete)?,
+            usage: self
+                .usage
+                .ok_or(StructuredCompletionReductionError::Incomplete)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StructuredCompletionResult<O: StructuredOutput> {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub semantic: StructuredTurnOutcome<O>,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+}
+
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum TextTurnReductionError {
     #[error("turn already completed")]
@@ -513,6 +622,20 @@ pub enum CompletionReductionError {
     AlreadyCompleted,
     #[error("turn has not completed yet")]
     Incomplete,
+}
+
+#[derive(Debug, Error, Clone, Eq, PartialEq)]
+pub enum StructuredCompletionReductionError {
+    #[error("turn already completed")]
+    AlreadyCompleted,
+    #[error("structured output appeared more than once")]
+    DuplicateStructuredOutput,
+    #[error("turn has not completed yet")]
+    Incomplete,
+    #[error("turn completed without structured output or refusal")]
+    MissingSemantic,
+    #[error("turn completed with both structured output and refusal")]
+    ConflictingSemantic,
 }
 
 pub struct TextTurnReducer<T: Toolset> {
@@ -636,6 +759,51 @@ impl CompletionReducer {
     }
 
     pub fn into_result(self) -> Result<CompletionTurnResult, CompletionReductionError> {
+        self.state.finish()
+    }
+}
+
+pub struct StructuredCompletionReducer<O: StructuredOutput> {
+    state: StructuredCompletionState<O>,
+}
+
+impl<O> Default for StructuredCompletionReducer<O>
+where
+    O: StructuredOutput,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<O> StructuredCompletionReducer<O>
+where
+    O: StructuredOutput,
+{
+    pub fn new() -> Self {
+        Self {
+            state: StructuredCompletionState::default(),
+        }
+    }
+
+    pub fn state(&self) -> &StructuredCompletionState<O> {
+        &self.state
+    }
+
+    pub fn into_state(self) -> StructuredCompletionState<O> {
+        self.state
+    }
+
+    pub fn apply(
+        &mut self,
+        event: &StructuredCompletionEvent<O>,
+    ) -> Result<(), StructuredCompletionReductionError> {
+        self.state.apply(event)
+    }
+
+    pub fn into_result(
+        self,
+    ) -> Result<StructuredCompletionResult<O>, StructuredCompletionReductionError> {
         self.state.finish()
     }
 }
@@ -802,6 +970,12 @@ mod tests {
             }
         }
 
+        fn definition(self) -> &'static ToolDef {
+            &Tools::definitions()[match self {
+                Self::Weather => 0,
+            }]
+        }
+
         fn all() -> &'static [Self] {
             &[Self::Weather]
         }
@@ -828,20 +1002,16 @@ mod tests {
             &DEFS
         }
 
-        fn parse_tool_call(
-            metadata: ToolMetadata,
-            name: &str,
-            arguments_json: &str,
-        ) -> Result<Self::ToolCall, ToolCallError> {
-            match name {
-                "weather" => serde_json::from_str(arguments_json)
+        fn parse_tool_call(metadata: ToolMetadata) -> Result<Self::ToolCall, ToolCallError> {
+            match metadata.name.as_str() {
+                "weather" => serde_json::from_str(metadata.arguments.get())
                     .map(|input| CallsCall::Weather(WeatherArgsCall { metadata, input }))
                     .map_err(|source| ToolCallError::Deserialize {
-                        name: name.to_string(),
+                        name: "weather".to_string(),
                         source,
                     }),
                 _ => Err(ToolCallError::UnknownTool {
-                    name: name.to_string(),
+                    name: metadata.name.as_str().to_string(),
                 }),
             }
         }

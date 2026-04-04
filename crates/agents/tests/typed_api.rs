@@ -1,12 +1,13 @@
 use agents::{
-    AdapterStructuredTurn, AdapterTextTurn, AgentError, AssistantInputItem, AssistantTurnItem,
-    AssistantTurnView, BudgetLease, BudgetManager, CompletionAdapter, CompletionEventStream,
-    CompletionRequest, Context, ContextError, ErasedStructuredTurnEventStream,
+    AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn, AgentError,
+    AssistantInputItem, AssistantTurnItem, AssistantTurnView, BudgetLease, BudgetManager,
+    CompletionAdapter, CompletionEventStream, CompletionRequest, Context, ContextError,
+    ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
     ErasedTextTurnEventStream, InputMessageRole, MessageContent, ModelInput, ModelInputItem,
     ModelName, ModelNameError, NonEmpty, OperationKind, RawJson, RequestBudget, RequestExtensions,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredTurn, Temperature, TextTurn,
-    TextTurnReducer, ToolMetadata, ToolPolicy, ToolUse, TurnAdapter, Usage, UsageEstimate,
-    UsageRecoveryAdapter,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredCompletionRequest, StructuredTurn,
+    Temperature, TextTurn, TextTurnReducer, ToolMetadata, ToolPolicy, ToolUse, TurnAdapter, Usage,
+    UsageEstimate, UsageRecoveryAdapter,
 };
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -42,6 +43,14 @@ impl CompletionAdapter for NullAdapter {
         _extensions: &RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as CompletionEventStream)
+    }
+
+    async fn structured_completion(
+        &self,
+        _request: AdapterStructuredCompletionRequest,
+        _extensions: &RequestExtensions,
+    ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
+        Ok(Box::pin(futures::stream::empty()) as ErasedStructuredCompletionEventStream)
     }
 }
 
@@ -137,6 +146,11 @@ fn typed_public_api_compiles_and_constructs_requests() {
         seed: None,
     };
     let _completion = CompletionRequest::builder()
+        .model(ModelName::new("gpt-4.1-mini").unwrap())
+        .prompt("hello")
+        .budget(RequestBudget::from_tokens(128))
+        .build();
+    let _structured_completion = StructuredCompletionRequest::<Summary>::builder()
         .model(ModelName::new("gpt-4.1-mini").unwrap())
         .prompt("hello")
         .budget(RequestBudget::from_tokens(128))

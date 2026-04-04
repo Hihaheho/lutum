@@ -202,6 +202,11 @@ fn session_commits_parallel_tool_results_in_order() {
 
     match outcome {
         TextStepOutcome::NeedsToolResults(round) => {
+            assert_eq!(round.tool_count(), 2);
+            assert_eq!(
+                round.clone().expect_at_most_one().unwrap_err(),
+                agents::ToolRoundArityError::ExpectedAtMostOne { actual: 2 }
+            );
             assert_eq!(round.tool_calls.len(), 2);
             assert!(matches!(
                 &round.tool_calls[0],

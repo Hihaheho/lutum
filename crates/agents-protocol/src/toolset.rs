@@ -124,6 +124,8 @@ pub trait ToolSelector<T: ?Sized>:
 {
     fn name(self) -> &'static str;
 
+    fn definition(self) -> &'static ToolDef;
+
     fn all() -> &'static [Self];
 
     fn try_from_name(name: &str) -> Option<Self>;
@@ -135,11 +137,17 @@ pub trait Toolset: Send + Sync + 'static {
 
     fn definitions() -> &'static [ToolDef];
 
-    fn parse_tool_call(
-        metadata: ToolMetadata,
-        name: &str,
-        arguments_json: &str,
-    ) -> Result<Self::ToolCall, ToolCallError>;
+    fn definitions_for<I>(selectors: I) -> Vec<&'static ToolDef>
+    where
+        I: IntoIterator<Item = Self::Selector>,
+    {
+        selectors
+            .into_iter()
+            .map(|selector| selector.definition())
+            .collect()
+    }
+
+    fn parse_tool_call(metadata: ToolMetadata) -> Result<Self::ToolCall, ToolCallError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
@@ -208,6 +216,10 @@ impl ToolSelector<NoTools> for NoToolSelector {
         match self {}
     }
 
+    fn definition(self) -> &'static ToolDef {
+        match self {}
+    }
+
     fn all() -> &'static [Self] {
         &[]
     }
@@ -228,13 +240,9 @@ impl Toolset for NoTools {
         &[]
     }
 
-    fn parse_tool_call(
-        _metadata: ToolMetadata,
-        name: &str,
-        _arguments_json: &str,
-    ) -> Result<Self::ToolCall, ToolCallError> {
+    fn parse_tool_call(metadata: ToolMetadata) -> Result<Self::ToolCall, ToolCallError> {
         Err(ToolCallError::UnknownTool {
-            name: name.to_string(),
+            name: metadata.name.as_str().to_string(),
         })
     }
 }

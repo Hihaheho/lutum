@@ -127,6 +127,15 @@ fn tool_round_is_only_applied_on_explicit_commit() {
 
     match outcome {
         TextStepOutcome::NeedsToolResults(round) => {
+            assert_eq!(round.tool_count(), 1);
+            assert!(matches!(
+                round.clone().expect_at_most_one().unwrap(),
+                Some(ToolsCall::Weather(_))
+            ));
+            assert!(matches!(
+                round.clone().expect_one().unwrap(),
+                ToolsCall::Weather(_)
+            ));
             let tool_uses = round
                 .tool_calls
                 .iter()

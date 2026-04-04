@@ -12,6 +12,7 @@ use agents_protocol::{
     },
     structured::StructuredOutput,
 };
+use thiserror::Error;
 
 use crate::{
     CollectError, Context, ContextError, EventHandler, PendingStructuredTurn, PendingTextTurn,
@@ -401,6 +402,47 @@ pub struct ToolRound<T: Toolset> {
     pub finish_reason: FinishReason,
     pub usage: Usage,
     pub committed_turn: CommittedTurn,
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum ToolRoundArityError {
+    #[error("expected exactly one tool call, got {actual}")]
+    ExpectedOne { actual: usize },
+    #[error("expected at most one tool call, got {actual}")]
+    ExpectedAtMostOne { actual: usize },
+}
+
+impl<T> ToolRound<T>
+where
+    T: Toolset,
+{
+    pub fn tool_count(&self) -> usize {
+        self.tool_calls.len()
+    }
+
+    pub fn expect_one(self) -> Result<T::ToolCall, ToolRoundArityError> {
+        let actual = self.tool_calls.len();
+        if actual != 1 {
+            return Err(ToolRoundArityError::ExpectedOne { actual });
+        }
+        Ok(self
+            .tool_calls
+            .into_iter()
+            .next()
+            .expect("length checked above"))
+    }
+
+    pub fn expect_at_most_one(self) -> Result<Option<T::ToolCall>, ToolRoundArityError> {
+        let actual = self.tool_calls.len();
+        if actual > 1 {
+            return Err(ToolRoundArityError::ExpectedAtMostOne { actual });
+        }
+        Ok(self.tool_calls.into_iter().next())
+    }
+
+    pub fn into_tool_calls(self) -> Vec<T::ToolCall> {
+        self.tool_calls
+    }
 }
 
 #[derive(Clone, Debug)]

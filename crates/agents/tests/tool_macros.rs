@@ -47,6 +47,10 @@ enum FnTools {
 fn tool_input_wrapper_builds_tool_use() {
     assert_eq!(RawToolsSelector::CurrentWeather.name(), "weather");
     assert_eq!(
+        RawToolsSelector::CurrentWeather.definition().name,
+        "weather"
+    );
+    assert_eq!(
         RawToolsSelector::try_from_name("weather"),
         Some(RawToolsSelector::CurrentWeather)
     );
@@ -60,24 +64,37 @@ fn tool_input_wrapper_builds_tool_use() {
     );
     let schema = serde_json::to_value(schemars::schema_for!(RawToolsSelector)).unwrap();
     assert_eq!(schema["enum"][0], "weather");
+    let selected_defs = RawTools::definitions_for([RawToolsSelector::CurrentWeather]);
+    assert_eq!(selected_defs.len(), 1);
+    assert_eq!(selected_defs[0].name, "weather");
 
-    let tool_call = RawTools::parse_tool_call(
-        ToolMetadata::new(
-            "call-1",
-            "weather",
-            RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
-        ),
+    let tool_call = RawTools::parse_tool_call(ToolMetadata::new(
+        "call-1",
         "weather",
-        "{\"city\":\"Tokyo\"}",
-    )
+        RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
+    ))
     .unwrap();
 
+    assert!(matches!(
+        tool_call.selector(),
+        RawToolsSelector::CurrentWeather
+    ));
+    let typed_tool = tool_call.clone().into_input();
+    assert!(matches!(
+        typed_tool,
+        RawTools::CurrentWeather(WeatherArgs { ref city }) if city == "Tokyo"
+    ));
+
     let tool_use = match tool_call {
-        RawToolsCall::CurrentWeather(call) => call
-            .tool_use(WeatherResult {
+        RawToolsCall::CurrentWeather(call) => {
+            assert_eq!(call.input().city, "Tokyo");
+            let input: WeatherArgs = call.clone().into();
+            assert_eq!(input.city, "Tokyo");
+            call.tool_use(WeatherResult {
                 forecast: "sunny".into(),
             })
-            .unwrap(),
+            .unwrap()
+        }
     };
 
     assert_eq!(
@@ -93,25 +110,24 @@ fn tool_input_wrapper_builds_tool_use() {
 
 #[test]
 fn tool_fn_wrapper_executes_with_skipped_args() {
-    let tool_call = FnTools::parse_tool_call(
-        ToolMetadata::new(
-            "call-2",
-            "get_weather",
-            RawJson::parse("{\"city\":\"Osaka\"}").unwrap(),
-        ),
+    let tool_call = FnTools::parse_tool_call(ToolMetadata::new(
+        "call-2",
         "get_weather",
-        "{\"city\":\"Osaka\"}",
-    )
+        RawJson::parse("{\"city\":\"Osaka\"}").unwrap(),
+    ))
     .unwrap();
 
     let tool_use = match tool_call {
-        FnToolsCall::GetWeather(call) => block_on(call.call(
-            &AppCtx {
-                prefix: "wx".into(),
-            },
-            7,
-        ))
-        .unwrap(),
+        FnToolsCall::GetWeather(call) => {
+            assert_eq!(call.input().city, "Osaka");
+            block_on(call.call(
+                &AppCtx {
+                    prefix: "wx".into(),
+                },
+                7,
+            ))
+            .unwrap()
+        }
     };
 
     assert_eq!(tool_use.result.get(), "{\"forecast\":\"wx:7:Osaka\"}");

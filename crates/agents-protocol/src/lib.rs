@@ -20,20 +20,24 @@ pub use conversation::{
 pub use error::{AgentError, BoxError};
 pub use extensions::RequestExtensions;
 pub use llm::{
-    AdapterStructuredOutputSpec, AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice,
-    AdapterToolDefinition, AdapterTurnConfig, CompletionAdapter, CompletionEvent,
-    CompletionEventStream, CompletionOptions, CompletionRequest, ErasedStructuredTurnEvent,
-    ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream, FinishReason,
-    GenerationParams, ModelName, ModelNameError, ModelSelection, ModelSelector, OperationKind,
-    StructuredOutputSpec, StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream,
-    Temperature, TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TurnAdapter,
-    TurnConfig, UsageRecoveryAdapter,
+    AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
+    AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig,
+    CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionOptions,
+    CompletionRequest, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
+    ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
+    ErasedTextTurnEventStream, FinishReason, GenerationParams, ModelName, ModelNameError,
+    ModelSelection, ModelSelector, OperationKind, StructuredCompletionEvent,
+    StructuredCompletionEventStream, StructuredCompletionRequest, StructuredOutputSpec,
+    StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream, Temperature, TemperatureError,
+    TextTurn, TextTurnEvent, TextTurnEventStream, TurnAdapter, TurnConfig, UsageRecoveryAdapter,
 };
 pub use reducer::{
     CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
-    StructuredTurnOutcome, StructuredTurnReducer, StructuredTurnReductionError,
-    StructuredTurnResult, StructuredTurnState, TextTurnReducer, TextTurnReductionError,
-    TextTurnResult, TextTurnState, assistant_json, find_tool_call_arguments,
+    StructuredCompletionReducer, StructuredCompletionReductionError, StructuredCompletionResult,
+    StructuredCompletionState, StructuredTurnOutcome, StructuredTurnReducer,
+    StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, TextTurnReducer,
+    TextTurnReductionError, TextTurnResult, TextTurnState, assistant_json,
+    find_tool_call_arguments,
 };
 pub use structured::StructuredOutput;
 pub use toolset::{

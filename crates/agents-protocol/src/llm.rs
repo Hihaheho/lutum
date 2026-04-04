@@ -16,12 +16,16 @@ pub type TextTurnEventStream<T, E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<TextTurnEvent<T>, E>> + Send + Sync + 'static>>;
 pub type StructuredTurnEventStream<T, O, E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<StructuredTurnEvent<T, O>, E>> + Send + Sync + 'static>>;
+pub type StructuredCompletionEventStream<O, E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<StructuredCompletionEvent<O>, E>> + Send + Sync + 'static>>;
 pub type CompletionEventStream<E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<CompletionEvent, E>> + Send + Sync + 'static>>;
 pub type ErasedTextTurnEventStream<E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<ErasedTextTurnEvent, E>> + Send + Sync + 'static>>;
 pub type ErasedStructuredTurnEventStream<E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<ErasedStructuredTurnEvent, E>> + Send + Sync + 'static>>;
+pub type ErasedStructuredCompletionEventStream<E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<ErasedStructuredCompletionEvent, E>> + Send + Sync + 'static>>;
 
 #[derive(
     Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
@@ -177,6 +181,42 @@ where
     }
 }
 
+#[derive(Builder, Clone, Debug, PartialEq)]
+#[builder(builder_type(name = StructuredCompletionRequestBuilder))]
+pub struct StructuredCompletionRequest<O: StructuredOutput> {
+    pub model: ModelName,
+    pub system: Option<String>,
+    #[builder(into)]
+    pub prompt: String,
+    #[builder(default)]
+    pub generation: GenerationParams,
+    #[builder(default = RequestBudget::unlimited())]
+    pub budget: RequestBudget,
+    #[builder(default)]
+    pub output: StructuredOutputSpec<O>,
+}
+
+impl<O> StructuredCompletionRequest<O>
+where
+    O: StructuredOutput,
+{
+    pub fn new(model: ModelName, prompt: impl Into<String>) -> Self {
+        Self {
+            model,
+            system: None,
+            prompt: prompt.into(),
+            generation: GenerationParams::default(),
+            budget: RequestBudget::unlimited(),
+            output: StructuredOutputSpec::default(),
+        }
+    }
+
+    pub fn with_system(mut self, system: impl Into<String>) -> Self {
+        self.system = Some(system.into());
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdapterToolDefinition {
     pub name: String,
@@ -230,6 +270,15 @@ pub struct AdapterStructuredOutputSpec {
 pub struct AdapterStructuredTurn {
     pub config: AdapterTurnConfig,
     pub extensions: Arc<crate::extensions::RequestExtensions>,
+    pub output: AdapterStructuredOutputSpec,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdapterStructuredCompletionRequest {
+    pub model: ModelName,
+    pub system: Option<String>,
+    pub prompt: String,
+    pub generation: GenerationParams,
     pub output: AdapterStructuredOutputSpec,
 }
 
@@ -713,6 +762,52 @@ pub enum CompletionEvent {
     },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum StructuredCompletionEvent<O: StructuredOutput> {
+    Started {
+        request_id: Option<String>,
+        model: String,
+    },
+    StructuredOutputChunk {
+        json_delta: String,
+    },
+    StructuredOutputReady(O),
+    ReasoningDelta {
+        delta: String,
+    },
+    RefusalDelta {
+        delta: String,
+    },
+    Completed {
+        request_id: Option<String>,
+        finish_reason: FinishReason,
+        usage: Usage,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ErasedStructuredCompletionEvent {
+    Started {
+        request_id: Option<String>,
+        model: String,
+    },
+    StructuredOutputChunk {
+        json_delta: String,
+    },
+    StructuredOutputReady(RawJson),
+    ReasoningDelta {
+        delta: String,
+    },
+    RefusalDelta {
+        delta: String,
+    },
+    Completed {
+        request_id: Option<String>,
+        finish_reason: FinishReason,
+        usage: Usage,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FinishReason {
     Stop,
@@ -726,6 +821,7 @@ pub enum FinishReason {
 pub enum OperationKind {
     TextTurn,
     StructuredTurn,
+    StructuredCompletion,
     Completion,
 }
 
@@ -751,6 +847,12 @@ pub trait CompletionAdapter: Send + Sync + 'static {
         request: CompletionRequest,
         extensions: &crate::extensions::RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError>;
+
+    async fn structured_completion(
+        &self,
+        request: AdapterStructuredCompletionRequest,
+        extensions: &crate::extensions::RequestExtensions,
+    ) -> Result<ErasedStructuredCompletionEventStream, AgentError>;
 }
 
 #[async_trait::async_trait]
@@ -796,6 +898,14 @@ where
     ) -> Result<CompletionEventStream, AgentError> {
         (**self).completion(request, extensions).await
     }
+
+    async fn structured_completion(
+        &self,
+        request: AdapterStructuredCompletionRequest,
+        extensions: &crate::extensions::RequestExtensions,
+    ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
+        (**self).structured_completion(request, extensions).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -817,13 +927,17 @@ fn test_stream_types_are_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<TextTurnEventStream<NoTools>>();
     assert_send_sync::<StructuredTurnEventStream<NoTools, ()>>();
+    assert_send_sync::<StructuredCompletionEventStream<()>>();
     assert_send_sync::<CompletionEventStream>();
     assert_send_sync::<ErasedTextTurnEventStream>();
     assert_send_sync::<ErasedStructuredTurnEventStream>();
+    assert_send_sync::<ErasedStructuredCompletionEventStream>();
     assert_send_sync::<TextTurnEvent<NoTools>>();
     assert_send_sync::<StructuredTurnEvent<NoTools, ()>>();
+    assert_send_sync::<StructuredCompletionEvent<()>>();
     assert_send_sync::<ErasedTextTurnEvent>();
     assert_send_sync::<ErasedStructuredTurnEvent>();
+    assert_send_sync::<ErasedStructuredCompletionEvent>();
     assert_send_sync::<CompletionEvent>();
 }
 

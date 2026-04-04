@@ -151,11 +151,33 @@ fn expand_tool_input_struct(item: ItemStruct, args: ToolInputArgs) -> proc_macro
         }
 
         impl #call_ident {
+            pub fn input(&self) -> &#ident {
+                &self.input
+            }
+
+            pub fn input_mut(&mut self) -> &mut #ident {
+                &mut self.input
+            }
+
+            pub fn into_input(self) -> #ident {
+                self.input
+            }
+
+            pub fn into_parts(self) -> (::agents::ToolMetadata, #ident) {
+                (self.metadata, self.input)
+            }
+
             pub fn tool_use(
                 self,
                 output: #output,
             ) -> Result<::agents::ToolUse, ::agents::ToolUseError> {
                 #ident::tool_use(self.metadata, output)
+            }
+        }
+
+        impl From<#call_ident> for #ident {
+            fn from(value: #call_ident) -> Self {
+                value.into_input()
             }
         }
     }
@@ -203,11 +225,33 @@ fn expand_tool_input_enum(item: ItemEnum, args: ToolInputArgs) -> proc_macro2::T
         }
 
         impl #call_ident {
+            pub fn input(&self) -> &#ident {
+                &self.input
+            }
+
+            pub fn input_mut(&mut self) -> &mut #ident {
+                &mut self.input
+            }
+
+            pub fn into_input(self) -> #ident {
+                self.input
+            }
+
+            pub fn into_parts(self) -> (::agents::ToolMetadata, #ident) {
+                (self.metadata, self.input)
+            }
+
             pub fn tool_use(
                 self,
                 output: #output,
             ) -> Result<::agents::ToolUse, ::agents::ToolUseError> {
                 #ident::tool_use(self.metadata, output)
+            }
+        }
+
+        impl From<#call_ident> for #ident {
+            fn from(value: #call_ident) -> Self {
+                value.into_input()
             }
         }
     }
@@ -302,6 +346,22 @@ fn expand_tool_fn(item_fn: ItemFn, args: ToolFnArgs) -> proc_macro2::TokenStream
         }
 
         impl #call_ident {
+            pub fn input(&self) -> &#input_ident {
+                &self.input
+            }
+
+            pub fn input_mut(&mut self) -> &mut #input_ident {
+                &mut self.input
+            }
+
+            pub fn into_input(self) -> #input_ident {
+                self.input
+            }
+
+            pub fn into_parts(self) -> (::agents::ToolMetadata, #input_ident) {
+                (self.metadata, self.input)
+            }
+
             pub fn tool_use(
                 self,
                 output: #output_ty,
@@ -318,6 +378,12 @@ fn expand_tool_fn(item_fn: ItemFn, args: ToolFnArgs) -> proc_macro2::TokenStream
                     .map_err(::agents::ToolExecutionError::Execute)?;
                 #input_ident::tool_use(self.metadata, output)
                     .map_err(::agents::ToolExecutionError::ToolUse)
+            }
+        }
+
+        impl From<#call_ident> for #input_ident {
+            fn from(value: #call_ident) -> Self {
+                value.into_input()
             }
         }
     }
@@ -338,14 +404,18 @@ fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     let mut wrapper_variants = Vec::new();
     let mut selector_variants = Vec::new();
     let mut metadata_arms = Vec::new();
+    let mut call_selector_arms = Vec::new();
+    let mut call_into_input_arms = Vec::new();
+    let mut call_into_parts_arms = Vec::new();
     let mut parse_arms = Vec::new();
     let mut defs = Vec::new();
     let mut selector_name_arms = Vec::new();
+    let mut selector_definition_arms = Vec::new();
     let mut selector_try_from_arms = Vec::new();
     let mut selector_all = Vec::new();
     let mut selector_expected_names = Vec::new();
 
-    for variant in variants {
+    for (index, variant) in variants.into_iter().enumerate() {
         let variant_ident = variant.ident;
         let input_ty = match variant.fields {
             Fields::Unnamed(FieldsUnnamed { unnamed, .. }) if unnamed.len() == 1 => {
@@ -368,16 +438,31 @@ fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         wrapper_variants.push(quote! { #variant_ident(#wrapper_ident) });
         selector_variants.push(quote! { #variant_ident });
         metadata_arms.push(quote! { Self::#variant_ident(inner) => &inner.metadata });
+        call_selector_arms
+            .push(quote! { Self::#variant_ident(_) => #selector_enum_ident::#variant_ident });
+        call_into_input_arms.push(
+            quote! { Self::#variant_ident(inner) => #enum_ident::#variant_ident(inner.into_input()) },
+        );
+        call_into_parts_arms.push(quote! {
+            Self::#variant_ident(inner) => {
+                let (metadata, input) = inner.into_parts();
+                (metadata, #enum_ident::#variant_ident(input))
+            }
+        });
         defs.push(quote! { ::agents::ToolDef::for_input::<#input_ty>() });
         selector_name_arms.push(quote! { Self::#variant_ident => #tool_name });
+        selector_definition_arms.push(
+            quote! { Self::#variant_ident => &<#enum_ident as ::agents::Toolset>::definitions()[#index] },
+        );
         selector_try_from_arms.push(quote! { #tool_name => Some(Self::#variant_ident) });
         selector_all.push(quote! { Self::#variant_ident });
         selector_expected_names.push(tool_name.clone());
         parse_arms.push(quote! {
             #tool_name => {
-                let input = ::serde_json::from_str::<#input_ty>(arguments_json)
+                let name = metadata.name.as_str().to_string();
+                let input = ::serde_json::from_str::<#input_ty>(metadata.arguments.get())
                     .map_err(|source| ::agents::ToolCallError::Deserialize {
-                        name: name.to_string(),
+                        name,
                         source,
                     })?;
                 Ok(#call_enum_ident::#variant_ident(#wrapper_ident {
@@ -417,6 +502,10 @@ fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
 
             pub fn definitions() -> &'static [::agents::ToolDef] {
                 <#enum_ident as ::agents::Toolset>::definitions()
+            }
+
+            pub fn definition(self) -> &'static ::agents::ToolDef {
+                <Self as ::agents::toolset::ToolSelector<#enum_ident>>::definition(self)
             }
 
             pub fn try_from_name(name: &str) -> Option<Self> {
@@ -488,13 +577,11 @@ fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
 
             fn parse_tool_call(
                 metadata: ::agents::ToolMetadata,
-                name: &str,
-                arguments_json: &str,
             ) -> Result<Self::ToolCall, ::agents::ToolCallError> {
-                match name {
+                match metadata.name.as_str() {
                     #(#parse_arms,)*
                     _ => Err(::agents::ToolCallError::UnknownTool {
-                        name: name.to_string(),
+                        name: metadata.name.as_str().to_string(),
                     }),
                 }
             }
@@ -508,9 +595,41 @@ fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             }
         }
 
+        impl #call_enum_ident {
+            pub fn selector(&self) -> #selector_enum_ident {
+                match self {
+                    #(#call_selector_arms,)*
+                }
+            }
+
+            pub fn into_input(self) -> #enum_ident {
+                match self {
+                    #(#call_into_input_arms,)*
+                }
+            }
+
+            pub fn into_parts(self) -> (::agents::ToolMetadata, #enum_ident) {
+                match self {
+                    #(#call_into_parts_arms,)*
+                }
+            }
+        }
+
+        impl From<#call_enum_ident> for #enum_ident {
+            fn from(value: #call_enum_ident) -> Self {
+                value.into_input()
+            }
+        }
+
         impl ::agents::toolset::ToolSelector<#enum_ident> for #selector_enum_ident {
             fn name(self) -> &'static str {
                 self.name()
+            }
+
+            fn definition(self) -> &'static ::agents::ToolDef {
+                match self {
+                    #(#selector_definition_arms,)*
+                }
             }
 
             fn all() -> &'static [Self] {

@@ -65,6 +65,44 @@ async fn run(ctx: Context) -> Result<(), Box<dyn std::error::Error>> {
 # }
 ```
 
+## Structured Output Without Tools
+
+Use `Context::structured_completion(...)` when you want prompt-based structured output without
+tools or transcript integration. `Context::new(...)` wires turn execution only; use
+`Context::from_parts(...)` when you want to supply a separate completion adapter:
+
+```rust
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct Contact {
+    email: String,
+}
+
+let result = ctx
+    .structured_completion(
+        RequestExtensions::default(),
+        agents::StructuredCompletionRequest::<Contact>::new(
+            agents::ModelName::new("gpt-4.1-mini")?,
+            "Extract the email address.",
+        ),
+        UsageEstimate::zero(),
+    )
+    .await?
+    .collect_noop()
+    .await?;
+
+match result.semantic {
+    agents::StructuredTurnOutcome::Structured(contact) => {
+        println!("{}", contact.email);
+    }
+    agents::StructuredTurnOutcome::Refusal(refusal) => {
+        println!("{refusal}");
+    }
+}
+```
+
+If you want transcript/session integration but still no tools, use
+`StructuredTurn::<NoTools, O>` instead.
+
 ## Shared turn config
 
 Turn-level configuration lives in plain structs:
@@ -99,7 +137,8 @@ construction path.
 - `<Toolset>Selector`
 
 `<Toolset>Selector` is serializable and schema-bearing, so it can be used as part of a structured
-output contract when one model selects the tools that another model may use.
+output contract when one model selects the tools that another model may use. Selectors can also be
+resolved back to their `ToolDef` via `selector.definition()` or `Toolset::definitions_for(...)`.
 
 ```rust
 #[derive(
@@ -155,6 +194,9 @@ match outcome {
     }
 }
 ```
+
+Single-tool tasks can use `round.expect_one()?` or `round.expect_at_most_one()?` instead of
+reaching for `first()`.
 
 ## Examples
 

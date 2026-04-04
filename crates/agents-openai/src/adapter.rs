@@ -15,11 +15,12 @@ use agents_protocol::{
     },
     extensions::RequestExtensions,
     llm::{
-        AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
-        CompletionAdapter, CompletionEvent, CompletionEventStream,
-        CompletionRequest as ProtocolCompletionRequest, ErasedStructuredTurnEvent,
-        ErasedStructuredTurnEventStream, ErasedTextTurnEvent, ErasedTextTurnEventStream,
-        ModelSelector, OperationKind, TurnAdapter, UsageRecoveryAdapter,
+        AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn,
+        AdapterToolChoice, AdapterTurnConfig, CompletionAdapter, CompletionEvent,
+        CompletionEventStream, CompletionRequest as ProtocolCompletionRequest,
+        ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
+        ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
+        ErasedTextTurnEventStream, ModelSelector, OperationKind, TurnAdapter, UsageRecoveryAdapter,
     },
     transcript::{TurnRole, TurnView},
 };
@@ -97,7 +98,8 @@ pub struct OpenAiAdapter {
     sse_event_recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
 }
 
-type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync + 'static>>;
+type ByteStream =
+    Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync + 'static>>;
 
 struct ResolvedModelSelection {
     primary: String,
@@ -224,6 +226,21 @@ impl OpenAiAdapter {
         (body, selection.primary)
     }
 
+    fn prepare_structured_completion_request(
+        &self,
+        request: &AdapterStructuredCompletionRequest,
+        extensions: &RequestExtensions,
+    ) -> (crate::responses::ResponsesRequest, String) {
+        let selection = self.resolve_model_selection(extensions, request.model.as_ref());
+        let mut body = build_structured_completion_request(request, &selection.primary);
+        if !selection.fallbacks.is_empty()
+            && let Some(serializer) = self.fallback_serializer.as_ref()
+        {
+            serializer.apply_to_responses(&selection.fallbacks, &mut body);
+        }
+        (body, selection.primary)
+    }
+
     async fn send_streaming_json<T>(&self, path: &str, body: &T) -> Result<ByteStream, OpenAiError>
     where
         T: Serialize + ?Sized,
@@ -335,6 +352,106 @@ impl CompletionAdapter for OpenAiAdapter {
             map_completion_stream(stream, model).map(|item| item.map_err(AgentError::backend)),
         ) as CompletionEventStream)
     }
+
+    async fn structured_completion(
+        &self,
+        request: AdapterStructuredCompletionRequest,
+        extensions: &RequestExtensions,
+    ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
+        let (body, model) = self.prepare_structured_completion_request(&request, extensions);
+        let stream = self
+            .send_streaming_json("/responses", &body)
+            .await
+            .map_err(AgentError::backend)?;
+        let stream = map_structured_stream(stream, model, self.sse_event_recovery_hook.clone())
+            .map(|item| item.map_err(AgentError::backend));
+        Ok(
+            Box::pin(stream.map(|item| item.and_then(map_erased_structured_completion_event)))
+                as ErasedStructuredCompletionEventStream,
+        )
+    }
+}
+
+fn build_structured_completion_request(
+    request: &AdapterStructuredCompletionRequest,
+    model: &str,
+) -> crate::responses::ResponsesRequest {
+    let mut input = Vec::new();
+    if let Some(system) = request.system.as_deref() {
+        input.push(InputItem::Message(InputMessage::new(
+            MessageRole::System,
+            vec![InputContent::InputText(InputTextContent::new(system))],
+        )));
+    }
+    input.push(InputItem::Message(InputMessage::new(
+        MessageRole::User,
+        vec![InputContent::InputText(InputTextContent::new(
+            request.prompt.clone(),
+        ))],
+    )));
+
+    crate::responses::ResponsesRequest {
+        model: model.to_string(),
+        input,
+        stream: true,
+        tools: Vec::new(),
+        parallel_tool_calls: false,
+        temperature: request
+            .generation
+            .temperature
+            .map(|temperature| temperature.get()),
+        max_output_tokens: request.generation.max_output_tokens,
+        reasoning: None,
+        text: Some(crate::responses::ResponsesTextConfig {
+            format: TextFormat::JsonSchema {
+                name: request.output.schema_name.clone(),
+                schema: request.output.schema.clone(),
+                description: None,
+                strict: Some(true),
+            },
+        }),
+        tool_choice: None,
+        models: None,
+        seed: request.generation.seed,
+    }
+}
+
+fn map_erased_structured_completion_event(
+    event: ErasedStructuredTurnEvent,
+) -> Result<ErasedStructuredCompletionEvent, AgentError> {
+    match event {
+        ErasedStructuredTurnEvent::Started { request_id, model } => {
+            Ok(ErasedStructuredCompletionEvent::Started { request_id, model })
+        }
+        ErasedStructuredTurnEvent::StructuredOutputChunk { json_delta } => {
+            Ok(ErasedStructuredCompletionEvent::StructuredOutputChunk { json_delta })
+        }
+        ErasedStructuredTurnEvent::StructuredOutputReady(raw) => {
+            Ok(ErasedStructuredCompletionEvent::StructuredOutputReady(raw))
+        }
+        ErasedStructuredTurnEvent::ReasoningDelta { delta } => {
+            Ok(ErasedStructuredCompletionEvent::ReasoningDelta { delta })
+        }
+        ErasedStructuredTurnEvent::RefusalDelta { delta } => {
+            Ok(ErasedStructuredCompletionEvent::RefusalDelta { delta })
+        }
+        ErasedStructuredTurnEvent::Completed {
+            request_id,
+            finish_reason,
+            usage,
+            ..
+        } => Ok(ErasedStructuredCompletionEvent::Completed {
+            request_id,
+            finish_reason,
+            usage,
+        }),
+        ErasedStructuredTurnEvent::ToolCallChunk { .. }
+        | ErasedStructuredTurnEvent::ToolCallReady(_) => {
+            Err(AgentError::backend(OpenAiError::Sse {
+                message: "structured completion does not support tool calls".to_string(),
+            }))
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -345,7 +462,9 @@ impl UsageRecoveryAdapter for OpenAiAdapter {
         request_id: &str,
     ) -> Result<Option<Usage>, AgentError> {
         match kind {
-            OperationKind::TextTurn | OperationKind::StructuredTurn => {
+            OperationKind::TextTurn
+            | OperationKind::StructuredTurn
+            | OperationKind::StructuredCompletion => {
                 let value = self
                     .get_json(&format!("/responses/{request_id}"))
                     .await
