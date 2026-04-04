@@ -1,6 +1,6 @@
-# agents
+# lutum
 
-`agents` is a small Rust library for typed, streaming LLM workflows.
+`lutum` is a small Rust library for typed, streaming LLM workflows.
 
 The library is built around three layers:
 
@@ -13,12 +13,12 @@ If you want the design rationale rather than just the public surface, read
 
 ## Workspace layout
 
-- `crates/agents` - public facade crate, `Context`, `Session`, mocks
-- `crates/agents-protocol` - canonical request/response algebras and core traits
-- `crates/agents-openai` - OpenAI Responses API adapter (also used as Ollama backend)
-- `crates/agents-claude` - Anthropic Claude Messages API adapter
-- `crates/agents-openrouter` - OpenRouter usage-recovery adapter
-- `crates/agents-macros` - proc-macros for tools
+- `crates/lutum` - public facade crate, `Context`, `Session`, mocks
+- `crates/lutum-protocol` - canonical request/response algebras and core traits
+- `crates/lutum-openai` - OpenAI Responses API adapter (also used as Ollama backend)
+- `crates/lutum-claude` - Anthropic Claude Messages API adapter
+- `crates/lutum-openrouter` - OpenRouter usage-recovery adapter
+- `crates/lutum-macros` - proc-macros for tools
 
 ## Core ideas
 
@@ -33,7 +33,7 @@ If you want the design rationale rather than just the public surface, read
 ## Minimal example
 
 ```rust
-use agents::{
+use lutum::{
     Context, ModelInput, NoTools, RequestExtensions, SharedPoolBudgetManager,
     SharedPoolBudgetOptions, TextTurn, UsageEstimate,
 };
@@ -43,7 +43,7 @@ async fn run(ctx: Context) -> Result<(), Box<dyn std::error::Error>> {
         .system("You are concise.")
         .user("Say hello.");
 
-    let turn = TextTurn::<NoTools>::new(agents::ModelName::new("gpt-4.1-mini")?);
+    let turn = TextTurn::<NoTools>::new(lutum::ModelName::new("gpt-4.1-mini")?);
 
     let result = ctx
         .text_turn(
@@ -80,8 +80,8 @@ struct Contact {
 let result = ctx
     .structured_completion(
         RequestExtensions::default(),
-        agents::StructuredCompletionRequest::<Contact>::new(
-            agents::ModelName::new("gpt-4.1-mini")?,
+        lutum::StructuredCompletionRequest::<Contact>::new(
+            lutum::ModelName::new("gpt-4.1-mini")?,
             "Extract the email address.",
         ),
         UsageEstimate::zero(),
@@ -91,10 +91,10 @@ let result = ctx
     .await?;
 
 match result.semantic {
-    agents::StructuredTurnOutcome::Structured(contact) => {
+    lutum::StructuredTurnOutcome::Structured(contact) => {
         println!("{}", contact.email);
     }
-    agents::StructuredTurnOutcome::Refusal(refusal) => {
+    lutum::StructuredTurnOutcome::Refusal(refusal) => {
         println!("{refusal}");
     }
 }
@@ -116,9 +116,9 @@ The safe primary path is `TextTurn::new(ModelName::new(...)? )` /
 with `..Default::default()` reserved for nested parameter bundles:
 
 ```rust
-use agents::{GenerationParams, TextTurn, ToolPolicy};
+use lutum::{GenerationParams, TextTurn, ToolPolicy};
 
-let mut turn = TextTurn::<AppTools>::new(agents::ModelName::new("gpt-4.1")?);
+let mut turn = TextTurn::<AppTools>::new(lutum::ModelName::new("gpt-4.1")?);
 turn.config.tools = ToolPolicy::allow_only(vec![AppToolsSelector::Weather]);
 turn.config.generation = GenerationParams {
     max_output_tokens: Some(512),
@@ -147,7 +147,7 @@ resolved back to their `ToolDef` via `selector.definition()` or `Toolset::defini
     serde::Serialize,
     serde::Deserialize,
     schemars::JsonSchema,
-    agents::Toolset,
+    lutum::Toolset,
 )]
 enum AppTools {
     Weather(WeatherArgs),
@@ -156,7 +156,7 @@ enum AppTools {
 
 let turn = TextTurn::<AppTools> {
     config: {
-        let mut config = agents::TurnConfig::<AppTools>::new(agents::ModelName::new("gpt-4.1")?);
+        let mut config = lutum::TurnConfig::<AppTools>::new(lutum::ModelName::new("gpt-4.1")?);
         config.tools = ToolPolicy::allow_only(vec![
             AppToolsSelector::Weather,
             AppToolsSelector::Search,
@@ -185,10 +185,10 @@ let outcome = session
     .await?;
 
 match outcome {
-    agents::TextStepOutcome::Finished(result) => {
+    lutum::TextStepOutcome::Finished(result) => {
         session.commit_text(result);
     }
-    agents::TextStepOutcome::NeedsToolResults(round) => {
+    lutum::TextStepOutcome::NeedsToolResults(round) => {
         let tool_uses = execute_tools(round.tool_calls.clone())?;
         session.commit_tool_round(round, tool_uses)?;
     }
@@ -200,8 +200,8 @@ reaching for `first()`.
 
 ## Examples
 
-- `crates/agents-openai/examples/ollama_transcript.rs`
-- `crates/agents-claude/examples/ollama_transcript.rs`
+- `crates/lutum-openai/examples/ollama_transcript.rs`
+- `crates/lutum-claude/examples/ollama_transcript.rs`
 
 ## Development
 

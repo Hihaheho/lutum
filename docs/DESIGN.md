@@ -1,6 +1,6 @@
 # Design
 
-`agents` is a typed, streaming LLM runtime. It intentionally avoids a top-level `Agent`
+`lutum` is a typed, streaming LLM runtime. It intentionally avoids a top-level `Agent`
 abstraction.
 
 ## Core principles
@@ -314,9 +314,9 @@ canonical request faithfully, that remains an adapter limitation.
 
 ### Available adapters
 
-- `agents-openai` — OpenAI Responses API plus OpenAI-compatible raw completion support
-- `agents-claude` — Anthropic Claude Messages API with lossless thinking-block replay
-- `agents-openrouter` — `OpenRouterGenerationClient` implements `UsageRecoveryAdapter`
+- `lutum-openai` — OpenAI Responses API plus OpenAI-compatible raw completion support
+- `lutum-claude` — Anthropic Claude Messages API with lossless thinking-block replay
+- `lutum-openrouter` — `OpenRouterGenerationClient` implements `UsageRecoveryAdapter`
   via `GET /api/v1/generation`; can be composed with any `TurnAdapter` via `Context::from_parts`
 
 ## RequestExtensions

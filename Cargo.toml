@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "crates/agents", "crates/agents-claude",
-    "crates/agents-macros",
-    "crates/agents-openai",
-    "crates/agents-openrouter",
-    "crates/agents-protocol",
+    "crates/lutum", "crates/lutum-claude",
+    "crates/lutum-macros",
+    "crates/lutum-openai",
+    "crates/lutum-openrouter",
+    "crates/lutum-protocol",
 ]
 resolver = "2"
 
@@ -13,11 +13,11 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-agents-claude = { path = "crates/agents-claude" }
-agents-macros = { path = "crates/agents-macros" }
-agents-openai = { path = "crates/agents-openai" }
-agents-openrouter = { path = "crates/agents-openrouter" }
-agents-protocol = { path = "crates/agents-protocol" }
+lutum-claude = { path = "crates/lutum-claude" }
+lutum-macros = { path = "crates/lutum-macros" }
+lutum-openai = { path = "crates/lutum-openai" }
+lutum-openrouter = { path = "crates/lutum-openrouter" }
+lutum-protocol = { path = "crates/lutum-protocol" }
 async-stream = "0.3"
 async-trait = "0.1.89"
 bon = "3"
