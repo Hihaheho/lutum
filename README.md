@@ -1,6 +1,15 @@
 # lutum
 
-`lutum` is a small Rust library for typed, streaming LLM workflows.
+`lutum`, pronounced /ˈlu.tum/, is a composable LLM toolkit for advanced orchestration.
+
+## Goals
+
+- Preserve provider-specific power
+- Be production-friendly
+- Compose, don't take over
+- Power advanced control flows
+
+## Design
 
 The library is built around three layers:
 

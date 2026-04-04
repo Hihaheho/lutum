@@ -2,6 +2,7 @@
 name = "lutum"
 version.workspace = true
 edition.workspace = true
+description = "A composable LLM toolkit for advanced orchestration"
 
 [features]
 default = ["openai"]
