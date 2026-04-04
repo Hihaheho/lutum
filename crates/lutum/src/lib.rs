@@ -43,6 +43,12 @@ pub mod toolset {
     pub use lutum_protocol::toolset::*;
 }
 
+pub use context::{
+    CollectError, Context, ContextError, EventHandler, HandlerContext, HandlerDirective,
+    PendingCompletion, PendingStructuredCompletion, PendingStructuredTurn, PendingTextTurn,
+    StructuredTurnPartial,
+};
+
 #[cfg(feature = "claude")]
 pub use lutum_claude::{
     BudgetTokensResolver, ClaudeAdapter, ClaudeCommittedTurn, ClaudeError, ClaudeTurnItem,
@@ -77,11 +83,6 @@ pub use lutum_protocol::{
     ToolName, ToolPolicy, ToolResultItemView, ToolSelector, ToolUse, ToolUseError, Toolset,
     TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView, Usage, UsageEstimate,
     UsageRecoveryAdapter, assistant_json, find_tool_call_arguments,
-};
-pub use context::{
-    CollectError, Context, ContextError, EventHandler, HandlerContext, HandlerDirective,
-    PendingCompletion, PendingStructuredCompletion, PendingStructuredTurn, PendingTextTurn,
-    StructuredTurnPartial,
 };
 pub use mock::{
     MockCompletionScenario, MockError, MockLlmAdapter, MockStructuredCompletionScenario,

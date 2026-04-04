@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 
-use lutum::{RawJson, ToolMetadata, ToolUse, Toolset};
 use futures::executor::block_on;
+use lutum::{RawJson, ToolMetadata, ToolUse, Toolset};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

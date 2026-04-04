@@ -1,10 +1,10 @@
+use futures::executor::block_on;
 use lutum::{
     Context, FinishReason, InputMessageRole, MockLlmAdapter, MockStructuredScenario,
     MockTextScenario, ModelInput, ModelInputItem, NoTools, RequestExtensions, Session,
     SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcome, StructuredTurn,
     TextStepOutcome, TextTurn, ToolPolicy, Usage, UsageEstimate,
 };
-use futures::executor::block_on;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

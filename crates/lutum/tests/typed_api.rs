@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use lutum::{
     AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn, AgentError,
     AssistantInputItem, AssistantTurnItem, AssistantTurnView, BudgetLease, BudgetManager,
@@ -9,7 +10,6 @@ use lutum::{
     Temperature, TextTurn, TextTurnReducer, ToolMetadata, ToolPolicy, ToolUse, TurnAdapter, Usage,
     UsageEstimate, UsageRecoveryAdapter,
 };
-use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

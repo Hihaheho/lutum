@@ -5,6 +5,7 @@ members = [
     "crates/lutum-openai",
     "crates/lutum-openrouter",
     "crates/lutum-protocol",
+    "crates/lutum-trace",
 ]
 resolver = "2"
 
@@ -38,4 +39,5 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 monostate = "1.0"

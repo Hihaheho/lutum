@@ -136,11 +136,9 @@ fn structured_turn_collects_typed_output_and_appends_assistant_item() {
                 request_id: Some("req-2".into()),
                 model: "gpt-4.1".into(),
             }),
-            Ok(
-                lutum::mock::RawStructuredTurnEvent::StructuredOutputChunk {
-                    json_delta: "{\"answer\":\"42\"}".into(),
-                },
-            ),
+            Ok(lutum::mock::RawStructuredTurnEvent::StructuredOutputChunk {
+                json_delta: "{\"answer\":\"42\"}".into(),
+            }),
             Ok(lutum::mock::RawStructuredTurnEvent::Completed {
                 request_id: Some("req-2".into()),
                 finish_reason: FinishReason::Stop,
@@ -393,11 +391,9 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
                 request_id: Some("req-bad-structured".into()),
                 model: "gpt-4.1".into(),
             }),
-            Ok(
-                lutum::mock::RawStructuredTurnEvent::StructuredOutputChunk {
-                    json_delta: "{\"answer\":42}".into(),
-                },
-            ),
+            Ok(lutum::mock::RawStructuredTurnEvent::StructuredOutputChunk {
+                json_delta: "{\"answer\":42}".into(),
+            }),
             Ok(lutum::mock::RawStructuredTurnEvent::Completed {
                 request_id: Some("req-bad-structured".into()),
                 finish_reason: FinishReason::Stop,

@@ -1,0 +1,13 @@
+[package]
+name = "lutum-trace"
+version.workspace = true
+edition.workspace = true
+description = "Scoped in-memory tracing layer for span/event collection and testing"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

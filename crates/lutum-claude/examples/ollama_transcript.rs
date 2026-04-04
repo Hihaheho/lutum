@@ -9,6 +9,8 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use console::style;
+use futures::StreamExt;
 use lutum_claude::ClaudeAdapter;
 use lutum_protocol::{
     budget::Usage,
@@ -19,8 +21,6 @@ use lutum_protocol::{
         GenerationParams, ModelName, TurnAdapter,
     },
 };
-use console::style;
-use futures::StreamExt;
 
 const MODEL: &str = "qwen3.5:2b";
 const BASE_URL: &str = "http://localhost:11434";
