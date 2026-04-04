@@ -2,6 +2,11 @@
 name = "lutum-claude"
 version.workspace = true
 edition.workspace = true
+description = "Anthropic Claude Messages API adapter for lutum"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["llm", "ai", "claude", "anthropic"]
 
 [dependencies]
 lutum-protocol.workspace = true

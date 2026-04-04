@@ -2,6 +2,11 @@
 name = "lutum-openrouter"
 version.workspace = true
 edition.workspace = true
+description = "OpenRouter adapter for lutum"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["llm", "ai", "openrouter"]
 
 [dependencies]
 lutum-protocol = { workspace = true }

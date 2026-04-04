@@ -2,6 +2,11 @@
 name = "lutum-protocol"
 version.workspace = true
 edition.workspace = true
+description = "Core traits and request/response types for lutum"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["llm", "ai", "protocol", "streaming"]
 
 [dependencies]
 async-trait.workspace = true

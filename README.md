@@ -52,7 +52,7 @@ async fn run(ctx: Context) -> Result<(), Box<dyn std::error::Error>> {
         .system("You are concise.")
         .user("Say hello.");
 
-    let turn = TextTurn::<NoTools>::new(lutum::ModelName::new("gpt-4.1-mini")?);
+    let turn = TextTurn::<NoTools>::new(lutum::ModelName::new("haiku-4.5")?);
 
     let result = ctx
         .text_turn(

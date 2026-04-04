@@ -2,6 +2,11 @@
 name = "lutum-macros"
 version.workspace = true
 edition.workspace = true
+description = "Proc-macros for defining LLM tools with lutum"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["llm", "ai", "macros", "tools"]
 
 [lib]
 proc-macro = true

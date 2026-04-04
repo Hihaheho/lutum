@@ -3,9 +3,14 @@ name = "lutum"
 version.workspace = true
 edition.workspace = true
 description = "A composable LLM toolkit for advanced orchestration"
+readme = "../../README.md"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["llm", "ai", "orchestration", "streaming"]
 
 [features]
-default = ["openai"]
+default = []
 claude = ["dep:lutum-claude"]
 openai = ["dep:lutum-openai"]
 

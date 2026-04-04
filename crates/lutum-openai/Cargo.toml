@@ -2,6 +2,11 @@
 name = "lutum-openai"
 version.workspace = true
 edition.workspace = true
+description = "OpenAI Responses API adapter for lutum"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["llm", "ai", "openai", "streaming"]
 
 [dependencies]
 lutum-protocol.workspace = true
