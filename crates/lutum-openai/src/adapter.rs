@@ -6,6 +6,9 @@ use std::{
     sync::Arc,
 };
 
+use async_stream::try_stream;
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use lutum_protocol::{
     AgentError, FinishReason,
     budget::Usage,
@@ -24,9 +27,6 @@ use lutum_protocol::{
     },
     transcript::{TurnRole, TurnView},
 };
-use async_stream::try_stream;
-use bytes::Bytes;
-use futures::{Stream, StreamExt};
 use reqwest::{
     Client,
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
@@ -1351,11 +1351,10 @@ where
                             let name = output_item_tool_name(&item);
                             // Also register under item id so that providers (e.g. Ollama) that
                             // use item_id (not call_id) in delta/done events can resolve the name.
-                            if let Some(item_id) = &item.id {
-                                if !item_id.is_empty() && *item_id != key {
+                            if let Some(item_id) = &item.id
+                                && !item_id.is_empty() && *item_id != key {
                                     tool_calls.observe_call(item_id.clone(), id.clone(), name.clone());
                                 }
-                            }
                             tool_calls.observe_call(key, id, name);
                         }
                     }
@@ -1569,11 +1568,10 @@ where
                             let key = output_item_tool_key(&item);
                             let id = output_item_tool_id(&item);
                             let name = output_item_tool_name(&item);
-                            if let Some(item_id) = &item.id {
-                                if !item_id.is_empty() && *item_id != key {
+                            if let Some(item_id) = &item.id
+                                && !item_id.is_empty() && *item_id != key {
                                     tool_calls.observe_call(item_id.clone(), id.clone(), name.clone());
                                 }
-                            }
                             tool_calls.observe_call(key, id, name);
                         }
                     }
