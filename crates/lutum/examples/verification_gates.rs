@@ -141,7 +141,9 @@ async fn main() -> anyhow::Result<()> {
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
     let model = ModelName::new(&model_name)?;
-    let adapter = OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model);
+    let adapter = OpenAiAdapter::new(token)
+        .with_base_url(endpoint)
+        .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::with_hooks(Arc::new(adapter), budget, HookRegistry::new());
     let source = "Call John Smith at john@example.com or +1-555-0100";

@@ -39,7 +39,11 @@ async fn main() -> anyhow::Result<()> {
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
     let model = ModelName::new(&model_name)?;
     let ctx = Context::new(
-        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model)),
+        Arc::new(
+            OpenAiAdapter::new(token)
+                .with_base_url(endpoint)
+                .with_default_model(model),
+        ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
     let system = "You are a Rust code generator. Output only the struct definition.";

@@ -85,7 +85,11 @@ async fn main() -> anyhow::Result<()> {
         .register_validate_prompt(RejectEmptyPrompt)
         .register_validate_output(BlockDangerousOutput);
     let ctx = Context::with_hooks(
-        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model)),
+        Arc::new(
+            OpenAiAdapter::new(token)
+                .with_base_url(endpoint)
+                .with_default_model(model),
+        ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
         hooks,
     );

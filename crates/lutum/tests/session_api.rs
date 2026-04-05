@@ -108,8 +108,7 @@ fn tool_round_is_only_applied_on_explicit_commit() {
             .prepare_text(
                 RequestExtensions::new(),
                 {
-                    let mut turn =
-                        TextTurn::<Tools>::new();
+                    let mut turn = TextTurn::<Tools>::new();
                     turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
                     turn
                 },

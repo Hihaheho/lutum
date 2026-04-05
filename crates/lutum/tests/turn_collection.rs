@@ -223,13 +223,9 @@ fn recorded_events_reduce_to_same_result_as_collect() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
-    let pending = block_on(ctx.text_turn(
-        extensions(),
-        input(),
-        weather_turn(),
-        UsageEstimate::zero(),
-    ))
-    .unwrap();
+    let pending =
+        block_on(ctx.text_turn(extensions(), input(), weather_turn(), UsageEstimate::zero()))
+            .unwrap();
     let collected = block_on(pending.collect_noop()).unwrap();
 
     assert_eq!(reduced.assistant_turn, collected.assistant_turn);

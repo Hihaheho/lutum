@@ -924,7 +924,9 @@ where
         extensions: &crate::extensions::RequestExtensions,
         hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
-        (**self).structured_completion(request, extensions, hooks).await
+        (**self)
+            .structured_completion(request, extensions, hooks)
+            .await
     }
 }
 

@@ -19,8 +19,8 @@ pub use conversation::{
     ModelInputValidationError, NonEmpty, RawJson, ToolCallId, ToolMetadata, ToolName, ToolUse,
 };
 pub use error::{AgentError, BoxError};
-pub use hooks::HookRegistry;
 pub use extensions::RequestExtensions;
+pub use hooks::HookRegistry;
 pub use llm::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
     AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig,
