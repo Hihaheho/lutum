@@ -34,6 +34,7 @@ If you want the design rationale rather than just the public surface, read
 | `crates/lutum-openrouter` | OpenRouter wrapper with usage recovery |
 | `crates/lutum-macros` | `#[derive(Toolset)]`, `#[tool_fn]`, `#[tool_input]`, hook macros |
 | `crates/lutum-trace` | Companion crate for scoped in-memory span and event capture |
+| `crates/lutum-eval` | Borrowed trace/artifact metrics and async judge metrics |
 
 ## Install
 
@@ -53,6 +54,9 @@ serde = { version = "1", features = ["derive"] }
 # Only if you want in-memory trace capture
 lutum-trace = "0.1.0"
 tracing-subscriber = { version = "0.3", features = ["registry"] }
+
+# Only if you want trace/artifact evaluation helpers
+lutum-eval = "0.1.0"
 ```
 
 ## Mental Model
@@ -404,6 +408,73 @@ if let Some(turn) = collected.trace.span("llm_turn") {
 The capture scope is task-local. If you spawn a Tokio task, call `lutum_trace::capture(...)`
 inside that task as well. For tests, `lutum_trace::test::collect(...)` provides a small helper on
 top of the same machinery.
+
+## Evaluation
+
+`lutum-eval` is a companion crate for scoring a strongly typed artifact together with a
+captured `TraceSnapshot`.
+
+- `Metric`: sync, pure, replay-friendly evaluation over `&TraceSnapshot` and `&Artifact`
+- `JudgeMetric`: async evaluation that also receives `&Context`, useful for model-based scoring
+
+Live evaluation uses the future output as the artifact directly:
+
+```rust
+use async_trait::async_trait;
+use lutum::Context;
+use lutum_eval::{JudgeMetric, Metric, evaluate_live, judge_live};
+
+#[derive(Debug)]
+struct Draft {
+    text: String,
+}
+
+struct LengthMetric;
+
+impl Metric for LengthMetric {
+    type Artifact = Draft;
+    type Score = usize;
+    type Error = core::convert::Infallible;
+
+    fn evaluate(
+        &self,
+        _trace: &lutum_eval::TraceSnapshot,
+        artifact: &Self::Artifact,
+    ) -> Result<Self::Score, Self::Error> {
+        Ok(artifact.text.len())
+    }
+}
+
+struct JudgeLength;
+
+#[async_trait]
+impl JudgeMetric for JudgeLength {
+    type Artifact = Draft;
+    type Score = usize;
+    type Error = core::convert::Infallible;
+
+    async fn judge(
+        &self,
+        _ctx: &Context,
+        _trace: &lutum_eval::TraceSnapshot,
+        artifact: &Self::Artifact,
+    ) -> Result<Self::Score, Self::Error> {
+        Ok(artifact.text.len())
+    }
+}
+
+// Assume `ctx: Context` was already built as in the quickstart.
+let metric_score = evaluate_live(&LengthMetric, async {
+    Draft { text: "hello".into() }
+}).await?;
+
+let judge_score = judge_live(&JudgeLength, &ctx, async {
+    Draft { text: "hello".into() }
+}).await?;
+```
+
+`Metric` is for deterministic local scoring. `JudgeMetric` is for cases where scoring itself
+needs to call back into lutum through a `Context`.
 
 ## Examples
 

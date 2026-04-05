@@ -1,0 +1,18 @@
+[package]
+name = "lutum-eval"
+version.workspace = true
+edition.workspace = true
+description = "Metric core for evaluating trace + artifact pairs"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["llm", "ai", "evaluation", "tracing"]
+
+[dependencies]
+async-trait.workspace = true
+lutum.workspace = true
+lutum-trace.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tracing.workspace = true
