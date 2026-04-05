@@ -82,7 +82,8 @@ Alternatives considered and rejected:
 
 **Execution model**
 
-Chaining slots include `last: Option<R>` as the final parameter. Singleton slots omit it.
+Chaining slots pass `last: Option<R>` to registered implementations. Slot definitions may
+omit that parameter entirely, or keep it for backwards compatibility. Singleton slots omit it.
 
 For `#[def_hook(always)]` slots:
 - `last` is always `Some(_)` for registered hooks because the default already ran

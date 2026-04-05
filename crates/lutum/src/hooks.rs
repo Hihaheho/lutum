@@ -12,8 +12,8 @@
 //! use lutum::*;
 //!
 //! #[def_hook(always)]
-//! async fn validate_output(_ctx: &Context, output: &str, last: Option<Result<(), String>>) -> Result<(), String> {
-//!     Ok(())
+//! async fn validate_output(_ctx: &Context, output: &str) -> Result<(), String> {
+//!     if output.trim().is_empty() { Err("output must not be empty".into()) } else { Ok(()) }
 //! }
 //! ```
 //!
@@ -47,8 +47,9 @@
 //!
 //! ## Chaining
 //!
-//! Multiple hooks registered for the same slot run in order for chaining slots. Each hook
-//! receives the previous hook's result as `last`:
+//! Multiple hooks registered for the same slot run in order for chaining slots. The slot
+//! definition may omit `last`, but each registered hook receives the previous hook's result
+//! as `last`:
 //!
 //! - `#[def_hook(always)]`: the default runs first, then the first registered hook gets `last = Some(default_result)`
 //! - `#[def_hook(fallback)]`: the first registered hook gets `last = None`

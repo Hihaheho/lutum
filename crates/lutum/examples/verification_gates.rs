@@ -38,16 +38,7 @@ fn normalize_phone(value: &str) -> String {
 }
 
 #[def_hook(always)]
-async fn audit_contact(
-    _ctx: &Context,
-    source: &str,
-    contact: &Contact,
-    last: Option<Result<(), Vec<String>>>,
-) -> Result<(), Vec<String>> {
-    if let Some(previous) = last {
-        return previous;
-    }
-
+async fn audit_contact(_ctx: &Context, source: &str, contact: &Contact) -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
     let source_tokens = source
         .split_whitespace()

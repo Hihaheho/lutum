@@ -316,14 +316,8 @@ use lutum::{
 };
 
 #[lutum::def_hook(always)]
-async fn validate_prompt(
-    _ctx: &Context,
-    prompt: &str,
-    last: Option<Result<(), String>>,
-) -> Result<(), String> {
-    if let Some(previous) = last {
-        previous
-    } else if prompt.trim().is_empty() {
+async fn validate_prompt(_ctx: &Context, prompt: &str) -> Result<(), String> {
+    if prompt.trim().is_empty() {
         Err("prompt must not be empty".into())
     } else {
         Ok(())
@@ -367,6 +361,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+- The slot definition can omit `last`; registered chaining hooks still receive it.
 - `always`: run the default implementation first, then chain registered hooks on top
 - `fallback`: use registered hooks if present, otherwise run the default
 - `singleton`: pick one override or use the default; the last registration wins and emits a warning

@@ -448,18 +448,27 @@ enum HookKind {
 }
 
 impl HookKind {
-    fn last_requirement(&self) -> HookLastRequirement {
+    fn default_last_requirement(&self) -> HookLastRequirement {
         match self {
-            Self::Always | Self::Fallback => HookLastRequirement::Required,
+            Self::Always | Self::Fallback => HookLastRequirement::Optional,
             Self::Singleton => HookLastRequirement::Forbidden,
         }
+    }
+
+    fn trait_has_last(&self) -> bool {
+        matches!(self, Self::Always | Self::Fallback)
     }
 }
 
 enum HookLastRequirement {
-    Required,
     Forbidden,
     Optional,
+}
+
+#[derive(Clone, Copy)]
+enum HookLastRecognition {
+    CompatibleOption,
+    LastNamedCompatibleOption,
 }
 
 fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream {
@@ -468,11 +477,16 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
         ctx_ty,
         explicit_args,
         output_ty,
-        has_last,
-    } = match analyze_hook_signature(&item_fn, kind.last_requirement()) {
+        has_last: default_has_last,
+    } = match analyze_hook_signature(
+        &item_fn,
+        kind.default_last_requirement(),
+        HookLastRecognition::LastNamedCompatibleOption,
+    ) {
         Ok(signature) => signature,
         Err(err) => return err.to_compile_error(),
     };
+    let trait_has_last = kind.trait_has_last();
 
     let fn_ident = item_fn.sig.ident.clone();
     let vis = item_fn.vis.clone();
@@ -508,7 +522,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
         .collect::<Vec<_>>();
     let mut hook_trait_args = hook_call_args.clone();
     let mut hook_trait_call_arg_names = hook_call_arg_names.clone();
-    if has_last {
+    if trait_has_last {
         hook_trait_args.push(quote! { last: ::std::option::Option<#output_ty> });
         hook_trait_call_arg_names.push(quote! { last });
     }
@@ -542,7 +556,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
             }
         })
         .collect::<Vec<_>>();
-    let default_call = if has_last {
+    let default_call = if default_has_last {
         quote! {
             #default_fn_ident(
                 #ctx_ident,
@@ -568,7 +582,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
         )
         .await
     };
-    let dyn_hook_impl_call = if has_last {
+    let dyn_hook_impl_call = if trait_has_last {
         quote! {
             <T as #hook_trait_ident>::call(
                 self,
@@ -830,7 +844,11 @@ fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStr
         explicit_args,
         output_ty,
         has_last,
-    } = match analyze_hook_signature(&item_fn, HookLastRequirement::Optional) {
+    } = match analyze_hook_signature(
+        &item_fn,
+        HookLastRequirement::Optional,
+        HookLastRecognition::CompatibleOption,
+    ) {
         Ok(signature) => signature,
         Err(err) => return err.to_compile_error(),
     };
@@ -876,6 +894,7 @@ fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStr
 fn analyze_hook_signature(
     item_fn: &ItemFn,
     last_requirement: HookLastRequirement,
+    last_recognition: HookLastRecognition,
 ) -> syn::Result<HookSignature> {
     if item_fn.sig.receiver().is_some() {
         return Err(syn::Error::new_spanned(
@@ -939,31 +958,14 @@ fn analyze_hook_signature(
     let ctx_ident = ctx_ident.clone();
     let ctx_ty = (*ctx_arg.ty).clone();
 
-    let maybe_last_arg = inputs.last().and_then(|arg| match arg {
-        FnArg::Typed(pat_ty) => option_inner_type(pat_ty.ty.as_ref())
-            .filter(|inner| types_match(inner, &output_ty))
-            .map(|_| pat_ty),
-        FnArg::Receiver(_) => None,
-    });
-    let has_last = if let Some(last_arg) = maybe_last_arg {
-        let Pat::Ident(PatIdent { .. }) = last_arg.pat.as_ref() else {
-            return Err(syn::Error::new_spanned(
-                &last_arg.pat,
-                "expected `last` identifier",
-            ));
-        };
-        true
-    } else {
-        false
-    };
+    let has_last = inputs
+        .last()
+        .copied()
+        .map(|arg| hook_last_matches(arg, &output_ty, last_recognition))
+        .transpose()?
+        .unwrap_or(false);
 
     match last_requirement {
-        HookLastRequirement::Required if !has_last => {
-            return Err(syn::Error::new_spanned(
-                &item_fn.sig.inputs,
-                "hook slot definitions with #[def_hook(always)] or #[def_hook(fallback)] require `last: Option<Return>` as the final argument",
-            ));
-        }
         HookLastRequirement::Forbidden if has_last => {
             return Err(syn::Error::new_spanned(
                 inputs.last().expect("hook must have final input"),
@@ -994,6 +996,37 @@ fn analyze_hook_signature(
         explicit_args,
         output_ty,
         has_last,
+    })
+}
+
+fn hook_last_matches(
+    arg: &FnArg,
+    output_ty: &Type,
+    recognition: HookLastRecognition,
+) -> syn::Result<bool> {
+    let FnArg::Typed(pat_ty) = arg else {
+        return Ok(false);
+    };
+    let Some(inner) = option_inner_type(pat_ty.ty.as_ref()) else {
+        return Ok(false);
+    };
+    if !types_match(inner, output_ty) {
+        return Ok(false);
+    }
+
+    let Pat::Ident(PatIdent { ident, .. }) = pat_ty.pat.as_ref() else {
+        return match recognition {
+            HookLastRecognition::CompatibleOption => Err(syn::Error::new_spanned(
+                &pat_ty.pat,
+                "expected `last` identifier",
+            )),
+            HookLastRecognition::LastNamedCompatibleOption => Ok(false),
+        };
+    };
+
+    Ok(match recognition {
+        HookLastRecognition::CompatibleOption => true,
+        HookLastRecognition::LastNamedCompatibleOption => is_hook_last_ident(ident),
     })
 }
 
@@ -1366,6 +1399,11 @@ fn option_inner_type(ty: &Type) -> Option<&Type> {
         GenericArgument::Type(inner) => Some(inner),
         _ => None,
     }
+}
+
+fn is_hook_last_ident(ident: &Ident) -> bool {
+    let ident = ident.to_string();
+    ident == "last" || ident.starts_with("_last")
 }
 
 fn types_match(lhs: &Type, rhs: &Type) -> bool {
