@@ -14,7 +14,13 @@ async fn ask(
     }
     session.push_user(prompt);
     let result = match temperature {
-        Some(temperature) => session.text_turn().temperature(temperature).collect().await?,
+        Some(temperature) => {
+            session
+                .text_turn()
+                .temperature(temperature)
+                .collect()
+                .await?
+        }
         None => session.text_turn().collect().await?,
     };
     Ok(result.assistant_text())

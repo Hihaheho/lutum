@@ -101,8 +101,7 @@ fn structured_session_turn_is_only_applied_after_commit() {
     let before_len = session.input().items().len();
     let before_turns = session.list_turns().count();
 
-    let result = block_on(async { session.structured_turn::<Contact>().collect().await })
-        .unwrap();
+    let result = block_on(async { session.structured_turn::<Contact>().collect().await }).unwrap();
 
     assert_eq!(session.input().items().len(), before_len);
     assert_eq!(session.list_turns().count(), before_turns);

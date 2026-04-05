@@ -49,7 +49,8 @@ fn prepare_and_collect_do_not_mutate_transcript_before_commit() {
     let before_len = session.input().items().len();
     let before_turns = session.list_turns().count();
 
-    let result = futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
+    let result =
+        futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
 
     assert_eq!(session.input().items().len(), before_len);
     assert_eq!(session.list_turns().count(), before_turns);

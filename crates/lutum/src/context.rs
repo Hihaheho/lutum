@@ -17,11 +17,11 @@ use lutum_protocol::{
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
         ErasedTextTurnEventStream, OperationKind, StructuredCompletionEvent,
         StructuredCompletionEventStream, StructuredCompletionRequest,
-        StructuredTurn as ProtocolStructuredTurn, StructuredTurnEvent,
-        StructuredTurnEventStream, StructuredTurnEventStreamWithTools,
-        StructuredTurnEventWithTools, TextTurn as ProtocolTextTurn, TextTurnEvent,
-        TextTurnEventStream, TextTurnEventStreamWithTools, TextTurnEventWithTools, TurnAdapter,
-        TurnConfig, UsageRecoveryAdapter,
+        StructuredTurn as ProtocolStructuredTurn, StructuredTurnEvent, StructuredTurnEventStream,
+        StructuredTurnEventStreamWithTools, StructuredTurnEventWithTools,
+        TextTurn as ProtocolTextTurn, TextTurnEvent, TextTurnEventStream,
+        TextTurnEventStreamWithTools, TextTurnEventWithTools, TurnAdapter, TurnConfig,
+        UsageRecoveryAdapter,
     },
     reducer::{
         CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
@@ -1187,11 +1187,7 @@ where
         mut handler: H,
     ) -> Result<
         StructuredTurnResultWithTools<T, O>,
-        CollectError<
-            H::Error,
-            StructuredTurnReductionError,
-            StructuredTurnPartialWithTools<T, O>,
-        >,
+        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
     >
     where
         H: EventHandler<StructuredTurnEventWithTools<T, O>, StructuredTurnStateWithTools<T, O>>,
@@ -1230,8 +1226,9 @@ where
                                 ),
                             });
                         }
-                        let partial =
-                            StructuredTurnPartialWithTools::from_state(self.reducer.state().clone());
+                        let partial = StructuredTurnPartialWithTools::from_state(
+                            self.reducer.state().clone(),
+                        );
                         return self
                             .reducer
                             .into_result()
@@ -1801,8 +1798,7 @@ where
     })
 }
 
-fn map_text_stream(stream: ErasedTextTurnEventStream) -> TextTurnEventStream
-{
+fn map_text_stream(stream: ErasedTextTurnEventStream) -> TextTurnEventStream {
     Box::pin(stream.map(|item| item.and_then(map_text_event)))
 }
 
@@ -1843,18 +1839,17 @@ where
 
 fn map_text_event(event: ErasedTextTurnEvent) -> Result<TextTurnEvent, AgentError> {
     match event {
-        ErasedTextTurnEvent::Started { request_id, model } => Ok(TextTurnEvent::Started {
-            request_id,
-            model,
-        }),
+        ErasedTextTurnEvent::Started { request_id, model } => {
+            Ok(TextTurnEvent::Started { request_id, model })
+        }
         ErasedTextTurnEvent::TextDelta { delta } => Ok(TextTurnEvent::TextDelta { delta }),
         ErasedTextTurnEvent::ReasoningDelta { delta } => {
             Ok(TextTurnEvent::ReasoningDelta { delta })
         }
         ErasedTextTurnEvent::RefusalDelta { delta } => Ok(TextTurnEvent::RefusalDelta { delta }),
-        ErasedTextTurnEvent::ToolCallChunk {
-            ..
-        } => Err(NoToolsContractViolation::TextTurnToolCallChunk.into()),
+        ErasedTextTurnEvent::ToolCallChunk { .. } => {
+            Err(NoToolsContractViolation::TextTurnToolCallChunk.into())
+        }
         ErasedTextTurnEvent::ToolCallReady(_) => {
             Err(NoToolsContractViolation::TextTurnToolCallReady.into())
         }
@@ -1888,9 +1883,7 @@ where
         ErasedTextTurnEvent::Started { request_id, model } => {
             Ok(TextTurnEventWithTools::Started { request_id, model })
         }
-        ErasedTextTurnEvent::TextDelta { delta } => {
-            Ok(TextTurnEventWithTools::TextDelta { delta })
-        }
+        ErasedTextTurnEvent::TextDelta { delta } => Ok(TextTurnEventWithTools::TextDelta { delta }),
         ErasedTextTurnEvent::ReasoningDelta { delta } => {
             Ok(TextTurnEventWithTools::ReasoningDelta { delta })
         }
@@ -1948,9 +1941,9 @@ where
         ErasedStructuredTurnEvent::RefusalDelta { delta } => {
             Ok(StructuredTurnEvent::RefusalDelta { delta })
         }
-        ErasedStructuredTurnEvent::ToolCallChunk {
-            ..
-        } => Err(NoToolsContractViolation::StructuredTurnToolCallChunk.into()),
+        ErasedStructuredTurnEvent::ToolCallChunk { .. } => {
+            Err(NoToolsContractViolation::StructuredTurnToolCallChunk.into())
+        }
         ErasedStructuredTurnEvent::ToolCallReady(_) => {
             Err(NoToolsContractViolation::StructuredTurnToolCallReady.into())
         }
@@ -1988,11 +1981,11 @@ where
         ErasedStructuredTurnEvent::StructuredOutputChunk { json_delta } => {
             Ok(StructuredTurnEventWithTools::StructuredOutputChunk { json_delta })
         }
-        ErasedStructuredTurnEvent::StructuredOutputReady(raw) => Ok(
-            StructuredTurnEventWithTools::StructuredOutputReady(
+        ErasedStructuredTurnEvent::StructuredOutputReady(raw) => {
+            Ok(StructuredTurnEventWithTools::StructuredOutputReady(
                 raw.deserialize().map_err(AgentError::structured_output)?,
-            ),
-        ),
+            ))
+        }
         ErasedStructuredTurnEvent::ReasoningDelta { delta } => {
             Ok(StructuredTurnEventWithTools::ReasoningDelta { delta })
         }

@@ -12,8 +12,13 @@ struct CommandPolicy {
 }
 // A struct is clearer here: multiple policy fields, shared helper logic, no capture noise.
 #[async_trait::async_trait]
-impl ValidateCommandHook for CommandPolicy {
-    async fn call(&self, _ctx: &Context, cmd: &str, last: Option<Validation>) -> Validation {
+impl StatefulValidateCommandHook for CommandPolicy {
+    async fn call_mut(
+        &mut self,
+        _ctx: &Context,
+        cmd: &str,
+        last: Option<Validation>,
+    ) -> Validation {
         if let Some(Err(reasons)) = last {
             return Err(reasons);
         }

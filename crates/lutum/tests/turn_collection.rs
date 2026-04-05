@@ -64,7 +64,9 @@ fn test_budget() -> SharedPoolBudgetManager {
 struct StopOnTextDelta;
 
 #[async_trait]
-impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>> for StopOnTextDelta {
+impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
+    for StopOnTextDelta
+{
     type Error = std::convert::Infallible;
 
     async fn on_event(
@@ -72,11 +74,13 @@ impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>> 
         event: &TextTurnEventWithTools<Tools>,
         _cx: &HandlerContext<TextTurnStateWithTools<Tools>>,
     ) -> Result<HandlerDirective, Self::Error> {
-        Ok(if matches!(event, TextTurnEventWithTools::TextDelta { .. }) {
-            HandlerDirective::Stop
-        } else {
-            HandlerDirective::Continue
-        })
+        Ok(
+            if matches!(event, TextTurnEventWithTools::TextDelta { .. }) {
+                HandlerDirective::Stop
+            } else {
+                HandlerDirective::Continue
+            },
+        )
     }
 }
 
@@ -140,7 +144,7 @@ fn structured_turn_collects_typed_output_and_appends_assistant_item() {
                     ..Usage::zero()
                 },
             }),
-    ]));
+        ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
     let result = block_on(ctx.structured_turn::<Summary>(input()).collect()).unwrap();
@@ -391,7 +395,7 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
                     ..Usage::zero()
                 },
             }),
-    ]));
+        ]));
     let ctx = Context::new(Arc::new(adapter), budget.clone());
     let pending = block_on(
         ctx.structured_turn::<Summary>(input())

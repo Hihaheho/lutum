@@ -34,7 +34,10 @@ async fn classify(
     let mut session = Session::new(ctx.clone());
     session.push_system(system);
     session.push_user(user);
-    let result = session.structured_turn::<RecoveryAction>().collect().await?;
+    let result = session
+        .structured_turn::<RecoveryAction>()
+        .collect()
+        .await?;
     match result.semantic {
         StructuredTurnOutcome::Structured(action) => Ok(action),
         StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),

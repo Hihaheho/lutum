@@ -154,8 +154,10 @@ impl Session {
     }
 
     /// Commit a completed tool-enabled structured turn into the session transcript.
-    pub fn commit_structured_with_tools<T, O>(&mut self, result: StructuredTurnResultWithTools<T, O>)
-    where
+    pub fn commit_structured_with_tools<T, O>(
+        &mut self,
+        result: StructuredTurnResultWithTools<T, O>,
+    ) where
         T: Toolset,
         O: StructuredOutput,
     {

@@ -398,11 +398,7 @@ where
     }
 }
 
-impl<O> Eq for StructuredTurnState<O>
-where
-    O: StructuredOutput + Eq,
-{
-}
+impl<O> Eq for StructuredTurnState<O> where O: StructuredOutput + Eq {}
 
 impl<O> StructuredTurnState<O>
 where
@@ -628,7 +624,9 @@ where
         Ok(())
     }
 
-    pub fn finish(self) -> Result<StructuredTurnResultWithTools<T, O>, StructuredTurnReductionError> {
+    pub fn finish(
+        self,
+    ) -> Result<StructuredTurnResultWithTools<T, O>, StructuredTurnReductionError> {
         let finish_reason = self
             .finish_reason
             .ok_or(StructuredTurnReductionError::Incomplete)?;
@@ -1001,7 +999,10 @@ where
         self.state
     }
 
-    pub fn apply(&mut self, event: &TextTurnEventWithTools<T>) -> Result<(), TextTurnReductionError> {
+    pub fn apply(
+        &mut self,
+        event: &TextTurnEventWithTools<T>,
+    ) -> Result<(), TextTurnReductionError> {
         self.state.apply(event)
     }
 
@@ -1041,11 +1042,17 @@ where
         self.state
     }
 
-    pub fn apply(&mut self, event: &StructuredTurnEvent<O>) -> Result<(), StructuredTurnReductionError> {
+    pub fn apply(
+        &mut self,
+        event: &StructuredTurnEvent<O>,
+    ) -> Result<(), StructuredTurnReductionError> {
         self.state.apply(event)
     }
 
-    pub fn into_result(self) -> Result<StructuredTurnResult<O>, (StructuredTurnReductionError, Option<CommittedTurn>)> {
+    pub fn into_result(
+        self,
+    ) -> Result<StructuredTurnResult<O>, (StructuredTurnReductionError, Option<CommittedTurn>)>
+    {
         let committed_turn = self.state.committed_turn.clone();
         self.state
             .finish()
@@ -1095,8 +1102,10 @@ where
 
     pub fn into_result(
         self,
-    ) -> Result<StructuredTurnResultWithTools<T, O>, (StructuredTurnReductionError, Option<CommittedTurn>)>
-    {
+    ) -> Result<
+        StructuredTurnResultWithTools<T, O>,
+        (StructuredTurnReductionError, Option<CommittedTurn>),
+    > {
         let committed_turn = self.state.committed_turn.clone();
         self.state
             .finish()

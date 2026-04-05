@@ -249,10 +249,7 @@ where
         self
     }
 
-    pub fn allow_only(
-        mut self,
-        selectors: impl IntoIterator<Item = T::Selector>,
-    ) -> Self {
+    pub fn allow_only(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
         self.turn.config.tools = ToolPolicy::allow_only(selectors);
         self
     }
@@ -262,10 +259,7 @@ where
         self
     }
 
-    pub fn require_only(
-        mut self,
-        selectors: impl IntoIterator<Item = T::Selector>,
-    ) -> Self {
+    pub fn require_only(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
         self.turn.config.tools = ToolPolicy::require_only(selectors);
         self
     }
@@ -279,7 +273,9 @@ where
             .await
     }
 
-    pub async fn stream(self) -> Result<lutum_protocol::TextTurnEventStreamWithTools<T>, ContextError> {
+    pub async fn stream(
+        self,
+    ) -> Result<lutum_protocol::TextTurnEventStreamWithTools<T>, ContextError> {
         Ok(self.start().await?.into_stream())
     }
 
@@ -521,10 +517,7 @@ where
         self
     }
 
-    pub fn allow_only(
-        mut self,
-        selectors: impl IntoIterator<Item = T::Selector>,
-    ) -> Self {
+    pub fn allow_only(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
         self.turn.config.tools = ToolPolicy::allow_only(selectors);
         self
     }
@@ -534,10 +527,7 @@ where
         self
     }
 
-    pub fn require_only(
-        mut self,
-        selectors: impl IntoIterator<Item = T::Selector>,
-    ) -> Self {
+    pub fn require_only(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
         self.turn.config.tools = ToolPolicy::require_only(selectors);
         self
     }
@@ -566,9 +556,9 @@ where
     >
     where
         H: EventHandler<
-            lutum_protocol::StructuredTurnEventWithTools<T, O>,
-            StructuredTurnStateWithTools<T, O>,
-        >,
+                lutum_protocol::StructuredTurnEventWithTools<T, O>,
+                StructuredTurnStateWithTools<T, O>,
+            >,
     {
         match self.start().await {
             Err(source) => Err(CollectError::Execution {
@@ -817,11 +807,7 @@ where
         handler: H,
     ) -> Result<
         StructuredCompletionResult<O>,
-        CollectError<
-            H::Error,
-            StructuredCompletionReductionError,
-            StructuredCompletionState<O>,
-        >,
+        CollectError<H::Error, StructuredCompletionReductionError, StructuredCompletionState<O>>,
     >
     where
         H: EventHandler<lutum_protocol::StructuredCompletionEvent<O>, StructuredCompletionState<O>>,
@@ -839,11 +825,7 @@ where
         self,
     ) -> Result<
         StructuredCompletionResult<O>,
-        CollectError<
-            Infallible,
-            StructuredCompletionReductionError,
-            StructuredCompletionState<O>,
-        >,
+        CollectError<Infallible, StructuredCompletionReductionError, StructuredCompletionState<O>>,
     > {
         match self.start().await {
             Ok(pending) => pending.collect().await,
