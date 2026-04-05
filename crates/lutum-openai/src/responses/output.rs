@@ -209,7 +209,8 @@ enum SseEventWire {
         output_index: usize,
         #[serde(default)]
         sequence_number: u64,
-        name: String,
+        #[serde(default)]
+        name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         arguments: Option<String>,
     },
@@ -981,6 +982,7 @@ pub struct ResponseFunctionCallArgumentsDeltaEvent {
 /// )
 /// .unwrap();
 /// let event = serde_json::from_value::<ResponseFunctionCallArgumentsDoneEvent>(json.clone()).unwrap();
+/// assert_eq!(event.name, Some("get_current_weather".into()));
 /// assert_eq!(serde_json::to_value(&event).unwrap(), json);
 /// assert_eq!(serde_json::from_value::<ResponseFunctionCallArgumentsDoneEvent>(json).unwrap(), event);
 /// ```
@@ -994,7 +996,8 @@ pub struct ResponseFunctionCallArgumentsDoneEvent {
     pub output_index: usize,
     #[serde(default)]
     pub sequence_number: u64,
-    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arguments: Option<String>,
     #[serde(rename = "type")]

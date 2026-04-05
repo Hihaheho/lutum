@@ -26,7 +26,70 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+anyhow = "1"
+console.workspace = true
+futures.workspace = true
 schemars.workspace = true
 serde.workspace = true
 tokio.workspace = true
 trybuild = "1"
+
+[[example]]
+name = "contract_first_turn"
+required-features = ["openai"]
+
+[[example]]
+name = "stage_loop"
+required-features = ["openai"]
+
+[[example]]
+name = "verification_gates"
+required-features = ["openai"]
+
+[[example]]
+name = "streaming_turn_ui"
+required-features = ["openai"]
+
+[[example]]
+name = "planner_generator_evaluator"
+required-features = ["openai"]
+
+[[example]]
+name = "reflexion"
+required-features = ["openai"]
+
+[[example]]
+name = "failure_taxonomy_recovery"
+required-features = ["openai"]
+
+[[example]]
+name = "multi_candidate"
+required-features = ["openai"]
+
+[[example]]
+name = "react_loop"
+required-features = ["openai"]
+
+[[example]]
+name = "memory_surface"
+required-features = ["openai"]
+
+[[example]]
+name = "rag"
+required-features = ["openai"]
+
+[[example]]
+name = "repo_ssot"
+required-features = ["openai"]
+
+[[example]]
+name = "deterministic_hooks"
+required-features = ["openai"]
+
+[[example]]
+name = "architectural_constraints"
+required-features = ["openai"]
+
+[[example]]
+name = "entropy_gc"
+required-features = ["openai"]

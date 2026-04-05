@@ -77,7 +77,7 @@ impl SseHints {
 /// Implementations can attempt to recover by supplying a reconstructed [`SseEvent`].
 ///
 /// The primary use case is compensating for provider-specific SSE format deviations
-/// (e.g. OpenRouter omitting `name` from `response.function_call_arguments.done`).
+/// not already handled by the built-in decoder.
 pub trait SseEventRecoveryHook: Send + Sync {
     fn recover_event(
         &self,
@@ -903,27 +903,29 @@ impl ToolCallTracker {
         name: Option<ToolName>,
         explicit_arguments_json: Option<String>,
     ) -> Result<Option<ToolMetadata>, OpenAiError> {
+        let buffered = self.buffers.remove(&key);
         let arguments_json = if let Some(args) = explicit_arguments_json {
-            self.buffers.remove(&key);
             args
         } else {
-            self.buffers
-                .remove(&key)
+            buffered
+                .as_ref()
                 .and_then(|buffer| {
                     if buffer.arguments_json.is_empty() {
                         None
                     } else {
-                        Some(buffer.arguments_json)
+                        Some(buffer.arguments_json.clone())
                     }
                 })
                 .unwrap_or_else(|| "{}".to_string())
         };
 
-        let resolved_name = name.or_else(|| {
-            self.finalized
-                .get(&key)
-                .map(|finalized| finalized.name.clone())
-        });
+        let resolved_name = name
+            .or_else(|| buffered.and_then(|buffer| buffer.name))
+            .or_else(|| {
+                self.finalized
+                    .get(&key)
+                    .map(|finalized| finalized.name.clone())
+            });
 
         let Some(resolved_name) = resolved_name else {
             return Ok(None);
@@ -1336,7 +1338,7 @@ where
                         if let Some(invocation) = tool_calls.finish(
                             response_tool_key_from_done(&event),
                             response_tool_id_from_done(&event),
-                            Some(ToolName::from(event.name.as_str())),
+                            event.name.as_deref().map(ToolName::from),
                             event.arguments.clone(),
                         )? {
                             flush_buffered_content(&mut pending_item, &mut committed_items);
@@ -1555,7 +1557,7 @@ where
                         if let Some(invocation) = tool_calls.finish(
                             response_tool_key_from_done(&event),
                             response_tool_id_from_done(&event),
-                            Some(ToolName::from(event.name.as_str())),
+                            event.name.as_deref().map(ToolName::from),
                             event.arguments.clone(),
                         )? {
                             flush_buffered_content(&mut pending_item, &mut committed_items);
@@ -2213,6 +2215,51 @@ mod tests {
     }
 
     #[test]
+    fn responses_sse_done_without_name_uses_buffered_tool_name() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_optional_name\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"sequence_number\":0,\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"weather\",\"arguments\":\"\"}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"item-1\",\"call_id\":\"call-1\",\"output_index\":0,\"sequence_number\":1,\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_optional_name\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+            )),
+        ];
+
+        let events = block_on(async {
+            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        let ready: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ErasedTextTurnEvent::ToolCallReady(invocation) => Some(invocation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].name.as_str(), "weather");
+        assert_eq!(
+            ready[0]
+                .arguments
+                .deserialize::<WeatherArgs>()
+                .unwrap()
+                .city,
+            "Tokyo"
+        );
+    }
+
+    #[test]
     fn responses_sse_recovery_hook_can_restore_missing_tool_name() {
         struct TestRecoveryHook;
 
@@ -2269,7 +2316,7 @@ mod tests {
                                 call_id,
                                 output_index,
                                 sequence_number,
-                                name,
+                                name: Some(name),
                                 arguments,
                                 event_type: Default::default(),
                             },
