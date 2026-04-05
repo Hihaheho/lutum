@@ -59,12 +59,15 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 - `Context`: execution boundary. It validates input, reserves budget, emits tracing, and reduces
   provider streams into typed results.
-- `TextTurn<T>` / `StructuredTurn<T, O>`: one turn configuration. They are thin facades over
-  shared config, not mini runtimes.
+- `TextTurn` / `StructuredTurn<O>`: no-tools-first executable turn builders.
+- `TextTurnWithTools<T>` / `StructuredTurnWithTools<T, O>`: tool-enabled turn builders reached
+  via `.tools::<T>()`.
 - `Session`: transcript helper. Nothing is committed until you call `commit_text`,
-  `commit_structured`, or `commit_tool_round`.
+  `commit_structured`, `commit_text_with_tools`, `commit_structured_with_tools`, or
+  `commit_tool_round`.
 - `ModelInput`: low-level request surface if you want to skip `Session` and drive turns directly.
-- `RequestExtensions`: opaque per-request metadata for routing, identity, and custom adapter logic.
+- `RequestExtensions`: opaque per-request metadata for routing, identity, and custom adapter
+  logic, attached inline with `.ext(...)` or `.extensions(...)`.
 
 ## Quickstart
 
@@ -75,8 +78,8 @@ explicitly commit the result.
 use std::sync::Arc;
 
 use lutum::{
-    Context, ModelName, NoTools, OpenAiAdapter, RequestExtensions, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcome,
+    Context, ModelName, OpenAiAdapter, Session, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions,
 };
 
 #[tokio::main]
@@ -94,38 +97,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     session.push_system("You are concise.");
     session.push_user("Say hello in one sentence.");
 
-    let outcome = session
-        .prepare_text(
-            RequestExtensions::new(),
-            session.text_turn::<NoTools>(),
-        )
-        .await?
-        .collect_noop()
+    let result = session
+        .text_turn()
+        .temperature(lutum::Temperature::new(0.2)?)
+        .collect()
         .await?;
 
-    match outcome {
-        TextStepOutcome::Finished(result) => {
-            println!("{}", result.assistant_text());
-            session.commit_text(result);
-        }
-        TextStepOutcome::NeedsToolResults(_) => unreachable!("NoTools never requests tools"),
-    }
+    println!("{}", result.assistant_text());
+    session.commit_text(result);
 
     Ok(())
 }
 ```
 
-If you do not want transcript management, call `Context::text_turn(...)` directly with a
-`ModelInput` instead of going through `Session`.
+If you do not want transcript management, call `Context::text_turn(input)` directly with a
+`ModelInput`, then use `.stream().await?`, `.collect().await?`, or `.collect_with(handler).await?`
+on the returned builder.
 
 ## Structured Output
 
-Use `Session::structured_turn::<NoTools, O>()` when structured output should participate in the
-same explicit transcript model as text turns. Starting from the quickstart setup, reuse the same
+Use `Session::structured_turn::<O>()` when structured output should participate in the same
+explicit transcript model as text turns. Starting from the quickstart setup, reuse the same
 mutable `session` and swap the turn kind:
 
 ```rust
-use lutum::{NoTools, RequestExtensions, StructuredStepOutcome, StructuredTurnOutcome};
+use lutum::StructuredTurnOutcome;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -136,26 +132,19 @@ struct Contact {
 
 session.push_user("Extract the email address from `Reach me at user@example.com`.");
 
-let outcome = session
-    .prepare_structured(
-        RequestExtensions::new(),
-        session.structured_turn::<NoTools, Contact>(),
-    )
-    .await?
-    .collect_noop()
+let result = session
+    .structured_turn::<Contact>()
+    .collect()
     .await?;
 
-match outcome {
-    StructuredStepOutcome::Finished(result) => match result.semantic.clone() {
-        StructuredTurnOutcome::Structured(contact) => {
-            println!("{}", contact.email);
-            session.commit_structured(result);
-        }
-        StructuredTurnOutcome::Refusal(reason) => {
-            eprintln!("{reason}");
-        }
-    },
-    StructuredStepOutcome::NeedsToolResults(_) => unreachable!("NoTools never requests tools"),
+match result.semantic.clone() {
+    StructuredTurnOutcome::Structured(contact) => {
+        println!("{}", contact.email);
+        session.commit_structured(result);
+    }
+    StructuredTurnOutcome::Refusal(reason) => {
+        eprintln!("{reason}");
+    }
 }
 ```
 
@@ -167,8 +156,8 @@ completion adapters are wired separately from turn execution:
 use std::sync::Arc;
 
 use lutum::{
-    Context, ModelName, OpenAiAdapter, RequestExtensions, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, StructuredCompletionRequest, StructuredTurnOutcome,
+    Context, ModelName, OpenAiAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    StructuredTurnOutcome,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -192,15 +181,12 @@ let ctx = Context::from_parts(
 );
 
 let result = ctx
-    .structured_completion(
-        RequestExtensions::new(),
-        StructuredCompletionRequest::<Contact>::new(
-            ModelName::new(&std::env::var("MODEL")?)?,
-            "Extract the email address from `Reach me at user@example.com`.",
-        ),
+    .structured_completion::<Contact>(
+        ModelName::new(&std::env::var("MODEL")?)?,
+        "Extract the email address from `Reach me at user@example.com`.",
     )
-    .await?
-    .collect_noop()
+    .system("Return only the structured data.")
+    .collect()
     .await?;
 
 match result.semantic {
@@ -218,8 +204,8 @@ tool loop, and `Session` only records committed turns and tool results.
 use std::sync::Arc;
 
 use lutum::{
-    Context, ModelName, OpenAiAdapter, RequestExtensions, Session, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, TextStepOutcome, ToolPolicy,
+    Context, ModelName, OpenAiAdapter, Session, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, TextStepOutcomeWithTools,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -255,17 +241,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     session.push_user("What is the weather in Tokyo?");
 
     loop {
-        let mut turn = session.text_turn::<Tools>();
-        turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
-
         let outcome = session
-            .prepare_text(RequestExtensions::new(), turn)
-            .await?
-            .collect_noop()
+            .text_turn()
+            .tools::<Tools>()
+            .allow_only([ToolsSelector::Weather])
+            .collect()
             .await?;
 
         match outcome {
-            TextStepOutcome::NeedsToolResults(round) => {
+            TextStepOutcomeWithTools::NeedsToolResults(round) => {
                 let tool_uses = round
                     .tool_calls
                     .iter()
@@ -281,9 +265,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 session.commit_tool_round(round, tool_uses)?;
             }
-            TextStepOutcome::Finished(result) => {
+            TextStepOutcomeWithTools::Finished(result) => {
                 println!("{}", result.assistant_text());
-                session.commit_text(result);
+                session.commit_text_with_tools(result);
                 break;
             }
         }
@@ -365,50 +349,17 @@ Core hooks take `&Context` as their first argument and are provider-agnostic. Ad
 take `&RequestExtensions` as their first argument and let adapters expose provider-specific
 selection or request-shaping behavior.
 
-`resolve_usage_estimate` is a builtin core hook. By default it reads
-`RequestExtensions::get::<lutum::budget::UsageEstimate>()` and falls back to zero.
+Attach request-scoped metadata inline on builders with `.ext(...)` or `.extensions(...)`:
 
 ```rust
-let mut extensions = RequestExtensions::new();
-extensions.insert(lutum::budget::UsageEstimate {
-    total_tokens: 2_048,
-    ..lutum::budget::UsageEstimate::zero()
-});
+#[derive(Clone, Debug)]
+struct Tenant(&'static str);
 
-let outcome = session
-    .prepare_text(extensions, session.text_turn::<NoTools>())
-    .await?
-    .collect_noop()
+let result = session
+    .text_turn()
+    .ext(Tenant("prod-eu"))
+    .collect()
     .await?;
-```
-
-You can override that policy centrally with a hook:
-
-```rust
-use lutum::{Context, HookRegistry, OperationKind, RequestExtensions, ResolveUsageEstimate};
-
-#[lutum::hook(ResolveUsageEstimate)]
-async fn plan_usage(
-    _ctx: &Context,
-    extensions: &RequestExtensions,
-    kind: OperationKind,
-) -> lutum::budget::UsageEstimate {
-    if let Some(estimate) = extensions.get::<lutum::budget::UsageEstimate>() {
-        return *estimate;
-    }
-
-    let total_tokens = match kind {
-        OperationKind::StructuredTurn | OperationKind::StructuredCompletion => 4_096,
-        OperationKind::TextTurn | OperationKind::Completion => 1_024,
-    };
-
-    lutum::budget::UsageEstimate {
-        total_tokens,
-        ..lutum::budget::UsageEstimate::zero()
-    }
-}
-
-let hooks = HookRegistry::new().register_resolve_usage_estimate(PlanUsage);
 ```
 
 ## Trace Capture
@@ -422,7 +373,7 @@ request ids, finish reasons, and nested events. Assuming you already built `ctx`
 quickstart, wrap the same turn execution with capture:
 
 ```rust
-use lutum::{NoTools, RequestExtensions, Session};
+use lutum::Session;
 use tracing::instrument::WithSubscriber as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -434,12 +385,8 @@ let collected = lutum_trace::capture(
         session.push_user("Say hello.");
 
         let _ = session
-            .prepare_text(
-                RequestExtensions::new(),
-                session.text_turn::<NoTools>(),
-            )
-            .await?
-            .collect_noop()
+            .text_turn()
+            .collect()
             .await?;
 
         Ok::<(), Box<dyn std::error::Error>>(())
@@ -480,7 +427,7 @@ cargo run -p lutum --example <name> --features openai
 | Example | What it shows | Run | Copy this when... |
 |---|---|---|---|
 | [`streaming_turn_ui`](crates/lutum/examples/streaming_turn_ui.rs) | Stream `TextTurnEvent` deltas directly to a UI or terminal | `cargo run -p lutum --example streaming_turn_ui --features openai` | You want the smallest streaming example without tools or transcript branching |
-| [`react_loop`](crates/lutum/examples/react_loop.rs) | Explicit tool loop with `ToolPolicy`, `NeedsToolResults`, and `commit_tool_round` | `cargo run -p lutum --example react_loop --features openai` | You want a ReAct-style loop but still keep tool execution in Rust |
+| [`react_loop`](crates/lutum/examples/react_loop.rs) | Explicit tool loop with `.tools::<T>()`, `NeedsToolResults`, and `commit_tool_round` | `cargo run -p lutum --example react_loop --features openai` | You want a ReAct-style loop but still keep tool execution in Rust |
 | [`verification_gates`](crates/lutum/examples/verification_gates.rs) | Structured output checked by deterministic Rust gates and retried | `cargo run -p lutum --example verification_gates --features openai` | You want model output to pass strict post-validation before acceptance |
 | [`deterministic_hooks`](crates/lutum/examples/deterministic_hooks.rs) | Prompt and output validation through typed hooks | `cargo run -p lutum --example deterministic_hooks --features openai` | You want reusable policy checks without baking them into every call site |
 | [`rag`](crates/lutum/examples/rag.rs) | Retrieve supporting text, then answer only from grounded evidence | `cargo run -p lutum --example rag --features openai` | You want a minimal retrieval-augmented generation pattern |

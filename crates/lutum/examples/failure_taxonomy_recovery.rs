@@ -22,19 +22,8 @@ async fn ask(ctx: &Context, system: &str, user: impl Into<String>) -> anyhow::Re
     let mut session = Session::new(ctx.clone());
     session.push_system(system);
     session.push_user(user);
-    let outcome = session
-        .prepare_text(
-            RequestExtensions::new(),
-            session.text_turn::<NoTools>(),
-            UsageEstimate::zero(),
-        )
-        .await?
-        .collect_noop()
-        .await?;
-    match outcome {
-        TextStepOutcome::Finished(result) => Ok(result.assistant_text()),
-        TextStepOutcome::NeedsToolResults(_) => unreachable!(),
-    }
+    let result = session.text_turn().collect().await?;
+    Ok(result.assistant_text())
 }
 
 async fn classify(
@@ -45,21 +34,10 @@ async fn classify(
     let mut session = Session::new(ctx.clone());
     session.push_system(system);
     session.push_user(user);
-    let outcome = session
-        .prepare_structured(
-            RequestExtensions::new(),
-            session.structured_turn::<NoTools, RecoveryAction>(),
-            UsageEstimate::zero(),
-        )
-        .await?
-        .collect_noop()
-        .await?;
-    match outcome {
-        StructuredStepOutcome::Finished(result) => match result.semantic {
-            StructuredTurnOutcome::Structured(action) => Ok(action),
-            StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),
-        },
-        StructuredStepOutcome::NeedsToolResults(_) => unreachable!(),
+    let result = session.structured_turn::<RecoveryAction>().collect().await?;
+    match result.semantic {
+        StructuredTurnOutcome::Structured(action) => Ok(action),
+        StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),
     }
 }
 

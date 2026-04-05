@@ -6,8 +6,8 @@ use lutum::{
     FinishReason, HandlerContext, HandlerDirective, InputMessageRole, MockError, MockLlmAdapter,
     MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, OperationKind,
     RequestBudget, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-    StructuredTurn, StructuredTurnOutcome, TextTurn, TextTurnEvent, TextTurnReducer, ToolMetadata,
-    ToolPolicy, Usage, UsageEstimate,
+    StructuredTurnOutcome, TextTurnEventWithTools, TextTurnReducerWithTools,
+    TextTurnStateWithTools, ToolMetadata, Usage, UsageEstimate,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,10 +38,9 @@ fn input() -> ModelInput {
     ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")])
 }
 
-fn weather_turn() -> TextTurn<Tools> {
-    let mut turn = TextTurn::new();
-    turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
-    turn
+fn weather_turn<'a>(turn: lutum::TextTurn<'a>) -> lutum::TextTurnWithTools<'a, Tools> {
+    turn.tools::<Tools>()
+        .allow_only(vec![ToolsSelector::Weather])
 }
 
 fn shared_pool_budget_error(err: &lutum::AgentError) -> &lutum::SharedPoolBudgetError {
@@ -62,22 +61,18 @@ fn test_budget() -> SharedPoolBudgetManager {
     })
 }
 
-fn extensions() -> RequestExtensions {
-    RequestExtensions::new()
-}
-
 struct StopOnTextDelta;
 
 #[async_trait]
-impl EventHandler<TextTurnEvent<Tools>, lutum::TextTurnState<Tools>> for StopOnTextDelta {
+impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>> for StopOnTextDelta {
     type Error = std::convert::Infallible;
 
     async fn on_event(
         &mut self,
-        event: &TextTurnEvent<Tools>,
-        _cx: &HandlerContext<lutum::TextTurnState<Tools>>,
+        event: &TextTurnEventWithTools<Tools>,
+        _cx: &HandlerContext<TextTurnStateWithTools<Tools>>,
     ) -> Result<HandlerDirective, Self::Error> {
-        Ok(if matches!(event, TextTurnEvent::TextDelta { .. }) {
+        Ok(if matches!(event, TextTurnEventWithTools::TextDelta { .. }) {
             HandlerDirective::Stop
         } else {
             HandlerDirective::Continue
@@ -111,10 +106,8 @@ fn text_turn_collects_assistant_output_and_tool_calls() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
-    let turn = weather_turn();
-    let pending =
-        block_on(ctx.text_turn(extensions(), input(), turn, UsageEstimate::zero())).unwrap();
-    let result = block_on(pending.collect_noop()).unwrap();
+    let pending = block_on(weather_turn(ctx.text_turn(input())).start()).unwrap();
+    let result = block_on(pending.collect()).unwrap();
 
     assert_eq!(result.assistant_text(), "looking up ");
     assert_eq!(result.tool_calls.len(), 1);
@@ -147,13 +140,10 @@ fn structured_turn_collects_typed_output_and_appends_assistant_item() {
                     ..Usage::zero()
                 },
             }),
-        ]));
+    ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
-    let turn = StructuredTurn::<Tools, Summary>::new();
-    let pending =
-        block_on(ctx.structured_turn(extensions(), input(), turn, UsageEstimate::zero())).unwrap();
-    let result = block_on(pending.collect_noop()).unwrap();
+    let result = block_on(ctx.structured_turn::<Summary>(input()).collect()).unwrap();
 
     assert!(matches!(
         result.semantic,
@@ -169,20 +159,20 @@ fn structured_turn_collects_typed_output_and_appends_assistant_item() {
 fn recorded_events_reduce_to_same_result_as_collect() {
     let arguments = lutum::RawJson::parse("{\"city\":\"Tokyo\"}").unwrap();
     let events = vec![
-        TextTurnEvent::<Tools>::Started {
+        TextTurnEventWithTools::<Tools>::Started {
             request_id: Some("req-r".into()),
             model: "gpt-4.1".into(),
         },
-        TextTurnEvent::<Tools>::TextDelta {
+        TextTurnEventWithTools::<Tools>::TextDelta {
             delta: "checking ".into(),
         },
-        TextTurnEvent::<Tools>::ToolCallReady(ToolsCall::Weather(WeatherArgsCall {
+        TextTurnEventWithTools::<Tools>::ToolCallReady(ToolsCall::Weather(WeatherArgsCall {
             metadata: ToolMetadata::new("call-1", "weather", arguments),
             input: WeatherArgs {
                 city: "Tokyo".into(),
             },
         })),
-        TextTurnEvent::<Tools>::Completed {
+        TextTurnEventWithTools::<Tools>::Completed {
             request_id: Some("req-r".into()),
             finish_reason: FinishReason::ToolCall,
             usage: Usage {
@@ -193,7 +183,7 @@ fn recorded_events_reduce_to_same_result_as_collect() {
         },
     ];
 
-    let mut reducer = TextTurnReducer::<Tools>::new();
+    let mut reducer = TextTurnReducerWithTools::<Tools>::new();
     for event in &events {
         reducer.apply(event).unwrap();
     }
@@ -223,10 +213,8 @@ fn recorded_events_reduce_to_same_result_as_collect() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
-    let pending =
-        block_on(ctx.text_turn(extensions(), input(), weather_turn(), UsageEstimate::zero()))
-            .unwrap();
-    let collected = block_on(pending.collect_noop()).unwrap();
+    let pending = block_on(weather_turn(ctx.text_turn(input())).start()).unwrap();
+    let collected = block_on(pending.collect()).unwrap();
 
     assert_eq!(reduced.assistant_turn, collected.assistant_turn);
     assert_eq!(reduced.tool_calls, collected.tool_calls);
@@ -245,22 +233,25 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
         Ok(lutum::mock::RawTextTurnEvent::TextDelta { delta: "he".into() }),
     ]));
     let ctx = Context::new(Arc::new(adapter), budget.clone());
-    let pending = block_on(ctx.text_turn(
-        extensions(),
-        input(),
-        TextTurn::<Tools>::new(),
-        UsageEstimate {
-            total_tokens: 10,
-            ..UsageEstimate::zero()
-        },
-    ))
+    let pending = block_on(
+        ctx.text_turn(input())
+            .tools::<Tools>()
+            .ext(UsageEstimate {
+                total_tokens: 10,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    )
     .unwrap();
 
-    let err = block_on(pending.collect(StopOnTextDelta)).unwrap_err();
+    let err = block_on(pending.collect_with(StopOnTextDelta)).unwrap_err();
 
     match err {
         CollectError::Stopped { partial } => {
-            assert_eq!(partial.assistant_text(), "he");
+            assert!(matches!(
+                partial.assistant_turn.as_slice(),
+                [AssistantTurnItem::Text(text)] if text == "he"
+            ));
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -273,15 +264,15 @@ fn into_stream_releases_reserved_budget_without_collect() {
     let budget = test_budget();
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![]));
     let ctx = Context::new(Arc::new(adapter), budget.clone());
-    let pending = block_on(ctx.text_turn(
-        extensions(),
-        input(),
-        TextTurn::<Tools>::new(),
-        UsageEstimate {
-            total_tokens: 10,
-            ..UsageEstimate::zero()
-        },
-    ))
+    let pending = block_on(
+        ctx.text_turn(input())
+            .tools::<Tools>()
+            .ext(UsageEstimate {
+                total_tokens: 10,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    )
     .unwrap();
 
     assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 90);
@@ -313,18 +304,18 @@ fn adapter_error_uses_recovered_usage_when_available() {
             },
         );
     let ctx = Context::new(Arc::new(adapter), budget.clone());
-    let pending = block_on(ctx.text_turn(
-        extensions(),
-        input(),
-        TextTurn::<Tools>::new(),
-        UsageEstimate {
-            total_tokens: 10,
-            ..UsageEstimate::zero()
-        },
-    ))
+    let pending = block_on(
+        ctx.text_turn(input())
+            .tools::<Tools>()
+            .ext(UsageEstimate {
+                total_tokens: 10,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    )
     .unwrap();
 
-    let err = block_on(pending.collect_noop()).unwrap_err();
+    let err = block_on(pending.collect()).unwrap_err();
     assert!(matches!(err, CollectError::Execution { .. }));
     assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 95);
 }
@@ -347,18 +338,17 @@ fn tool_call_deserialize_error_surfaces_as_execution_error() {
         }),
     ]));
     let ctx = Context::new(Arc::new(adapter), budget.clone());
-    let pending = block_on(ctx.text_turn(
-        extensions(),
-        input(),
-        weather_turn(),
-        UsageEstimate {
-            total_tokens: 10,
-            ..UsageEstimate::zero()
-        },
-    ))
+    let pending = block_on(
+        weather_turn(ctx.text_turn(input()))
+            .ext(UsageEstimate {
+                total_tokens: 10,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    )
     .unwrap();
 
-    let err = block_on(pending.collect_noop()).unwrap_err();
+    let err = block_on(pending.collect()).unwrap_err();
 
     match err {
         CollectError::Execution { source, partial } => {
@@ -368,7 +358,10 @@ fn tool_call_deserialize_error_surfaces_as_execution_error() {
                     if name == "weather"
             ));
             assert_eq!(partial.request_id.as_deref(), Some("req-bad-tool"));
-            assert_eq!(partial.assistant_text(), "looking up ");
+            assert!(matches!(
+                partial.assistant_turn.as_slice(),
+                [AssistantTurnItem::Text(text)] if text == "looking up "
+            ));
             assert!(partial.tool_calls.is_empty());
             assert!(partial.finish_reason.is_none());
         }
@@ -398,20 +391,19 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
                     ..Usage::zero()
                 },
             }),
-        ]));
+    ]));
     let ctx = Context::new(Arc::new(adapter), budget.clone());
-    let pending = block_on(ctx.structured_turn(
-        extensions(),
-        input(),
-        StructuredTurn::<Tools, Summary>::new(),
-        UsageEstimate {
-            total_tokens: 10,
-            ..UsageEstimate::zero()
-        },
-    ))
+    let pending = block_on(
+        ctx.structured_turn::<Summary>(input())
+            .ext(UsageEstimate {
+                total_tokens: 10,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    )
     .unwrap();
 
-    let err = block_on(pending.collect_noop()).unwrap_err();
+    let err = block_on(pending.collect()).unwrap_err();
 
     match err {
         CollectError::Execution { source, partial } => {
@@ -436,19 +428,16 @@ fn request_budget_is_enforced_per_turn() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
 
-    let err = match block_on(ctx.text_turn(
-        extensions(),
-        input(),
-        {
-            let mut turn = TextTurn::<Tools>::new();
-            turn.config.budget = RequestBudget::from_tokens(16);
-            turn
-        },
-        UsageEstimate {
-            total_tokens: 32,
-            ..UsageEstimate::zero()
-        },
-    )) {
+    let err = match block_on(
+        ctx.text_turn(input())
+            .tools::<Tools>()
+            .budget(RequestBudget::from_tokens(16))
+            .ext(UsageEstimate {
+                total_tokens: 32,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    ) {
         Ok(_) => panic!("request should have been rejected by the per-request budget"),
         Err(err) => err,
     };

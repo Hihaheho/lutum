@@ -18,7 +18,7 @@ pub use conversation::{
     EmptyNonEmptyError, InputMessageRole, MessageContent, ModelInput, ModelInputItem,
     ModelInputValidationError, NonEmpty, RawJson, ToolCallId, ToolMetadata, ToolName, ToolUse,
 };
-pub use error::{AgentError, BoxError};
+pub use error::{AgentError, BoxError, NoToolsContractViolation};
 pub use extensions::RequestExtensions;
 pub use hooks::HookRegistry;
 pub use llm::{
@@ -30,15 +30,19 @@ pub use llm::{
     ErasedTextTurnEventStream, FinishReason, GenerationParams, ModelName, ModelNameError,
     OperationKind, StructuredCompletionEvent, StructuredCompletionEventStream,
     StructuredCompletionRequest, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
-    StructuredTurnEventStream, Temperature, TemperatureError, TextTurn, TextTurnEvent,
-    TextTurnEventStream, TurnAdapter, TurnConfig, UsageRecoveryAdapter,
+    StructuredTurnEventStream, StructuredTurnEventStreamWithTools,
+    StructuredTurnEventWithTools, Temperature, TemperatureError, TextTurn, TextTurnEvent,
+    TextTurnEventStream, TextTurnEventStreamWithTools, TextTurnEventWithTools, TurnAdapter,
+    TurnConfig, UsageRecoveryAdapter,
 };
 pub use reducer::{
     CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
     StructuredCompletionReducer, StructuredCompletionReductionError, StructuredCompletionResult,
     StructuredCompletionState, StructuredTurnOutcome, StructuredTurnReducer,
-    StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, TextTurnReducer,
-    TextTurnReductionError, TextTurnResult, TextTurnState, assistant_json,
+    StructuredTurnReducerWithTools, StructuredTurnReductionError, StructuredTurnResult,
+    StructuredTurnResultWithTools, StructuredTurnState, StructuredTurnStateWithTools,
+    TextTurnReducer, TextTurnReducerWithTools, TextTurnReductionError, TextTurnResult,
+    TextTurnResultWithTools, TextTurnState, TextTurnStateWithTools, assistant_json,
     find_tool_call_arguments,
 };
 pub use structured::StructuredOutput;

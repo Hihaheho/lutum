@@ -1,25 +1,23 @@
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 
 use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
-    GenerationParams, InputMessageRole, ModelInput, ModelInputItem, RequestBudget,
-    RequestExtensions, StructuredTurn, StructuredTurnEventStream, TextTurn, TextTurnEventStream,
-    ToolUse, Toolset, TurnConfig, TurnView,
+    GenerationParams, InputMessageRole, ModelInput, ModelInputItem, RequestBudget, ToolUse,
+    Toolset, TurnConfig, TurnView,
     budget::Usage,
     reducer::{
-        StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, TextTurnResult,
+        StructuredTurnResult as StructuredTurnResultNoTools, StructuredTurnResultWithTools,
+        StructuredTurnStateWithTools, TextTurnResult as TextTurnResultNoTools,
+        TextTurnResultWithTools,
     },
     structured::StructuredOutput,
 };
 use thiserror::Error;
 
 use crate::{
-    CollectError, Context, ContextError, EventHandler, PendingStructuredTurn, PendingTextTurn,
-    context::{
-        PendingStructuredTurn as CorePendingStructuredTurn, PendingTextTurn as CorePendingTextTurn,
-        StructuredTurnPartial as CoreStructuredTurnPartial,
-    },
+    Context,
+    builders::{StructuredTurn, TextTurn},
+    context::StructuredTurnPartialWithTools,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -29,7 +27,7 @@ pub struct SessionDefaults {
 }
 
 impl SessionDefaults {
-    fn apply<T>(&self, turn: &mut TurnConfig<T>)
+    pub(crate) fn apply<T>(&self, turn: &mut TurnConfig<T>)
     where
         T: Toolset,
     {
@@ -89,23 +87,15 @@ impl Session {
         self.input
     }
 
-    pub fn text_turn<T>(&self) -> TextTurn<T>
-    where
-        T: Toolset,
-    {
-        let mut turn = TextTurn::new();
-        self.defaults.apply(&mut turn.config);
-        turn
+    pub fn text_turn(&self) -> TextTurn<'_> {
+        TextTurn::from_session(self)
     }
 
-    pub fn structured_turn<T, O>(&self) -> StructuredTurn<T, O>
+    pub fn structured_turn<O>(&self) -> StructuredTurn<'_, O>
     where
-        T: Toolset,
         O: StructuredOutput,
     {
-        let mut turn = StructuredTurn::new();
-        self.defaults.apply(&mut turn.config);
-        turn
+        StructuredTurn::from_session(self)
     }
 
     pub fn push_system(&mut self, text: impl Into<String>) {
@@ -123,37 +113,15 @@ impl Session {
             .push(ModelInputItem::text(InputMessageRole::User, text));
     }
 
-    pub async fn prepare_text<T>(
-        &self,
-        extensions: RequestExtensions,
-        mut turn: TextTurn<T>,
-    ) -> Result<SessionPendingText<T>, ContextError>
-    where
-        T: Toolset,
-    {
-        self.defaults.apply(&mut turn.config);
-        let pending = self
-            .ctx
-            .text_turn(extensions, self.input.clone(), turn)
-            .await?;
-        Ok(SessionPendingText { pending })
+    pub(crate) fn snapshot_input(&self) -> ModelInput {
+        self.input.clone()
     }
 
-    pub async fn prepare_structured<T, O>(
-        &self,
-        extensions: RequestExtensions,
-        mut turn: StructuredTurn<T, O>,
-    ) -> Result<SessionPendingStructured<T, O>, ContextError>
+    pub(crate) fn apply_defaults<T>(&self, turn: &mut TurnConfig<T>)
     where
         T: Toolset,
-        O: StructuredOutput,
     {
-        self.defaults.apply(&mut turn.config);
-        let pending = self
-            .ctx
-            .structured_turn(extensions, self.input.clone(), turn)
-            .await?;
-        Ok(SessionPendingStructured { pending })
+        self.defaults.apply(turn);
     }
 
     /// Returns committed turns stored directly in the ordered `ModelInput`.
@@ -164,16 +132,29 @@ impl Session {
         })
     }
 
-    /// Commit a completed text turn into the session transcript.
-    pub fn commit_text<T>(&mut self, result: TextTurnResult<T>)
+    /// Commit a completed no-tools text turn into the session transcript.
+    pub fn commit_text(&mut self, result: TextTurnResultNoTools) {
+        self.input.push(ModelInputItem::Turn(result.committed_turn));
+    }
+
+    /// Commit a completed tool-enabled text turn into the session transcript.
+    pub fn commit_text_with_tools<T>(&mut self, result: TextTurnResultWithTools<T>)
     where
         T: Toolset,
     {
         self.input.push(ModelInputItem::Turn(result.committed_turn));
     }
 
-    /// Commit a completed structured turn into the session transcript.
-    pub fn commit_structured<T, O>(&mut self, result: StructuredTurnResult<T, O>)
+    /// Commit a completed no-tools structured turn into the session transcript.
+    pub fn commit_structured<O>(&mut self, result: StructuredTurnResultNoTools<O>)
+    where
+        O: StructuredOutput,
+    {
+        self.input.push(ModelInputItem::Turn(result.committed_turn));
+    }
+
+    /// Commit a completed tool-enabled structured turn into the session transcript.
+    pub fn commit_structured_with_tools<T, O>(&mut self, result: StructuredTurnResultWithTools<T, O>)
     where
         T: Toolset,
         O: StructuredOutput,
@@ -255,139 +236,6 @@ where
     Ok(ordered)
 }
 
-pub struct SessionPendingText<T>
-where
-    T: Toolset,
-{
-    pending: CorePendingTextTurn<T>,
-}
-
-impl<T> SessionPendingText<T>
-where
-    T: Toolset,
-{
-    pub fn into_pending(self) -> PendingTextTurn<T> {
-        self.pending
-    }
-
-    pub fn into_stream(self) -> TextTurnEventStream<T> {
-        self.pending.into_stream()
-    }
-
-    pub async fn collect<H>(
-        self,
-        handler: H,
-    ) -> Result<
-        TextStepOutcome<T>,
-        CollectError<H::Error, crate::TextTurnReductionError, crate::TextTurnState<T>>,
-    >
-    where
-        H: EventHandler<crate::TextTurnEvent<T>, crate::TextTurnState<T>>,
-    {
-        let result = self.pending.collect(handler).await?;
-        Ok(TextStepOutcome::from_result(result))
-    }
-
-    pub async fn collect_noop(
-        self,
-    ) -> Result<
-        TextStepOutcome<T>,
-        CollectError<Infallible, crate::TextTurnReductionError, crate::TextTurnState<T>>,
-    > {
-        let result = self.pending.collect_noop().await?;
-        Ok(TextStepOutcome::from_result(result))
-    }
-}
-
-#[allow(clippy::result_large_err, clippy::type_complexity)]
-fn map_structured_result<T, O, HE>(
-    raw: Result<
-        StructuredTurnResult<T, O>,
-        CollectError<HE, StructuredTurnReductionError, CoreStructuredTurnPartial<T, O>>,
-    >,
-) -> Result<
-    StructuredStepOutcome<T, O>,
-    CollectError<HE, StructuredTurnReductionError, CoreStructuredTurnPartial<T, O>>,
->
-where
-    T: Toolset,
-    O: StructuredOutput,
-{
-    match raw {
-        Ok(result) => Ok(StructuredStepOutcome::from_result(result)),
-        Err(CollectError::Reduction {
-            source: StructuredTurnReductionError::MissingSemantic,
-            partial,
-        }) => {
-            let partial_for_outcome = CoreStructuredTurnPartial {
-                state: partial.state.clone(),
-                committed_turn: partial.committed_turn.clone(),
-            };
-            if let Some(outcome) = StructuredStepOutcome::from_partial(partial_for_outcome) {
-                Ok(outcome)
-            } else {
-                Err(CollectError::Reduction {
-                    source: StructuredTurnReductionError::MissingSemantic,
-                    partial,
-                })
-            }
-        }
-        Err(err) => Err(err),
-    }
-}
-
-pub struct SessionPendingStructured<T, O>
-where
-    T: Toolset,
-    O: StructuredOutput,
-{
-    pending: CorePendingStructuredTurn<T, O>,
-}
-
-impl<T, O> SessionPendingStructured<T, O>
-where
-    T: Toolset,
-    O: StructuredOutput,
-{
-    pub fn into_pending(self) -> PendingStructuredTurn<T, O> {
-        self.pending
-    }
-
-    pub fn into_stream(self) -> StructuredTurnEventStream<T, O> {
-        self.pending.into_stream()
-    }
-
-    pub async fn collect<H>(
-        self,
-        handler: H,
-    ) -> Result<
-        StructuredStepOutcome<T, O>,
-        CollectError<
-            H::Error,
-            crate::StructuredTurnReductionError,
-            CoreStructuredTurnPartial<T, O>,
-        >,
-    >
-    where
-        H: EventHandler<crate::StructuredTurnEvent<T, O>, crate::StructuredTurnState<T, O>>,
-    {
-        map_structured_result(self.pending.collect(handler).await)
-    }
-
-    pub async fn collect_noop(
-        self,
-    ) -> Result<
-        StructuredStepOutcome<T, O>,
-        CollectError<
-            Infallible,
-            crate::StructuredTurnReductionError,
-            CoreStructuredTurnPartial<T, O>,
-        >,
-    > {
-        map_structured_result(self.pending.collect_noop().await)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ToolRound<T: Toolset> {
     pub request_id: Option<String>,
@@ -441,17 +289,17 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub enum TextStepOutcome<T: Toolset> {
-    Finished(TextTurnResult<T>),
+pub enum TextStepOutcomeWithTools<T: Toolset> {
+    Finished(TextTurnResultWithTools<T>),
     NeedsToolResults(ToolRound<T>),
 }
 
-impl<T> TextStepOutcome<T>
+impl<T> TextStepOutcomeWithTools<T>
 where
     T: Toolset,
 {
-    fn from_result(result: TextTurnResult<T>) -> Self {
-        let TextTurnResult {
+    pub(crate) fn from_result(result: TextTurnResultWithTools<T>) -> Self {
+        let TextTurnResultWithTools {
             request_id,
             model,
             assistant_turn,
@@ -471,7 +319,7 @@ where
                 committed_turn,
             })
         } else {
-            Self::Finished(TextTurnResult {
+            Self::Finished(TextTurnResultWithTools {
                 request_id,
                 model,
                 assistant_turn,
@@ -485,18 +333,18 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub enum StructuredStepOutcome<T: Toolset, O: StructuredOutput> {
-    Finished(StructuredTurnResult<T, O>),
+pub enum StructuredStepOutcomeWithTools<T: Toolset, O: StructuredOutput> {
+    Finished(StructuredTurnResultWithTools<T, O>),
     NeedsToolResults(ToolRound<T>),
 }
 
-impl<T, O> StructuredStepOutcome<T, O>
+impl<T, O> StructuredStepOutcomeWithTools<T, O>
 where
     T: Toolset,
     O: StructuredOutput,
 {
-    fn from_result(result: StructuredTurnResult<T, O>) -> Self {
-        let StructuredTurnResult {
+    pub(crate) fn from_result(result: StructuredTurnResultWithTools<T, O>) -> Self {
+        let StructuredTurnResultWithTools {
             request_id,
             model,
             assistant_turn,
@@ -517,7 +365,7 @@ where
                 committed_turn,
             })
         } else {
-            Self::Finished(StructuredTurnResult {
+            Self::Finished(StructuredTurnResultWithTools {
                 request_id,
                 model,
                 assistant_turn,
@@ -530,8 +378,8 @@ where
         }
     }
 
-    fn from_partial(partial: CoreStructuredTurnPartial<T, O>) -> Option<Self> {
-        let CoreStructuredTurnPartial {
+    pub(crate) fn from_partial(partial: StructuredTurnPartialWithTools<T, O>) -> Option<Self> {
+        let StructuredTurnPartialWithTools {
             state,
             committed_turn,
         } = partial;
@@ -539,7 +387,7 @@ where
             return None;
         }
         let committed_turn = committed_turn?;
-        let StructuredTurnState {
+        let StructuredTurnStateWithTools {
             request_id,
             model,
             assistant_turn,

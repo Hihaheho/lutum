@@ -1,7 +1,7 @@
 use lutum::{
-    FinishReason, MockLlmAdapter, MockStructuredScenario, MockTextScenario, NoTools,
-    RequestExtensions, Session, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-    StructuredStepOutcome, TextStepOutcome, TextTurn, ToolPolicy, Usage, UsageEstimate,
+    FinishReason, MockLlmAdapter, MockStructuredScenario, MockTextScenario, Session,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcomeWithTools,
+    TextStepOutcomeWithTools, Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -49,27 +49,12 @@ fn prepare_and_collect_do_not_mutate_transcript_before_commit() {
     let before_len = session.input().items().len();
     let before_turns = session.list_turns().count();
 
-    let outcome = futures::executor::block_on(async {
-        session
-            .prepare_text(
-                RequestExtensions::new(),
-                TextTurn::<NoTools>::new(),
-                UsageEstimate::zero(),
-            )
-            .await
-            .unwrap()
-            .collect_noop()
-            .await
-            .unwrap()
-    });
+    let result = futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
 
     assert_eq!(session.input().items().len(), before_len);
     assert_eq!(session.list_turns().count(), before_turns);
 
-    match outcome {
-        TextStepOutcome::Finished(result) => session.commit_text(result),
-        TextStepOutcome::NeedsToolResults(_) => unreachable!(),
-    }
+    session.commit_text(result);
 
     assert_eq!(session.input().items().len(), before_len + 1);
     assert_eq!(session.list_turns().count(), 1);
@@ -105,18 +90,10 @@ fn tool_round_is_only_applied_on_explicit_commit() {
 
     let outcome = futures::executor::block_on(async {
         session
-            .prepare_text(
-                RequestExtensions::new(),
-                {
-                    let mut turn = TextTurn::<Tools>::new();
-                    turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
-                    turn
-                },
-                UsageEstimate::zero(),
-            )
-            .await
-            .unwrap()
-            .collect_noop()
+            .text_turn()
+            .tools::<Tools>()
+            .allow_only(vec![ToolsSelector::Weather])
+            .collect()
             .await
             .unwrap()
     });
@@ -125,7 +102,7 @@ fn tool_round_is_only_applied_on_explicit_commit() {
     assert_eq!(session.list_turns().count(), before_turns);
 
     match outcome {
-        TextStepOutcome::NeedsToolResults(round) => {
+        TextStepOutcomeWithTools::NeedsToolResults(round) => {
             assert_eq!(round.tool_count(), 1);
             assert!(matches!(
                 round.clone().expect_at_most_one().unwrap(),
@@ -149,7 +126,7 @@ fn tool_round_is_only_applied_on_explicit_commit() {
                 .collect::<Vec<_>>();
             session.commit_tool_round(round, tool_uses).unwrap();
         }
-        TextStepOutcome::Finished(_) => unreachable!(),
+        TextStepOutcomeWithTools::Finished(_) => unreachable!(),
     }
 
     assert_eq!(session.input().items().len(), before_len + 2);
@@ -199,23 +176,9 @@ fn session_can_drive_a_stateful_step_loop() {
 
     for prompt in ["step one", "step two"] {
         session.push_user(prompt);
-        let outcome = futures::executor::block_on(async {
-            session
-                .prepare_text(
-                    RequestExtensions::new(),
-                    TextTurn::<NoTools>::new(),
-                    UsageEstimate::zero(),
-                )
-                .await
-                .unwrap()
-                .collect_noop()
-                .await
-                .unwrap()
-        });
-        match outcome {
-            TextStepOutcome::Finished(result) => session.commit_text(result),
-            TextStepOutcome::NeedsToolResults(_) => unreachable!(),
-        }
+        let result =
+            futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
+        session.commit_text(result);
     }
 
     assert_eq!(session.input().items().len(), 4);
@@ -267,18 +230,10 @@ fn structured_tool_round_stays_explicit_until_commit() {
 
     let outcome = futures::executor::block_on(async {
         session
-            .prepare_structured(
-                RequestExtensions::new(),
-                {
-                    let mut turn = lutum::StructuredTurn::<Tools, Summary>::new();
-                    turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
-                    turn
-                },
-                UsageEstimate::zero(),
-            )
-            .await
-            .unwrap()
-            .collect_noop()
+            .structured_turn::<Summary>()
+            .tools::<Tools>()
+            .allow_only(vec![ToolsSelector::Weather])
+            .collect()
             .await
             .unwrap()
     });
@@ -287,7 +242,7 @@ fn structured_tool_round_stays_explicit_until_commit() {
     assert_eq!(session.list_turns().count(), before_turns);
 
     match outcome {
-        StructuredStepOutcome::NeedsToolResults(round) => {
+        StructuredStepOutcomeWithTools::NeedsToolResults(round) => {
             let tool_uses = round
                 .tool_calls
                 .iter()
@@ -302,7 +257,7 @@ fn structured_tool_round_stays_explicit_until_commit() {
                 .collect::<Vec<_>>();
             session.commit_tool_round(round, tool_uses).unwrap();
         }
-        StructuredStepOutcome::Finished(_) => unreachable!(),
+        StructuredStepOutcomeWithTools::Finished(_) => unreachable!(),
     }
 
     assert_eq!(session.input().items().len(), before_len + 2);

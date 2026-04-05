@@ -18,15 +18,7 @@ async fn main() -> anyhow::Result<()> {
     let input = ModelInput::new()
         .user("Tell a very short story about a robot learning to bake in 2-3 sentences.");
 
-    let pending = ctx
-        .text_turn(
-            RequestExtensions::new(),
-            input,
-            TextTurn::<NoTools>::new(),
-            UsageEstimate::zero(),
-        )
-        .await?;
-    let mut stream = pending.into_stream();
+    let mut stream = ctx.text_turn(input).stream().await?;
     let start = Instant::now();
 
     while let Some(event) = stream.next().await {

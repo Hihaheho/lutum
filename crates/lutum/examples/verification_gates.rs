@@ -107,21 +107,10 @@ async fn extract(ctx: &Context, prompt: &str) -> anyhow::Result<Contact> {
     );
     session.push_user(prompt);
 
-    let outcome = session
-        .prepare_structured(
-            RequestExtensions::new(),
-            session.structured_turn::<NoTools, Contact>(),
-        )
-        .await?
-        .collect_noop()
-        .await?;
-
-    match outcome {
-        StructuredStepOutcome::Finished(result) => match result.semantic {
-            StructuredTurnOutcome::Structured(contact) => Ok(contact),
-            StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),
-        },
-        StructuredStepOutcome::NeedsToolResults(_) => unreachable!(),
+    let result = session.structured_turn::<Contact>().collect().await?;
+    match result.semantic {
+        StructuredTurnOutcome::Structured(contact) => Ok(contact),
+        StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),
     }
 }
 

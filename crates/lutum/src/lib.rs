@@ -4,6 +4,8 @@ pub mod budget {
     pub use lutum_protocol::budget::*;
 }
 
+mod builders;
+
 pub mod context;
 
 pub mod conversation {
@@ -47,8 +49,13 @@ pub mod toolset {
 
 pub use context::{
     CollectError, Context, ContextError, EventHandler, HandlerContext, HandlerDirective,
-    PendingCompletion, PendingStructuredCompletion, PendingStructuredTurn, PendingTextTurn,
-    StructuredTurnPartial,
+    PendingCompletion, PendingStructuredCompletion, PendingStructuredTurn,
+    PendingStructuredTurnWithTools, PendingTextTurn, PendingTextTurnWithTools,
+    StructuredTurnPartial, StructuredTurnPartialWithTools,
+};
+pub use builders::{
+    Completion, StructuredCompletion, StructuredTurn, StructuredTurnWithTools, TextTurn,
+    TextTurnWithTools,
 };
 pub use hooks::{
     HookRegistry, ResolveUsageEstimate, ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt,
@@ -83,13 +90,17 @@ pub use lutum_protocol::{
     SharedPoolBudgetOptions, StructuredCompletionEvent, StructuredCompletionEventStream,
     StructuredCompletionReducer, StructuredCompletionReductionError, StructuredCompletionRequest,
     StructuredCompletionResult, StructuredCompletionState, StructuredOutput, StructuredOutputSpec,
-    StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnOutcome,
-    StructuredTurnReducer, StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState,
-    Temperature, TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TextTurnReducer,
-    TextTurnReductionError, TextTurnResult, TextTurnState, ToolCallError, ToolCallId,
+    StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnEventStreamWithTools,
+    StructuredTurnEventWithTools, StructuredTurnOutcome, StructuredTurnReducer,
+    StructuredTurnReducerWithTools, StructuredTurnReductionError, StructuredTurnResult,
+    StructuredTurnResultWithTools, StructuredTurnState, StructuredTurnStateWithTools, Temperature,
+    TemperatureError, TextTurnEvent, TextTurnEventStream, TextTurnEventStreamWithTools,
+    TextTurnEventWithTools, TextTurnReducer, TextTurnReducerWithTools, TextTurnReductionError,
+    TextTurnResult, TextTurnResultWithTools, TextTurnState, TextTurnStateWithTools, ToolCallError, ToolCallId,
     ToolCallItemView, ToolCallWrapper, ToolDef, ToolExecutionError, ToolInput, ToolMetadata,
     ToolName, ToolPolicy, ToolResultItemView, ToolSelector, ToolUse, ToolUseError, Toolset,
-    TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView, Usage, UsageRecoveryAdapter,
+    TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView, Usage, UsageEstimate,
+    UsageRecoveryAdapter,
     assistant_json, find_tool_call_arguments,
 };
 pub use mock::{
@@ -98,6 +109,6 @@ pub use mock::{
     RawStructuredTurnEvent, RawTextTurnEvent,
 };
 pub use session::{
-    Session, SessionDefaults, SessionPendingStructured, SessionPendingText, StructuredStepOutcome,
-    TextStepOutcome, ToolRound, ToolRoundArityError,
+    Session, SessionDefaults, StructuredStepOutcomeWithTools, TextStepOutcomeWithTools, ToolRound,
+    ToolRoundArityError,
 };

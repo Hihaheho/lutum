@@ -10,19 +10,8 @@ async fn ask(ctx: &Context, system: &str, user: impl Into<String>) -> anyhow::Re
     let mut session = Session::new(ctx.clone());
     session.push_system(system);
     session.push_user(user);
-    let outcome = session
-        .prepare_text(
-            RequestExtensions::new(),
-            session.text_turn::<NoTools>(),
-            UsageEstimate::zero(),
-        )
-        .await?
-        .collect_noop()
-        .await?;
-    match outcome {
-        TextStepOutcome::Finished(result) => Ok(result.assistant_text()),
-        TextStepOutcome::NeedsToolResults(_) => unreachable!(),
-    }
+    let result = session.text_turn().collect().await?;
+    Ok(result.assistant_text())
 }
 
 fn read_agents_file() -> anyhow::Result<String> {

@@ -36,19 +36,8 @@ fn seed_history(session: &mut Session) {
     }
 }
 async fn ask(session: &Session) -> anyhow::Result<(String, Usage)> {
-    let outcome = session
-        .prepare_text(
-            RequestExtensions::new(),
-            session.text_turn::<NoTools>(),
-            UsageEstimate::zero(),
-        )
-        .await?
-        .collect_noop()
-        .await?;
-    match outcome {
-        TextStepOutcome::Finished(result) => Ok((result.assistant_text(), result.usage)),
-        TextStepOutcome::NeedsToolResults(_) => unreachable!(),
-    }
+    let result = session.text_turn().collect().await?;
+    Ok((result.assistant_text(), result.usage))
 }
 async fn ask_with_prompt(
     ctx: &Context,

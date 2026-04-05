@@ -7,8 +7,8 @@ use lutum::{
     ErasedTextTurnEventStream, HookRegistry, InputMessageRole, MessageContent, ModelInput,
     ModelInputItem, ModelName, ModelNameError, NonEmpty, OperationKind, RawJson, RequestBudget,
     RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-    StructuredCompletionRequest, StructuredTurn, Temperature, TextTurn, TextTurnReducer,
-    ToolMetadata, ToolPolicy, ToolUse, TurnAdapter, Usage, UsageEstimate, UsageRecoveryAdapter,
+    Temperature, TextTurnReducer, TextTurnReducerWithTools, ToolMetadata, ToolPolicy, ToolUse,
+    TurnAdapter, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -139,26 +139,25 @@ fn typed_public_api_compiles_and_constructs_requests() {
         )),
     ]);
 
-    let mut _text = TextTurn::<Tools>::new();
-    _text.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
-    _text.config.budget = RequestBudget::from_tokens(256);
-
-    let mut _structured = StructuredTurn::<Tools, Summary>::new();
-    _structured.config.generation = lutum::GenerationParams {
-        temperature: Some(Temperature::try_from(0.3).unwrap()),
-        max_output_tokens: Some(512),
-        seed: None,
-    };
-    let _completion = CompletionRequest::builder()
-        .model(ModelName::new("gpt-4.1-mini").unwrap())
-        .prompt("hello")
-        .budget(RequestBudget::from_tokens(128))
-        .build();
-    let _structured_completion = StructuredCompletionRequest::<Summary>::builder()
-        .model(ModelName::new("gpt-4.1-mini").unwrap())
-        .prompt("hello")
-        .budget(RequestBudget::from_tokens(128))
-        .build();
+    let _text = ctx
+        .text_turn(input.clone())
+        .tools::<Tools>()
+        .allow_only(vec![ToolsSelector::Weather])
+        .budget(RequestBudget::from_tokens(256));
+    let _structured = ctx
+        .structured_turn::<Summary>(input.clone())
+        .tools::<Tools>()
+        .generation_config(lutum::GenerationParams {
+            temperature: Some(Temperature::try_from(0.3).unwrap()),
+            max_output_tokens: Some(512),
+            seed: None,
+        });
+    let _completion = ctx
+        .completion(ModelName::new("gpt-4.1-mini").unwrap(), "hello")
+        .budget(RequestBudget::from_tokens(128));
+    let _structured_completion = ctx
+        .structured_completion::<Summary>(ModelName::new("gpt-4.1-mini").unwrap(), "hello")
+        .budget(RequestBudget::from_tokens(128));
     let _estimate = UsageEstimate::zero();
     let _extensions = RequestExtensions::new();
     let _input = input;
@@ -197,7 +196,7 @@ fn selector_plans_round_trip_and_drive_tool_policy() {
 
 #[test]
 fn reducer_is_public_and_directly_usable() {
-    let mut reducer = TextTurnReducer::<Tools>::new();
+    let mut reducer = TextTurnReducer::new();
     reducer
         .apply(&lutum::TextTurnEvent::Started {
             request_id: Some("req-1".into()),
@@ -241,15 +240,17 @@ fn reducer_ignores_duplicate_tool_call_ready() {
         },
     });
 
-    let mut reducer = TextTurnReducer::<Tools>::new();
+    let mut reducer = TextTurnReducerWithTools::<Tools>::new();
     reducer
-        .apply(&lutum::TextTurnEvent::ToolCallReady(invocation.clone()))
+        .apply(&lutum::TextTurnEventWithTools::ToolCallReady(
+            invocation.clone(),
+        ))
         .unwrap();
     reducer
-        .apply(&lutum::TextTurnEvent::ToolCallReady(invocation))
+        .apply(&lutum::TextTurnEventWithTools::ToolCallReady(invocation))
         .unwrap();
     reducer
-        .apply(&lutum::TextTurnEvent::Completed {
+        .apply(&lutum::TextTurnEventWithTools::Completed {
             request_id: None,
             finish_reason: lutum::FinishReason::ToolCall,
             usage: Usage::zero(),
@@ -281,12 +282,8 @@ fn context_rejects_invalid_model_input_before_adapter_call() {
         ),
     ]);
 
-    let err = futures::executor::block_on(ctx.text_turn(
-        RequestExtensions::new(),
-        input,
-        TextTurn::<Tools>::new(),
-        UsageEstimate::zero(),
-    ));
+    let err =
+        futures::executor::block_on(ctx.text_turn(input).tools::<Tools>().allow_all().start());
 
     assert!(matches!(
         err,

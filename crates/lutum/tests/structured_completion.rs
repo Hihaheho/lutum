@@ -1,9 +1,8 @@
 use futures::executor::block_on;
 use lutum::{
     CollectError, FinishReason, MockLlmAdapter, MockStructuredCompletionScenario,
-    RawStructuredCompletionEvent, RequestExtensions, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, StructuredCompletionReductionError, StructuredCompletionRequest,
-    StructuredTurnOutcome, Usage, UsageEstimate,
+    RawStructuredCompletionEvent, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    StructuredCompletionReductionError, StructuredTurnOutcome, Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -40,17 +39,11 @@ fn structured_completion_collects_structured_output() {
     let ctx = lutum::Context::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
 
     let result = block_on(async {
-        ctx.structured_completion(
-            RequestExtensions::new(),
-            StructuredCompletionRequest::<Contact>::new(
-                lutum::ModelName::new("gpt-4.1-mini").unwrap(),
-                "Extract the email address.",
-            ),
-            UsageEstimate::zero(),
+        ctx.structured_completion::<Contact>(
+            lutum::ModelName::new("gpt-4.1-mini").unwrap(),
+            "Extract the email address.",
         )
-        .await
-        .unwrap()
-        .collect_noop()
+        .collect()
         .await
         .unwrap()
     });
@@ -87,17 +80,11 @@ fn structured_completion_collects_refusal() {
     let ctx = lutum::Context::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
 
     let result = block_on(async {
-        ctx.structured_completion(
-            RequestExtensions::new(),
-            StructuredCompletionRequest::<Contact>::new(
-                lutum::ModelName::new("gpt-4.1-mini").unwrap(),
-                "Extract the email address.",
-            ),
-            UsageEstimate::zero(),
+        ctx.structured_completion::<Contact>(
+            lutum::ModelName::new("gpt-4.1-mini").unwrap(),
+            "Extract the email address.",
         )
-        .await
-        .unwrap()
-        .collect_noop()
+        .collect()
         .await
         .unwrap()
     });
@@ -131,17 +118,11 @@ fn structured_completion_requires_semantic_output() {
     let ctx = lutum::Context::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
 
     let err = block_on(async {
-        ctx.structured_completion(
-            RequestExtensions::new(),
-            StructuredCompletionRequest::<Contact>::new(
-                lutum::ModelName::new("gpt-4.1-mini").unwrap(),
-                "Extract the email address.",
-            ),
-            UsageEstimate::zero(),
+        ctx.structured_completion::<Contact>(
+            lutum::ModelName::new("gpt-4.1-mini").unwrap(),
+            "Extract the email address.",
         )
-        .await
-        .unwrap()
-        .collect_noop()
+        .collect()
         .await
         .unwrap_err()
     });
@@ -161,14 +142,11 @@ fn context_new_does_not_enable_structured_completion() {
     let ctx = lutum::Context::new(Arc::new(MockLlmAdapter::new()), budget);
 
     let err = block_on(async {
-        ctx.structured_completion(
-            RequestExtensions::new(),
-            StructuredCompletionRequest::<Contact>::new(
-                lutum::ModelName::new("gpt-4.1-mini").unwrap(),
-                "Extract the email address.",
-            ),
-            UsageEstimate::zero(),
+        ctx.structured_completion::<Contact>(
+            lutum::ModelName::new("gpt-4.1-mini").unwrap(),
+            "Extract the email address.",
         )
+        .start()
         .await
     });
 

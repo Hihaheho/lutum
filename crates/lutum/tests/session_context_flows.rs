@@ -1,9 +1,8 @@
 use futures::executor::block_on;
 use lutum::{
     Context, FinishReason, InputMessageRole, MockLlmAdapter, MockStructuredScenario,
-    MockTextScenario, ModelInput, ModelInputItem, NoTools, RequestExtensions, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcome, StructuredTurn,
-    TextStepOutcome, TextTurn, ToolPolicy, Usage, UsageEstimate,
+    MockTextScenario, ModelInput, ModelInputItem, Session, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, TextStepOutcomeWithTools, Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -68,14 +67,7 @@ fn direct_context_text_turn_collects_without_session_helpers() {
         "Run without session helpers.",
     )]);
 
-    let pending = block_on(ctx.text_turn(
-        RequestExtensions::new(),
-        input,
-        TextTurn::<NoTools>::new(),
-        UsageEstimate::zero(),
-    ))
-    .unwrap();
-    let result = block_on(pending.collect_noop()).unwrap();
+    let result = block_on(ctx.text_turn(input).collect()).unwrap();
 
     assert_eq!(result.request_id.as_deref(), Some("req-direct"));
     assert_eq!(result.finish_reason, FinishReason::Stop);
@@ -109,34 +101,18 @@ fn structured_session_turn_is_only_applied_after_commit() {
     let before_len = session.input().items().len();
     let before_turns = session.list_turns().count();
 
-    let outcome = block_on(async {
-        session
-            .prepare_structured(
-                RequestExtensions::new(),
-                StructuredTurn::<NoTools, Contact>::new(),
-                UsageEstimate::zero(),
-            )
-            .await
-            .unwrap()
-            .collect_noop()
-            .await
-            .unwrap()
-    });
+    let result = block_on(async { session.structured_turn::<Contact>().collect().await })
+        .unwrap();
 
     assert_eq!(session.input().items().len(), before_len);
     assert_eq!(session.list_turns().count(), before_turns);
 
-    match outcome {
-        StructuredStepOutcome::Finished(result) => {
-            assert!(matches!(
-                result.semantic,
-                lutum::StructuredTurnOutcome::Structured(Contact { ref email })
-                    if email == "user@example.com"
-            ));
-            session.commit_structured(result);
-        }
-        StructuredStepOutcome::NeedsToolResults(_) => unreachable!(),
-    }
+    assert!(matches!(
+        result.semantic,
+        lutum::StructuredTurnOutcome::Structured(Contact { ref email })
+            if email == "user@example.com"
+    ));
+    session.commit_structured(result);
 
     assert_eq!(session.input().items().len(), before_len + 1);
     assert_eq!(session.list_turns().count(), 1);
@@ -177,19 +153,10 @@ fn session_commits_parallel_tool_results_in_order() {
 
     let outcome = block_on(async {
         session
-            .prepare_text(
-                RequestExtensions::new(),
-                {
-                    let mut turn = TextTurn::<Tools>::new();
-                    turn.config.tools =
-                        ToolPolicy::allow_only(vec![ToolsSelector::Weather, ToolsSelector::Search]);
-                    turn
-                },
-                UsageEstimate::zero(),
-            )
-            .await
-            .unwrap()
-            .collect_noop()
+            .text_turn()
+            .tools::<Tools>()
+            .allow_only(vec![ToolsSelector::Weather, ToolsSelector::Search])
+            .collect()
             .await
             .unwrap()
     });
@@ -198,7 +165,7 @@ fn session_commits_parallel_tool_results_in_order() {
     assert_eq!(session.list_turns().count(), before_turns);
 
     match outcome {
-        TextStepOutcome::NeedsToolResults(round) => {
+        TextStepOutcomeWithTools::NeedsToolResults(round) => {
             assert_eq!(round.tool_count(), 2);
             assert_eq!(
                 round.clone().expect_at_most_one().unwrap_err(),
@@ -233,7 +200,7 @@ fn session_commits_parallel_tool_results_in_order() {
                 .collect::<Vec<_>>();
             session.commit_tool_round(round, tool_uses).unwrap();
         }
-        TextStepOutcome::Finished(_) => unreachable!(),
+        TextStepOutcomeWithTools::Finished(_) => unreachable!(),
     }
 
     assert_eq!(session.input().items().len(), before_len + 3);

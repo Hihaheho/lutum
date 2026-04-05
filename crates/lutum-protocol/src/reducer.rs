@@ -7,51 +7,29 @@ use crate::{
     conversation::{AssistantTurn, AssistantTurnItem, RawJson, ToolCallId},
     llm::{
         CompletionEvent, FinishReason, StructuredCompletionEvent, StructuredTurnEvent,
-        TextTurnEvent,
+        StructuredTurnEventWithTools, TextTurnEvent, TextTurnEventWithTools,
     },
     structured::StructuredOutput,
     toolset::{ToolCallWrapper, Toolset},
     transcript::CommittedTurn,
 };
 
-#[derive(Debug)]
-pub struct TextTurnState<T: Toolset> {
+#[derive(Debug, Default)]
+pub struct TextTurnState {
     pub request_id: Option<String>,
     pub model: String,
     pub assistant_turn: Vec<AssistantTurnItem>,
-    pub tool_calls: Vec<T::ToolCall>,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
     pub committed_turn: Option<CommittedTurn>,
 }
 
-impl<T> Default for TextTurnState<T>
-where
-    T: Toolset,
-{
-    fn default() -> Self {
-        Self {
-            request_id: None,
-            model: String::new(),
-            assistant_turn: Vec::new(),
-            tool_calls: Vec::new(),
-            finish_reason: None,
-            usage: None,
-            committed_turn: None,
-        }
-    }
-}
-
-impl<T> Clone for TextTurnState<T>
-where
-    T: Toolset,
-{
+impl Clone for TextTurnState {
     fn clone(&self) -> Self {
         Self {
             request_id: self.request_id.clone(),
             model: self.model.clone(),
             assistant_turn: self.assistant_turn.clone(),
-            tool_calls: self.tool_calls.clone(),
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
             committed_turn: self.committed_turn.clone(),
@@ -59,33 +37,20 @@ where
     }
 }
 
-impl<T> PartialEq for TextTurnState<T>
-where
-    T: Toolset,
-    T::ToolCall: PartialEq,
-{
+impl PartialEq for TextTurnState {
     fn eq(&self, other: &Self) -> bool {
         self.request_id == other.request_id
             && self.model == other.model
             && self.assistant_turn == other.assistant_turn
-            && self.tool_calls == other.tool_calls
             && self.finish_reason == other.finish_reason
             && self.usage == other.usage
             && committed_turn_option_eq(&self.committed_turn, &other.committed_turn)
     }
 }
 
-impl<T> Eq for TextTurnState<T>
-where
-    T: Toolset,
-    T::ToolCall: Eq,
-{
-}
+impl Eq for TextTurnState {}
 
-impl<T> TextTurnState<T>
-where
-    T: Toolset,
-{
+impl TextTurnState {
     pub fn assistant_text(&self) -> String {
         assistant_text(&self.assistant_turn)
     }
@@ -93,7 +58,7 @@ where
     /// Apply a streaming event to advance this turn state.
     ///
     /// Returns an error if the turn has already completed.
-    pub fn apply(&mut self, event: &TextTurnEvent<T>) -> Result<(), TextTurnReductionError> {
+    pub fn apply(&mut self, event: &TextTurnEvent) -> Result<(), TextTurnReductionError> {
         if self.finish_reason.is_some() {
             return Err(TextTurnReductionError::AlreadyCompleted);
         }
@@ -111,10 +76,6 @@ where
             }
             TextTurnEvent::RefusalDelta { delta } => {
                 push_or_extend_refusal(&mut self.assistant_turn, delta);
-            }
-            TextTurnEvent::ToolCallChunk { .. } => {}
-            TextTurnEvent::ToolCallReady(tool_call) => {
-                push_tool_call(&mut self.assistant_turn, &mut self.tool_calls, tool_call);
             }
             TextTurnEvent::Completed {
                 request_id,
@@ -140,7 +101,7 @@ where
     /// received a `Completed` event, and
     /// [`TextTurnReductionError::EmptyAssistantOutput`] if the completed turn
     /// produced no assistant items.
-    pub fn finish(self) -> Result<TextTurnResult<T>, TextTurnReductionError> {
+    pub fn finish(self) -> Result<TextTurnResult, TextTurnReductionError> {
         // Check completion first so callers get Incomplete (not EmptyAssistantOutput)
         // when finish() is called on a fresh or mid-stream state.
         let finish_reason = self
@@ -156,7 +117,6 @@ where
             request_id: self.request_id,
             model: self.model,
             assistant_turn,
-            tool_calls: self.tool_calls,
             finish_reason,
             usage,
             committed_turn,
@@ -165,7 +125,180 @@ where
 }
 
 #[derive(Debug)]
-pub struct TextTurnResult<T: Toolset> {
+pub struct TextTurnResult {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub assistant_turn: AssistantTurn,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+    pub committed_turn: CommittedTurn,
+}
+
+impl TextTurnResult {
+    pub fn assistant_text(&self) -> String {
+        self.assistant_turn.assistant_text()
+    }
+}
+
+impl Clone for TextTurnResult {
+    fn clone(&self) -> Self {
+        Self {
+            request_id: self.request_id.clone(),
+            model: self.model.clone(),
+            assistant_turn: self.assistant_turn.clone(),
+            finish_reason: self.finish_reason.clone(),
+            usage: self.usage,
+            committed_turn: self.committed_turn.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct TextTurnStateWithTools<T: Toolset> {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub assistant_turn: Vec<AssistantTurnItem>,
+    pub tool_calls: Vec<T::ToolCall>,
+    pub finish_reason: Option<FinishReason>,
+    pub usage: Option<Usage>,
+    pub committed_turn: Option<CommittedTurn>,
+}
+
+impl<T> Default for TextTurnStateWithTools<T>
+where
+    T: Toolset,
+{
+    fn default() -> Self {
+        Self {
+            request_id: None,
+            model: String::new(),
+            assistant_turn: Vec::new(),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            usage: None,
+            committed_turn: None,
+        }
+    }
+}
+
+impl<T> Clone for TextTurnStateWithTools<T>
+where
+    T: Toolset,
+{
+    fn clone(&self) -> Self {
+        Self {
+            request_id: self.request_id.clone(),
+            model: self.model.clone(),
+            assistant_turn: self.assistant_turn.clone(),
+            tool_calls: self.tool_calls.clone(),
+            finish_reason: self.finish_reason.clone(),
+            usage: self.usage,
+            committed_turn: self.committed_turn.clone(),
+        }
+    }
+}
+
+impl<T> PartialEq for TextTurnStateWithTools<T>
+where
+    T: Toolset,
+    T::ToolCall: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.request_id == other.request_id
+            && self.model == other.model
+            && self.assistant_turn == other.assistant_turn
+            && self.tool_calls == other.tool_calls
+            && self.finish_reason == other.finish_reason
+            && self.usage == other.usage
+            && committed_turn_option_eq(&self.committed_turn, &other.committed_turn)
+    }
+}
+
+impl<T> Eq for TextTurnStateWithTools<T>
+where
+    T: Toolset,
+    T::ToolCall: Eq,
+{
+}
+
+impl<T> TextTurnStateWithTools<T>
+where
+    T: Toolset,
+{
+    pub fn apply(
+        &mut self,
+        event: &TextTurnEventWithTools<T>,
+    ) -> Result<(), TextTurnReductionError> {
+        if self.finish_reason.is_some() {
+            return Err(TextTurnReductionError::AlreadyCompleted);
+        }
+
+        match event {
+            TextTurnEventWithTools::Started { request_id, model } => {
+                self.request_id = request_id.clone();
+                self.model = model.clone();
+            }
+            TextTurnEventWithTools::TextDelta { delta } => {
+                push_or_extend_text(&mut self.assistant_turn, delta);
+            }
+            TextTurnEventWithTools::ReasoningDelta { delta } => {
+                push_or_extend_reasoning(&mut self.assistant_turn, delta);
+            }
+            TextTurnEventWithTools::RefusalDelta { delta } => {
+                push_or_extend_refusal(&mut self.assistant_turn, delta);
+            }
+            TextTurnEventWithTools::ToolCallChunk { .. } => {}
+            TextTurnEventWithTools::ToolCallReady(tool_call) => {
+                push_tool_call(&mut self.assistant_turn, &mut self.tool_calls, tool_call);
+            }
+            TextTurnEventWithTools::Completed {
+                request_id,
+                finish_reason,
+                usage,
+                committed_turn,
+            } => {
+                if let Some(request_id) = request_id.clone() {
+                    self.request_id = Some(request_id);
+                }
+                self.finish_reason = Some(finish_reason.clone());
+                self.usage = Some(*usage);
+                self.committed_turn = Some(committed_turn.clone());
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<TextTurnResultWithTools<T>, TextTurnReductionError> {
+        let finish_reason = self
+            .finish_reason
+            .ok_or(TextTurnReductionError::Incomplete)?;
+        let usage = self.usage.ok_or(TextTurnReductionError::Incomplete)?;
+        let committed_turn = self
+            .committed_turn
+            .ok_or(TextTurnReductionError::Incomplete)?;
+        let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
+            .map_err(|_| TextTurnReductionError::EmptyAssistantOutput)?;
+        Ok(TextTurnResultWithTools {
+            request_id: self.request_id,
+            model: self.model,
+            assistant_turn,
+            tool_calls: self.tool_calls,
+            finish_reason,
+            usage,
+            committed_turn,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StructuredTurnOutcome<O> {
+    Structured(O),
+    Refusal(String),
+}
+
+#[derive(Debug)]
+pub struct TextTurnResultWithTools<T: Toolset> {
     pub request_id: Option<String>,
     pub model: String,
     pub assistant_turn: AssistantTurn,
@@ -175,7 +308,7 @@ pub struct TextTurnResult<T: Toolset> {
     pub committed_turn: CommittedTurn,
 }
 
-impl<T> TextTurnResult<T>
+impl<T> TextTurnResultWithTools<T>
 where
     T: Toolset,
 {
@@ -184,7 +317,7 @@ where
     }
 }
 
-impl<T> Clone for TextTurnResult<T>
+impl<T> Clone for TextTurnResultWithTools<T>
 where
     T: Toolset,
 {
@@ -202,11 +335,10 @@ where
 }
 
 #[derive(Debug)]
-pub struct StructuredTurnState<T: Toolset, O: StructuredOutput> {
+pub struct StructuredTurnState<O: StructuredOutput> {
     pub request_id: Option<String>,
     pub model: String,
     pub assistant_turn: Vec<AssistantTurnItem>,
-    pub tool_calls: Vec<T::ToolCall>,
     pub structured: Option<O>,
     pub refusal: Option<String>,
     pub finish_reason: Option<FinishReason>,
@@ -214,9 +346,8 @@ pub struct StructuredTurnState<T: Toolset, O: StructuredOutput> {
     pub committed_turn: Option<CommittedTurn>,
 }
 
-impl<T, O> Default for StructuredTurnState<T, O>
+impl<O> Default for StructuredTurnState<O>
 where
-    T: Toolset,
     O: StructuredOutput,
 {
     fn default() -> Self {
@@ -224,7 +355,6 @@ where
             request_id: None,
             model: String::new(),
             assistant_turn: Vec::new(),
-            tool_calls: Vec::new(),
             structured: None,
             refusal: None,
             finish_reason: None,
@@ -234,9 +364,8 @@ where
     }
 }
 
-impl<T, O> Clone for StructuredTurnState<T, O>
+impl<O> Clone for StructuredTurnState<O>
 where
-    T: Toolset,
     O: StructuredOutput,
 {
     fn clone(&self) -> Self {
@@ -244,7 +373,6 @@ where
             request_id: self.request_id.clone(),
             model: self.model.clone(),
             assistant_turn: self.assistant_turn.clone(),
-            tool_calls: self.tool_calls.clone(),
             structured: self.structured.clone(),
             refusal: self.refusal.clone(),
             finish_reason: self.finish_reason.clone(),
@@ -254,17 +382,14 @@ where
     }
 }
 
-impl<T, O> PartialEq for StructuredTurnState<T, O>
+impl<O> PartialEq for StructuredTurnState<O>
 where
-    T: Toolset,
-    T::ToolCall: PartialEq,
     O: StructuredOutput + PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
         self.request_id == other.request_id
             && self.model == other.model
             && self.assistant_turn == other.assistant_turn
-            && self.tool_calls == other.tool_calls
             && self.structured == other.structured
             && self.refusal == other.refusal
             && self.finish_reason == other.finish_reason
@@ -273,25 +398,19 @@ where
     }
 }
 
-impl<T, O> Eq for StructuredTurnState<T, O>
+impl<O> Eq for StructuredTurnState<O>
 where
-    T: Toolset,
-    T::ToolCall: Eq,
     O: StructuredOutput + Eq,
 {
 }
 
-impl<T, O> StructuredTurnState<T, O>
+impl<O> StructuredTurnState<O>
 where
-    T: Toolset,
     O: StructuredOutput,
 {
-    /// Apply a streaming event to advance this turn state.
-    ///
-    /// Returns an error if the turn has already completed.
     pub fn apply(
         &mut self,
-        event: &StructuredTurnEvent<T, O>,
+        event: &StructuredTurnEvent<O>,
     ) -> Result<(), StructuredTurnReductionError> {
         if self.finish_reason.is_some() {
             return Err(StructuredTurnReductionError::AlreadyCompleted);
@@ -322,10 +441,6 @@ where
                     self.refusal = Some(delta.clone());
                 }
             }
-            StructuredTurnEvent::ToolCallChunk { .. } => {}
-            StructuredTurnEvent::ToolCallReady(tool_call) => {
-                push_tool_call(&mut self.assistant_turn, &mut self.tool_calls, tool_call);
-            }
             StructuredTurnEvent::Completed {
                 request_id,
                 finish_reason,
@@ -344,15 +459,7 @@ where
         Ok(())
     }
 
-    /// Finalize the accumulated state into a completed turn result.
-    ///
-    /// Returns [`StructuredTurnReductionError::Incomplete`] if the turn has
-    /// not yet received a `Completed` event, and
-    /// [`StructuredTurnReductionError::EmptyAssistantOutput`] if the completed
-    /// turn produced no assistant items.
-    pub fn finish(self) -> Result<StructuredTurnResult<T, O>, StructuredTurnReductionError> {
-        // Check completion first so callers get Incomplete (not EmptyAssistantOutput)
-        // when finish() is called on a fresh or mid-stream state.
+    pub fn finish(self) -> Result<StructuredTurnResult<O>, StructuredTurnReductionError> {
         let finish_reason = self
             .finish_reason
             .ok_or(StructuredTurnReductionError::Incomplete)?;
@@ -373,6 +480,175 @@ where
             request_id: self.request_id,
             model: self.model,
             assistant_turn,
+            semantic,
+            finish_reason,
+            usage,
+            committed_turn,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct StructuredTurnStateWithTools<T: Toolset, O: StructuredOutput> {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub assistant_turn: Vec<AssistantTurnItem>,
+    pub tool_calls: Vec<T::ToolCall>,
+    pub structured: Option<O>,
+    pub refusal: Option<String>,
+    pub finish_reason: Option<FinishReason>,
+    pub usage: Option<Usage>,
+    pub committed_turn: Option<CommittedTurn>,
+}
+
+impl<T, O> Default for StructuredTurnStateWithTools<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    fn default() -> Self {
+        Self {
+            request_id: None,
+            model: String::new(),
+            assistant_turn: Vec::new(),
+            tool_calls: Vec::new(),
+            structured: None,
+            refusal: None,
+            finish_reason: None,
+            usage: None,
+            committed_turn: None,
+        }
+    }
+}
+
+impl<T, O> Clone for StructuredTurnStateWithTools<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    fn clone(&self) -> Self {
+        Self {
+            request_id: self.request_id.clone(),
+            model: self.model.clone(),
+            assistant_turn: self.assistant_turn.clone(),
+            tool_calls: self.tool_calls.clone(),
+            structured: self.structured.clone(),
+            refusal: self.refusal.clone(),
+            finish_reason: self.finish_reason.clone(),
+            usage: self.usage,
+            committed_turn: self.committed_turn.clone(),
+        }
+    }
+}
+
+impl<T, O> PartialEq for StructuredTurnStateWithTools<T, O>
+where
+    T: Toolset,
+    T::ToolCall: PartialEq,
+    O: StructuredOutput + PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.request_id == other.request_id
+            && self.model == other.model
+            && self.assistant_turn == other.assistant_turn
+            && self.tool_calls == other.tool_calls
+            && self.structured == other.structured
+            && self.refusal == other.refusal
+            && self.finish_reason == other.finish_reason
+            && self.usage == other.usage
+            && committed_turn_option_eq(&self.committed_turn, &other.committed_turn)
+    }
+}
+
+impl<T, O> Eq for StructuredTurnStateWithTools<T, O>
+where
+    T: Toolset,
+    T::ToolCall: Eq,
+    O: StructuredOutput + Eq,
+{
+}
+
+impl<T, O> StructuredTurnStateWithTools<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    pub fn apply(
+        &mut self,
+        event: &StructuredTurnEventWithTools<T, O>,
+    ) -> Result<(), StructuredTurnReductionError> {
+        if self.finish_reason.is_some() {
+            return Err(StructuredTurnReductionError::AlreadyCompleted);
+        }
+
+        match event {
+            StructuredTurnEventWithTools::Started { request_id, model } => {
+                self.request_id = request_id.clone();
+                self.model = model.clone();
+            }
+            StructuredTurnEventWithTools::StructuredOutputChunk { json_delta } => {
+                push_or_extend_text(&mut self.assistant_turn, json_delta);
+            }
+            StructuredTurnEventWithTools::StructuredOutputReady(value) => {
+                if self.structured.is_some() {
+                    return Err(StructuredTurnReductionError::DuplicateStructuredOutput);
+                }
+                self.structured = Some(value.clone());
+            }
+            StructuredTurnEventWithTools::ReasoningDelta { delta } => {
+                push_or_extend_reasoning(&mut self.assistant_turn, delta);
+            }
+            StructuredTurnEventWithTools::RefusalDelta { delta } => {
+                push_or_extend_refusal(&mut self.assistant_turn, delta);
+                if let Some(existing) = self.refusal.as_mut() {
+                    existing.push_str(delta);
+                } else {
+                    self.refusal = Some(delta.clone());
+                }
+            }
+            StructuredTurnEventWithTools::ToolCallChunk { .. } => {}
+            StructuredTurnEventWithTools::ToolCallReady(tool_call) => {
+                push_tool_call(&mut self.assistant_turn, &mut self.tool_calls, tool_call);
+            }
+            StructuredTurnEventWithTools::Completed {
+                request_id,
+                finish_reason,
+                usage,
+                committed_turn,
+            } => {
+                if let Some(request_id) = request_id.clone() {
+                    self.request_id = Some(request_id);
+                }
+                self.finish_reason = Some(finish_reason.clone());
+                self.usage = Some(*usage);
+                self.committed_turn = Some(committed_turn.clone());
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<StructuredTurnResultWithTools<T, O>, StructuredTurnReductionError> {
+        let finish_reason = self
+            .finish_reason
+            .ok_or(StructuredTurnReductionError::Incomplete)?;
+        let usage = self.usage.ok_or(StructuredTurnReductionError::Incomplete)?;
+        let committed_turn = self
+            .committed_turn
+            .ok_or(StructuredTurnReductionError::Incomplete)?;
+        let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
+            .map_err(|_| StructuredTurnReductionError::EmptyAssistantOutput)?;
+        let semantic = match (self.structured, self.refusal) {
+            (Some(value), None) => StructuredTurnOutcome::Structured(value),
+            (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
+            (None, None) => return Err(StructuredTurnReductionError::MissingSemantic),
+            (Some(_), Some(_)) => return Err(StructuredTurnReductionError::ConflictingSemantic),
+        };
+
+        Ok(StructuredTurnResultWithTools {
+            request_id: self.request_id,
+            model: self.model,
+            assistant_turn,
             tool_calls: self.tool_calls,
             semantic,
             finish_reason,
@@ -382,14 +658,36 @@ where
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StructuredTurnOutcome<O> {
-    Structured(O),
-    Refusal(String),
+#[derive(Debug)]
+pub struct StructuredTurnResult<O: StructuredOutput> {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub assistant_turn: AssistantTurn,
+    pub semantic: StructuredTurnOutcome<O>,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+    pub committed_turn: CommittedTurn,
+}
+
+impl<O> Clone for StructuredTurnResult<O>
+where
+    O: StructuredOutput,
+{
+    fn clone(&self) -> Self {
+        Self {
+            request_id: self.request_id.clone(),
+            model: self.model.clone(),
+            assistant_turn: self.assistant_turn.clone(),
+            semantic: self.semantic.clone(),
+            finish_reason: self.finish_reason.clone(),
+            usage: self.usage,
+            committed_turn: self.committed_turn.clone(),
+        }
+    }
 }
 
 #[derive(Debug)]
-pub struct StructuredTurnResult<T: Toolset, O: StructuredOutput> {
+pub struct StructuredTurnResultWithTools<T: Toolset, O: StructuredOutput> {
     pub request_id: Option<String>,
     pub model: String,
     pub assistant_turn: AssistantTurn,
@@ -400,7 +698,7 @@ pub struct StructuredTurnResult<T: Toolset, O: StructuredOutput> {
     pub committed_turn: CommittedTurn,
 }
 
-impl<T, O> Clone for StructuredTurnResult<T, O>
+impl<T, O> Clone for StructuredTurnResultWithTools<T, O>
 where
     T: Toolset,
     O: StructuredOutput,
@@ -638,11 +936,45 @@ pub enum StructuredCompletionReductionError {
     ConflictingSemantic,
 }
 
-pub struct TextTurnReducer<T: Toolset> {
-    state: TextTurnState<T>,
+pub struct TextTurnReducer {
+    state: TextTurnState,
 }
 
-impl<T> Default for TextTurnReducer<T>
+impl Default for TextTurnReducer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TextTurnReducer {
+    pub fn new() -> Self {
+        Self {
+            state: TextTurnState::default(),
+        }
+    }
+
+    pub fn state(&self) -> &TextTurnState {
+        &self.state
+    }
+
+    pub fn into_state(self) -> TextTurnState {
+        self.state
+    }
+
+    pub fn apply(&mut self, event: &TextTurnEvent) -> Result<(), TextTurnReductionError> {
+        self.state.apply(event)
+    }
+
+    pub fn into_result(self) -> Result<TextTurnResult, TextTurnReductionError> {
+        self.state.finish()
+    }
+}
+
+pub struct TextTurnReducerWithTools<T: Toolset> {
+    state: TextTurnStateWithTools<T>,
+}
+
+impl<T> Default for TextTurnReducerWithTools<T>
 where
     T: Toolset,
 {
@@ -651,40 +983,39 @@ where
     }
 }
 
-impl<T> TextTurnReducer<T>
+impl<T> TextTurnReducerWithTools<T>
 where
     T: Toolset,
 {
     pub fn new() -> Self {
         Self {
-            state: TextTurnState::default(),
+            state: TextTurnStateWithTools::default(),
         }
     }
 
-    pub fn state(&self) -> &TextTurnState<T> {
+    pub fn state(&self) -> &TextTurnStateWithTools<T> {
         &self.state
     }
 
-    pub fn into_state(self) -> TextTurnState<T> {
+    pub fn into_state(self) -> TextTurnStateWithTools<T> {
         self.state
     }
 
-    pub fn apply(&mut self, event: &TextTurnEvent<T>) -> Result<(), TextTurnReductionError> {
+    pub fn apply(&mut self, event: &TextTurnEventWithTools<T>) -> Result<(), TextTurnReductionError> {
         self.state.apply(event)
     }
 
-    pub fn into_result(self) -> Result<TextTurnResult<T>, TextTurnReductionError> {
+    pub fn into_result(self) -> Result<TextTurnResultWithTools<T>, TextTurnReductionError> {
         self.state.finish()
     }
 }
 
-pub struct StructuredTurnReducer<T: Toolset, O: StructuredOutput> {
-    state: StructuredTurnState<T, O>,
+pub struct StructuredTurnReducer<O: StructuredOutput> {
+    state: StructuredTurnState<O>,
 }
 
-impl<T, O> Default for StructuredTurnReducer<T, O>
+impl<O> Default for StructuredTurnReducer<O>
 where
-    T: Toolset,
     O: StructuredOutput,
 {
     fn default() -> Self {
@@ -692,9 +1023,8 @@ where
     }
 }
 
-impl<T, O> StructuredTurnReducer<T, O>
+impl<O> StructuredTurnReducer<O>
 where
-    T: Toolset,
     O: StructuredOutput,
 {
     pub fn new() -> Self {
@@ -703,24 +1033,69 @@ where
         }
     }
 
-    pub fn state(&self) -> &StructuredTurnState<T, O> {
+    pub fn state(&self) -> &StructuredTurnState<O> {
         &self.state
     }
 
-    pub fn into_state(self) -> StructuredTurnState<T, O> {
+    pub fn into_state(self) -> StructuredTurnState<O> {
+        self.state
+    }
+
+    pub fn apply(&mut self, event: &StructuredTurnEvent<O>) -> Result<(), StructuredTurnReductionError> {
+        self.state.apply(event)
+    }
+
+    pub fn into_result(self) -> Result<StructuredTurnResult<O>, (StructuredTurnReductionError, Option<CommittedTurn>)> {
+        let committed_turn = self.state.committed_turn.clone();
+        self.state
+            .finish()
+            .map_err(|source| (source, committed_turn))
+    }
+}
+
+pub struct StructuredTurnReducerWithTools<T: Toolset, O: StructuredOutput> {
+    state: StructuredTurnStateWithTools<T, O>,
+}
+
+impl<T, O> Default for StructuredTurnReducerWithTools<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, O> StructuredTurnReducerWithTools<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    pub fn new() -> Self {
+        Self {
+            state: StructuredTurnStateWithTools::default(),
+        }
+    }
+
+    pub fn state(&self) -> &StructuredTurnStateWithTools<T, O> {
+        &self.state
+    }
+
+    pub fn into_state(self) -> StructuredTurnStateWithTools<T, O> {
         self.state
     }
 
     pub fn apply(
         &mut self,
-        event: &StructuredTurnEvent<T, O>,
+        event: &StructuredTurnEventWithTools<T, O>,
     ) -> Result<(), StructuredTurnReductionError> {
         self.state.apply(event)
     }
 
     pub fn into_result(
         self,
-    ) -> Result<StructuredTurnResult<T, O>, (StructuredTurnReductionError, Option<CommittedTurn>)>
+    ) -> Result<StructuredTurnResultWithTools<T, O>, (StructuredTurnReductionError, Option<CommittedTurn>)>
     {
         let committed_turn = self.state.committed_turn.clone();
         self.state
@@ -1024,20 +1399,20 @@ mod tests {
 
     #[test]
     fn text_reducer_returns_assistant_turn() {
-        let mut reducer = TextTurnReducer::<Tools>::new();
+        let mut reducer = TextTurnReducerWithTools::<Tools>::new();
         reducer
-            .apply(&TextTurnEvent::Started {
+            .apply(&TextTurnEventWithTools::Started {
                 request_id: Some("req-1".into()),
                 model: "gpt-4.1".into(),
             })
             .unwrap();
         reducer
-            .apply(&TextTurnEvent::TextDelta {
+            .apply(&TextTurnEventWithTools::TextDelta {
                 delta: "checking ".into(),
             })
             .unwrap();
         reducer
-            .apply(&TextTurnEvent::ToolCallReady(CallsCall::Weather(
+            .apply(&TextTurnEventWithTools::ToolCallReady(CallsCall::Weather(
                 WeatherArgsCall {
                     metadata: ToolMetadata::new(
                         ToolCallId::from("call-1"),
@@ -1051,7 +1426,7 @@ mod tests {
             )))
             .unwrap();
         reducer
-            .apply(&TextTurnEvent::Completed {
+            .apply(&TextTurnEventWithTools::Completed {
                 request_id: Some("req-1".into()),
                 finish_reason: FinishReason::ToolCall,
                 usage: Usage {
@@ -1069,7 +1444,7 @@ mod tests {
 
     #[test]
     fn structured_reducer_distinguishes_structured_and_refusal() {
-        let mut reducer = StructuredTurnReducer::<Tools, Summary>::new();
+        let mut reducer = StructuredTurnReducer::<Summary>::new();
         reducer
             .apply(&StructuredTurnEvent::Started {
                 request_id: Some("req-2".into()),

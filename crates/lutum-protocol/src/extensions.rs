@@ -49,4 +49,8 @@ impl RequestExtensions {
     pub fn contains<T: Any + Send + Sync + 'static>(&self) -> bool {
         self.map.contains_key(&TypeId::of::<T>())
     }
+
+    pub fn extend(&mut self, other: Self) {
+        self.map.extend(other.map);
+    }
 }

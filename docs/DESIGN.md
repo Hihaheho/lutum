@@ -113,8 +113,10 @@ These are two distinct concepts.
 
 **Completed result** — used immediately after execution:
 
-- `TextTurnResult<T>`, `StructuredTurnResult<T, O>`
-- carries `assistant_turn: AssistantTurn`, `tool_calls`, `finish_reason`, `usage`
+- no-tools: `TextTurnResult`, `StructuredTurnResult<O>`
+- tool-enabled: `TextTurnResultWithTools<T>`, `StructuredTurnResultWithTools<T, O>`
+- no-tools results omit `tool_calls`; tool-enabled results carry `tool_calls`, `assistant_turn`,
+  `finish_reason`, and `usage`
 - also carries `committed_turn: CommittedTurn` — the exact adapter-owned turn
 
 **Committed transcript turn** — used for history and replay:
@@ -188,13 +190,15 @@ It deliberately does not own:
 
 ### Explicit commit model
 
-- `prepare_text(...)` / `prepare_structured(...)` do not mutate transcript state
-- `collect*()` does not mutate transcript state
+- `Session::text_turn()` / `Session::structured_turn::<O>()` return executable builders
+- `builder.start()` / `builder.collect()` / `builder.collect_with(...)` do not mutate transcript
+  state
 - transcript state changes only through explicit `commit_*`
 - `input()`, `input_mut()`, and `into_input()` give direct access to the ordered input
-- `into_pending()` drops back to raw `Context`-style collection
 
 `commit_text` and `commit_structured` are infallible — they push `ModelInputItem::Turn`.
+
+`commit_text_with_tools` and `commit_structured_with_tools` commit completed tool-enabled turns.
 
 `commit_tool_round` validates tool use ordering against the committed turn's `AssistantTurn`
 and returns `Result<(), AssistantTurnInputError>`.
@@ -209,16 +213,21 @@ graph semantics or first-class branch structure at this stage.
 
 ## Shared turn config
 
-Shared config replaces the old duplicated request structs:
+Execution config is shared across text and structured turns:
 
 - `GenerationParams` — temperature, max_output_tokens, seed
 - `TurnConfig<T>`
 - `ToolPolicy<T>`
 
-Thin facades:
+Public builders in `lutum`:
 
-- `TextTurn<T>`
-- `StructuredTurn<T, O>`
+- `Session::text_turn()` / `Context::text_turn(input)` return `TextTurn`
+- `Session::structured_turn::<O>()` / `Context::structured_turn::<O>(input)` return
+  `StructuredTurn<O>`
+- `.tools::<T>()` upgrades those into `TextTurnWithTools<T>` /
+  `StructuredTurnWithTools<T, O>`
+- request metadata is attached inline with `.ext(...)` / `.extensions(...)`
+- low-level generation overrides stay available via `.generation_config(...)`
 
 `ReasoningParams` no longer exists in core. Reasoning is provider-owned: `OpenAiAdapter`
 accepts a `ReasoningEffortResolver`; `ClaudeAdapter` accepts a `BudgetTokensResolver` for
@@ -253,12 +262,26 @@ Selectors also retain a typed path back to `ToolDef`:
 Execution is streaming-first.
 
 - start a turn with `Context` or `Session`
-- stream typed events via `into_stream()`
-- or collect through `collect*()` with an optional event handler
+- stream typed events via `.stream().await?`
+- or collect through `.collect()` / `.collect_with(...)`
 
-`TextTurnState` and `StructuredTurnState` are the public partial state types. Reducers
-(`TextTurnReducer`, `StructuredTurnReducer`) are thin wrappers around state; they are
-implementation details, not the primary public concept.
+No-tools is the default event/result family:
+
+- `TextTurnEvent`, `StructuredTurnEvent<O>`
+- `TextTurnState`, `StructuredTurnState<O>`
+- `TextTurnReducer`, `StructuredTurnReducer<O>`
+- `TextTurnResult`, `StructuredTurnResult<O>`
+
+Tool-enabled turns use the `WithTools` suffix:
+
+- `TextTurnEventWithTools<T>`, `StructuredTurnEventWithTools<T, O>`
+- `TextTurnStateWithTools<T>`, `StructuredTurnStateWithTools<T, O>`
+- `TextTurnReducerWithTools<T>`, `StructuredTurnReducerWithTools<T, O>`
+- `TextTurnResultWithTools<T>`, `StructuredTurnResultWithTools<T, O>`
+- `TextStepOutcomeWithTools<T>`, `StructuredStepOutcomeWithTools<T, O>`
+
+No-tools event streams reject provider tool signals as contract violations rather than silently
+discarding them.
 
 The reducer stores the `committed_turn` from the `Completed` event during `apply()`.
 `into_result()` uses that internally — it does not accept a caller-supplied committed turn.
@@ -270,21 +293,21 @@ abandoned, `OwnedLease::drop()` releases the reserved capacity by recording zero
 
 There are now two completion-style APIs:
 
-- `Context::completion` — raw text completion
-- `Context::structured_completion` — prompt-based structured output without tools
+- `Context::completion(model, prompt)` — raw text completion builder
+- `Context::structured_completion::<O>(model, prompt)` — prompt-based structured output builder
 
-`Context::completion` is the lower-level raw text path. It uses:
+Both return executable builders with the same inline request-metadata style as turn builders:
 
-- `CompletionRequest` — model, prompt, `CompletionOptions` (temperature, max_output_tokens, stop), budget
-- `CompletionEvent` — `Started`, `TextDelta(String)`, `Completed { finish_reason, usage }`
-- `CompletionAdapter::completion(request, &extensions) -> CompletionEventStream`
+- `.ext(...)` / `.extensions(...)`
+- `.temperature(...)`, `.max_output_tokens(...)`, `.budget(...)`
+- `.collect()`, `.collect_with(...)`, `.stream()`
 
-`Context::structured_completion` is the tool-less structured path for prompt-based tasks that do
-not need transcript integration. It uses:
+`Context::structured_completion::<O>(...)` also supports `.system(...)`, `.seed(...)`, and
+`.generation_config(...)`.
 
-- `StructuredCompletionRequest<O>` — model, optional system prompt, prompt, `GenerationParams`, budget
-- `StructuredCompletionEvent<O>` — `Started`, `StructuredOutputChunk`, `StructuredOutputReady`, `ReasoningDelta`, `RefusalDelta`, `Completed`
-- `CompletionAdapter::structured_completion(request, &extensions) -> ErasedStructuredCompletionEventStream`
+Internally these builders still compile into `CompletionRequest` /
+`StructuredCompletionRequest<O>` and stream `CompletionEvent` /
+`StructuredCompletionEvent<O>`.
 
 Unlike turn-based execution, neither completion API produces a `CommittedTurn` or integrates with
 the transcript model.
@@ -292,7 +315,8 @@ the transcript model.
 `Context::new(...)` does not configure a completion adapter. Calling either completion API on that
 context returns an error; use `Context::from_parts(...)` when completion is needed.
 
-If you need transcript/session/replay but still do not need tools, use `StructuredTurn::<NoTools, O>`.
+If you need transcript/session/replay but still do not need tools, use
+`Session::structured_turn::<O>()` or `Context::structured_turn::<O>(input)`.
 
 Budget reservation, tracing, and usage recovery follow the same path as turn execution.
 
@@ -323,7 +347,8 @@ canonical request faithfully, that remains an adapter limitation.
 
 `RequestExtensions` is a per-request type-map for execution metadata.
 
-The library treats entries as opaque. It passes `Arc<RequestExtensions>` to:
+The public API attaches entries inline on builders with `.ext(...)` or `.extensions(...)`.
+Core treats entries as opaque and passes `Arc<RequestExtensions>` to:
 
 - `BudgetManager` methods so implementors can extract identity, routing keys, or cost centers
 - `EventHandler` so handlers can inspect request metadata during streaming

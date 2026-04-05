@@ -13,17 +13,11 @@ async fn ask(
         session.push_system(system);
     }
     session.push_user(prompt);
-    let mut turn = session.text_turn::<NoTools>();
-    turn.config.generation.temperature = temperature;
-    let outcome = session
-        .prepare_text(RequestExtensions::new(), turn, UsageEstimate::zero())
-        .await?
-        .collect_noop()
-        .await?;
-    match outcome {
-        TextStepOutcome::Finished(result) => Ok(result.assistant_text()),
-        TextStepOutcome::NeedsToolResults(_) => unreachable!(),
-    }
+    let result = match temperature {
+        Some(temperature) => session.text_turn().temperature(temperature).collect().await?,
+        None => session.text_turn().collect().await?,
+    };
+    Ok(result.assistant_text())
 }
 
 #[tokio::main]

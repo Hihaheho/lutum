@@ -23,24 +23,13 @@ async fn update_task_state(
     let mut session = Session::new(ctx.clone());
     session.push_system(system);
     session.push_user(prompt);
-    let turn: StructuredTurn<NoTools, TaskState> = session.structured_turn();
-    let outcome = session
-        .prepare_structured(RequestExtensions::new(), turn, UsageEstimate::zero())
-        .await?
-        .collect_noop()
-        .await?;
-
-    match outcome {
-        StructuredStepOutcome::Finished(result) => {
-            let state = match result.semantic.clone() {
-                StructuredTurnOutcome::Structured(state) => state,
-                StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),
-            };
-            session.commit_structured(result);
-            Ok(state)
-        }
-        StructuredStepOutcome::NeedsToolResults(_) => unreachable!(),
-    }
+    let result = session.structured_turn::<TaskState>().collect().await?;
+    let state = match result.semantic.clone() {
+        StructuredTurnOutcome::Structured(state) => state,
+        StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),
+    };
+    session.commit_structured(result);
+    Ok(state)
 }
 
 fn save_state(state: &TaskState) -> anyhow::Result<()> {

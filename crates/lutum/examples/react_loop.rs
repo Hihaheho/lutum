@@ -156,17 +156,15 @@ async fn main() -> anyhow::Result<()> {
     session.push_user("Who is the top spender? Give their name and total.");
 
     for _step in 1..=10 {
-        let mut turn = session.text_turn::<DbTools>();
-        turn.config.tools = ToolPolicy::AllowAll;
-
         let outcome = session
-            .prepare_text(RequestExtensions::new(), turn, UsageEstimate::zero())
-            .await?
-            .collect_noop()
+            .text_turn()
+            .tools::<DbTools>()
+            .allow_all()
+            .collect()
             .await?;
 
         match outcome {
-            TextStepOutcome::NeedsToolResults(round) => {
+            TextStepOutcomeWithTools::NeedsToolResults(round) => {
                 let mut tool_uses = Vec::with_capacity(round.tool_calls.len());
 
                 for tool_call in round.tool_calls.iter().cloned() {
@@ -189,9 +187,9 @@ async fn main() -> anyhow::Result<()> {
 
                 session.commit_tool_round(round, tool_uses).unwrap();
             }
-            TextStepOutcome::Finished(result) => {
+            TextStepOutcomeWithTools::Finished(result) => {
                 println!("Answer: {}", result.assistant_text().trim());
-                session.commit_text(result);
+                session.commit_text_with_tools(result);
                 return Ok(());
             }
         }
