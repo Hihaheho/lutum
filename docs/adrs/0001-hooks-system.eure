@@ -36,8 +36,8 @@ Two constraints remained non-negotiable:
 ```
 
 decision = ```markdown
-Adopt `#[def_hook(always)]` and `#[def_hook(fallback)]` as the canonical slot-definition
-syntax.
+Adopt `#[def_hook(always)]`, `#[def_hook(fallback)]`, and `#[def_hook(singleton)]` as
+the canonical slot-definition syntax.
 
 `#[def_hook(...)]` is applied to an async function and generates the slot marker type,
 hook trait, `HookRegistry` extension methods, and `Context` forwarding method. The
@@ -48,7 +48,11 @@ argument selects how the default body participates in execution:
   validation, safety checks, and auditing where the base behavior must not be bypassed.
 - `#[def_hook(fallback)]`: the default body runs only when no hooks are registered.
   The first registered hook receives `last = None`. This is the right fit for override
-  slots such as model selection, where registration means replacing the default.
+  slots that intentionally support chaining.
+- `#[def_hook(singleton)]`: the default body runs only when no hooks are registered, and
+  one registered hook replaces it. Later registrations overwrite earlier ones and emit
+  a warning. This is the right fit for override slots such as model selection, where
+  registration means replacing the default and chaining adds no value.
 
 Keep `#[hook(SlotType)]` as the implementation form. It generates a named struct
 implementing the slot's hook trait and remains the idiomatic way to define stateful or
@@ -62,8 +66,8 @@ definition mode at the slot definition site.
 
 - `def_hook` clearly marks the definition site and pairs naturally with `#[hook(SlotType)]`
   as the implementation site
-- the semantic mode is now an argument, which makes `always` vs `fallback` read as two
-  variants of one macro instead of two unrelated top-level attributes
+- the semantic mode is now an argument, which makes `always` / `fallback` / `singleton`
+  read as variants of one macro instead of unrelated top-level attributes
 - this is shorter and less awkward than `#[define_hook(...)]`, while being more explicit
   than names like `#[hook_slot(...)]`
 
@@ -78,7 +82,7 @@ Alternatives considered and rejected:
 
 **Execution model**
 
-The hook call signature includes `last: Option<R>` as the final parameter.
+Chaining slots include `last: Option<R>` as the final parameter. Singleton slots omit it.
 
 For `#[def_hook(always)]` slots:
 - `last` is always `Some(_)` for registered hooks because the default already ran
@@ -88,16 +92,21 @@ For `#[def_hook(fallback)]` slots:
 - `last = None` for the first registered hook
 - `last = Some(previous_result)` for subsequent hooks
 
+For `#[def_hook(singleton)]` slots:
+- the default implementation runs when no hooks are registered
+- one registered hook replaces the default and receives no `last` argument
+- more than one registered hook means the last registration wins and emits a warning
+
 **Registry model**
 
 `HookRegistry` is a `HashMap<TypeId, Box<dyn Any + Send + Sync>>` where each slot stores
-`Vec<Arc<dyn SlotHook>>`. It is built via generated `register_*` methods and passed to
-`Context::with_hooks`. `Context` stores it as `Arc<HookRegistry>` and exposes `hooks()`
-for direct registry access.
+either `Vec<Arc<dyn SlotHook>>` for chaining slots or `Arc<dyn SlotHook>` for singleton
+slots. It is built via generated `register_*` methods and passed to `Context::with_hooks`.
+`Context` stores it as `Arc<HookRegistry>` and exposes `hooks()` for direct registry access.
 
 **Builtin hook**
 
-`select_model` is declared with `#[def_hook(fallback)]`. `Context` calls it before every
+`select_model` is declared with `#[def_hook(singleton)]`. `Context` calls it before every
 `text_turn` and `structured_turn`. The default implementation returns the configured
 model unchanged; registering a hook allows runtime model selection without modifying the
 adapter.
@@ -116,9 +125,11 @@ consequences = ```markdown
   once and attached to any `Context` at construction time
 - User code remains the explicit call site. The library invokes only the documented
   builtin `select_model` hook automatically
-- Default participation remains explicit at the definition site through the `always` /
-  `fallback` mode argument
-- Hooks still compose via the `last` chain parameter in registration order
+- Default participation remains explicit at the definition site through the
+  `always` / `fallback` / `singleton` mode argument
+- Hooks still compose via the `last` chain parameter in registration order where
+  chaining is intended, while singleton slots use a single effective override with
+  last-registration-wins semantics
 - Stateful hooks remain first-class: any type implementing the generated hook trait can
   be registered, not just closures
 - `Context::new` continues to work with an empty registry

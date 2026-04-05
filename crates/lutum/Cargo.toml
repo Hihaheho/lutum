@@ -29,6 +29,7 @@ tracing.workspace = true
 anyhow = "1"
 console.workspace = true
 futures.workspace = true
+lutum-trace.workspace = true
 schemars.workspace = true
 serde.workspace = true
 tokio.workspace = true

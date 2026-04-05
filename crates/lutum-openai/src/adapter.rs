@@ -52,21 +52,16 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply_to_completion(&self, request: &mut CompletionRequest);
 }
 
-#[lutum_macros::def_hook(fallback)]
-pub async fn select_openai_model(
-    _extensions: &RequestExtensions,
-    default: ModelName,
-    last: Option<ModelName>,
-) -> ModelName {
-    last.unwrap_or(default)
+#[lutum_macros::def_hook(singleton)]
+pub async fn select_openai_model(_extensions: &RequestExtensions, default: ModelName) -> ModelName {
+    default
 }
 
-#[lutum_macros::def_hook(fallback)]
+#[lutum_macros::def_hook(singleton)]
 pub async fn resolve_reasoning_effort(
     _extensions: &RequestExtensions,
-    last: Option<Option<OpenAiReasoningEffort>>,
 ) -> Option<OpenAiReasoningEffort> {
-    last.unwrap_or(None)
+    None
 }
 
 /// A snapshot of tool name information available at the time an SSE decode error occurred.
@@ -1763,7 +1758,8 @@ mod tests {
     use lutum_protocol::{
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
         AssistantTurnItem, AssistantTurnView, ErasedStructuredTurnEvent, ErasedTextTurnEvent,
-        GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ToolUse,
+        GenerationParams, HookRegistry, InputMessageRole, ModelInput, ModelInputItem, ModelName,
+        RequestExtensions, ToolUse,
     };
 
     use super::*;
@@ -1788,6 +1784,19 @@ mod tests {
         fn apply_to_completion(&self, request: &mut CompletionRequest) {
             request.models = Some(vec!["fallback".to_string()]);
         }
+    }
+
+    #[lutum_macros::hook(SelectOpenaiModel)]
+    async fn prefer_gpt_4_1(_extensions: &RequestExtensions, _default: ModelName) -> ModelName {
+        ModelName::new("gpt-4.1").unwrap()
+    }
+
+    #[lutum_macros::hook(SelectOpenaiModel)]
+    async fn prefer_gpt_4_1_mini(
+        _extensions: &RequestExtensions,
+        _default: ModelName,
+    ) -> ModelName {
+        ModelName::new("gpt-4.1-mini").unwrap()
     }
 
     #[test]
@@ -1856,6 +1865,20 @@ mod tests {
             completion_request.models,
             Some(vec!["fallback".to_string()])
         );
+    }
+
+    #[test]
+    fn select_openai_model_uses_last_registered_singleton_override() {
+        let hooks = HookRegistry::new()
+            .register_select_openai_model(PreferGpt41)
+            .register_select_openai_model(PreferGpt41Mini);
+
+        let selected = block_on(hooks.select_openai_model(
+            &RequestExtensions::new(),
+            ModelName::new("gpt-4.1-nano").unwrap(),
+        ));
+
+        assert_eq!(selected.as_str(), "gpt-4.1-mini");
     }
 
     #[test]

@@ -11,7 +11,7 @@ struct CommandPolicy {
     max_pipes: usize,
 }
 // A struct is clearer here: multiple policy fields, shared helper logic, no capture noise.
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 impl ValidateCommandHook for CommandPolicy {
     async fn call(&self, _ctx: &Context, cmd: &str, last: Option<Validation>) -> Validation {
         if let Some(Err(reasons)) = last {
@@ -69,7 +69,11 @@ async fn main() -> anyhow::Result<()> {
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model = ModelName::new(&std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into()))?;
     let ctx = Context::with_hooks(
-        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model)),
+        Arc::new(
+            OpenAiAdapter::new(token)
+                .with_base_url(endpoint)
+                .with_default_model(model),
+        ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
         HookRegistry::new().register_validate_command(CommandPolicy {
             allowed_prefixes: &["/var/log", "/tmp"],

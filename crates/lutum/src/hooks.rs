@@ -18,7 +18,12 @@
 //! ```
 //!
 //! Use `#[def_hook(fallback)]` when the base implementation should run only if no hooks are
-//! registered. This is a good fit for override and routing slots.
+//! registered. This is a good fit for override and routing slots that intentionally support
+//! chaining.
+//!
+//! Use `#[def_hook(singleton)]` when the slot is conceptually "pick one override or use the
+//! default". This keeps the hook signature simpler because there is no `last` argument. If the
+//! same slot is registered multiple times, the last registration wins and a warning is emitted.
 //!
 //! This generates:
 //! - `ValidateOutput` - slot marker type
@@ -42,13 +47,15 @@
 //!
 //! ## Chaining
 //!
-//! Multiple hooks registered for the same slot run in order. Each hook receives the
-//! previous hook's result as `last`:
+//! Multiple hooks registered for the same slot run in order for chaining slots. Each hook
+//! receives the previous hook's result as `last`:
 //!
 //! - `#[def_hook(always)]`: the default runs first, then the first registered hook gets `last = Some(default_result)`
 //! - `#[def_hook(fallback)]`: the first registered hook gets `last = None`
 //! - Subsequent hooks always get `last = Some(previous_result)`
 //! - With `#[def_hook(fallback)]`, the default implementation runs only when no hooks are registered
+//! - With `#[def_hook(singleton)]`, zero registered hooks uses the default and one registered
+//!   hook replaces it; later registrations overwrite earlier ones and emit a warning
 //!
 //! ## Registration and usage
 //!

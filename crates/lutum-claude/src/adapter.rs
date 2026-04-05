@@ -60,22 +60,17 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply(&self, request: &mut MessagesRequest);
 }
 
-#[lutum_macros::def_hook(fallback)]
-pub async fn select_claude_model(
-    _extensions: &RequestExtensions,
-    default: ModelName,
-    last: Option<ModelName>,
-) -> ModelName {
-    last.unwrap_or(default)
+#[lutum_macros::def_hook(singleton)]
+pub async fn select_claude_model(_extensions: &RequestExtensions, default: ModelName) -> ModelName {
+    default
 }
 
-#[lutum_macros::def_hook(fallback)]
+#[lutum_macros::def_hook(singleton)]
 pub async fn resolve_budget_tokens(
     _extensions: &RequestExtensions,
     default: Option<u32>,
-    last: Option<Option<u32>>,
 ) -> Option<u32> {
-    last.unwrap_or(default)
+    default
 }
 
 #[derive(Clone)]
@@ -214,7 +209,14 @@ impl TurnAdapter for ClaudeAdapter {
             .await
             .map(|budget| budget.max(MIN_THINKING_BUDGET_TOKENS));
         let body = self
-            .prepare_messages_request(&input, &turn.config, model.as_ref(), thinking_budget, None, true)
+            .prepare_messages_request(
+                &input,
+                &turn.config,
+                model.as_ref(),
+                thinking_budget,
+                None,
+                true,
+            )
             .map_err(AgentError::backend)?;
         let stream = self
             .send_streaming_json("/v1/messages", &body)
@@ -1242,10 +1244,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(request.model, "claude-sonnet");
-        assert_eq!(
-            request.models,
-            Some(vec!["fallback-model".to_string()])
-        );
+        assert_eq!(request.models, Some(vec!["fallback-model".to_string()]));
     }
 
     #[test]
