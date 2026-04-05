@@ -72,9 +72,10 @@ pub async fn select_claude_model(
 #[lutum_macros::def_hook(fallback)]
 pub async fn resolve_budget_tokens(
     _extensions: &RequestExtensions,
+    default: Option<u32>,
     last: Option<Option<u32>>,
 ) -> Option<u32> {
-    last.unwrap_or(None)
+    last.unwrap_or(default)
 }
 
 #[derive(Clone)]
@@ -83,6 +84,7 @@ pub struct ClaudeAdapter {
     api_key: Arc<str>,
     base_url: Arc<str>,
     default_model: ModelName,
+    default_thinking_budget: Option<u32>,
     fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
     usage_cache: UsageCache,
 }
@@ -124,6 +126,7 @@ impl ClaudeAdapter {
             api_key: Arc::from(api_key.into()),
             base_url: normalize_base_url(DEFAULT_BASE_URL),
             default_model: ModelName::new("claude-opus-4-5").unwrap(),
+            default_thinking_budget: None,
             fallback_serializer: None,
             usage_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -136,6 +139,11 @@ impl ClaudeAdapter {
 
     pub fn with_default_model(mut self, model: ModelName) -> Self {
         self.default_model = model;
+        self
+    }
+
+    pub fn with_default_thinking_budget(mut self, budget_tokens: u32) -> Self {
+        self.default_thinking_budget = Some(budget_tokens);
         self
     }
 
@@ -202,7 +210,7 @@ impl TurnAdapter for ClaudeAdapter {
             .select_claude_model(turn.extensions.as_ref(), self.default_model.clone())
             .await;
         let thinking_budget = hooks
-            .resolve_budget_tokens(turn.extensions.as_ref())
+            .resolve_budget_tokens(turn.extensions.as_ref(), self.default_thinking_budget)
             .await
             .map(|budget| budget.max(MIN_THINKING_BUDGET_TOKENS));
         let body = self
@@ -228,7 +236,7 @@ impl TurnAdapter for ClaudeAdapter {
             .select_claude_model(turn.extensions.as_ref(), self.default_model.clone())
             .await;
         let thinking_budget = hooks
-            .resolve_budget_tokens(turn.extensions.as_ref())
+            .resolve_budget_tokens(turn.extensions.as_ref(), self.default_thinking_budget)
             .await
             .map(|budget| budget.max(MIN_THINKING_BUDGET_TOKENS));
         let format = Some(OutputFormat::JsonSchema {
