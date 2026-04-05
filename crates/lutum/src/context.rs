@@ -31,6 +31,8 @@ use lutum_protocol::{
     toolset::{ToolSelector, Toolset},
 };
 
+use crate::hooks::{HookRegistry, SelectModelRegistryExt};
+
 pub type ContextError = AgentError;
 
 #[derive(Debug, Error)]
@@ -65,10 +67,22 @@ pub struct Context {
     turns: Arc<dyn TurnAdapter>,
     completion: Arc<dyn CompletionAdapter>,
     recovery: Arc<dyn UsageRecoveryAdapter>,
+    hooks: Arc<HookRegistry>,
 }
 
 impl Context {
     pub fn new<T>(adapter: Arc<T>, budget: impl BudgetManager + 'static) -> Self
+    where
+        T: TurnAdapter + UsageRecoveryAdapter + 'static,
+    {
+        Self::with_hooks(adapter, budget, HookRegistry::new())
+    }
+
+    pub fn with_hooks<T>(
+        adapter: Arc<T>,
+        budget: impl BudgetManager + 'static,
+        hooks: HookRegistry,
+    ) -> Self
     where
         T: TurnAdapter + UsageRecoveryAdapter + 'static,
     {
@@ -77,6 +91,7 @@ impl Context {
             turns: adapter.clone(),
             completion: Arc::new(UnsupportedCompletionAdapter),
             recovery: adapter,
+            hooks: Arc::new(hooks),
         }
     }
 
@@ -86,16 +101,31 @@ impl Context {
         recovery: Arc<dyn UsageRecoveryAdapter>,
         budget: impl BudgetManager + 'static,
     ) -> Self {
+        Self::from_parts_with_hooks(turns, completion, recovery, budget, HookRegistry::new())
+    }
+
+    pub fn from_parts_with_hooks(
+        turns: Arc<dyn TurnAdapter>,
+        completion: Arc<dyn CompletionAdapter>,
+        recovery: Arc<dyn UsageRecoveryAdapter>,
+        budget: impl BudgetManager + 'static,
+        hooks: HookRegistry,
+    ) -> Self {
         Self {
             budget: Arc::new(budget),
             turns,
             completion,
             recovery,
+            hooks: Arc::new(hooks),
         }
     }
 
     pub fn budget(&self) -> &dyn BudgetManager {
         self.budget.as_ref()
+    }
+
+    pub fn hooks(&self) -> &HookRegistry {
+        self.hooks.as_ref()
     }
 }
 
@@ -292,6 +322,14 @@ impl Context {
         T: Toolset,
     {
         input.validate()?;
+        let mut turn = turn;
+        turn.config.model = <HookRegistry as SelectModelRegistryExt>::select_model(
+            self.hooks(),
+            self,
+            &extensions,
+            turn.config.model.clone(),
+        )
+        .await;
         let lease = self
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
@@ -333,6 +371,14 @@ impl Context {
         O: StructuredOutput,
     {
         input.validate()?;
+        let mut turn = turn;
+        turn.config.model = <HookRegistry as SelectModelRegistryExt>::select_model(
+            self.hooks(),
+            self,
+            &extensions,
+            turn.config.model.clone(),
+        )
+        .await;
         let lease = self
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;

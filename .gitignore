@@ -8,4 +8,6 @@
 target/
 !README.md
 !docs/**/*.md
+!docs/**/*.eure
 !LICENSE-*
+!Eure.eure

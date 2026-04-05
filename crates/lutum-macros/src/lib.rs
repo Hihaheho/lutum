@@ -3,8 +3,9 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
     Attribute, Data, DeriveInput, Expr, Fields, FieldsNamed, FieldsUnnamed, FnArg, GenericArgument,
-    Ident, ItemEnum, ItemFn, ItemStruct, Lit, Meta, MetaNameValue, Pat, PatIdent, PathArguments,
-    ReturnType, Token, Type, TypePath, parse::Parse, parse_macro_input, punctuated::Punctuated,
+    Ident, ItemEnum, ItemFn, ItemStruct, Lifetime, Lit, Meta, MetaNameValue, Pat, PatIdent,
+    PathArguments, ReturnType, Token, Type, TypePath, parse::Parse, parse_macro_input,
+    punctuated::Punctuated,
 };
 
 struct ToolInputArgs {
@@ -101,6 +102,49 @@ pub fn tool_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as ToolFnArgs);
     let item_fn = parse_macro_input!(item as ItemFn);
     expand_tool_fn(item_fn, args).into()
+}
+
+#[proc_macro_attribute]
+pub fn hook(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "use #[hook_always] or #[hook_fallback] to declare a hook slot, or #[hook(SlotType)] to implement one",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let slot_ident = parse_macro_input!(attr as Ident);
+    let item_fn = parse_macro_input!(item as ItemFn);
+    expand_hook_impl(item_fn, slot_ident).into()
+}
+
+#[proc_macro_attribute]
+pub fn hook_always(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[hook_always] does not accept arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let item_fn = parse_macro_input!(item as ItemFn);
+    expand_hook(item_fn, HookKind::Always).into()
+}
+
+#[proc_macro_attribute]
+pub fn hook_fallback(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[hook_fallback] does not accept arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let item_fn = parse_macro_input!(item as ItemFn);
+    expand_hook(item_fn, HookKind::Fallback).into()
 }
 
 #[proc_macro_derive(Toolset)]
@@ -389,6 +433,406 @@ fn expand_tool_fn(item_fn: ItemFn, args: ToolFnArgs) -> proc_macro2::TokenStream
     }
 }
 
+struct HookSignature {
+    explicit_args: Vec<(Ident, Type)>,
+    output_ty: Type,
+}
+
+enum HookKind {
+    Always,
+    Fallback,
+}
+
+fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream {
+    let HookSignature {
+        explicit_args,
+        output_ty,
+    } = match analyze_hook_signature(&item_fn) {
+        Ok(signature) => signature,
+        Err(err) => return err.to_compile_error(),
+    };
+
+    let fn_ident = item_fn.sig.ident.clone();
+    let vis = item_fn.vis.clone();
+    let hook_name = fn_ident.to_string();
+    let slot_ident = format_ident!("{}", hook_name.to_upper_camel_case());
+    let hook_trait_ident = format_ident!("{slot_ident}Hook");
+    let registry_ext_ident = format_ident!("{slot_ident}RegistryExt");
+    let context_ext_ident = format_ident!("{slot_ident}ContextExt");
+    let default_fn_ident = format_ident!("__lutum_hook_default_{}", fn_ident);
+    let register_fn_ident = format_ident!("register_{}", fn_ident);
+
+    item_fn.vis = syn::Visibility::Inherited;
+    item_fn.sig.ident = default_fn_ident.clone();
+
+    let hook_call_args = explicit_args
+        .iter()
+        .map(|(ident, ty)| quote! { #ident: #ty })
+        .collect::<Vec<_>>();
+    let hook_call_arg_names = explicit_args
+        .iter()
+        .map(|(ident, _)| quote! { #ident })
+        .collect::<Vec<_>>();
+    let registry_args = explicit_args
+        .iter()
+        .map(|(ident, ty)| {
+            let ty = hook_ext_arg_type(ty);
+            quote! { #ident: #ty }
+        })
+        .collect::<Vec<_>>();
+    let context_args = registry_args.clone();
+    let clone_bounds = explicit_args
+        .iter()
+        .filter(|(_, ty)| !matches!(ty, Type::Reference(_)))
+        .map(|(_, ty)| {
+            let ty = hook_ext_arg_type(ty);
+            quote! { #ty: ::std::clone::Clone }
+        })
+        .collect::<Vec<_>>();
+    let async_fn_arg_tys = explicit_args
+        .iter()
+        .map(|(_, ty)| quote! { #ty })
+        .collect::<Vec<_>>();
+    let cloned_hook_call_arg_names = explicit_args
+        .iter()
+        .map(|(ident, ty)| {
+            if matches!(ty, Type::Reference(_)) {
+                quote! { #ident }
+            } else {
+                quote! { #ident.clone() }
+            }
+        })
+        .collect::<Vec<_>>();
+    let clone_where = if clone_bounds.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            where
+                #(#clone_bounds,)*
+        }
+    };
+    let dispatch = match kind {
+        HookKind::Always => quote! {
+            let mut last = ::std::option::Option::Some(
+                #default_fn_ident(
+                    ctx,
+                    #(#cloned_hook_call_arg_names,)*
+                    None,
+                )
+                .await,
+            );
+            if let Some(hooks) = chain {
+                for hook in hooks {
+                    last = ::std::option::Option::Some(
+                        hook.call(
+                            ctx,
+                            #(#cloned_hook_call_arg_names,)*
+                            last,
+                        )
+                        .await,
+                    );
+                }
+            }
+            last.expect("hook chain unexpectedly empty")
+        },
+        HookKind::Fallback => quote! {
+            match chain {
+                Some(hooks) if !hooks.is_empty() => {
+                    let mut last = ::std::option::Option::None;
+                    for hook in hooks {
+                        last = ::std::option::Option::Some(
+                            hook.call(
+                                ctx,
+                                #(#cloned_hook_call_arg_names,)*
+                                last,
+                            )
+                            .await,
+                        );
+                    }
+                    last.expect("hook chain unexpectedly empty")
+                }
+                _ => {
+                    #default_fn_ident(
+                        ctx,
+                        #(#cloned_hook_call_arg_names,)*
+                        None,
+                    )
+                    .await
+                }
+            }
+        },
+    };
+
+    quote! {
+        #item_fn
+
+        #[allow(dead_code)]
+        #vis struct #slot_ident;
+
+        #[allow(dead_code)]
+        #[::async_trait::async_trait(?Send)]
+        #vis trait #hook_trait_ident: Send + Sync {
+            async fn call(
+                &self,
+                ctx: &::lutum::Context,
+                #(#hook_call_args,)*
+                last: ::std::option::Option<#output_ty>,
+            ) -> #output_ty;
+        }
+
+        #[::async_trait::async_trait(?Send)]
+        impl<F> #hook_trait_ident for F
+        where
+            F: ::std::ops::AsyncFn(
+                    &::lutum::Context,
+                    #(#async_fn_arg_tys,)*
+                    ::std::option::Option<#output_ty>,
+                ) -> #output_ty
+                + Send
+                + Sync,
+        {
+            async fn call(
+                &self,
+                ctx: &::lutum::Context,
+                #(#hook_call_args,)*
+                last: ::std::option::Option<#output_ty>,
+            ) -> #output_ty {
+                self(ctx, #(#hook_call_arg_names,)* last).await
+            }
+        }
+
+        #[allow(dead_code)]
+        #vis trait #registry_ext_ident {
+            fn #register_fn_ident<H>(self, hook: H) -> Self
+            where
+                H: #hook_trait_ident + 'static,
+                Self: Sized;
+
+            fn #fn_ident<'a>(
+                &'a self,
+                ctx: &'a ::lutum::Context,
+                #(#registry_args,)*
+            ) -> impl ::std::future::Future<Output = #output_ty> + 'a
+            #clone_where;
+        }
+
+        impl #registry_ext_ident for ::lutum::HookRegistry {
+            fn #register_fn_ident<H>(mut self, hook: H) -> Self
+            where
+                H: #hook_trait_ident + 'static,
+                Self: Sized,
+            {
+                let slot = self
+                    .slots_mut()
+                    .entry(::std::any::TypeId::of::<#slot_ident>())
+                    .or_insert_with(|| {
+                        ::std::boxed::Box::new(
+                            ::std::vec::Vec::<::std::sync::Arc<dyn #hook_trait_ident>>::new(),
+                        ) as ::std::boxed::Box<dyn ::std::any::Any + Send + Sync>
+                    });
+                slot.downcast_mut::<::std::vec::Vec<::std::sync::Arc<dyn #hook_trait_ident>>>()
+                    .expect("hook slot type mismatch")
+                    .push(::std::sync::Arc::new(hook));
+                self
+            }
+
+            fn #fn_ident<'a>(
+                &'a self,
+                ctx: &'a ::lutum::Context,
+                #(#registry_args,)*
+            ) -> impl ::std::future::Future<Output = #output_ty> + 'a
+            #clone_where {
+                async move {
+                    use ::tracing::Instrument as _;
+
+                    let span = ::tracing::info_span!("lutum_hook", name = #hook_name);
+                    async move {
+                        let chain = self
+                            .slots()
+                            .get(&::std::any::TypeId::of::<#slot_ident>())
+                            .and_then(|slot| {
+                                slot.downcast_ref::<
+                                    ::std::vec::Vec<::std::sync::Arc<dyn #hook_trait_ident>>,
+                                >()
+                            });
+                        #dispatch
+                    }
+                    .instrument(span)
+                    .await
+                }
+            }
+        }
+
+        #[allow(dead_code)]
+        #vis trait #context_ext_ident {
+            fn #fn_ident<'a>(
+                &'a self,
+                #(#context_args,)*
+            ) -> impl ::std::future::Future<Output = #output_ty> + 'a
+            #clone_where;
+        }
+
+        impl #context_ext_ident for ::lutum::Context {
+            fn #fn_ident<'a>(
+                &'a self,
+                #(#context_args,)*
+            ) -> impl ::std::future::Future<Output = #output_ty> + 'a
+            #clone_where {
+                <::lutum::HookRegistry as #registry_ext_ident>::#fn_ident(
+                    self.hooks(),
+                    self,
+                    #(#hook_call_arg_names,)*
+                )
+            }
+        }
+    }
+}
+
+fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStream {
+    let HookSignature {
+        explicit_args,
+        output_ty,
+    } = match analyze_hook_signature(&item_fn) {
+        Ok(signature) => signature,
+        Err(err) => return err.to_compile_error(),
+    };
+
+    let fn_ident = item_fn.sig.ident.clone();
+    let vis = item_fn.vis.clone();
+    let struct_ident = format_ident!("{}", fn_ident.to_string().to_upper_camel_case());
+    let hook_trait_ident = format_ident!("{slot_ident}Hook");
+    let hook_call_args = explicit_args
+        .iter()
+        .map(|(ident, ty)| quote! { #ident: #ty })
+        .collect::<Vec<_>>();
+    let hook_call_arg_names = explicit_args
+        .iter()
+        .map(|(ident, _)| quote! { #ident })
+        .collect::<Vec<_>>();
+
+    quote! {
+        #item_fn
+
+        #[allow(dead_code)]
+        #vis struct #struct_ident;
+
+        #[::async_trait::async_trait(?Send)]
+        impl #hook_trait_ident for #struct_ident {
+            async fn call(
+                &self,
+                ctx: &::lutum::Context,
+                #(#hook_call_args,)*
+                last: ::std::option::Option<#output_ty>,
+            ) -> #output_ty {
+                #fn_ident(ctx, #(#hook_call_arg_names,)* last).await
+            }
+        }
+    }
+}
+
+fn analyze_hook_signature(item_fn: &ItemFn) -> syn::Result<HookSignature> {
+    if item_fn.sig.receiver().is_some() {
+        return Err(syn::Error::new_spanned(
+            &item_fn.sig,
+            "hook attributes do not support methods",
+        ));
+    }
+    if item_fn.sig.asyncness.is_none() {
+        return Err(syn::Error::new_spanned(
+            &item_fn.sig,
+            "hook attributes require an async fn",
+        ));
+    }
+    if !item_fn.sig.generics.params.is_empty() || item_fn.sig.generics.where_clause.is_some() {
+        return Err(syn::Error::new_spanned(
+            &item_fn.sig.generics,
+            "hook attributes do not support generics or where clauses",
+        ));
+    }
+    if item_fn.sig.constness.is_some()
+        || item_fn.sig.unsafety.is_some()
+        || item_fn.sig.abi.is_some()
+        || item_fn.sig.variadic.is_some()
+    {
+        return Err(syn::Error::new_spanned(
+            &item_fn.sig,
+            "hook attributes support only plain async functions",
+        ));
+    }
+
+    let output_ty = output_type_or_unit(&item_fn.sig.output);
+    let inputs = item_fn.sig.inputs.iter().collect::<Vec<_>>();
+    if inputs.len() < 2 {
+        return Err(syn::Error::new_spanned(
+            &item_fn.sig.inputs,
+            "hook attributes require `ctx: &Context` first and `last: Option<Return>` last",
+        ));
+    }
+
+    let Some(FnArg::Typed(ctx_arg)) = inputs.first().copied() else {
+        return Err(syn::Error::new_spanned(
+            inputs.first().expect("hook must have inputs"),
+            "expected `ctx: &Context` as the first argument",
+        ));
+    };
+    let Pat::Ident(PatIdent { .. }) = ctx_arg.pat.as_ref() else {
+        return Err(syn::Error::new_spanned(
+            &ctx_arg.pat,
+            "expected `ctx` identifier",
+        ));
+    };
+    if !is_context_ref(ctx_arg.ty.as_ref()) {
+        return Err(syn::Error::new_spanned(
+            &ctx_arg.ty,
+            "first hook argument must be `ctx: &Context`",
+        ));
+    }
+
+    let Some(FnArg::Typed(last_arg)) = inputs.last().copied() else {
+        return Err(syn::Error::new_spanned(
+            inputs.last().expect("hook must have last input"),
+            "expected `last: Option<Return>` as the final argument",
+        ));
+    };
+    let Pat::Ident(PatIdent { .. }) = last_arg.pat.as_ref() else {
+        return Err(syn::Error::new_spanned(
+            &last_arg.pat,
+            "expected `last` identifier",
+        ));
+    };
+    let Some(last_inner) = option_inner_type(last_arg.ty.as_ref()) else {
+        return Err(syn::Error::new_spanned(
+            &last_arg.ty,
+            "final hook argument must have type `Option<Return>`",
+        ));
+    };
+    if !types_match(last_inner, &output_ty) {
+        return Err(syn::Error::new_spanned(
+            &last_arg.ty,
+            "final hook argument must have type `Option<Return>` where `Return` matches the hook return type",
+        ));
+    }
+
+    let mut explicit_args = Vec::new();
+    for arg in &inputs[1..inputs.len() - 1] {
+        let FnArg::Typed(pat_ty) = arg else {
+            return Err(syn::Error::new_spanned(arg, "unsupported hook argument"));
+        };
+        let Pat::Ident(PatIdent { ident, .. }) = pat_ty.pat.as_ref() else {
+            return Err(syn::Error::new_spanned(
+                &pat_ty.pat,
+                "expected identifier pattern",
+            ));
+        };
+        explicit_args.push((ident.clone(), (*pat_ty.ty).clone()));
+    }
+
+    Ok(HookSignature {
+        explicit_args,
+        output_ty,
+    })
+}
+
 fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     let enum_ident = input.ident.clone();
     let vis = input.vis.clone();
@@ -663,6 +1107,13 @@ fn doc_string(attrs: &[Attribute]) -> String {
         .join("\n")
 }
 
+fn output_type_or_unit(output: &ReturnType) -> Type {
+    match output {
+        ReturnType::Default => syn::parse_quote!(()),
+        ReturnType::Type(_, ty) => *ty.clone(),
+    }
+}
+
 fn result_output_type(output: &ReturnType) -> syn::Result<Type> {
     let ReturnType::Type(_, ty) = output else {
         return Err(syn::Error::new_spanned(
@@ -716,5 +1167,62 @@ fn wrapper_ident_for_type(ty: &Type) -> Ident {
         format_ident!("{ident}Call")
     } else {
         panic!("Toolset variant payloads must be path types");
+    }
+}
+
+fn is_context_ref(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    if reference.mutability.is_some() {
+        return false;
+    }
+    let Type::Path(type_path) = reference.elem.as_ref() else {
+        return false;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "Context")
+}
+
+fn option_inner_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segment = type_path.path.segments.last()?;
+    if segment.ident != "Option" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    match args.args.first()? {
+        GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    }
+}
+
+fn types_match(lhs: &Type, rhs: &Type) -> bool {
+    strip_type_wrappers(lhs) == strip_type_wrappers(rhs)
+}
+
+fn strip_type_wrappers(ty: &Type) -> &Type {
+    match ty {
+        Type::Group(group) => strip_type_wrappers(&group.elem),
+        Type::Paren(paren) => strip_type_wrappers(&paren.elem),
+        _ => ty,
+    }
+}
+
+fn hook_ext_arg_type(ty: &Type) -> Type {
+    match ty {
+        Type::Reference(reference) => {
+            let mut reference = reference.clone();
+            reference.lifetime = Some(Lifetime::new("'a", proc_macro2::Span::call_site()));
+            Type::Reference(reference)
+        }
+        _ => ty.clone(),
     }
 }

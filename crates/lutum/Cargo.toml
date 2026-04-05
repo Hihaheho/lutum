@@ -87,6 +87,10 @@ name = "deterministic_hooks"
 required-features = ["openai"]
 
 [[example]]
+name = "stateful_hook"
+required-features = ["openai"]
+
+[[example]]
 name = "architectural_constraints"
 required-features = ["openai"]
 

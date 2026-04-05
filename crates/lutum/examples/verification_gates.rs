@@ -37,7 +37,17 @@ fn normalize_phone(value: &str) -> String {
         .collect()
 }
 
-fn audit(source: &str, contact: &Contact) -> Result<(), Vec<String>> {
+#[hook_always]
+async fn audit_contact(
+    _ctx: &Context,
+    source: &str,
+    contact: &Contact,
+    last: Option<Result<(), Vec<String>>>,
+) -> Result<(), Vec<String>> {
+    if let Some(previous) = last {
+        return previous;
+    }
+
     let mut failures = Vec::new();
     let source_tokens = source
         .split_whitespace()
@@ -135,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
     let adapter = OpenAiAdapter::new(token).with_base_url(endpoint);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let ctx = Context::with_hooks(Arc::new(adapter), budget, HookRegistry::new());
     let model = ModelName::new(&model_name)?;
     let source = "Call John Smith at john@example.com or +1-555-0100";
     let mut prior_failure = None;
@@ -151,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(contact) => {
                 println!("Extracted contact: {contact:#?}");
 
-                match audit(source, &contact) {
+                match ctx.audit_contact(source, &contact).await {
                     Ok(()) => {
                         println!("Rust gates: pass");
                         return Ok(());
