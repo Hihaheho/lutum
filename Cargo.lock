@@ -789,6 +789,7 @@ dependencies = [
  "lutum-macros",
  "lutum-openai",
  "lutum-protocol",
+ "lutum-trace",
  "schemars",
  "serde",
  "serde_json",

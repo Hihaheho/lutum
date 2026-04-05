@@ -22,6 +22,7 @@ lutum-macros = { path = "crates/lutum-macros", version = "0.1.0" }
 lutum-openai = { path = "crates/lutum-openai", version = "0.1.0" }
 lutum-openrouter = { path = "crates/lutum-openrouter", version = "0.1.0" }
 lutum-protocol = { path = "crates/lutum-protocol", version = "0.1.0" }
+lutum-trace = { path = "crates/lutum-trace", version = "0.1.0" }
 async-stream = "0.3"
 async-trait = "0.1.89"
 bon = "3"
