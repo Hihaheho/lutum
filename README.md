@@ -1,101 +1,206 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Hihaheho/lutum/main/assets/lutum-logo-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Hihaheho/lutum/main/assets/lutum-logo-light.svg">
-  <img alt="Lutum" src="https://raw.githubusercontent.com/Hihaheho/lutum/main/assets/lutum-logo-light.svg" height="100px" >
+  <img alt="Lutum" src="https://raw.githubusercontent.com/Hihaheho/lutum/main/assets/lutum-logo-light.svg" height="100px">
 </picture>
 
-`lutum`, pronounced /ˈlu.tum/, is a composable LLM toolkit for advanced orchestration.
+`lutum`, pronounced /ˈlu.tum/, is a composable, streaming LLM toolkit for advanced orchestration.
+It keeps control flow in user code, preserves provider-specific power, and makes transcript replay
+an explicit part of the API instead of a hidden framework detail.
 
-## Goals
-
-- Preserve provider-specific power
-- Be production-friendly
-- Compose, don't take over
-- Power advanced control flows
-
-## Design
-
-The library is built around three layers:
-
-- `Context`: the exact execution contract
-- `TextTurn` / `StructuredTurn`: thin turn facades over shared config
-- `Session`: transcript and replay convenience without hidden control flow
+- Stream typed events or collect them into completed turn results
+- Keep tool execution, retries, and branching in user code
+- Commit transcript state explicitly with `Session`
+- Add typed hooks and in-memory trace capture without adopting a framework-owned agent loop
 
 If you want the design rationale rather than just the public surface, read
 [docs/DESIGN.md](docs/DESIGN.md).
 
-## Workspace layout
+## Goals
 
-- `crates/lutum` - public facade crate, `Context`, `Session`, mocks
-- `crates/lutum-protocol` - canonical request/response algebras and core traits
-- `crates/lutum-openai` - OpenAI Responses API adapter (also used as Ollama backend)
-- `crates/lutum-claude` - Anthropic Claude Messages API adapter
-- `crates/lutum-openrouter` - OpenRouter usage-recovery adapter
-- `crates/lutum-macros` - proc-macros for tools
+- Preserve provider-specific power instead of flattening everything into one framework API
+- Keep execution, tool calls, retries, and branching in user code
+- Make streaming and exact transcript replay first-class
+- Stay composable enough to fit advanced orchestration without taking over the runtime
 
-## Core ideas
+## Workspace Layout
 
-- No monolithic `Agent` abstraction
-- Request replay is modeled as `ModelInput`
-- Completed model output is modeled as `AssistantTurn`
-- Turn configuration is shared through `TurnConfig<T>`
-- Text and structured turns stay separate as thin facades
-- Tool execution stays in user code
-- `Session` is convenience, not hidden control flow
+| Crate | Role |
+|---|---|
+| `crates/lutum` | Public facade crate: `Context`, `Session`, turn APIs, mocks |
+| `crates/lutum-protocol` | Core traits, request/response algebras, reducers, transcript views |
+| `crates/lutum-openai` | OpenAI Responses API adapter, also usable with OpenAI-compatible backends |
+| `crates/lutum-claude` | Anthropic Claude Messages API adapter |
+| `crates/lutum-openrouter` | OpenRouter wrapper with usage recovery |
+| `crates/lutum-macros` | `#[derive(Toolset)]`, `#[tool_fn]`, `#[tool_input]`, hook macros |
+| `crates/lutum-trace` | Companion crate for scoped in-memory span and event capture |
 
-## Minimal example
+## Install
+
+This README uses the `openai` feature and `OpenAiAdapter`, which works with OpenAI-compatible
+endpoints such as OpenAI or Ollama.
+
+```toml
+[dependencies]
+lutum = { version = "0.1.0", features = ["openai"] }
+# Pick your favorite async runtime
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# Only if you use structured output or tool schemas
+schemars = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+
+# Only if you want in-memory trace capture
+lutum-trace = "0.1.0"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+```
+
+## Mental Model
+
+- `Context`: execution boundary. It validates input, reserves budget, emits tracing, and reduces
+  provider streams into typed results.
+- `TextTurn<T>` / `StructuredTurn<T, O>`: one turn configuration. They are thin facades over
+  shared config, not mini runtimes.
+- `Session`: transcript helper. Nothing is committed until you call `commit_text`,
+  `commit_structured`, or `commit_tool_round`.
+- `ModelInput`: low-level request surface if you want to skip `Session` and drive turns directly.
+- `RequestExtensions`: opaque per-request metadata for routing, identity, and custom adapter logic.
+
+## Quickstart
+
+This is the shortest useful path: build a `Context`, start a `Session`, run a text turn, then
+explicitly commit the result.
 
 ```rust
+use std::sync::Arc;
+
 use lutum::{
-    Context, ModelInput, NoTools, RequestExtensions, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, TextTurn, UsageEstimate,
+    Context, ModelName, NoTools, OpenAiAdapter, RequestExtensions, Session,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcome, UsageEstimate,
 };
 
-async fn run(ctx: Context) -> Result<(), Box<dyn std::error::Error>> {
-    let input = ModelInput::new()
-        .system("You are concise.")
-        .user("Say hello.");
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let adapter = OpenAiAdapter::new(std::env::var("TOKEN")?)
+        .with_base_url(std::env::var("ENDPOINT")?)
+        .with_default_model(ModelName::new(&std::env::var("MODEL")?)?);
 
-    let turn = TextTurn::<NoTools>::new(lutum::ModelName::new("haiku-4.5")?);
+    let ctx = Context::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
 
-    let result = ctx
-        .text_turn(
-            RequestExtensions::default(),
-            input,
-            turn,
+    let mut session = Session::new(ctx);
+    session.push_system("You are concise.");
+    session.push_user("Say hello in one sentence.");
+
+    let outcome = session
+        .prepare_text(
+            RequestExtensions::new(),
+            session.text_turn::<NoTools>(),
             UsageEstimate::zero(),
         )
         .await?
         .collect_noop()
         .await?;
 
-    println!("{}", result.assistant_text());
+    match outcome {
+        TextStepOutcome::Finished(result) => {
+            println!("{}", result.assistant_text());
+            session.commit_text(result);
+        }
+        TextStepOutcome::NeedsToolResults(_) => unreachable!("NoTools never requests tools"),
+    }
+
     Ok(())
 }
-
-# fn main() {
-#     let _ = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-# }
 ```
 
-## Structured Output Without Tools
+If you do not want transcript management, call `Context::text_turn(...)` directly with a
+`ModelInput` instead of going through `Session`.
 
-Use `Context::structured_completion(...)` when you want prompt-based structured output without
-tools or transcript integration. `Context::new(...)` wires turn execution only; use
-`Context::from_parts(...)` when you want to supply a separate completion adapter:
+## Structured Output
+
+Use `Session::structured_turn::<NoTools, O>()` when structured output should participate in the
+same explicit transcript model as text turns. Starting from the quickstart setup, reuse the same
+mutable `session` and swap the turn kind:
 
 ```rust
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+use lutum::{
+    NoTools, RequestExtensions, StructuredStepOutcome, StructuredTurnOutcome, UsageEstimate,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 struct Contact {
     email: String,
 }
 
+session.push_user("Extract the email address from `Reach me at user@example.com`.");
+
+let outcome = session
+    .prepare_structured(
+        RequestExtensions::new(),
+        session.structured_turn::<NoTools, Contact>(),
+        UsageEstimate::zero(),
+    )
+    .await?
+    .collect_noop()
+    .await?;
+
+match outcome {
+    StructuredStepOutcome::Finished(result) => match result.semantic.clone() {
+        StructuredTurnOutcome::Structured(contact) => {
+            println!("{}", contact.email);
+            session.commit_structured(result);
+        }
+        StructuredTurnOutcome::Refusal(reason) => {
+            eprintln!("{reason}");
+        }
+    },
+    StructuredStepOutcome::NeedsToolResults(_) => unreachable!("NoTools never requests tools"),
+}
+```
+
+If you want one-off structured extraction without transcript integration, use
+`Context::structured_completion(...)`. That path requires `Context::from_parts(...)`, because
+completion adapters are wired separately from turn execution:
+
+```rust
+use std::sync::Arc;
+
+use lutum::{
+    Context, ModelName, OpenAiAdapter, RequestExtensions, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, StructuredCompletionRequest, StructuredTurnOutcome, UsageEstimate,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct Contact {
+    email: String,
+}
+
+let adapter = Arc::new(
+    OpenAiAdapter::new(std::env::var("TOKEN")?)
+        .with_base_url(std::env::var("ENDPOINT")?)
+        .with_default_model(ModelName::new(&std::env::var("MODEL")?)?),
+);
+
+let ctx = Context::from_parts(
+    adapter.clone(),
+    adapter.clone(),
+    adapter,
+    SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+);
+
 let result = ctx
     .structured_completion(
-        RequestExtensions::default(),
-        lutum::StructuredCompletionRequest::<Contact>::new(
-            lutum::ModelName::new("gpt-4.1-mini")?,
-            "Extract the email address.",
+        RequestExtensions::new(),
+        StructuredCompletionRequest::<Contact>::new(
+            ModelName::new(&std::env::var("MODEL")?)?,
+            "Extract the email address from `Reach me at user@example.com`.",
         ),
         UsageEstimate::zero(),
     )
@@ -104,121 +209,250 @@ let result = ctx
     .await?;
 
 match result.semantic {
-    lutum::StructuredTurnOutcome::Structured(contact) => {
-        println!("{}", contact.email);
-    }
-    lutum::StructuredTurnOutcome::Refusal(refusal) => {
-        println!("{refusal}");
-    }
+    StructuredTurnOutcome::Structured(contact) => println!("{}", contact.email),
+    StructuredTurnOutcome::Refusal(reason) => eprintln!("{reason}"),
 }
 ```
 
-If you want transcript/session integration but still no tools, use
-`StructuredTurn::<NoTools, O>` instead.
+## Tools And Explicit Session Loops
 
-## Shared turn config
-
-Turn-level configuration lives in plain structs:
-
-- `GenerationParams`
-- `TurnConfig<T>`
-- `ToolPolicy<T>`
-
-The safe primary path is `TextTurn::new(ModelName::new(...)? )` /
-`StructuredTurn::new(ModelName::new(...)? )` for top-level turns,
-with `..Default::default()` reserved for nested parameter bundles:
+Tools are declared with macros, but they are never executed by the library. User code owns the
+tool loop, and `Session` only records committed turns and tool results.
 
 ```rust
-use lutum::{GenerationParams, TextTurn, ToolPolicy};
+use std::sync::Arc;
 
-let mut turn = TextTurn::<AppTools>::new(lutum::ModelName::new("gpt-4.1")?);
-turn.config.tools = ToolPolicy::allow_only(vec![AppToolsSelector::Weather]);
-turn.config.generation = GenerationParams {
-    max_output_tokens: Some(512),
-    ..Default::default()
+use lutum::{
+    Context, ModelName, OpenAiAdapter, RequestExtensions, Session, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, TextStepOutcome, ToolPolicy, UsageEstimate,
 };
-```
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-All of these structs also derive `bon::Builder`, so builder usage stays available as a secondary
-construction path.
+#[lutum::tool_input(name = "weather", output = WeatherResult)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct WeatherArgs {
+    city: String,
+}
 
-## Tool selection
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct WeatherResult {
+    forecast: String,
+}
 
-`#[derive(Toolset)]` generates two public enums:
-
-- `<Toolset>Call`
-- `<Toolset>Selector`
-
-`<Toolset>Selector` is serializable and schema-bearing, so it can be used as part of a structured
-output contract when one model selects the tools that another model may use. Selectors can also be
-resolved back to their `ToolDef` via `selector.definition()` or `Toolset::definitions_for(...)`.
-
-```rust
-#[derive(
-    Clone,
-    Debug,
-    serde::Serialize,
-    serde::Deserialize,
-    schemars::JsonSchema,
-    lutum::Toolset,
-)]
-enum AppTools {
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, lutum::Toolset)]
+enum Tools {
     Weather(WeatherArgs),
-    Search(SearchArgs),
 }
 
-let turn = TextTurn::<AppTools> {
-    config: {
-        let mut config = lutum::TurnConfig::<AppTools>::new(lutum::ModelName::new("gpt-4.1")?);
-        config.tools = ToolPolicy::allow_only(vec![
-            AppToolsSelector::Weather,
-            AppToolsSelector::Search,
-        ]);
-        config
-    },
-};
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let adapter = OpenAiAdapter::new(std::env::var("TOKEN")?)
+        .with_base_url(std::env::var("ENDPOINT")?)
+        .with_default_model(ModelName::new(&std::env::var("MODEL")?)?);
+
+    let ctx = Context::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+
+    let mut session = Session::new(ctx);
+    session.push_user("What is the weather in Tokyo?");
+
+    loop {
+        let mut turn = session.text_turn::<Tools>();
+        turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
+
+        let outcome = session
+            .prepare_text(RequestExtensions::new(), turn, UsageEstimate::zero())
+            .await?
+            .collect_noop()
+            .await?;
+
+        match outcome {
+            TextStepOutcome::NeedsToolResults(round) => {
+                let tool_uses = round
+                    .tool_calls
+                    .iter()
+                    .cloned()
+                    .map(|tool_call| match tool_call {
+                        ToolsCall::Weather(call) => call
+                            .tool_use(WeatherResult {
+                                forecast: "sunny, 24C".into(),
+                            })
+                            .unwrap(),
+                    })
+                    .collect::<Vec<_>>();
+
+                session.commit_tool_round(round, tool_uses)?;
+            }
+            TextStepOutcome::Finished(result) => {
+                println!("{}", result.assistant_text());
+                session.commit_text(result);
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
 ```
 
-## Session
+For single-tool rounds, `round.expect_one()?` and `round.expect_at_most_one()?` are often cleaner
+than manually inspecting the vector.
 
-`Session` keeps transcript state and replay helpers without hiding execution:
+## Hooks
 
-- `prepare_text(...)` / `prepare_structured(...)` do not mutate transcript state
-- `collect*()` does not auto-commit transcript state
-- transcript state changes only on explicit `commit_*`
-- you can always access `Context` or raw `ModelInput` directly
-
-This makes branching and tool replay explicit:
+Hooks are named, typed async slots. Define a slot with `#[def_hook(...)]`, implement handlers with
+`#[hook(...)]`, register them in a `HookRegistry`, then build the `Context` with
+`Context::with_hooks(...)`.
 
 ```rust
-let outcome = session
-    .prepare_text(RequestExtensions::default(), turn, UsageEstimate::zero())
-    .await?
-    .collect_noop()
-    .await?;
+use std::sync::Arc;
 
-match outcome {
-    lutum::TextStepOutcome::Finished(result) => {
-        session.commit_text(result);
+use lutum::{
+    Context, HookRegistry, ModelName, OpenAiAdapter, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions,
+};
+
+#[lutum::def_hook(always)]
+async fn validate_prompt(
+    _ctx: &Context,
+    prompt: &str,
+    last: Option<Result<(), String>>,
+) -> Result<(), String> {
+    if let Some(previous) = last {
+        previous
+    } else if prompt.trim().is_empty() {
+        Err("prompt must not be empty".into())
+    } else {
+        Ok(())
     }
-    lutum::TextStepOutcome::NeedsToolResults(round) => {
-        let tool_uses = execute_tools(round.tool_calls.clone())?;
-        session.commit_tool_round(round, tool_uses)?;
+}
+
+#[lutum::hook(ValidatePrompt)]
+async fn reject_secrets(
+    _ctx: &Context,
+    prompt: &str,
+    last: Option<Result<(), String>>,
+) -> Result<(), String> {
+    if let Some(previous) = last {
+        return previous;
     }
+    if prompt.contains("sk-") {
+        Err("looks like an API key".into())
+    } else {
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let hooks = HookRegistry::new().register_validate_prompt(RejectSecrets);
+
+    let ctx = Context::with_hooks(
+        Arc::new(
+            OpenAiAdapter::new(std::env::var("TOKEN")?)
+                .with_base_url(std::env::var("ENDPOINT")?)
+                .with_default_model(ModelName::new(&std::env::var("MODEL")?)?),
+        ),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+        hooks,
+    );
+
+    ctx.validate_prompt("Explain borrow checking in one paragraph.")
+        .await?;
+
+    Ok(())
 }
 ```
 
-Single-tool tasks can use `round.expect_one()?` or `round.expect_at_most_one()?` instead of
-reaching for `first()`.
+- `always`: run the default implementation first, then chain registered hooks on top
+- `fallback`: use registered hooks if present, otherwise run the default
+- `singleton`: pick one override or use the default; the last registration wins and emits a warning
+
+Core hooks take `&Context` as their first argument and are provider-agnostic. Adapter-local hooks
+take `&RequestExtensions` as their first argument and let adapters expose provider-specific
+selection or request-shaping behavior.
+
+## Trace Capture
+
+`lutum-trace` is a separate crate for scoped, in-memory tracing capture. It is useful in tests,
+debug tooling, and local observability when you want to inspect span fields and events without
+shipping traces anywhere.
+
+`Context` emits `llm_turn` spans during execution, so once the layer is installed you can capture
+request ids, finish reasons, and nested events. Assuming you already built `ctx` as in the
+quickstart, wrap the same turn execution with capture:
+
+```rust
+use lutum::{NoTools, RequestExtensions, Session, UsageEstimate};
+use tracing::instrument::WithSubscriber as _;
+use tracing_subscriber::layer::SubscriberExt as _;
+
+let subscriber = tracing_subscriber::registry().with(lutum_trace::layer());
+
+let collected = lutum_trace::capture(
+    async {
+        let mut session = Session::new(ctx.clone());
+        session.push_user("Say hello.");
+
+        let _ = session
+            .prepare_text(
+                RequestExtensions::new(),
+                session.text_turn::<NoTools>(),
+                UsageEstimate::zero(),
+            )
+            .await?
+            .collect_noop()
+            .await?;
+
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .with_subscriber(subscriber),
+)
+.await;
+
+if let Some(turn) = collected.trace.span("llm_turn") {
+    println!("request_id = {:?}", turn.field("request_id"));
+    println!("finish_reason = {:?}", turn.field("finish_reason"));
+}
+```
+
+The capture scope is task-local. If you spawn a Tokio task, call `lutum_trace::capture(...)`
+inside that task as well. For tests, `lutum_trace::test::collect(...)` provides a small helper on
+top of the same machinery.
 
 ## Examples
 
-- `crates/lutum-openai/examples/ollama_transcript.rs`
-- `crates/lutum-claude/examples/ollama_transcript.rs`
+All examples live under [crates/lutum/examples](crates/lutum/examples) and use
+`OpenAiAdapter` behind the `openai` feature.
+
+Set the endpoint once, then swap `<name>`:
+
+```bash
+export TOKEN="$OPENAI_API_KEY"
+export MODEL="gpt-4.1-mini"
+export ENDPOINT="https://api.openai.com/v1"
+
+cargo run -p lutum --example <name> --features openai
+```
+
+- `TOKEN`: API key, or a dummy value like `local` for a local compatible endpoint
+- `MODEL`: model name passed to `with_default_model(...)`
+- `ENDPOINT`: OpenAI-compatible base URL such as OpenAI or `http://localhost:11434/v1`
+
+| Example | What it shows | Run | Copy this when... |
+|---|---|---|---|
+| [`streaming_turn_ui`](crates/lutum/examples/streaming_turn_ui.rs) | Stream `TextTurnEvent` deltas directly to a UI or terminal | `cargo run -p lutum --example streaming_turn_ui --features openai` | You want the smallest streaming example without tools or transcript branching |
+| [`react_loop`](crates/lutum/examples/react_loop.rs) | Explicit tool loop with `ToolPolicy`, `NeedsToolResults`, and `commit_tool_round` | `cargo run -p lutum --example react_loop --features openai` | You want a ReAct-style loop but still keep tool execution in Rust |
+| [`verification_gates`](crates/lutum/examples/verification_gates.rs) | Structured output checked by deterministic Rust gates and retried | `cargo run -p lutum --example verification_gates --features openai` | You want model output to pass strict post-validation before acceptance |
+| [`deterministic_hooks`](crates/lutum/examples/deterministic_hooks.rs) | Prompt and output validation through typed hooks | `cargo run -p lutum --example deterministic_hooks --features openai` | You want reusable policy checks without baking them into every call site |
+| [`rag`](crates/lutum/examples/rag.rs) | Retrieve supporting text, then answer only from grounded evidence | `cargo run -p lutum --example rag --features openai` | You want a minimal retrieval-augmented generation pattern |
+| [`memory_surface`](crates/lutum/examples/memory_surface.rs) | Store and reload structured task state outside the transcript | `cargo run -p lutum --example memory_surface --features openai` | You want long-running state that is explicit and app-owned |
+| [`entropy_gc`](crates/lutum/examples/entropy_gc.rs) | Compact long history into a summary, then continue the session | `cargo run -p lutum --example entropy_gc --features openai` | You want to shrink prompt footprint without giving up iterative workflows |
 
 ## Development
-
-Useful commands:
 
 ```bash
 cargo check --workspace --all-targets
