@@ -1,7 +1,7 @@
 use lutum::*;
 use std::sync::Arc;
 type Validation = Result<(), Vec<String>>;
-#[hook_always]
+#[def_hook(always)]
 async fn validate_command(_ctx: &Context, _cmd: &str, _last: Option<Validation>) -> Validation {
     Ok(())
 }

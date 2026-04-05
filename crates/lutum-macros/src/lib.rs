@@ -109,7 +109,7 @@ pub fn hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     if attr.is_empty() {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "use #[hook_always] or #[hook_fallback] to declare a hook slot, or #[hook(SlotType)] to implement one",
+            "use #[def_hook(always)] or #[def_hook(fallback)] to declare a hook slot, or #[hook(SlotType)] to implement one",
         )
         .to_compile_error()
         .into();
@@ -120,31 +120,29 @@ pub fn hook(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn hook_always(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if !attr.is_empty() {
+pub fn def_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if attr.is_empty() {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "#[hook_always] does not accept arguments",
+            "use #[def_hook(always)] or #[def_hook(fallback)]",
         )
         .to_compile_error()
         .into();
     }
-    let item_fn = parse_macro_input!(item as ItemFn);
-    expand_hook(item_fn, HookKind::Always).into()
-}
 
-#[proc_macro_attribute]
-pub fn hook_fallback(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if !attr.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[hook_fallback] does not accept arguments",
+    let kind_ident = parse_macro_input!(attr as Ident);
+    let item_fn = parse_macro_input!(item as ItemFn);
+
+    match kind_ident.to_string().as_str() {
+        "always" => expand_hook(item_fn, HookKind::Always).into(),
+        "fallback" => expand_hook(item_fn, HookKind::Fallback).into(),
+        _ => syn::Error::new_spanned(
+            kind_ident,
+            "#[def_hook(...)] expects `always` or `fallback`",
         )
         .to_compile_error()
-        .into();
+        .into(),
     }
-    let item_fn = parse_macro_input!(item as ItemFn);
-    expand_hook(item_fn, HookKind::Fallback).into()
 }
 
 #[proc_macro_derive(Toolset)]

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use lutum::*;
 
-#[hook_always]
+#[def_hook(always)]
 async fn validate_prompt(
     _ctx: &Context,
     _prompt: &str,
@@ -11,7 +11,7 @@ async fn validate_prompt(
     Ok(())
 }
 
-#[hook_always]
+#[def_hook(always)]
 async fn validate_output(
     _ctx: &Context,
     _output: &str,

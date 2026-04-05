@@ -8,98 +8,120 @@ decision-date = `2026-04-05`
 
 context = ```markdown
 Lutum examples consistently duplicate cross-cutting concerns as plain functions:
-pre/post validation gates (`deterministic_hooks`), output auditing (`verification_gates`,
-`contract_first_turn`), and policy checks (`architectural_constraints`). These functions
-are not pluggable — replacing them requires editing call sites.
+pre/post validation gates (`deterministic_hooks`), output auditing (`verification_gates`),
+and policy checks (`architectural_constraints`). These functions are not pluggable;
+replacing them requires editing call sites.
 
 The framework already exposes `RequestExtensions` and `EventHandler` for per-request
-metadata and streaming event handling, but no mechanism existed for named, reusable,
-overridable decision points in user orchestration code.
+metadata and streaming event handling, but no mechanism existed for named, typed,
+reusable decision points in user orchestration code.
 
-The original design sketch proposed a `#[hook]` attribute macro that would create a
-`HookName` unit type, define a trait, and generate extension methods on `Context`.
-After discussion, two constraints were made explicit:
+The original hook API introduced two defining macros, `#[hook_always]` and
+`#[hook_fallback]`, plus `#[hook(SlotType)]` for concrete implementations.
+The behavior was correct, but the naming was not:
 
-1. The library must never own a loop — hooks are call points in user code, not
-   lifecycle interceptors wired to internal execution.
-2. Hook storage must not live on `Context` as a global registry; it lives in a
+- `hook_always` / `hook_fallback` read like two unrelated features instead of two
+  definition modes for the same concept
+- the pair did not line up visually with `#[hook(SlotType)]`, which already occupied
+  the shorter, more general `hook` namespace
+- the definition site should say "this defines a hook slot", not bury that meaning in
+  a suffix
+
+Two constraints remained non-negotiable:
+
+1. The library must never own a loop. Hooks are call points in user code, not
+   lifecycle interceptors wired into an internal agent runtime.
+2. Hook storage must not live on `Context` as a global registry. It lives in a
    separate `HookRegistry` passed to `Context::with_hooks`.
 ```
 
 decision = ```markdown
-Introduce a hooks system with four components:
+Adopt `#[def_hook(always)]` and `#[def_hook(fallback)]` as the canonical slot-definition
+syntax.
 
-**`#[hook_always]` and `#[hook_fallback]` proc-macros (lutum-macros)**
+`#[def_hook(...)]` is applied to an async function and generates the slot marker type,
+hook trait, `HookRegistry` extension methods, and `Context` forwarding method. The
+argument selects how the default body participates in execution:
 
-Both are applied to an async fn and generate the same surface (slot marker type, hook
-trait, `HookRegistry` extension methods, `Context` forwarding method), but differ in
-how the default body participates in execution:
+- `#[def_hook(always)]`: the default body always runs first, regardless of registration.
+  Registered hooks receive `last = Some(default_result)`. This is the right fit for
+  validation, safety checks, and auditing where the base behavior must not be bypassed.
+- `#[def_hook(fallback)]`: the default body runs only when no hooks are registered.
+  The first registered hook receives `last = None`. This is the right fit for override
+  slots such as model selection, where registration means replacing the default.
 
-- `#[hook_always]` — the default body **always runs first**, regardless of registration.
-  Registered hooks receive `last = Some(default_result)`. Intended for safety checks,
-  validation, and auditing where the base behavior must never be silently bypassed.
+Keep `#[hook(SlotType)]` as the implementation form. It generates a named struct
+implementing the slot's hook trait and remains the idiomatic way to define stateful or
+configurable implementations. The hook trait also retains its blanket impl for async
+closures, so ad-hoc hooks do not require a named type.
 
-- `#[hook_fallback]` — the default body **runs only when no hooks are registered**.
-  The first registered hook receives `last = None`. Intended for pure-override slots
-  such as model selection, where registering a hook means replacing the default entirely.
+The no-arg `#[hook]` form remains intentionally invalid. Users must choose a concrete
+definition mode at the slot definition site.
 
-The no-arg `#[hook]` form is intentionally absent; users must choose between the two
-semantics explicitly. `#[hook(SlotType)]` (with a type argument) is reserved for
-creating named implementation structs (see below).
+**Naming rationale**
 
-**`#[hook(SlotType)]` variant**
+- `def_hook` clearly marks the definition site and pairs naturally with `#[hook(SlotType)]`
+  as the implementation site
+- the semantic mode is now an argument, which makes `always` vs `fallback` read as two
+  variants of one macro instead of two unrelated top-level attributes
+- this is shorter and less awkward than `#[define_hook(...)]`, while being more explicit
+  than names like `#[hook_slot(...)]`
 
-Applied to an async fn with a slot marker type as argument, generates a named struct
-implementing the slot's hook trait. This is the idiomatic form for stateful or
-configurable implementations that would be awkward as closures.
+Alternatives considered and rejected:
 
-The hook trait also has a blanket impl for `AsyncFn` closures, so ad-hoc hooks can be
-registered without defining a struct.
+- `#[hook_slot(always)]` / `#[hook_slot(fallback)]`: accurate, but heavier and less
+  pleasant in examples
+- `#[define_hook(always)]` / `#[define_hook(fallback)]`: explicit, but too verbose for
+  a macro expected to appear frequently
+- keeping `#[hook_always]` / `#[hook_fallback]`: behaviorally fine, but visually clunky
+  and a poor fit next to `#[hook(SlotType)]`
 
-**Chain-of-responsibility execution**
+**Execution model**
 
-The hook call signature includes `last: Option<R>` as the final parameter. Its value
-depends on the slot kind:
+The hook call signature includes `last: Option<R>` as the final parameter.
 
-For `#[hook_always]` slots:
-- `last` is always `Some(_)` for registered hooks (the default ran first)
-- The idiomatic propagation pattern is `if let Some(Err(e)) = last { return Err(e); }`
+For `#[def_hook(always)]` slots:
+- `last` is always `Some(_)` for registered hooks because the default already ran
+- the usual propagation pattern is `if let Some(Err(err)) = last { return Err(err); }`
 
-For `#[hook_fallback]` slots:
+For `#[def_hook(fallback)]` slots:
 - `last = None` for the first registered hook
 - `last = Some(previous_result)` for subsequent hooks
 
-**`HookRegistry`**
+**Registry model**
 
-A `HashMap<TypeId, Box<dyn Any + Send + Sync>>` where each slot stores
-`Vec<Arc<dyn SlotHook>>`. Built via builder-style `register_*` methods, then passed
-to `Context::with_hooks`. `Context` carries it as `Arc<HookRegistry>` and exposes
-`hooks()` for direct registry access.
+`HookRegistry` is a `HashMap<TypeId, Box<dyn Any + Send + Sync>>` where each slot stores
+`Vec<Arc<dyn SlotHook>>`. It is built via generated `register_*` methods and passed to
+`Context::with_hooks`. `Context` stores it as `Arc<HookRegistry>` and exposes `hooks()`
+for direct registry access.
 
-**`select_model` builtin hook**
+**Builtin hook**
 
-Declared with `#[hook_fallback]`. Called by `Context` before every `text_turn` and
-`structured_turn`. Default implementation returns the configured model unchanged.
-Registering a handler allows runtime model selection without modifying the adapter.
+`select_model` is declared with `#[def_hook(fallback)]`. `Context` calls it before every
+`text_turn` and `structured_turn`. The default implementation returns the configured
+model unchanged; registering a hook allows runtime model selection without modifying the
+adapter.
 
-**Tracing integration**
+**Tracing**
 
-Each generated registry call method wraps execution in a
-`tracing::info_span!("lutum_hook", name = "hook_name")` span, making hook invocations
-visible in `lutum-trace` captures without any user-side instrumentation.
+Each generated registry call method wraps execution in
+`tracing::info_span!("lutum_hook", name = "hook_name")`, so hook invocations appear in
+`lutum-trace` captures without extra user instrumentation.
 ```
 
 consequences = ```markdown
-- Cross-cutting concerns (validation, policy, model selection) can be defined once
-  and attached to any `Context` at construction time
-- User code remains the explicit call site — the library never invokes a hook
-  automatically except `select_model`, which is a documented builtin
-- The `hook_always` / `hook_fallback` distinction makes default participation explicit
-  at the definition site; there is no ambiguity about whether the default is bypassed
-- Hooks compose via the `last` chain parameter; the ordering is registration order
-- Stateful hooks are first-class: any type implementing the generated hook trait can
+- Slot definitions now read as definitions, and implementations still read as implementations:
+  `#[def_hook(...)]` defines the slot, `#[hook(SlotType)]` implements it
+- Cross-cutting concerns such as validation, policy, and model selection can be defined
+  once and attached to any `Context` at construction time
+- User code remains the explicit call site. The library invokes only the documented
+  builtin `select_model` hook automatically
+- Default participation remains explicit at the definition site through the `always` /
+  `fallback` mode argument
+- Hooks still compose via the `last` chain parameter in registration order
+- Stateful hooks remain first-class: any type implementing the generated hook trait can
   be registered, not just closures
-- `Context::new` continues to work with an empty registry; no breaking change
-- The adapter-level `ModelSelector` trait remains for adapter-internal model routing;
-  `select_model` hook operates at the `Context` level before dispatch
+- `Context::new` continues to work with an empty registry
+- The adapter-level `ModelSelector` trait remains for adapter-internal routing; the
+  `select_model` hook still operates at the `Context` level before dispatch
 ```

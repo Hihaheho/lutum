@@ -58,7 +58,7 @@ pub use hooks::{
 pub use lutum_claude::{
     BudgetTokensResolver, ClaudeAdapter, ClaudeCommittedTurn, ClaudeError, ClaudeTurnItem,
 };
-pub use lutum_macros::{Toolset, hook, hook_always, hook_fallback, tool_fn, tool_input};
+pub use lutum_macros::{Toolset, def_hook, hook, tool_fn, tool_input};
 #[cfg(feature = "openai")]
 pub use lutum_openai::{
     OpenAiAdapter, OpenAiError, OpenAiReasoningEffort, ReasoningEffortResolver,

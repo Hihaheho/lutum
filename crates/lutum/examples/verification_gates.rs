@@ -37,7 +37,7 @@ fn normalize_phone(value: &str) -> String {
         .collect()
 }
 
-#[hook_always]
+#[def_hook(always)]
 async fn audit_contact(
     _ctx: &Context,
     source: &str,

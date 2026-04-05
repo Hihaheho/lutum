@@ -5,19 +5,19 @@
 //!
 //! ## Defining a hook slot
 //!
-//! Use `#[hook_always]` when the base implementation must always run, with registered
+//! Use `#[def_hook(always)]` when the base implementation must always run, with registered
 //! hooks layered on top. This is a good fit for validation, safety, and logging slots:
 //!
 //! ```rust,ignore
 //! use lutum::*;
 //!
-//! #[hook_always]
+//! #[def_hook(always)]
 //! async fn validate_output(_ctx: &Context, output: &str, last: Option<Result<(), String>>) -> Result<(), String> {
 //!     Ok(())
 //! }
 //! ```
 //!
-//! Use `#[hook_fallback]` when the base implementation should run only if no hooks are
+//! Use `#[def_hook(fallback)]` when the base implementation should run only if no hooks are
 //! registered. This is a good fit for override and routing slots.
 //!
 //! This generates:
@@ -45,10 +45,10 @@
 //! Multiple hooks registered for the same slot run in order. Each hook receives the
 //! previous hook's result as `last`:
 //!
-//! - `#[hook_always]`: the default runs first, then the first registered hook gets `last = Some(default_result)`
-//! - `#[hook_fallback]`: the first registered hook gets `last = None`
+//! - `#[def_hook(always)]`: the default runs first, then the first registered hook gets `last = Some(default_result)`
+//! - `#[def_hook(fallback)]`: the first registered hook gets `last = None`
 //! - Subsequent hooks always get `last = Some(previous_result)`
-//! - With `#[hook_fallback]`, the default implementation runs only when no hooks are registered
+//! - With `#[def_hook(fallback)]`, the default implementation runs only when no hooks are registered
 //!
 //! ## Registration and usage
 //!
@@ -109,7 +109,7 @@ impl Default for HookRegistry {
     }
 }
 
-#[lutum_macros::hook_fallback]
+#[lutum_macros::def_hook(fallback)]
 pub async fn select_model(
     ctx: &Context,
     _extensions: &RequestExtensions,
