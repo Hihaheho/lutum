@@ -11,6 +11,7 @@ use lutum_protocol::{
     AgentError, RequestExtensions,
     budget::Usage,
     conversation::{AssistantTurnItem, ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
+    hooks::HookRegistry,
     llm::{
         AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn,
         CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionRequest,
@@ -233,6 +234,7 @@ impl TurnAdapter for MockLlmAdapter {
         &self,
         _input: ModelInput,
         _turn: AdapterTextTurn,
+        _hooks: &HookRegistry,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
         let scenario = self
             .text_turns
@@ -315,6 +317,7 @@ impl TurnAdapter for MockLlmAdapter {
         &self,
         _input: ModelInput,
         _turn: AdapterStructuredTurn,
+        _hooks: &HookRegistry,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
         let scenario = self
             .structured_turns
@@ -413,6 +416,7 @@ impl CompletionAdapter for MockLlmAdapter {
         &self,
         _request: CompletionRequest,
         _extensions: &RequestExtensions,
+        _hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError> {
         let scenario = self
             .completions
@@ -444,6 +448,7 @@ impl CompletionAdapter for MockLlmAdapter {
         &self,
         _request: AdapterStructuredCompletionRequest,
         _extensions: &RequestExtensions,
+        _hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
         let scenario = self
             .structured_completions

@@ -3,7 +3,7 @@ use std::convert::Infallible;
 
 use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
-    GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, RequestBudget,
+    GenerationParams, InputMessageRole, ModelInput, ModelInputItem, RequestBudget,
     RequestExtensions, StructuredTurn, StructuredTurnEventStream, TextTurn, TextTurnEventStream,
     ToolUse, Toolset, TurnConfig, TurnView, UsageEstimate,
     budget::Usage,
@@ -24,7 +24,6 @@ use crate::{
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionDefaults {
-    pub model: Option<ModelName>,
     pub generation: GenerationParams,
     pub budget: RequestBudget,
 }
@@ -90,25 +89,23 @@ impl Session {
         self.input
     }
 
-    pub fn text_turn<T>(&self) -> Option<TextTurn<T>>
+    pub fn text_turn<T>(&self) -> TextTurn<T>
     where
         T: Toolset,
     {
-        let model = self.defaults.model.clone()?;
-        let mut turn = TextTurn::new(model);
+        let mut turn = TextTurn::new();
         self.defaults.apply(&mut turn.config);
-        Some(turn)
+        turn
     }
 
-    pub fn structured_turn<T, O>(&self) -> Option<StructuredTurn<T, O>>
+    pub fn structured_turn<T, O>(&self) -> StructuredTurn<T, O>
     where
         T: Toolset,
         O: StructuredOutput,
     {
-        let model = self.defaults.model.clone()?;
-        let mut turn = StructuredTurn::new(model);
+        let mut turn = StructuredTurn::new();
         self.defaults.apply(&mut turn.config);
-        Some(turn)
+        turn
     }
 
     pub fn push_system(&mut self, text: impl Into<String>) {

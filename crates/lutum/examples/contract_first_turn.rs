@@ -30,11 +30,11 @@ fn add_usage(total: &mut Usage, usage: Usage) {
 }
 
 #[rustfmt::skip]
-async fn ask(ctx: &Context, model: &ModelName, system: &str, user: impl Into<String>) -> anyhow::Result<(String, Usage)> {
-    let mut session = Session::new(ctx.clone()).with_defaults(SessionDefaults { model: Some(model.clone()), ..Default::default() });
+async fn ask(ctx: &Context, system: &str, user: impl Into<String>) -> anyhow::Result<(String, Usage)> {
+    let mut session = Session::new(ctx.clone());
     session.push_system(system);
     session.push_user(user);
-    let outcome = session.prepare_text(RequestExtensions::new(), session.text_turn::<NoTools>().unwrap(), UsageEstimate::zero()).await?.collect_noop().await?;
+    let outcome = session.prepare_text(RequestExtensions::new(), session.text_turn::<NoTools>(), UsageEstimate::zero()).await?.collect_noop().await?;
     match outcome { TextStepOutcome::Finished(result) => Ok((result.assistant_text(), result.usage)), TextStepOutcome::NeedsToolResults(_) => unreachable!() }
 }
 
@@ -44,8 +44,8 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
-    let ctx = Context::new(Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint)), SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()));
     let model = ModelName::new(&model_name)?;
+    let ctx = Context::new(Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model)), SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()));
     let ticket = "I was charged twice for my subscription last month.";
     let policy = "You route support tickets.\n- refund_request: duplicate charge, incorrect charge, or refund-needed billing error.\n- billing_inquiry: billing question that does not require a refund.\n- technical_issue: product malfunction, login problem, or bug.";
     let contract = Contract { output_format: "<route_id>: <one-sentence reason>", allowed_routes: &["refund_request", "billing_inquiry", "technical_issue"], evidence_terms: &["charged", "twice", "subscription", "last month", "billing"] };
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let mut usage = Usage::zero();
 
     println!("Contract evaluated in Rust:\n{hint}\nTicket: {ticket}\nExpected route: refund_request\n");
-    let (first, first_usage) = ask(&ctx, &model, &system, &user).await?;
+    let (first, first_usage) = ask(&ctx, &system, &user).await?;
     add_usage(&mut usage, first_usage);
     println!("Attempt 1: {first}");
     match audit(&contract, &first) {
@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         Err(failures) => {
             println!("Audit: fail\n- {}", failures.join("\n- "));
             let retry_user = format!("{user}\n\nAudit failed. Fix every issue:\n- {}", failures.join("\n- "));
-            let (retry, retry_usage) = ask(&ctx, &model, &system, retry_user).await?;
+            let (retry, retry_usage) = ask(&ctx, &system, retry_user).await?;
             add_usage(&mut usage, retry_usage);
             println!("\nRetry: {retry}");
             match audit(&contract, &retry) {

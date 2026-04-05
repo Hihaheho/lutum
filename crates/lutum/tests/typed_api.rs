@@ -4,11 +4,11 @@ use lutum::{
     AssistantInputItem, AssistantTurnItem, AssistantTurnView, BudgetLease, BudgetManager,
     CompletionAdapter, CompletionEventStream, CompletionRequest, Context, ContextError,
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
-    ErasedTextTurnEventStream, InputMessageRole, MessageContent, ModelInput, ModelInputItem,
-    ModelName, ModelNameError, NonEmpty, OperationKind, RawJson, RequestBudget, RequestExtensions,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredCompletionRequest, StructuredTurn,
-    Temperature, TextTurn, TextTurnReducer, ToolMetadata, ToolPolicy, ToolUse, TurnAdapter, Usage,
-    UsageEstimate, UsageRecoveryAdapter,
+    ErasedTextTurnEventStream, HookRegistry, InputMessageRole, MessageContent, ModelInput,
+    ModelInputItem, ModelName, ModelNameError, NonEmpty, OperationKind, RawJson, RequestBudget,
+    RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    StructuredCompletionRequest, StructuredTurn, Temperature, TextTurn, TextTurnReducer,
+    ToolMetadata, ToolPolicy, ToolUse, TurnAdapter, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ impl TurnAdapter for NullAdapter {
         &self,
         _input: ModelInput,
         _turn: AdapterTextTurn,
+        _hooks: &HookRegistry,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedTextTurnEventStream)
     }
@@ -30,6 +31,7 @@ impl TurnAdapter for NullAdapter {
         &self,
         _input: ModelInput,
         _turn: AdapterStructuredTurn,
+        _hooks: &HookRegistry,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedStructuredTurnEventStream)
     }
@@ -41,6 +43,7 @@ impl CompletionAdapter for NullAdapter {
         &self,
         _request: CompletionRequest,
         _extensions: &RequestExtensions,
+        _hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as CompletionEventStream)
     }
@@ -49,6 +52,7 @@ impl CompletionAdapter for NullAdapter {
         &self,
         _request: AdapterStructuredCompletionRequest,
         _extensions: &RequestExtensions,
+        _hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedStructuredCompletionEventStream)
     }
@@ -135,11 +139,11 @@ fn typed_public_api_compiles_and_constructs_requests() {
         )),
     ]);
 
-    let mut _text = TextTurn::<Tools>::new(ModelName::new("gpt-4.1").unwrap());
+    let mut _text = TextTurn::<Tools>::new();
     _text.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
     _text.config.budget = RequestBudget::from_tokens(256);
 
-    let mut _structured = StructuredTurn::<Tools, Summary>::new(ModelName::new("gpt-4.1").unwrap());
+    let mut _structured = StructuredTurn::<Tools, Summary>::new();
     _structured.config.generation = lutum::GenerationParams {
         temperature: Some(Temperature::try_from(0.3).unwrap()),
         max_output_tokens: Some(512),
@@ -280,7 +284,7 @@ fn context_rejects_invalid_model_input_before_adapter_call() {
     let err = futures::executor::block_on(ctx.text_turn(
         RequestExtensions::new(),
         input,
-        TextTurn::<Tools>::new(ModelName::new("gpt-4.1").unwrap()),
+        TextTurn::<Tools>::new(),
         UsageEstimate::zero(),
     ));
 

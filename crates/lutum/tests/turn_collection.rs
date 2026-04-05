@@ -38,8 +38,8 @@ fn input() -> ModelInput {
     ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")])
 }
 
-fn weather_turn(model: &str) -> TextTurn<Tools> {
-    let mut turn = TextTurn::new(lutum::ModelName::new(model).unwrap());
+fn weather_turn() -> TextTurn<Tools> {
+    let mut turn = TextTurn::new();
     turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
     turn
 }
@@ -111,7 +111,7 @@ fn text_turn_collects_assistant_output_and_tool_calls() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
-    let turn = weather_turn("gpt-4.1");
+    let turn = weather_turn();
     let pending =
         block_on(ctx.text_turn(extensions(), input(), turn, UsageEstimate::zero())).unwrap();
     let result = block_on(pending.collect_noop()).unwrap();
@@ -150,7 +150,7 @@ fn structured_turn_collects_typed_output_and_appends_assistant_item() {
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
-    let turn = StructuredTurn::<Tools, Summary>::new(lutum::ModelName::new("gpt-4.1").unwrap());
+    let turn = StructuredTurn::<Tools, Summary>::new();
     let pending =
         block_on(ctx.structured_turn(extensions(), input(), turn, UsageEstimate::zero())).unwrap();
     let result = block_on(pending.collect_noop()).unwrap();
@@ -226,7 +226,7 @@ fn recorded_events_reduce_to_same_result_as_collect() {
     let pending = block_on(ctx.text_turn(
         extensions(),
         input(),
-        weather_turn("gpt-4.1"),
+        weather_turn(),
         UsageEstimate::zero(),
     ))
     .unwrap();
@@ -252,7 +252,7 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
     let pending = block_on(ctx.text_turn(
         extensions(),
         input(),
-        TextTurn::<Tools>::new(lutum::ModelName::new("gpt-4.1").unwrap()),
+        TextTurn::<Tools>::new(),
         UsageEstimate {
             total_tokens: 10,
             ..UsageEstimate::zero()
@@ -280,7 +280,7 @@ fn into_stream_releases_reserved_budget_without_collect() {
     let pending = block_on(ctx.text_turn(
         extensions(),
         input(),
-        TextTurn::<Tools>::new(lutum::ModelName::new("gpt-4.1").unwrap()),
+        TextTurn::<Tools>::new(),
         UsageEstimate {
             total_tokens: 10,
             ..UsageEstimate::zero()
@@ -320,7 +320,7 @@ fn adapter_error_uses_recovered_usage_when_available() {
     let pending = block_on(ctx.text_turn(
         extensions(),
         input(),
-        TextTurn::<Tools>::new(lutum::ModelName::new("gpt-4.1").unwrap()),
+        TextTurn::<Tools>::new(),
         UsageEstimate {
             total_tokens: 10,
             ..UsageEstimate::zero()
@@ -354,7 +354,7 @@ fn tool_call_deserialize_error_surfaces_as_execution_error() {
     let pending = block_on(ctx.text_turn(
         extensions(),
         input(),
-        weather_turn("gpt-4.1"),
+        weather_turn(),
         UsageEstimate {
             total_tokens: 10,
             ..UsageEstimate::zero()
@@ -407,7 +407,7 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
     let pending = block_on(ctx.structured_turn(
         extensions(),
         input(),
-        StructuredTurn::<Tools, Summary>::new(lutum::ModelName::new("gpt-4.1").unwrap()),
+        StructuredTurn::<Tools, Summary>::new(),
         UsageEstimate {
             total_tokens: 10,
             ..UsageEstimate::zero()
@@ -444,7 +444,7 @@ fn request_budget_is_enforced_per_turn() {
         extensions(),
         input(),
         {
-            let mut turn = TextTurn::<Tools>::new(lutum::ModelName::new("gpt-4.1").unwrap());
+            let mut turn = TextTurn::<Tools>::new();
             turn.config.budget = RequestBudget::from_tokens(16);
             turn
         },

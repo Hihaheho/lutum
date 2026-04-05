@@ -17,17 +17,13 @@ struct TaskState {
 
 async fn update_task_state(
     ctx: &Context,
-    model: &ModelName,
     system: &str,
     prompt: impl Into<String>,
 ) -> anyhow::Result<TaskState> {
-    let mut session = Session::new(ctx.clone()).with_defaults(SessionDefaults {
-        model: Some(model.clone()),
-        ..Default::default()
-    });
+    let mut session = Session::new(ctx.clone());
     session.push_system(system);
     session.push_user(prompt);
-    let turn: StructuredTurn<NoTools, TaskState> = session.structured_turn().unwrap();
+    let turn: StructuredTurn<NoTools, TaskState> = session.structured_turn();
     let outcome = session
         .prepare_structured(RequestExtensions::new(), turn, UsageEstimate::zero())
         .await?
@@ -95,11 +91,11 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
+    let model = ModelName::new(&model_name)?;
     let ctx = Context::new(
-        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint)),
+        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model)),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let model = ModelName::new(&model_name)?;
     let system = concat!(
         "You are maintaining an external work-memory record for a coding task. ",
         "Return a valid TaskState object only. ",
@@ -110,7 +106,6 @@ async fn main() -> anyhow::Result<()> {
 
     let session1_state = update_task_state(
         &ctx,
-        &model,
         system,
         format!(
             "Task: {task}\n\
@@ -129,7 +124,6 @@ async fn main() -> anyhow::Result<()> {
     let saved_state = load_state()?;
     let session2_state = update_task_state(
         &ctx,
-        &model,
         system,
         format!(
             "You are resuming this task. Here is your current state:\n{}\n\

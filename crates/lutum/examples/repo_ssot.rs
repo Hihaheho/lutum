@@ -6,22 +6,14 @@ const NAVIGATION_SYSTEM: &str = "You are a codebase guide. Read the AGENTS.md co
 const ANSWER_SYSTEM: &str = "Answer the question using only the provided crate detail. Be concise.";
 const QUESTION: &str = "Which crate should I edit to fix a bug in the OpenAI SSE parser?";
 
-async fn ask(
-    ctx: &Context,
-    model: &ModelName,
-    system: &str,
-    user: impl Into<String>,
-) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone()).with_defaults(SessionDefaults {
-        model: Some(model.clone()),
-        ..Default::default()
-    });
+async fn ask(ctx: &Context, system: &str, user: impl Into<String>) -> anyhow::Result<String> {
+    let mut session = Session::new(ctx.clone());
     session.push_system(system);
     session.push_user(user);
     let outcome = session
         .prepare_text(
             RequestExtensions::new(),
-            session.text_turn::<NoTools>().unwrap(),
+            session.text_turn::<NoTools>(),
             UsageEstimate::zero(),
         )
         .await?
@@ -221,14 +213,13 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
-    let adapter = OpenAiAdapter::new(token).with_base_url(endpoint);
+    let model = ModelName::new(&model_name)?;
+    let adapter = OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
-    let model = ModelName::new(&model_name)?;
 
     let raw_crate = ask(
         &ctx,
-        &model,
         NAVIGATION_SYSTEM,
         format!("AGENTS.md:\n{agents_content}\n\nQuestion: {QUESTION}"),
     )
@@ -241,7 +232,6 @@ async fn main() -> anyhow::Result<()> {
 
     let answer = ask(
         &ctx,
-        &model,
         ANSWER_SYSTEM,
         format!("Crate detail:\n{crate_detail}\n\nQuestion: {QUESTION}"),
     )

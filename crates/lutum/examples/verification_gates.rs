@@ -109,11 +109,8 @@ fn build_prompt(source: &str, prior_failure: Option<&GateFailure>) -> String {
     prompt
 }
 
-async fn extract(ctx: &Context, model: &ModelName, prompt: &str) -> anyhow::Result<Contact> {
-    let mut session = Session::new(ctx.clone()).with_defaults(SessionDefaults {
-        model: Some(model.clone()),
-        ..Default::default()
-    });
+async fn extract(ctx: &Context, prompt: &str) -> anyhow::Result<Contact> {
+    let mut session = Session::new(ctx.clone());
     session.push_system(
         "You extract contacts from source text. Rust decides whether the extraction passes verification. Use only values grounded in the source.",
     );
@@ -122,7 +119,7 @@ async fn extract(ctx: &Context, model: &ModelName, prompt: &str) -> anyhow::Resu
     let outcome = session
         .prepare_structured(
             RequestExtensions::new(),
-            session.structured_turn::<NoTools, Contact>().unwrap(),
+            session.structured_turn::<NoTools, Contact>(),
             UsageEstimate::zero(),
         )
         .await?
@@ -143,10 +140,10 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
-    let adapter = OpenAiAdapter::new(token).with_base_url(endpoint);
+    let model = ModelName::new(&model_name)?;
+    let adapter = OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::with_hooks(Arc::new(adapter), budget, HookRegistry::new());
-    let model = ModelName::new(&model_name)?;
     let source = "Call John Smith at john@example.com or +1-555-0100";
     let mut prior_failure = None;
 
@@ -157,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
         let prompt = build_prompt(source, prior_failure.as_ref());
         println!("\nAttempt {attempt}");
 
-        match extract(&ctx, &model, &prompt).await {
+        match extract(&ctx, &prompt).await {
             Ok(contact) => {
                 println!("Extracted contact: {contact:#?}");
 

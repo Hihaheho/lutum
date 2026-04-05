@@ -432,6 +432,8 @@ fn expand_tool_fn(item_fn: ItemFn, args: ToolFnArgs) -> proc_macro2::TokenStream
 }
 
 struct HookSignature {
+    ctx_ident: Ident,
+    ctx_ty: Type,
     explicit_args: Vec<(Ident, Type)>,
     output_ty: Type,
 }
@@ -443,6 +445,8 @@ enum HookKind {
 
 fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream {
     let HookSignature {
+        ctx_ident,
+        ctx_ty,
         explicit_args,
         output_ty,
     } = match analyze_hook_signature(&item_fn) {
@@ -459,6 +463,16 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
     let context_ext_ident = format_ident!("{slot_ident}ContextExt");
     let default_fn_ident = format_ident!("__lutum_hook_default_{}", fn_ident);
     let register_fn_ident = format_ident!("register_{}", fn_ident);
+    let is_context_hook = is_context_ref(&ctx_ty);
+    // For the registry ext method, the first-arg type needs a lifetime annotation if it's a reference
+    let ctx_ty_with_lifetime: Type = match &ctx_ty {
+        Type::Reference(r) => {
+            let mut r2 = r.clone();
+            r2.lifetime = Some(Lifetime::new("'a", proc_macro2::Span::call_site()));
+            Type::Reference(r2)
+        }
+        other => other.clone(),
+    };
 
     item_fn.vis = syn::Visibility::Inherited;
     item_fn.sig.ident = default_fn_ident.clone();
@@ -487,7 +501,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
             quote! { #ty: ::std::clone::Clone }
         })
         .collect::<Vec<_>>();
-    let async_fn_arg_tys = explicit_args
+    let _async_fn_arg_tys = explicit_args
         .iter()
         .map(|(_, ty)| quote! { #ty })
         .collect::<Vec<_>>();
@@ -513,7 +527,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
         HookKind::Always => quote! {
             let mut last = ::std::option::Option::Some(
                 #default_fn_ident(
-                    ctx,
+                    #ctx_ident,
                     #(#cloned_hook_call_arg_names,)*
                     None,
                 )
@@ -523,7 +537,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
                 for hook in hooks {
                     last = ::std::option::Option::Some(
                         hook.call(
-                            ctx,
+                            #ctx_ident,
                             #(#cloned_hook_call_arg_names,)*
                             last,
                         )
@@ -540,7 +554,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
                     for hook in hooks {
                         last = ::std::option::Option::Some(
                             hook.call(
-                                ctx,
+                                #ctx_ident,
                                 #(#cloned_hook_call_arg_names,)*
                                 last,
                             )
@@ -551,7 +565,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
                 }
                 _ => {
                     #default_fn_ident(
-                        ctx,
+                        #ctx_ident,
                         #(#cloned_hook_call_arg_names,)*
                         None,
                     )
@@ -561,6 +575,35 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
         },
     };
 
+    let context_ext = if is_context_hook {
+        quote! {
+            #[allow(dead_code)]
+            #vis trait #context_ext_ident {
+                fn #fn_ident<'a>(
+                    &'a self,
+                    #(#context_args,)*
+                ) -> impl ::std::future::Future<Output = #output_ty> + 'a
+                #clone_where;
+            }
+
+            impl #context_ext_ident for ::lutum::Context {
+                fn #fn_ident<'a>(
+                    &'a self,
+                    #(#context_args,)*
+                ) -> impl ::std::future::Future<Output = #output_ty> + 'a
+                #clone_where {
+                    <::lutum_protocol::HookRegistry as #registry_ext_ident>::#fn_ident(
+                        self.hooks(),
+                        self,
+                        #(#hook_call_arg_names,)*
+                    )
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     quote! {
         #item_fn
 
@@ -568,35 +611,14 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
         #vis struct #slot_ident;
 
         #[allow(dead_code)]
-        #[::async_trait::async_trait(?Send)]
+        #[::async_trait::async_trait]
         #vis trait #hook_trait_ident: Send + Sync {
             async fn call(
                 &self,
-                ctx: &::lutum::Context,
+                #ctx_ident: #ctx_ty,
                 #(#hook_call_args,)*
                 last: ::std::option::Option<#output_ty>,
             ) -> #output_ty;
-        }
-
-        #[::async_trait::async_trait(?Send)]
-        impl<F> #hook_trait_ident for F
-        where
-            F: ::std::ops::AsyncFn(
-                    &::lutum::Context,
-                    #(#async_fn_arg_tys,)*
-                    ::std::option::Option<#output_ty>,
-                ) -> #output_ty
-                + Send
-                + Sync,
-        {
-            async fn call(
-                &self,
-                ctx: &::lutum::Context,
-                #(#hook_call_args,)*
-                last: ::std::option::Option<#output_ty>,
-            ) -> #output_ty {
-                self(ctx, #(#hook_call_arg_names,)* last).await
-            }
         }
 
         #[allow(dead_code)]
@@ -608,13 +630,13 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
 
             fn #fn_ident<'a>(
                 &'a self,
-                ctx: &'a ::lutum::Context,
+                #ctx_ident: #ctx_ty_with_lifetime,
                 #(#registry_args,)*
             ) -> impl ::std::future::Future<Output = #output_ty> + 'a
             #clone_where;
         }
 
-        impl #registry_ext_ident for ::lutum::HookRegistry {
+        impl #registry_ext_ident for ::lutum_protocol::HookRegistry {
             fn #register_fn_ident<H>(mut self, hook: H) -> Self
             where
                 H: #hook_trait_ident + 'static,
@@ -636,7 +658,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
 
             fn #fn_ident<'a>(
                 &'a self,
-                ctx: &'a ::lutum::Context,
+                #ctx_ident: #ctx_ty_with_lifetime,
                 #(#registry_args,)*
             ) -> impl ::std::future::Future<Output = #output_ty> + 'a
             #clone_where {
@@ -661,33 +683,14 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
             }
         }
 
-        #[allow(dead_code)]
-        #vis trait #context_ext_ident {
-            fn #fn_ident<'a>(
-                &'a self,
-                #(#context_args,)*
-            ) -> impl ::std::future::Future<Output = #output_ty> + 'a
-            #clone_where;
-        }
-
-        impl #context_ext_ident for ::lutum::Context {
-            fn #fn_ident<'a>(
-                &'a self,
-                #(#context_args,)*
-            ) -> impl ::std::future::Future<Output = #output_ty> + 'a
-            #clone_where {
-                <::lutum::HookRegistry as #registry_ext_ident>::#fn_ident(
-                    self.hooks(),
-                    self,
-                    #(#hook_call_arg_names,)*
-                )
-            }
-        }
+        #context_ext
     }
 }
 
 fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStream {
     let HookSignature {
+        ctx_ident,
+        ctx_ty,
         explicit_args,
         output_ty,
     } = match analyze_hook_signature(&item_fn) {
@@ -718,11 +721,11 @@ fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStr
         impl #hook_trait_ident for #struct_ident {
             async fn call(
                 &self,
-                ctx: &::lutum::Context,
+                #ctx_ident: #ctx_ty,
                 #(#hook_call_args,)*
                 last: ::std::option::Option<#output_ty>,
             ) -> #output_ty {
-                #fn_ident(ctx, #(#hook_call_arg_names,)* last).await
+                #fn_ident(#ctx_ident, #(#hook_call_arg_names,)* last).await
             }
         }
     }
@@ -770,21 +773,26 @@ fn analyze_hook_signature(item_fn: &ItemFn) -> syn::Result<HookSignature> {
     let Some(FnArg::Typed(ctx_arg)) = inputs.first().copied() else {
         return Err(syn::Error::new_spanned(
             inputs.first().expect("hook must have inputs"),
-            "expected `ctx: &Context` as the first argument",
+            "first hook argument must be a typed reference (e.g. `ctx: &Context` or `extensions: &RequestExtensions`)",
         ));
     };
-    let Pat::Ident(PatIdent { .. }) = ctx_arg.pat.as_ref() else {
+    let Pat::Ident(PatIdent {
+        ident: ctx_ident, ..
+    }) = ctx_arg.pat.as_ref()
+    else {
         return Err(syn::Error::new_spanned(
             &ctx_arg.pat,
-            "expected `ctx` identifier",
+            "expected an identifier for the first hook argument",
         ));
     };
-    if !is_context_ref(ctx_arg.ty.as_ref()) {
+    let Type::Reference(_) = ctx_arg.ty.as_ref() else {
         return Err(syn::Error::new_spanned(
             &ctx_arg.ty,
-            "first hook argument must be `ctx: &Context`",
+            "first hook argument must be a shared reference (e.g. `&Context` or `&RequestExtensions`)",
         ));
-    }
+    };
+    let ctx_ident = ctx_ident.clone();
+    let ctx_ty = (*ctx_arg.ty).clone();
 
     let Some(FnArg::Typed(last_arg)) = inputs.last().copied() else {
         return Err(syn::Error::new_spanned(
@@ -826,6 +834,8 @@ fn analyze_hook_signature(item_fn: &ItemFn) -> syn::Result<HookSignature> {
     }
 
     Ok(HookSignature {
+        ctx_ident,
+        ctx_ty,
         explicit_args,
         output_ty,
     })

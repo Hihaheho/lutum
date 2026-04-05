@@ -54,22 +54,14 @@ async fn block_dangerous_output(
     }
 }
 
-async fn ask(
-    ctx: &Context,
-    model: &ModelName,
-    system: &str,
-    prompt: &str,
-) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone()).with_defaults(SessionDefaults {
-        model: Some(model.clone()),
-        ..Default::default()
-    });
+async fn ask(ctx: &Context, system: &str, prompt: &str) -> anyhow::Result<String> {
+    let mut session = Session::new(ctx.clone());
     session.push_system(system);
     session.push_user(prompt);
     let outcome = session
         .prepare_text(
             RequestExtensions::new(),
-            session.text_turn::<NoTools>().unwrap(),
+            session.text_turn::<NoTools>(),
             UsageEstimate::zero(),
         )
         .await?
@@ -93,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         .register_validate_prompt(RejectEmptyPrompt)
         .register_validate_output(BlockDangerousOutput);
     let ctx = Context::with_hooks(
-        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint)),
+        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model)),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
         hooks,
     );
@@ -103,7 +95,6 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     let output = ask(
         &ctx,
-        &model,
         "You are a shell expert. Output only the command, nothing else.",
         prompt,
     )

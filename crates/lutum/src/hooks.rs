@@ -24,7 +24,7 @@
 //! - `ValidateOutput` - slot marker type
 //! - `ValidateOutputHook` - hook trait to implement
 //! - `ValidateOutputRegistryExt` - `register_validate_output` and `validate_output` on `HookRegistry`
-//! - `ValidateOutputContextExt` - `validate_output` on `Context`
+//! - `ValidateOutputContextExt` - `validate_output` on `Context` (only for `&Context` first-arg hooks)
 //!
 //! ## Defining a named implementation
 //!
@@ -64,58 +64,15 @@
 //! ctx.validate_output(&output).await?;
 //! ```
 //!
-//! ## Builtin hooks
+//! ## Hook kinds
 //!
-//! [`select_model`] is a builtin hook called automatically by [`Context`] before every turn.
-//! Register a handler to override model selection per request.
-use std::{
-    any::{Any, TypeId},
-    collections::HashMap,
-};
+//! - **Core hooks** (`ctx: &Context` first arg): called by `Context` — provider-agnostic decisions
+//! - **Adapter-local hooks** (`extensions: &RequestExtensions` first arg): called by adapters
+//!   using the `&HookRegistry` passed from `Context` — provider-specific request shaping
+//!
+//! ## Builtin adapter hooks
+//!
+//! Each adapter (`ClaudeAdapter`, `OpenAiAdapter`) defines its own model-selection and
+//! resolver hooks. Register them to override the adapter's default behaviour.
 
-use lutum_protocol::{ModelName, extensions::RequestExtensions};
-
-use crate::Context;
-
-/// Storage for hook chains.
-///
-/// Build a registry with [`HookRegistry::new`], register handlers with the
-/// generated `register_*` methods, then pass it to [`Context::with_hooks`].
-pub struct HookRegistry {
-    slots: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
-}
-
-impl HookRegistry {
-    pub fn new() -> Self {
-        Self {
-            slots: HashMap::new(),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn slots(&self) -> &HashMap<TypeId, Box<dyn Any + Send + Sync>> {
-        &self.slots
-    }
-
-    #[doc(hidden)]
-    pub fn slots_mut(&mut self) -> &mut HashMap<TypeId, Box<dyn Any + Send + Sync>> {
-        &mut self.slots
-    }
-}
-
-impl Default for HookRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[lutum_macros::def_hook(fallback)]
-pub async fn select_model(
-    ctx: &Context,
-    _extensions: &RequestExtensions,
-    current: ModelName,
-    last: Option<ModelName>,
-) -> ModelName {
-    let _ = ctx;
-    last.unwrap_or(current)
-}
+pub use lutum_protocol::hooks::HookRegistry;

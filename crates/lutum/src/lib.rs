@@ -50,18 +50,20 @@ pub use context::{
     PendingCompletion, PendingStructuredCompletion, PendingStructuredTurn, PendingTextTurn,
     StructuredTurnPartial,
 };
-pub use hooks::{
-    HookRegistry, SelectModel, SelectModelContextExt, SelectModelHook, SelectModelRegistryExt,
-};
+pub use hooks::HookRegistry;
 
 #[cfg(feature = "claude")]
 pub use lutum_claude::{
-    BudgetTokensResolver, ClaudeAdapter, ClaudeCommittedTurn, ClaudeError, ClaudeTurnItem,
+    ClaudeAdapter, ClaudeCommittedTurn, ClaudeError, ClaudeTurnItem, ResolveBudgetTokens,
+    ResolveBudgetTokensHook, ResolveBudgetTokensRegistryExt, SelectClaudeModel,
+    SelectClaudeModelHook, SelectClaudeModelRegistryExt,
 };
 pub use lutum_macros::{Toolset, def_hook, hook, tool_fn, tool_input};
 #[cfg(feature = "openai")]
 pub use lutum_openai::{
-    OpenAiAdapter, OpenAiError, OpenAiReasoningEffort, ReasoningEffortResolver,
+    OpenAiAdapter, OpenAiError, OpenAiReasoningEffort, ResolveReasoningEffort,
+    ResolveReasoningEffortHook, ResolveReasoningEffortRegistryExt, SelectOpenaiModel,
+    SelectOpenaiModelHook, SelectOpenaiModelRegistryExt,
 };
 pub use lutum_protocol::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
@@ -74,15 +76,14 @@ pub use lutum_protocol::{
     ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
     ErasedTextTurnEventStream, FinishReason, GenerationParams, InputMessageRole, ItemView,
     MessageContent, ModelInput, ModelInputItem, ModelInputValidationError, ModelName,
-    ModelNameError, ModelSelection, ModelSelector, NoToolSelector, NoTools, NonEmpty,
-    OperationKind, RawJson, Remaining, RequestBudget, RequestExtensions, SharedPoolBudgetError,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredCompletionEvent,
-    StructuredCompletionEventStream, StructuredCompletionReducer,
-    StructuredCompletionReductionError, StructuredCompletionRequest, StructuredCompletionResult,
-    StructuredCompletionState, StructuredOutput, StructuredOutputSpec, StructuredTurn,
-    StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnOutcome, StructuredTurnReducer,
-    StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, Temperature,
-    TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TextTurnReducer,
+    ModelNameError, NoToolSelector, NoTools, NonEmpty, OperationKind, RawJson, Remaining,
+    RequestBudget, RequestExtensions, SharedPoolBudgetError, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, StructuredCompletionEvent, StructuredCompletionEventStream,
+    StructuredCompletionReducer, StructuredCompletionReductionError, StructuredCompletionRequest,
+    StructuredCompletionResult, StructuredCompletionState, StructuredOutput, StructuredOutputSpec,
+    StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream, StructuredTurnOutcome,
+    StructuredTurnReducer, StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState,
+    Temperature, TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TextTurnReducer,
     TextTurnReductionError, TextTurnResult, TextTurnState, ToolCallError, ToolCallId,
     ToolCallItemView, ToolCallWrapper, ToolDef, ToolExecutionError, ToolInput, ToolMetadata,
     ToolName, ToolPolicy, ToolResultItemView, ToolSelector, ToolUse, ToolUseError, Toolset,

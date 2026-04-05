@@ -31,7 +31,7 @@ use lutum_protocol::{
     toolset::{ToolSelector, Toolset},
 };
 
-use crate::hooks::{HookRegistry, SelectModelRegistryExt};
+use lutum_protocol::hooks::HookRegistry;
 
 pub type ContextError = AgentError;
 
@@ -48,6 +48,7 @@ impl CompletionAdapter for UnsupportedCompletionAdapter {
         &self,
         _request: CompletionRequest,
         _extensions: &RequestExtensions,
+        _hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError> {
         Err(AgentError::other(MissingCompletionAdapter))
     }
@@ -56,6 +57,7 @@ impl CompletionAdapter for UnsupportedCompletionAdapter {
         &self,
         _request: AdapterStructuredCompletionRequest,
         _extensions: &RequestExtensions,
+        _hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
         Err(AgentError::other(MissingCompletionAdapter))
     }
@@ -322,22 +324,18 @@ impl Context {
         T: Toolset,
     {
         input.validate()?;
-        let mut turn = turn;
-        turn.config.model = <HookRegistry as SelectModelRegistryExt>::select_model(
-            self.hooks(),
-            self,
-            &extensions,
-            turn.config.model.clone(),
-        )
-        .await;
         let lease = self
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
         let extensions = Arc::new(extensions);
-        let span = turn_span("text_turn", turn.config.model.as_ref(), estimate);
+        let span = turn_span("text_turn", estimate);
         let stream = match self
             .turns
-            .text_turn(input, erase_text_turn(turn, Arc::clone(&extensions))?)
+            .text_turn(
+                input,
+                erase_text_turn(turn, Arc::clone(&extensions))?,
+                self.hooks(),
+            )
             .await
         {
             Ok(stream) => stream,
@@ -371,22 +369,18 @@ impl Context {
         O: StructuredOutput,
     {
         input.validate()?;
-        let mut turn = turn;
-        turn.config.model = <HookRegistry as SelectModelRegistryExt>::select_model(
-            self.hooks(),
-            self,
-            &extensions,
-            turn.config.model.clone(),
-        )
-        .await;
         let lease = self
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
         let extensions = Arc::new(extensions);
-        let span = turn_span("structured_turn", turn.config.model.as_ref(), estimate);
+        let span = turn_span("structured_turn", estimate);
         let stream = match self
             .turns
-            .structured_turn(input, erase_structured_turn(turn, Arc::clone(&extensions))?)
+            .structured_turn(
+                input,
+                erase_structured_turn(turn, Arc::clone(&extensions))?,
+                self.hooks(),
+            )
             .await
         {
             Ok(stream) => stream,
@@ -417,8 +411,12 @@ impl Context {
         let lease = self
             .budget
             .reserve(&extensions, &estimate, request.budget)?;
-        let span = turn_span("completion", request.model.as_ref(), estimate);
-        let stream = match self.completion.completion(request, &extensions).await {
+        let span = turn_span("completion", estimate);
+        let stream = match self
+            .completion
+            .completion(request, &extensions, self.hooks())
+            .await
+        {
             Ok(stream) => stream,
             Err(source) => {
                 self.budget.record_used(lease, Usage::zero())?;
@@ -450,10 +448,14 @@ impl Context {
         let lease = self
             .budget
             .reserve(&extensions, &estimate, request.budget)?;
-        let span = turn_span("structured_completion", request.model.as_ref(), estimate);
+        let span = turn_span("structured_completion", estimate);
         let stream = match self
             .completion
-            .structured_completion(erase_structured_completion_request(request)?, &extensions)
+            .structured_completion(
+                erase_structured_completion_request(request)?,
+                &extensions,
+                self.hooks(),
+            )
             .await
         {
             Ok(stream) => stream,
@@ -1230,7 +1232,6 @@ where
         .collect::<Result<Vec<_>, serde_json::Error>>()?;
 
     Ok(AdapterTurnConfig {
-        model: config.model,
         generation: config.generation,
         tools,
         tool_choice,
@@ -1430,11 +1431,11 @@ async fn recover_or_release_budget(
     record_budget_usage(owned_lease, recovered_usage)
 }
 
-fn turn_span(kind: &'static str, model: &str, estimate: UsageEstimate) -> Span {
+fn turn_span(kind: &'static str, estimate: UsageEstimate) -> Span {
     tracing::info_span!(
         "llm_turn",
         kind = %kind,
-        model = %model,
+        model = field::Empty,
         request_id = field::Empty,
         estimate_tokens = estimate.total_tokens,
         estimate_cost_micros_usd = estimate.cost_micros_usd,

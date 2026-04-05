@@ -14,6 +14,7 @@ use lutum_protocol::{
     budget::Usage,
     conversation::{ModelInput, ModelInputItem},
     extensions::RequestExtensions,
+    hooks::HookRegistry,
     llm::{
         AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig, ErasedTextTurnEvent,
         GenerationParams, ModelName, TurnAdapter,
@@ -33,9 +34,10 @@ struct TurnRecord {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Ollama ignores the API key, but the adapter requires a non-empty value.
-    let adapter = OpenAiAdapter::new("ollama").with_base_url(BASE_URL);
-
     let model = ModelName::new(MODEL)?;
+    let adapter = OpenAiAdapter::new("ollama")
+        .with_base_url(BASE_URL)
+        .with_default_model(model);
     let generation = GenerationParams {
         temperature: None,
         max_output_tokens: Some(2048),
@@ -62,7 +64,6 @@ async fn main() -> anyhow::Result<()> {
 
         let turn = AdapterTextTurn {
             config: AdapterTurnConfig {
-                model: model.clone(),
                 generation: generation.clone(),
                 tools: vec![],
                 tool_choice: AdapterToolChoice::None,
@@ -70,7 +71,8 @@ async fn main() -> anyhow::Result<()> {
             extensions: Arc::new(RequestExtensions::default()),
         };
 
-        let mut stream = adapter.text_turn(input.clone(), turn).await?;
+        let hooks = HookRegistry::new();
+        let mut stream = adapter.text_turn(input.clone(), turn, &hooks).await?;
         let mut assistant_text = String::new();
         let mut turn_usage = None;
 

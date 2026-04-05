@@ -10,7 +10,9 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
-    let adapter = OpenAiAdapter::new(token).with_base_url(endpoint);
+    let adapter = OpenAiAdapter::new(token)
+        .with_base_url(endpoint)
+        .with_default_model(ModelName::new(&model_name)?);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
     let input = ModelInput::new()
@@ -20,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
         .text_turn(
             RequestExtensions::new(),
             input,
-            TextTurn::<NoTools>::new(ModelName::new(&model_name)?),
+            TextTurn::<NoTools>::new(),
             UsageEstimate::zero(),
         )
         .await?;

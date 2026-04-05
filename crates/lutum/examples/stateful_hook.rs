@@ -45,22 +45,14 @@ impl ValidateCommandHook for CommandPolicy {
         }
     }
 }
-async fn ask(
-    ctx: &Context,
-    model: &ModelName,
-    system: &str,
-    prompt: &str,
-) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone()).with_defaults(SessionDefaults {
-        model: Some(model.clone()),
-        ..Default::default()
-    });
+async fn ask(ctx: &Context, system: &str, prompt: &str) -> anyhow::Result<String> {
+    let mut session = Session::new(ctx.clone());
     session.push_system(system);
     session.push_user(prompt);
     let outcome = session
         .prepare_text(
             RequestExtensions::new(),
-            session.text_turn::<NoTools>().unwrap(),
+            session.text_turn::<NoTools>(),
             UsageEstimate::zero(),
         )
         .await?
@@ -77,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model = ModelName::new(&std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into()))?;
     let ctx = Context::with_hooks(
-        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint)),
+        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model)),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
         HookRegistry::new().register_validate_command(CommandPolicy {
             allowed_prefixes: &["/var/log", "/tmp"],
@@ -101,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
                     .join("\n"),
             )
         };
-        let cmd = ask(&ctx, &model, system, &prompt).await?;
+        let cmd = ask(&ctx, system, &prompt).await?;
         println!("Attempt {attempt}: {cmd}");
         match ctx.validate_command(&cmd).await {
             Ok(()) => {

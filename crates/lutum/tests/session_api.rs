@@ -53,7 +53,7 @@ fn prepare_and_collect_do_not_mutate_transcript_before_commit() {
         session
             .prepare_text(
                 RequestExtensions::new(),
-                TextTurn::<NoTools>::new(lutum::ModelName::new("gpt-4.1-mini").unwrap()),
+                TextTurn::<NoTools>::new(),
                 UsageEstimate::zero(),
             )
             .await
@@ -109,7 +109,7 @@ fn tool_round_is_only_applied_on_explicit_commit() {
                 RequestExtensions::new(),
                 {
                     let mut turn =
-                        TextTurn::<Tools>::new(lutum::ModelName::new("gpt-4.1-mini").unwrap());
+                        TextTurn::<Tools>::new();
                     turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
                     turn
                 },
@@ -204,7 +204,7 @@ fn session_can_drive_a_stateful_step_loop() {
             session
                 .prepare_text(
                     RequestExtensions::new(),
-                    TextTurn::<NoTools>::new(lutum::ModelName::new("gpt-4.1-mini").unwrap()),
+                    TextTurn::<NoTools>::new(),
                     UsageEstimate::zero(),
                 )
                 .await
@@ -271,9 +271,7 @@ fn structured_tool_round_stays_explicit_until_commit() {
             .prepare_structured(
                 RequestExtensions::new(),
                 {
-                    let mut turn = lutum::StructuredTurn::<Tools, Summary>::new(
-                        lutum::ModelName::new("gpt-4.1-mini").unwrap(),
-                    );
+                    let mut turn = lutum::StructuredTurn::<Tools, Summary>::new();
                     turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
                     turn
                 },

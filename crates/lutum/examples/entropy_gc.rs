@@ -20,11 +20,8 @@ const HISTORY: &[&str] = &[
 fn approx_word_count(text: &str) -> usize {
     text.split_whitespace().count()
 }
-fn session(ctx: &Context, model: &ModelName) -> Session {
-    Session::new(ctx.clone()).with_defaults(SessionDefaults {
-        model: Some(model.clone()),
-        ..Default::default()
-    })
+fn session(ctx: &Context) -> Session {
+    Session::new(ctx.clone())
 }
 fn seed_history(session: &mut Session) {
     session.push_system(SYSTEM);
@@ -42,7 +39,7 @@ async fn ask(session: &Session) -> anyhow::Result<(String, Usage)> {
     let outcome = session
         .prepare_text(
             RequestExtensions::new(),
-            session.text_turn::<NoTools>().unwrap(),
+            session.text_turn::<NoTools>(),
             UsageEstimate::zero(),
         )
         .await?
@@ -55,10 +52,9 @@ async fn ask(session: &Session) -> anyhow::Result<(String, Usage)> {
 }
 async fn ask_with_prompt(
     ctx: &Context,
-    model: &ModelName,
     prompt: impl Into<String>,
 ) -> anyhow::Result<(String, Usage)> {
-    let mut session = session(ctx, model);
+    let mut session = session(ctx);
     seed_history(&mut session);
     session.push_user(prompt);
     ask(&session).await
@@ -68,18 +64,18 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
+    let model = ModelName::new(&model_name)?;
     let ctx = Context::new(
-        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint)),
+        Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model)),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let model = ModelName::new(&model_name)?;
     let transcript_word_count: usize = HISTORY.iter().map(|text| approx_word_count(text)).sum();
-    let (full_answer, _) = ask_with_prompt(&ctx, &model, "What should the user try next?").await?;
+    let (full_answer, _) = ask_with_prompt(&ctx, "What should the user try next?").await?;
 
     println!("Approx original transcript word count: {transcript_word_count}");
 
     if transcript_word_count > COMPACTION_THRESHOLD_WORDS {
-        let (summary, compaction_usage) = ask_with_prompt(&ctx, &model, COMPACTION_PROMPT).await?;
+        let (summary, compaction_usage) = ask_with_prompt(&ctx, COMPACTION_PROMPT).await?;
         println!(
             "Provider-reported compaction input tokens: {}",
             compaction_usage.input_tokens
@@ -89,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
             approx_word_count(&summary)
         );
 
-        let mut compact = session(&ctx, &model);
+        let mut compact = session(&ctx);
         compact.push_system(SYSTEM);
         compact.push_user(format!(
             "Summary of the previous troubleshooting session:\n{summary}"

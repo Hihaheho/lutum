@@ -2,6 +2,7 @@ pub mod budget;
 pub mod conversation;
 pub mod error;
 pub mod extensions;
+pub mod hooks;
 pub mod llm;
 pub mod reducer;
 pub mod structured;
@@ -18,6 +19,7 @@ pub use conversation::{
     ModelInputValidationError, NonEmpty, RawJson, ToolCallId, ToolMetadata, ToolName, ToolUse,
 };
 pub use error::{AgentError, BoxError};
+pub use hooks::HookRegistry;
 pub use extensions::RequestExtensions;
 pub use llm::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
@@ -26,10 +28,10 @@ pub use llm::{
     CompletionRequest, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
     ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
     ErasedTextTurnEventStream, FinishReason, GenerationParams, ModelName, ModelNameError,
-    ModelSelection, ModelSelector, OperationKind, StructuredCompletionEvent,
-    StructuredCompletionEventStream, StructuredCompletionRequest, StructuredOutputSpec,
-    StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream, Temperature, TemperatureError,
-    TextTurn, TextTurnEvent, TextTurnEventStream, TurnAdapter, TurnConfig, UsageRecoveryAdapter,
+    OperationKind, StructuredCompletionEvent, StructuredCompletionEventStream,
+    StructuredCompletionRequest, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
+    StructuredTurnEventStream, Temperature, TemperatureError, TextTurn, TextTurnEvent,
+    TextTurnEventStream, TurnAdapter, TurnConfig, UsageRecoveryAdapter,
 };
 pub use reducer::{
     CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,

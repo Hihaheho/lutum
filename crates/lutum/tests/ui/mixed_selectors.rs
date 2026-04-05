@@ -37,7 +37,7 @@ enum OtherTools {
 fn main() {
     let _turn = {
         let mut turn =
-            TextTurn::<AppTools>::new(lutum::ModelName::new("gpt-4.1-mini").unwrap());
+            TextTurn::<AppTools>::new();
         turn.config.tools = ToolPolicy::allow_only(vec![
             AppToolsSelector::Weather,
             OtherToolsSelector::Search,

@@ -139,13 +139,11 @@ async fn main() -> anyhow::Result<()> {
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
 
-    let adapter = OpenAiAdapter::new(token).with_base_url(endpoint);
+    let model = ModelName::new(&model_name)?;
+    let adapter = OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Context::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx).with_defaults(SessionDefaults {
-        model: Some(ModelName::new(&model_name)?),
-        ..Default::default()
-    });
+    let mut session = Session::new(ctx);
 
     session.push_system(
         "You are investigating an in-memory database through tools. \
@@ -156,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
     session.push_user("Who is the top spender? Give their name and total.");
 
     for _step in 1..=10 {
-        let mut turn = session.text_turn::<DbTools>().unwrap();
+        let mut turn = session.text_turn::<DbTools>();
         turn.config.tools = ToolPolicy::AllowAll;
 
         let outcome = session

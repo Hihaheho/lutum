@@ -5,7 +5,9 @@ pub mod responses;
 pub mod sse;
 
 pub use adapter::{
-    FallbackSerializer, OpenAiAdapter, ReasoningEffortResolver, SseEventRecoveryHook, SseHints,
+    FallbackSerializer, OpenAiAdapter, ResolveReasoningEffort, ResolveReasoningEffortHook,
+    ResolveReasoningEffortRegistryExt, SelectOpenaiModel, SelectOpenaiModelHook,
+    SelectOpenaiModelRegistryExt, SseEventRecoveryHook, SseHints,
 };
 pub use completion::CompletionRequest;
 pub use error::OpenAiError;

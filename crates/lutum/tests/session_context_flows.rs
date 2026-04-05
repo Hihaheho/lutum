@@ -71,7 +71,7 @@ fn direct_context_text_turn_collects_without_session_helpers() {
     let pending = block_on(ctx.text_turn(
         RequestExtensions::new(),
         input,
-        TextTurn::<NoTools>::new(lutum::ModelName::new("gpt-4.1-mini").unwrap()),
+        TextTurn::<NoTools>::new(),
         UsageEstimate::zero(),
     ))
     .unwrap();
@@ -113,9 +113,7 @@ fn structured_session_turn_is_only_applied_after_commit() {
         session
             .prepare_structured(
                 RequestExtensions::new(),
-                StructuredTurn::<NoTools, Contact>::new(
-                    lutum::ModelName::new("gpt-4.1-mini").unwrap(),
-                ),
+                StructuredTurn::<NoTools, Contact>::new(),
                 UsageEstimate::zero(),
             )
             .await
@@ -182,8 +180,7 @@ fn session_commits_parallel_tool_results_in_order() {
             .prepare_text(
                 RequestExtensions::new(),
                 {
-                    let mut turn =
-                        TextTurn::<Tools>::new(lutum::ModelName::new("gpt-4.1-mini").unwrap());
+                    let mut turn = TextTurn::<Tools>::new();
                     turn.config.tools =
                         ToolPolicy::allow_only(vec![ToolsSelector::Weather, ToolsSelector::Search]);
                     turn

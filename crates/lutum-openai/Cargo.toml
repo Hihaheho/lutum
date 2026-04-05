@@ -9,6 +9,7 @@ license.workspace = true
 keywords = ["llm", "ai", "openai", "streaming"]
 
 [dependencies]
+lutum-macros.workspace = true
 lutum-protocol.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
@@ -20,6 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 monostate.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 anyhow = "1"

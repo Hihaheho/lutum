@@ -808,6 +808,7 @@ dependencies = [
  "bytes",
  "console",
  "futures",
+ "lutum-macros",
  "lutum-protocol",
  "reqwest",
  "serde",
@@ -837,6 +838,7 @@ dependencies = [
  "bytes",
  "console",
  "futures",
+ "lutum-macros",
  "lutum-protocol",
  "monostate",
  "reqwest",
@@ -845,6 +847,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

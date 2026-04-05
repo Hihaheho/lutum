@@ -3,7 +3,11 @@ pub mod error;
 pub mod messages;
 pub mod sse;
 
-pub use adapter::{BudgetTokensResolver, ClaudeAdapter, FallbackSerializer};
+pub use adapter::{
+    ClaudeAdapter, FallbackSerializer, ResolveBudgetTokens, ResolveBudgetTokensHook,
+    ResolveBudgetTokensRegistryExt, SelectClaudeModel, SelectClaudeModelHook,
+    SelectClaudeModelRegistryExt,
+};
 pub use error::ClaudeError;
 pub use messages::{
     ClaudeCommittedTurn, ClaudeContentBlock, ClaudeMessage, ClaudeRole, ClaudeTool,

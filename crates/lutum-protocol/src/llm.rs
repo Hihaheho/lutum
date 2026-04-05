@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt, marker::PhantomData, pin::Pin, sync::Arc};
+use std::{fmt, marker::PhantomData, pin::Pin, sync::Arc};
 
 use bon::Builder;
 use futures::Stream;
@@ -7,6 +7,7 @@ use crate::{
     AgentError,
     budget::{RequestBudget, Usage},
     conversation::{ModelInput, RawJson, ToolMetadata},
+    hooks::HookRegistry,
     structured::StructuredOutput,
     toolset::{NoTools, ToolPolicy, Toolset},
     transcript::CommittedTurn,
@@ -102,7 +103,6 @@ pub struct GenerationParams {
 #[derive(Builder, Clone, Debug, PartialEq)]
 #[builder(builder_type(name = TurnConfigBuilder))]
 pub struct TurnConfig<T: Toolset = NoTools> {
-    pub model: ModelName,
     #[builder(default)]
     pub generation: GenerationParams,
     #[builder(default)]
@@ -115,13 +115,21 @@ impl<T> TurnConfig<T>
 where
     T: Toolset,
 {
-    pub fn new(model: ModelName) -> Self {
+    pub fn new() -> Self {
         Self {
-            model,
             generation: GenerationParams::default(),
             tools: ToolPolicy::Disabled,
             budget: RequestBudget::unlimited(),
         }
+    }
+}
+
+impl<T> Default for TurnConfig<T>
+where
+    T: Toolset,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -135,10 +143,19 @@ impl<T> TextTurn<T>
 where
     T: Toolset,
 {
-    pub fn new(model: ModelName) -> Self {
+    pub fn new() -> Self {
         Self {
-            config: TurnConfig::new(model),
+            config: TurnConfig::new(),
         }
+    }
+}
+
+impl<T> Default for TextTurn<T>
+where
+    T: Toolset,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -173,11 +190,21 @@ where
     T: Toolset,
     O: StructuredOutput,
 {
-    pub fn new(model: ModelName) -> Self {
+    pub fn new() -> Self {
         Self {
-            config: TurnConfig::new(model),
+            config: TurnConfig::new(),
             output: StructuredOutputSpec::default(),
         }
+    }
+}
+
+impl<T, O> Default for StructuredTurn<T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -234,24 +261,9 @@ pub enum AdapterToolChoice {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdapterTurnConfig {
-    pub model: ModelName,
     pub generation: GenerationParams,
     pub tools: Vec<AdapterToolDefinition>,
     pub tool_choice: AdapterToolChoice,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ModelSelection {
-    /// Borrowed model names must be truly `'static`; runtime-derived values
-    /// should use `Cow::Owned`.
-    pub primary: Option<Cow<'static, str>>,
-    /// Borrowed model names must be truly `'static`; runtime-derived values
-    /// should use `Cow::Owned`.
-    pub fallbacks: Option<Vec<Cow<'static, str>>>,
-}
-
-pub trait ModelSelector: Send + Sync {
-    fn select_model(&self, extensions: &crate::extensions::RequestExtensions) -> ModelSelection;
 }
 
 #[derive(Clone)]
@@ -831,12 +843,14 @@ pub trait TurnAdapter: Send + Sync + 'static {
         &self,
         input: ModelInput,
         turn: AdapterTextTurn,
+        hooks: &HookRegistry,
     ) -> Result<ErasedTextTurnEventStream, AgentError>;
 
     async fn structured_turn(
         &self,
         input: ModelInput,
         turn: AdapterStructuredTurn,
+        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError>;
 }
 
@@ -846,12 +860,14 @@ pub trait CompletionAdapter: Send + Sync + 'static {
         &self,
         request: CompletionRequest,
         extensions: &crate::extensions::RequestExtensions,
+        hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError>;
 
     async fn structured_completion(
         &self,
         request: AdapterStructuredCompletionRequest,
         extensions: &crate::extensions::RequestExtensions,
+        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError>;
 }
 
@@ -873,16 +889,18 @@ where
         &self,
         input: ModelInput,
         turn: AdapterTextTurn,
+        hooks: &HookRegistry,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
-        (**self).text_turn(input, turn).await
+        (**self).text_turn(input, turn, hooks).await
     }
 
     async fn structured_turn(
         &self,
         input: ModelInput,
         turn: AdapterStructuredTurn,
+        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
-        (**self).structured_turn(input, turn).await
+        (**self).structured_turn(input, turn, hooks).await
     }
 }
 
@@ -895,16 +913,18 @@ where
         &self,
         request: CompletionRequest,
         extensions: &crate::extensions::RequestExtensions,
+        hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError> {
-        (**self).completion(request, extensions).await
+        (**self).completion(request, extensions, hooks).await
     }
 
     async fn structured_completion(
         &self,
         request: AdapterStructuredCompletionRequest,
         extensions: &crate::extensions::RequestExtensions,
+        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
-        (**self).structured_completion(request, extensions).await
+        (**self).structured_completion(request, extensions, hooks).await
     }
 }
 
