@@ -69,11 +69,11 @@ async fn main() -> anyhow::Result<()> {
                 .with_default_model(model),
         ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        HookRegistry::new().register_validate_command(CommandPolicy {
+        HookRegistry::new().register_validate_command(Stateful::new(CommandPolicy {
             allowed_prefixes: &["/var/log", "/tmp"],
             forbidden_tokens: &["rm", "mv", "sudo", ">", ">>", "dd"],
             max_pipes: 2,
-        }),
+        })),
     );
     let system = "You are a shell expert for log triage on a read-only system.\nOutput only the shell command, nothing else.";
     let request = "List the 5 most recent error lines from /var/log/syslog.";

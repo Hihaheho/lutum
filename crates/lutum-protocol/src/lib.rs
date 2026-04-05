@@ -20,7 +20,7 @@ pub use conversation::{
 };
 pub use error::{AgentError, BoxError, NoToolsContractViolation};
 pub use extensions::RequestExtensions;
-pub use hooks::HookRegistry;
+pub use hooks::{HookReentrancyError, HookRegistry, Stateful};
 pub use llm::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
     AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig,
@@ -30,10 +30,10 @@ pub use llm::{
     ErasedTextTurnEventStream, FinishReason, GenerationParams, ModelName, ModelNameError,
     OperationKind, StructuredCompletionEvent, StructuredCompletionEventStream,
     StructuredCompletionRequest, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
-    StructuredTurnEventStream, StructuredTurnEventStreamWithTools,
-    StructuredTurnEventWithTools, Temperature, TemperatureError, TextTurn, TextTurnEvent,
-    TextTurnEventStream, TextTurnEventStreamWithTools, TextTurnEventWithTools, TurnAdapter,
-    TurnConfig, UsageRecoveryAdapter,
+    StructuredTurnEventStream, StructuredTurnEventStreamWithTools, StructuredTurnEventWithTools,
+    Temperature, TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream,
+    TextTurnEventStreamWithTools, TextTurnEventWithTools, TurnAdapter, TurnConfig,
+    UsageRecoveryAdapter,
 };
 pub use reducer::{
     CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,

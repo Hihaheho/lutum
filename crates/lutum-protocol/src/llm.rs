@@ -19,8 +19,9 @@ pub type TextTurnEventStreamWithTools<T, E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<TextTurnEventWithTools<T>, E>> + Send + Sync + 'static>>;
 pub type StructuredTurnEventStream<O, E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<StructuredTurnEvent<O>, E>> + Send + Sync + 'static>>;
-pub type StructuredTurnEventStreamWithTools<T, O, E = AgentError> =
-    Pin<Box<dyn Stream<Item = Result<StructuredTurnEventWithTools<T, O>, E>> + Send + Sync + 'static>>;
+pub type StructuredTurnEventStreamWithTools<T, O, E = AgentError> = Pin<
+    Box<dyn Stream<Item = Result<StructuredTurnEventWithTools<T, O>, E>> + Send + Sync + 'static>,
+>;
 pub type StructuredCompletionEventStream<O, E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<StructuredCompletionEvent<O>, E>> + Send + Sync + 'static>>;
 pub type CompletionEventStream<E = AgentError> =

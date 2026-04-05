@@ -493,6 +493,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
     let hook_name = fn_ident.to_string();
     let slot_ident = format_ident!("{}", hook_name.to_upper_camel_case());
     let hook_trait_ident = format_ident!("{slot_ident}Hook");
+    let stateful_hook_trait_ident = format_ident!("Stateful{slot_ident}Hook");
     let dyn_hook_trait_ident = format_ident!("__LutumDyn{slot_ident}Hook");
     let registry_ext_ident = format_ident!("{slot_ident}RegistryExt");
     let context_ext_ident = format_ident!("{slot_ident}ContextExt");
@@ -602,6 +603,14 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
             )
             .await
         }
+    };
+    let stateful_hook_impl_call = quote! {
+        <T as #stateful_hook_trait_ident>::call_mut(
+            &mut *hook,
+            #ctx_ident,
+            #(#hook_trait_call_arg_names,)*
+        )
+        .await
     };
     let clone_where = if clone_bounds.is_empty() {
         quote! {}
@@ -764,6 +773,20 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
 
         #[allow(dead_code)]
         #[::async_trait::async_trait]
+        #vis trait #stateful_hook_trait_ident: Send {
+            fn on_reentrancy(err: ::lutum_protocol::hooks::HookReentrancyError) -> #output_ty {
+                panic!("stateful hook reentered: {err}");
+            }
+
+            async fn call_mut(
+                &mut self,
+                #ctx_ident: #ctx_ty,
+                #(#hook_trait_args,)*
+            ) -> #output_ty;
+        }
+
+        #[allow(dead_code)]
+        #[::async_trait::async_trait]
         trait #dyn_hook_trait_ident: Send + Sync {
             async fn call_dyn(
                 &self,
@@ -785,6 +808,30 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
                 last: ::std::option::Option<#output_ty>,
             ) -> #output_ty {
                 #dyn_hook_impl_call
+            }
+        }
+
+        #[allow(dead_code)]
+        #[::async_trait::async_trait]
+        impl<T> #hook_trait_ident for ::lutum_protocol::hooks::Stateful<T>
+        where
+            T: #stateful_hook_trait_ident + 'static,
+        {
+            async fn call(
+                &self,
+                #ctx_ident: #ctx_ty,
+                #(#hook_trait_args,)*
+            ) -> #output_ty {
+                let Some(mut hook) = self.try_lock() else {
+                    return <T as #stateful_hook_trait_ident>::on_reentrancy(
+                        ::lutum_protocol::hooks::HookReentrancyError {
+                            slot: #hook_name,
+                            hook_type: ::std::any::type_name::<T>(),
+                        },
+                    );
+                };
+
+                #stateful_hook_impl_call
             }
         }
 

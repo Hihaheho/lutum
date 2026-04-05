@@ -6,11 +6,11 @@ use lutum::{
     AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn, AgentError,
     CompletionAdapter, CompletionEventStream, CompletionRequest, Context,
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
-    ErasedTextTurnEventStream, HookRegistry, InputMessageRole, MockLlmAdapter, ModelInput,
-    ModelInputItem, ModelName, OperationKind, RequestExtensions, ResolveUsageEstimateHook,
-    ResolveUsageEstimateRegistryExt, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-    TurnAdapter, Usage, UsageRecoveryAdapter, budget::UsageEstimate,
-    hooks::ResolveUsageEstimateContextExt,
+    ErasedTextTurnEventStream, HookReentrancyError, HookRegistry, InputMessageRole, MockLlmAdapter,
+    ModelInput, ModelInputItem, ModelName, OperationKind, RequestExtensions,
+    ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage, UsageRecoveryAdapter,
+    budget::UsageEstimate, hooks::ResolveUsageEstimateContextExt,
 };
 use lutum_trace::FieldValue;
 use schemars::JsonSchema;
@@ -56,6 +56,66 @@ async fn choose_label(_ctx: &Context, label: &str) -> String {
 async fn pick_registered_label(_ctx: &Context, label: &str, last: Option<String>) -> String {
     assert!(last.is_none(), "fallback chains should start from None");
     format!("hook:{label}")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CounterError {
+    Reentered(HookReentrancyError),
+}
+
+type CounterResult = Result<usize, CounterError>;
+
+#[lutum::def_hook(singleton)]
+async fn next_counter(_ctx: &Context, seed: usize) -> CounterResult {
+    Ok(seed)
+}
+
+struct CountingHook {
+    next: usize,
+}
+
+#[async_trait]
+impl StatefulNextCounterHook for CountingHook {
+    fn on_reentrancy(err: HookReentrancyError) -> CounterResult {
+        Err(CounterError::Reentered(err))
+    }
+
+    async fn call_mut(&mut self, _ctx: &Context, seed: usize) -> CounterResult {
+        let current = self.next.max(seed);
+        self.next = current + 1;
+        Ok(current)
+    }
+}
+
+struct ReentrantCounter;
+
+#[async_trait]
+impl StatefulNextCounterHook for ReentrantCounter {
+    fn on_reentrancy(err: HookReentrancyError) -> CounterResult {
+        Err(CounterError::Reentered(err))
+    }
+
+    async fn call_mut(&mut self, ctx: &Context, seed: usize) -> CounterResult {
+        if seed == 0 {
+            Ok(0)
+        } else {
+            ctx.next_counter(seed - 1).await
+        }
+    }
+}
+
+#[lutum::def_hook(singleton)]
+async fn describe_label(_ctx: &Context, label: &str) -> String {
+    label.to_string()
+}
+
+struct NestedLabelHook;
+
+#[async_trait]
+impl StatefulDescribeLabelHook for NestedLabelHook {
+    async fn call_mut(&mut self, ctx: &Context, label: &str) -> String {
+        ctx.select_label(label.to_string()).await
+    }
 }
 
 fn test_context(hooks: HookRegistry) -> Context {
@@ -269,6 +329,48 @@ fn fallback_hook_starts_registered_chain_without_default_result() {
 }
 
 #[test]
+fn stateful_hook_mutates_state_without_interior_mutability() {
+    let ctx = test_context(
+        HookRegistry::new().register_next_counter(Stateful::new(CountingHook { next: 0 })),
+    );
+
+    let first = block_on(ctx.next_counter(10));
+    let second = block_on(ctx.next_counter(10));
+
+    assert_eq!(first, Ok(10));
+    assert_eq!(second, Ok(11));
+}
+
+#[test]
+fn stateful_hook_reentrancy_can_return_a_typed_error() {
+    let ctx =
+        test_context(HookRegistry::new().register_next_counter(Stateful::new(ReentrantCounter)));
+
+    let result = block_on(ctx.next_counter(1));
+
+    assert_eq!(
+        result,
+        Err(CounterError::Reentered(HookReentrancyError {
+            slot: "next_counter",
+            hook_type: std::any::type_name::<ReentrantCounter>(),
+        }))
+    );
+}
+
+#[test]
+fn stateful_hook_can_call_other_hooks_without_registry_deadlock() {
+    let ctx = test_context(
+        HookRegistry::new()
+            .register_select_label(PrefixLabel)
+            .register_describe_label(Stateful::new(NestedLabelHook)),
+    );
+
+    let described = block_on(ctx.describe_label("base"));
+
+    assert_eq!(described, "hooked:base");
+}
+
+#[test]
 fn resolve_usage_estimate_defaults_to_zero() {
     let ctx = test_context(HookRegistry::new());
 
@@ -336,9 +438,11 @@ fn context_entrypoints_pass_operation_kind_to_resolve_usage_estimate() {
 
     let _text = block_on(ctx.text_turn(input()).start()).unwrap();
     let _structured = block_on(ctx.structured_turn::<Summary>(input()).start()).unwrap();
-    let _completion =
-        block_on(ctx.completion(ModelName::new("gpt-4.1-mini").unwrap(), "hello").start())
-            .unwrap();
+    let _completion = block_on(
+        ctx.completion(ModelName::new("gpt-4.1-mini").unwrap(), "hello")
+            .start(),
+    )
+    .unwrap();
     let _structured_completion = block_on(
         ctx.structured_completion::<Summary>(ModelName::new("gpt-4.1-mini").unwrap(), "hello")
             .start(),

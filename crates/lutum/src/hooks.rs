@@ -44,6 +44,8 @@
 //! ```
 //!
 //! This generates a `BlockDangerousOutput` struct implementing `ValidateOutputHook`.
+//! For mutable state, implement the generated `StatefulValidateOutputHook` trait on your
+//! type and register it with [`Stateful`].
 //!
 //! ## Chaining
 //!
@@ -65,6 +67,8 @@
 //!     .register_validate_output(BlockDangerousOutput);
 //!     // or with a closure:
 //!     // .register_validate_output(|_ctx, output, last| async move { Ok(()) });
+//!     // or for mutable state:
+//!     // .register_validate_output(Stateful::new(MyMutableHook::default()));
 //!
 //! let ctx = Context::with_hooks(adapter, budget, hooks);
 //!
@@ -89,7 +93,7 @@
 
 use crate::{Context, OperationKind, RequestExtensions, budget::UsageEstimate};
 
-pub use lutum_protocol::hooks::HookRegistry;
+pub use lutum_protocol::hooks::{HookReentrancyError, HookRegistry, Stateful};
 
 #[lutum_macros::def_hook(singleton)]
 pub async fn resolve_usage_estimate(
