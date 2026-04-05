@@ -82,5 +82,23 @@
 //!
 //! Each adapter (`ClaudeAdapter`, `OpenAiAdapter`) defines its own model-selection and
 //! resolver hooks. Register them to override the adapter's default behaviour.
+//!
+//! `lutum` itself also defines `resolve_usage_estimate(&Context, &RequestExtensions,
+//! OperationKind) -> UsageEstimate`. The default implementation reads a typed estimate from
+//! `RequestExtensions` and falls back to zero.
+
+use crate::{Context, OperationKind, RequestExtensions, budget::UsageEstimate};
 
 pub use lutum_protocol::hooks::HookRegistry;
+
+#[lutum_macros::def_hook(singleton)]
+pub async fn resolve_usage_estimate(
+    _ctx: &Context,
+    extensions: &RequestExtensions,
+    _kind: OperationKind,
+) -> UsageEstimate {
+    extensions
+        .get::<UsageEstimate>()
+        .copied()
+        .unwrap_or_else(UsageEstimate::zero)
+}

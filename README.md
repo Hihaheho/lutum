@@ -76,7 +76,7 @@ use std::sync::Arc;
 
 use lutum::{
     Context, ModelName, NoTools, OpenAiAdapter, RequestExtensions, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcome, UsageEstimate,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcome,
 };
 
 #[tokio::main]
@@ -98,7 +98,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .prepare_text(
             RequestExtensions::new(),
             session.text_turn::<NoTools>(),
-            UsageEstimate::zero(),
         )
         .await?
         .collect_noop()
@@ -126,9 +125,7 @@ same explicit transcript model as text turns. Starting from the quickstart setup
 mutable `session` and swap the turn kind:
 
 ```rust
-use lutum::{
-    NoTools, RequestExtensions, StructuredStepOutcome, StructuredTurnOutcome, UsageEstimate,
-};
+use lutum::{NoTools, RequestExtensions, StructuredStepOutcome, StructuredTurnOutcome};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -143,7 +140,6 @@ let outcome = session
     .prepare_structured(
         RequestExtensions::new(),
         session.structured_turn::<NoTools, Contact>(),
-        UsageEstimate::zero(),
     )
     .await?
     .collect_noop()
@@ -172,7 +168,7 @@ use std::sync::Arc;
 
 use lutum::{
     Context, ModelName, OpenAiAdapter, RequestExtensions, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, StructuredCompletionRequest, StructuredTurnOutcome, UsageEstimate,
+    SharedPoolBudgetOptions, StructuredCompletionRequest, StructuredTurnOutcome,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -202,7 +198,6 @@ let result = ctx
             ModelName::new(&std::env::var("MODEL")?)?,
             "Extract the email address from `Reach me at user@example.com`.",
         ),
-        UsageEstimate::zero(),
     )
     .await?
     .collect_noop()
@@ -224,7 +219,7 @@ use std::sync::Arc;
 
 use lutum::{
     Context, ModelName, OpenAiAdapter, RequestExtensions, Session, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, TextStepOutcome, ToolPolicy, UsageEstimate,
+    SharedPoolBudgetOptions, TextStepOutcome, ToolPolicy,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -264,7 +259,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         turn.config.tools = ToolPolicy::allow_only(vec![ToolsSelector::Weather]);
 
         let outcome = session
-            .prepare_text(RequestExtensions::new(), turn, UsageEstimate::zero())
+            .prepare_text(RequestExtensions::new(), turn)
             .await?
             .collect_noop()
             .await?;
@@ -370,6 +365,52 @@ Core hooks take `&Context` as their first argument and are provider-agnostic. Ad
 take `&RequestExtensions` as their first argument and let adapters expose provider-specific
 selection or request-shaping behavior.
 
+`resolve_usage_estimate` is a builtin core hook. By default it reads
+`RequestExtensions::get::<lutum::budget::UsageEstimate>()` and falls back to zero.
+
+```rust
+let mut extensions = RequestExtensions::new();
+extensions.insert(lutum::budget::UsageEstimate {
+    total_tokens: 2_048,
+    ..lutum::budget::UsageEstimate::zero()
+});
+
+let outcome = session
+    .prepare_text(extensions, session.text_turn::<NoTools>())
+    .await?
+    .collect_noop()
+    .await?;
+```
+
+You can override that policy centrally with a hook:
+
+```rust
+use lutum::{Context, HookRegistry, OperationKind, RequestExtensions, ResolveUsageEstimate};
+
+#[lutum::hook(ResolveUsageEstimate)]
+async fn plan_usage(
+    _ctx: &Context,
+    extensions: &RequestExtensions,
+    kind: OperationKind,
+) -> lutum::budget::UsageEstimate {
+    if let Some(estimate) = extensions.get::<lutum::budget::UsageEstimate>() {
+        return *estimate;
+    }
+
+    let total_tokens = match kind {
+        OperationKind::StructuredTurn | OperationKind::StructuredCompletion => 4_096,
+        OperationKind::TextTurn | OperationKind::Completion => 1_024,
+    };
+
+    lutum::budget::UsageEstimate {
+        total_tokens,
+        ..lutum::budget::UsageEstimate::zero()
+    }
+}
+
+let hooks = HookRegistry::new().register_resolve_usage_estimate(PlanUsage);
+```
+
 ## Trace Capture
 
 `lutum-trace` is a separate crate for scoped, in-memory tracing capture. It is useful in tests,
@@ -381,7 +422,7 @@ request ids, finish reasons, and nested events. Assuming you already built `ctx`
 quickstart, wrap the same turn execution with capture:
 
 ```rust
-use lutum::{NoTools, RequestExtensions, Session, UsageEstimate};
+use lutum::{NoTools, RequestExtensions, Session};
 use tracing::instrument::WithSubscriber as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -396,7 +437,6 @@ let collected = lutum_trace::capture(
             .prepare_text(
                 RequestExtensions::new(),
                 session.text_turn::<NoTools>(),
-                UsageEstimate::zero(),
             )
             .await?
             .collect_noop()

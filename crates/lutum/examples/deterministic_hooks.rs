@@ -51,11 +51,7 @@ async fn ask(ctx: &Context, system: &str, prompt: &str) -> anyhow::Result<String
     session.push_system(system);
     session.push_user(prompt);
     let outcome = session
-        .prepare_text(
-            RequestExtensions::new(),
-            session.text_turn::<NoTools>(),
-            UsageEstimate::zero(),
-        )
+        .prepare_text(RequestExtensions::new(), session.text_turn::<NoTools>())
         .await?
         .collect_noop()
         .await?;

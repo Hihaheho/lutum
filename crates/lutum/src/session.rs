@@ -5,7 +5,7 @@ use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
     GenerationParams, InputMessageRole, ModelInput, ModelInputItem, RequestBudget,
     RequestExtensions, StructuredTurn, StructuredTurnEventStream, TextTurn, TextTurnEventStream,
-    ToolUse, Toolset, TurnConfig, TurnView, UsageEstimate,
+    ToolUse, Toolset, TurnConfig, TurnView,
     budget::Usage,
     reducer::{
         StructuredTurnReductionError, StructuredTurnResult, StructuredTurnState, TextTurnResult,
@@ -127,7 +127,6 @@ impl Session {
         &self,
         extensions: RequestExtensions,
         mut turn: TextTurn<T>,
-        estimate: UsageEstimate,
     ) -> Result<SessionPendingText<T>, ContextError>
     where
         T: Toolset,
@@ -135,7 +134,7 @@ impl Session {
         self.defaults.apply(&mut turn.config);
         let pending = self
             .ctx
-            .text_turn(extensions, self.input.clone(), turn, estimate)
+            .text_turn(extensions, self.input.clone(), turn)
             .await?;
         Ok(SessionPendingText { pending })
     }
@@ -144,7 +143,6 @@ impl Session {
         &self,
         extensions: RequestExtensions,
         mut turn: StructuredTurn<T, O>,
-        estimate: UsageEstimate,
     ) -> Result<SessionPendingStructured<T, O>, ContextError>
     where
         T: Toolset,
@@ -153,7 +151,7 @@ impl Session {
         self.defaults.apply(&mut turn.config);
         let pending = self
             .ctx
-            .structured_turn(extensions, self.input.clone(), turn, estimate)
+            .structured_turn(extensions, self.input.clone(), turn)
             .await?;
         Ok(SessionPendingStructured { pending })
     }

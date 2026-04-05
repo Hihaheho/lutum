@@ -33,6 +33,8 @@ use lutum_protocol::{
 
 use lutum_protocol::hooks::HookRegistry;
 
+use crate::hooks::ResolveUsageEstimateContextExt;
+
 pub type ContextError = AgentError;
 
 #[derive(Debug, Error)]
@@ -318,12 +320,14 @@ impl Context {
         extensions: RequestExtensions,
         input: ModelInput,
         turn: TextTurn<T>,
-        estimate: UsageEstimate,
     ) -> Result<PendingTextTurn<T>, ContextError>
     where
         T: Toolset,
     {
         input.validate()?;
+        let estimate = self
+            .resolve_usage_estimate(&extensions, OperationKind::TextTurn)
+            .await;
         let lease = self
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
@@ -362,13 +366,15 @@ impl Context {
         extensions: RequestExtensions,
         input: ModelInput,
         turn: StructuredTurn<T, O>,
-        estimate: UsageEstimate,
     ) -> Result<PendingStructuredTurn<T, O>, ContextError>
     where
         T: Toolset,
         O: StructuredOutput,
     {
         input.validate()?;
+        let estimate = self
+            .resolve_usage_estimate(&extensions, OperationKind::StructuredTurn)
+            .await;
         let lease = self
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
@@ -406,8 +412,10 @@ impl Context {
         &self,
         extensions: RequestExtensions,
         request: CompletionRequest,
-        estimate: UsageEstimate,
     ) -> Result<PendingCompletion, ContextError> {
+        let estimate = self
+            .resolve_usage_estimate(&extensions, OperationKind::Completion)
+            .await;
         let lease = self
             .budget
             .reserve(&extensions, &estimate, request.budget)?;
@@ -440,11 +448,13 @@ impl Context {
         &self,
         extensions: RequestExtensions,
         request: StructuredCompletionRequest<O>,
-        estimate: UsageEstimate,
     ) -> Result<PendingStructuredCompletion<O>, ContextError>
     where
         O: StructuredOutput,
     {
+        let estimate = self
+            .resolve_usage_estimate(&extensions, OperationKind::StructuredCompletion)
+            .await;
         let lease = self
             .budget
             .reserve(&extensions, &estimate, request.budget)?;

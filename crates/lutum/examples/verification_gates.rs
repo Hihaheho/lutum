@@ -111,7 +111,6 @@ async fn extract(ctx: &Context, prompt: &str) -> anyhow::Result<Contact> {
         .prepare_structured(
             RequestExtensions::new(),
             session.structured_turn::<NoTools, Contact>(),
-            UsageEstimate::zero(),
         )
         .await?
         .collect_noop()

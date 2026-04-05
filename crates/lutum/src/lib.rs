@@ -50,7 +50,9 @@ pub use context::{
     PendingCompletion, PendingStructuredCompletion, PendingStructuredTurn, PendingTextTurn,
     StructuredTurnPartial,
 };
-pub use hooks::HookRegistry;
+pub use hooks::{
+    HookRegistry, ResolveUsageEstimate, ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt,
+};
 
 #[cfg(feature = "claude")]
 pub use lutum_claude::{
@@ -87,8 +89,8 @@ pub use lutum_protocol::{
     TextTurnReductionError, TextTurnResult, TextTurnState, ToolCallError, ToolCallId,
     ToolCallItemView, ToolCallWrapper, ToolDef, ToolExecutionError, ToolInput, ToolMetadata,
     ToolName, ToolPolicy, ToolResultItemView, ToolSelector, ToolUse, ToolUseError, Toolset,
-    TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView, Usage, UsageEstimate,
-    UsageRecoveryAdapter, assistant_json, find_tool_call_arguments,
+    TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView, Usage, UsageRecoveryAdapter,
+    assistant_json, find_tool_call_arguments,
 };
 pub use mock::{
     MockCompletionScenario, MockError, MockLlmAdapter, MockStructuredCompletionScenario,
