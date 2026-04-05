@@ -1,4 +1,8 @@
-# lutum
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Hihaheho/lutum/main/assets/lutum-logo-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Hihaheho/lutum/main/assets/lutum-logo-light.svg">
+  <img alt="Lutum" src="https://raw.githubusercontent.com/Hihaheho/lutum/main/assets/lutum-logo-light.svg" height="100px" >
+</picture>
 
 `lutum`, pronounced /ˈlu.tum/, is a composable LLM toolkit for advanced orchestration.
 
