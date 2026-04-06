@@ -11,8 +11,8 @@ mod probe;
 pub use paste;
 
 pub use crate::probe::{
-    Probe, ProbeContext, ProbeDecision, ProbeDispatchError, ProbeDispatchFuture, ProbeDispatcher,
-    ProbeDispatchHook, ProbeHandle, ProbeHookSlot, ProbeRunError, ProbeRuntime,
+    Probe, ProbeContext, ProbeDecision, ProbeDispatchError, ProbeDispatchFuture, ProbeDispatchHook,
+    ProbeDispatcher, ProbeHandle, ProbeHookSlot, ProbeRunError, ProbeRuntime,
 };
 pub use lutum_trace::{
     Collected, EventRecord, FieldValue, SpanNode, TraceEvent, TraceSnapshot, TraceSpanId,

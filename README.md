@@ -495,7 +495,7 @@ As with `lutum_trace::capture(...)`, live probe events require the active subscr
 include `lutum_trace::layer()`.
 
 A probe that intercepts a hook receives each call through `StatefulXxxHook::call_mut`. The hook
-system generates an `XxxArgs` tuple struct whose fields hold owned copies of the hook arguments,
+system generates an `XxxArgs` named struct whose fields hold owned copies of the hook arguments,
 so borrowed values like `&str` are already converted before they reach the probe.
 Use `register_probe_hook!(cx, Slot)` inside `register_hooks` to wire each slot — no per-slot
 boilerplate impl needed.
@@ -553,9 +553,9 @@ impl StatefulValidateResponseHook for ResponseQuality {
         _llm: &Lutum,
         args: ValidateResponseArgs,
     ) -> Result<(), String> {
-        // args.0 is already an owned String; no &str lifetime issues
-        if args.0.contains("sorry") {
-            self.violations.push(args.0.clone());
+        // args.response is already an owned String; no &str lifetime issues
+        if args.response.contains("sorry") {
+            self.violations.push(args.response.clone());
             Err("response contains an apology".into())
         } else {
             Ok(())
