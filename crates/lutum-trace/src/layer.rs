@@ -4,12 +4,16 @@ use tracing::{Event, Id, Subscriber};
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 use crate::{
-    snapshot::EventRecord,
+    snapshot::{EventRecord, TraceEvent, TraceSpanId},
     store::{FieldVisitor, InnerStore, SpanData},
 };
 
 tokio::task_local! {
     pub(crate) static CAPTURE: Arc<Mutex<InnerStore>>;
+}
+
+tokio::task_local! {
+    pub(crate) static TRACE_EVENTS: Option<Arc<dyn Fn(TraceEvent) + Send + Sync>>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -29,6 +33,14 @@ where
             f(&mut guard)
         })
         .ok()
+}
+
+fn emit_trace_event(event: TraceEvent) {
+    let _ = TRACE_EVENTS.try_with(|emit| {
+        if let Some(emit) = emit {
+            emit(event);
+        }
+    });
 }
 
 impl<S> Layer<S> for CaptureLayer
@@ -54,6 +66,7 @@ where
             let parent = raw_parent.and_then(|raw| store.active_ids.get(&raw).copied());
             let key = store.alloc_key();
             let raw_id = id.clone().into_u64();
+            let fields_for_event = fields.clone();
 
             store.spans.insert(
                 key,
@@ -78,6 +91,15 @@ where
             }
 
             store.active_ids.insert(raw_id, key);
+
+            emit_trace_event(TraceEvent::SpanOpened {
+                span_id: TraceSpanId(key.raw()),
+                parent_span_id: parent.map(|parent| TraceSpanId(parent.raw())),
+                name: attrs.metadata().name().to_string(),
+                target: attrs.metadata().target().to_string(),
+                level: attrs.metadata().level().to_string(),
+                fields: fields_for_event,
+            });
         });
     }
 
@@ -94,10 +116,16 @@ where
             let mut visitor = FieldVisitor::default();
             values.record(&mut visitor);
             let (fields, _) = visitor.into_parts();
+            let fields_for_event = fields.clone();
 
             for (name, value) in fields {
                 span.upsert_field(name, value);
             }
+
+            emit_trace_event(TraceEvent::SpanRecorded {
+                span_id: TraceSpanId(key.raw()),
+                fields: fields_for_event,
+            });
         });
     }
 
@@ -113,22 +141,42 @@ where
             message,
             fields,
         };
+        let parent_span_id = parent
+            .and_then(|raw| with_store(|store| store.active_ids.get(&raw).copied()))
+            .flatten()
+            .map(|span_id| TraceSpanId(span_id.raw()));
 
         with_store(|store| {
             if let Some(key) = parent.and_then(|raw| store.active_ids.get(&raw).copied())
                 && let Some(span) = store.spans.get_mut(&key)
             {
                 span.events.push(record);
+                emit_trace_event(TraceEvent::Event {
+                    parent_span_id,
+                    record: span.events.last().cloned().expect("event just inserted"),
+                });
                 return;
             }
 
             store.root_events.push(record);
+            emit_trace_event(TraceEvent::Event {
+                parent_span_id: None,
+                record: store
+                    .root_events
+                    .last()
+                    .cloned()
+                    .expect("root event just inserted"),
+            });
         });
     }
 
     fn on_close(&self, id: Id, _ctx: Context<'_, S>) {
         with_store(|store| {
-            store.active_ids.remove(&id.into_u64());
+            if let Some(span_id) = store.active_ids.remove(&id.into_u64()) {
+                emit_trace_event(TraceEvent::SpanClosed {
+                    span_id: TraceSpanId(span_id.raw()),
+                });
+            }
         });
     }
 }

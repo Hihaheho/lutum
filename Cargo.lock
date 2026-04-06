@@ -825,9 +825,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "lutum",
+ "lutum-protocol",
  "lutum-trace",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

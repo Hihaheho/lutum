@@ -11,6 +11,32 @@ pub enum FieldValue {
     Str(String),
 }
 
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+pub struct TraceSpanId(pub u64);
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TraceEvent {
+    SpanOpened {
+        span_id: TraceSpanId,
+        parent_span_id: Option<TraceSpanId>,
+        name: String,
+        target: String,
+        level: String,
+        fields: Vec<(String, FieldValue)>,
+    },
+    SpanRecorded {
+        span_id: TraceSpanId,
+        fields: Vec<(String, FieldValue)>,
+    },
+    Event {
+        parent_span_id: Option<TraceSpanId>,
+        record: EventRecord,
+    },
+    SpanClosed {
+        span_id: TraceSpanId,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceSnapshot {
     pub roots: Vec<SpanNode>,

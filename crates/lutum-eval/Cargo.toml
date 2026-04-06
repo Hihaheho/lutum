@@ -12,7 +12,11 @@ keywords = ["llm", "ai", "evaluation", "tracing"]
 async-trait.workspace = true
 lutum.workspace = true
 lutum-trace.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+lutum-protocol.workspace = true

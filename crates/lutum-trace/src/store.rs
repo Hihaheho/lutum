@@ -7,6 +7,12 @@ use crate::snapshot::{EventRecord, FieldValue};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct SpanKey(u64);
 
+impl SpanKey {
+    pub(crate) fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct InnerStore {
     pub(crate) next_key: u64,

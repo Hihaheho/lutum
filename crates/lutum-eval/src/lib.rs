@@ -2,7 +2,15 @@ use std::future::Future;
 
 use async_trait::async_trait;
 
-pub use lutum_trace::{Collected, EventRecord, FieldValue, SpanNode, TraceSnapshot};
+mod probe;
+
+pub use crate::probe::{
+    Probe, ProbeContext, ProbeDecision, ProbeDispatchError, ProbeDispatchFuture, ProbeDispatcher,
+    ProbeHandle, ProbeRunError, ProbeRuntime,
+};
+pub use lutum_trace::{
+    Collected, EventRecord, FieldValue, SpanNode, TraceEvent, TraceSnapshot, TraceSpanId,
+};
 
 /// Pure evaluation over a trace snapshot and a strongly typed artifact.
 ///

@@ -34,7 +34,7 @@ If you want the design rationale rather than just the public surface, read
 | `crates/lutum-openrouter` | OpenRouter wrapper with usage recovery |
 | `crates/lutum-macros` | `#[derive(Toolset)]`, `#[tool_fn]`, `#[tool_input]`, hook macros |
 | `crates/lutum-trace` | Companion crate for scoped in-memory span and event capture |
-| `crates/lutum-eval` | Borrowed trace/artifact metrics and async judge metrics |
+| `crates/lutum-eval` | Borrowed trace/artifact metrics, async judge metrics, and live probes |
 
 ## Install
 
@@ -55,7 +55,7 @@ serde = { version = "1", features = ["derive"] }
 lutum-trace = "0.1.0"
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
-# Only if you want trace/artifact evaluation helpers
+# Only if you want trace/artifact evaluation helpers or live probes
 lutum-eval = "0.1.0"
 ```
 
@@ -416,6 +416,7 @@ captured `TraceSnapshot`.
 
 - `Metric`: sync, pure, replay-friendly evaluation over `&TraceSnapshot` and `&Artifact`
 - `JudgeMetric`: async evaluation that also receives `&Lutum`, useful for model-based scoring
+- `Probe`: mutable, live-only evaluation over `TraceEvent`, with optional probe-backed hook proxies
 
 Live evaluation uses the future output as the artifact directly:
 
@@ -423,6 +424,11 @@ Live evaluation uses the future output as the artifact directly:
 use async_trait::async_trait;
 use lutum::Lutum;
 use lutum_eval::{JudgeMetric, Metric, evaluate_live, judge_live};
+
+#[lutum::def_hook(singleton)]
+async fn score_bias(_llm: &Lutum, score: usize) -> usize {
+    score
+}
 
 #[derive(Debug)]
 struct Draft {
@@ -455,11 +461,11 @@ impl JudgeMetric for JudgeLength {
 
     async fn judge(
         &self,
-        _ctx: &Lutum,
+        llm: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
     ) -> Result<Self::Score, Self::Error> {
-        Ok(artifact.text.len())
+        Ok(llm.score_bias(artifact.text.len()).await)
     }
 }
 
@@ -475,6 +481,68 @@ let judge_score = judge_live(&JudgeLength, &llm, async {
 
 `Metric` is for deterministic local scoring. `JudgeMetric` is for cases where scoring itself
 needs to call back into lutum through a `Lutum`.
+
+### Probes
+
+`Probe` is the live-only counterpart when you want incremental decisions from trace events or
+want hook calls to route back into the same mutable state machine.
+
+- `ProbeDispatcher` owns the runtime and builds the hook registry
+- `Probe::register_hooks` installs probe-backed proxies through `ProbeContext`
+- `ProbeRuntime::run_live(...)` forwards live `TraceEvent`s, then calls `finalize(trace, artifact)`
+
+As with `lutum_trace::capture(...)`, live probe events require the active subscriber stack to
+include `lutum_trace::layer()`.
+
+```rust
+use core::convert::Infallible;
+use lutum_eval::{Probe, ProbeDecision, ProbeDispatcher, TraceEvent, TraceSnapshot};
+
+#[derive(Debug)]
+struct Draft {
+    text: String,
+}
+
+#[derive(Default)]
+struct CountMessages {
+    messages: usize,
+}
+
+impl Probe for CountMessages {
+    type Artifact = Draft;
+    type Score = usize;
+    type Error = Infallible;
+
+    fn on_trace_event(
+        &mut self,
+        event: &TraceEvent,
+    ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
+        if matches!(event, TraceEvent::Event { .. }) {
+            self.messages += 1;
+        }
+        Ok(ProbeDecision::Continue)
+    }
+
+    fn finalize(
+        &mut self,
+        _trace: &TraceSnapshot,
+        artifact: &Self::Artifact,
+    ) -> Result<Self::Score, Self::Error> {
+        Ok(self.messages + artifact.text.len())
+    }
+}
+
+let (_hooks, runtime) = ProbeDispatcher::new(CountMessages::default()).into_parts();
+
+let score = runtime.run_live(async {
+    tracing::info!("draft-started");
+    Draft { text: "hello".into() }
+}).await?;
+```
+
+When a hook proxy needs to call back into the probe, send owned values through the dispatcher.
+`Lutum` is cloneable, and borrowed hook arguments like `&str` usually need to be copied into an
+owned value before they cross the channel boundary.
 
 ## Examples
 
