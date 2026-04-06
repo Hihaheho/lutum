@@ -4,7 +4,7 @@
   <img alt="Lutum" src="https://raw.githubusercontent.com/Hihaheho/lutum/main/assets/lutum-logo-light.svg" height="100px">
 </picture>
 
-`lutum`, pronounced /ˈlu.tum/, is a composable, streaming LLM toolkit for advanced orchestration.
+🕶️ `lutum`, pronounced /ˈlu.tum/, is a composable, streaming LLM toolkit for advanced orchestration.
 It keeps control flow in user code, preserves provider-specific power, and makes transcript replay
 an explicit part of the API instead of a hidden framework detail.
 
