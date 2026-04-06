@@ -4,7 +4,9 @@
 
 !Cargo.toml
 !Cargo.lock
+!rust-toolchain.toml
 !**/*.rs
+!**/tests/ui/*.stderr
 target/
 !README.md
 !docs/**/*.md
