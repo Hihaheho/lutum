@@ -58,6 +58,7 @@ pub trait Metric {
 impl<T> Metric for T
 where
     T: PureMetric + Send + Sync,
+    T::Artifact: Sync,
 {
     type Artifact = T::Artifact;
     type Score = T::Score;

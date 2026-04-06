@@ -50,6 +50,7 @@ pub trait Probe: Send + 'static {
 impl<T> Probe for T
 where
     T: Metric + Send + Sync + 'static,
+    T::Artifact: Sync,
 {
     type Score = T::Score;
     type Artifact = T::Artifact;
@@ -234,8 +235,9 @@ where
     {
         let dispatcher = self.dispatcher.clone();
         let ctx = ctx.clone();
+        let event_ctx = ctx.clone();
         let collected = lutum_trace::capture_with_events(future, move |event| {
-            let _ = dispatcher.send_trace(ctx.clone(), event);
+            let _ = dispatcher.send_trace(event_ctx.clone(), event);
         })
         .await;
 
