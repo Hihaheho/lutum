@@ -414,16 +414,18 @@ top of the same machinery.
 `lutum-eval` is a companion crate for scoring a strongly typed artifact together with a
 captured `TraceSnapshot`.
 
-- `Metric`: sync, pure, replay-friendly evaluation over `&TraceSnapshot` and `&Artifact`
-- `JudgeMetric`: async evaluation that also receives `&Lutum`, useful for model-based scoring
-- `Probe`: mutable, live-only evaluation over `TraceEvent`, with optional probe-backed hook proxies
+- `PureMetric`: sync, pure, replay-friendly evaluation over `&TraceSnapshot` and `&Artifact`
+- `Metric`: async evaluation that also receives `&Lutum`; every `PureMetric` is also a `Metric`
+- `Probe`: async live evaluation over `TraceEvent` plus finalization; every `Metric` is also a `Probe`
 
 Live evaluation uses the future output as the artifact directly:
 
 ```rust
 use async_trait::async_trait;
 use lutum::Lutum;
-use lutum_eval::{JudgeMetric, Metric, evaluate_live, judge_live};
+use lutum_eval::{
+    Metric, PureMetric, evaluate_live, evaluate_pure_live,
+};
 
 #[lutum::def_hook(singleton)]
 async fn score_bias(_llm: &Lutum, score: usize) -> usize {
@@ -437,7 +439,7 @@ struct Draft {
 
 struct LengthMetric;
 
-impl Metric for LengthMetric {
+impl PureMetric for LengthMetric {
     type Artifact = Draft;
     type Score = usize;
     type Error = core::convert::Infallible;
@@ -451,15 +453,15 @@ impl Metric for LengthMetric {
     }
 }
 
-struct JudgeLength;
+struct ScaledLengthMetric;
 
 #[async_trait]
-impl JudgeMetric for JudgeLength {
+impl Metric for ScaledLengthMetric {
     type Artifact = Draft;
     type Score = usize;
     type Error = core::convert::Infallible;
 
-    async fn judge(
+    async fn evaluate(
         &self,
         llm: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
@@ -470,17 +472,17 @@ impl JudgeMetric for JudgeLength {
 }
 
 // Assume `llm: Lutum` was already built as in the quickstart.
-let metric_score = evaluate_live(&LengthMetric, async {
+let pure_score = evaluate_pure_live(&LengthMetric, async {
     Draft { text: "hello".into() }
 }).await?;
 
-let judge_score = judge_live(&JudgeLength, &llm, async {
+let metric_score = evaluate_live(&ScaledLengthMetric, &llm, async {
     Draft { text: "hello".into() }
 }).await?;
 ```
 
-`Metric` is for deterministic local scoring. `JudgeMetric` is for cases where scoring itself
-needs to call back into lutum through a `Lutum`.
+`PureMetric` is the small synchronous subset. `Metric` is the default async scoring abstraction
+that can execute through `Lutum`.
 
 ### Probes
 
@@ -489,7 +491,7 @@ want hook calls to route back into the same mutable state machine.
 
 - `ProbeDispatcher` owns the runtime and builds the hook registry
 - `Probe::register_hooks` installs hook routing through `ProbeContext`
-- `ProbeRuntime::run_live(...)` forwards live `TraceEvent`s, then calls `finalize(trace, artifact)`
+- `ProbeRuntime::run_live(&llm, ...)` forwards live `TraceEvent`s, then calls `finalize(&llm, trace, artifact)`
 
 As with `lutum_trace::capture(...)`, live probe events require the active subscriber stack to
 include `lutum_trace::layer()`.
@@ -530,15 +532,17 @@ impl Probe for ResponseQuality {
         register_probe_hook!(cx, ValidateResponse);
     }
 
-    fn on_trace_event(
+    async fn on_trace_event(
         &mut self,
+        _llm: &Lutum,
         _event: &TraceEvent,
     ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
         Ok(ProbeDecision::Continue)
     }
 
-    fn finalize(
+    async fn finalize(
         &mut self,
+        _llm: &Lutum,
         _trace: &TraceSnapshot,
         _artifact: &Self::Artifact,
     ) -> Result<Self::Score, Self::Error> {
@@ -567,8 +571,9 @@ impl StatefulValidateResponseHook for ResponseQuality {
 
 let (hooks, runtime) = ProbeDispatcher::new(ResponseQuality::default()).into_parts();
 // Pass `hooks` to `Lutum::with_hooks(...)` so the probe intercepts validate_response calls.
+let llm = Lutum::with_hooks(/* adapter */, /* budget */, hooks);
 
-let score = runtime.run_live(async {
+let score = runtime.run_live(&llm, async {
     tracing::info!("draft-started");
     "Here is your answer.".to_string()
 }).await?;
