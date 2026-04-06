@@ -488,61 +488,125 @@ needs to call back into lutum through a `Lutum`.
 want hook calls to route back into the same mutable state machine.
 
 - `ProbeDispatcher` owns the runtime and builds the hook registry
-- `Probe::register_hooks` installs probe-backed proxies through `ProbeContext`
+- `Probe::register_hooks` installs hook routing through `ProbeContext`
 - `ProbeRuntime::run_live(...)` forwards live `TraceEvent`s, then calls `finalize(trace, artifact)`
 
 As with `lutum_trace::capture(...)`, live probe events require the active subscriber stack to
 include `lutum_trace::layer()`.
 
-```rust
-use core::convert::Infallible;
-use lutum_eval::{Probe, ProbeDecision, ProbeDispatcher, TraceEvent, TraceSnapshot};
+A probe that intercepts a hook receives each call through `StatefulXxxHook::call_mut`. The hook
+system generates an `XxxArgs` tuple struct whose fields hold owned copies of the hook arguments,
+so borrowed values like `&str` are already converted before they reach the probe. Write the
+`ProbeHookSlot` wiring once per hook slot (not once per probe), then any probe that implements
+`StatefulXxxHook` can register it with a single `cx.register_hook::<Slot>()` call.
 
-#[derive(Debug)]
-struct Draft {
-    text: String,
+```rust
+use async_trait::async_trait;
+use core::convert::Infallible;
+use lutum::Lutum;
+use lutum_eval::{
+    Probe, ProbeContext, ProbeDecision, ProbeDispatchHook, ProbeDispatcher,
+    ProbeHookSlot, TraceEvent, TraceSnapshot,
+};
+
+// -- Define a hook slot (once per slot, e.g. in a shared library) ----------------
+
+#[lutum::def_hook(singleton)]
+async fn validate_response(_llm: &Lutum, response: &str) -> Result<(), String> {
+    Ok(())
 }
+
+// -- Wire the slot to the probe dispatcher (once per slot) -----------------------
+
+#[async_trait]
+impl<P> ValidateResponseHook for ProbeDispatchHook<P, ValidateResponse>
+where
+    P: Probe + StatefulValidateResponseHook + 'static,
+    P::Score: Send + 'static,
+    P::Artifact: Send + 'static,
+    P::Error: Send + 'static,
+{
+    async fn call(&self, ctx: &Lutum, args: ValidateResponseArgs) -> Result<(), String> {
+        let ctx = ctx.clone();
+        self.dispatcher
+            .dispatch(move |probe| Box::pin(async move { probe.call_mut(&ctx, args).await }))
+            .await
+            .expect("probe dispatcher alive")
+    }
+}
+
+impl<P> ProbeHookSlot<P> for ValidateResponse
+where
+    P: Probe + StatefulValidateResponseHook + 'static,
+    P::Score: Send + 'static,
+    P::Artifact: Send + 'static,
+    P::Error: Send + 'static,
+{
+    fn register(cx: &mut ProbeContext<'_, P>) {
+        let dispatcher = cx.dispatcher();
+        cx.update_hooks(|h| h.register_validate_response(ProbeDispatchHook::new(dispatcher)));
+    }
+}
+
+// -- Implement the probe (once per probe) ----------------------------------------
 
 #[derive(Default)]
-struct CountMessages {
-    messages: usize,
+struct ResponseQuality {
+    violations: Vec<String>,
 }
 
-impl Probe for CountMessages {
-    type Artifact = Draft;
-    type Score = usize;
+impl Probe for ResponseQuality {
+    type Artifact = String;
+    type Score = Vec<String>;
     type Error = Infallible;
+
+    fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
+        cx.register_hook::<ValidateResponse>();
+    }
 
     fn on_trace_event(
         &mut self,
-        event: &TraceEvent,
+        _event: &TraceEvent,
     ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
-        if matches!(event, TraceEvent::Event { .. }) {
-            self.messages += 1;
-        }
         Ok(ProbeDecision::Continue)
     }
 
     fn finalize(
         &mut self,
         _trace: &TraceSnapshot,
-        artifact: &Self::Artifact,
+        _artifact: &Self::Artifact,
     ) -> Result<Self::Score, Self::Error> {
-        Ok(self.messages + artifact.text.len())
+        Ok(self.violations.clone())
     }
 }
 
-let (_hooks, runtime) = ProbeDispatcher::new(CountMessages::default()).into_parts();
+#[async_trait]
+impl StatefulValidateResponseHook for ResponseQuality {
+    async fn call_mut(
+        &mut self,
+        _llm: &Lutum,
+        args: ValidateResponseArgs,
+    ) -> Result<(), String> {
+        // args.0 is already an owned String; no &str lifetime issues
+        if args.0.contains("sorry") {
+            self.violations.push(args.0.clone());
+            Err("response contains an apology".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+// -- Run -------------------------------------------------------------------------
+
+let (hooks, runtime) = ProbeDispatcher::new(ResponseQuality::default()).into_parts();
+// Pass `hooks` to `Lutum::with_hooks(...)` so the probe intercepts validate_response calls.
 
 let score = runtime.run_live(async {
     tracing::info!("draft-started");
-    Draft { text: "hello".into() }
+    "Here is your answer.".to_string()
 }).await?;
 ```
-
-When a hook proxy needs to call back into the probe, send owned values through the dispatcher.
-`Lutum` is cloneable, and borrowed hook arguments like `&str` usually need to be copied into an
-owned value before they cross the channel boundary.
 
 ## Examples
 

@@ -11,7 +11,7 @@ use lutum::{
     HookRegistry, Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
 };
 use lutum_eval::{
-    Probe, ProbeContext, ProbeDecision, ProbeDispatchHook, ProbeDispatcher, ProbeInterceptor,
+    Probe, ProbeContext, ProbeDecision, ProbeDispatchHook, ProbeDispatcher, ProbeHookSlot,
     ProbeRunError,
 };
 use tracing::instrument::WithSubscriber as _;
@@ -35,11 +35,11 @@ async fn validate_step(_llm: &Lutum, _step: &str) -> Validation {
 }
 
 // ---------------------------------------------------------------------------
-// ProbeInterceptor + ProbeDispatchHook impls for the three test hook slots.
+// ProbeHookSlot + ProbeDispatchHook impls for the three test hook slots.
 //
 // These are written once per slot (not once per probe). Each ProbeDispatchHook
 // impl routes hook calls through the probe's event loop; the matching
-// ProbeInterceptor impl lets probes use `cx.intercept::<Slot>()` with no
+// ProbeHookSlot impl lets probes use `cx.register_hook::<Slot>()` with no
 // further boilerplate. ProbeHandle / ProbeDispatcher never appear in probe
 // or hook-implementation code.
 // ---------------------------------------------------------------------------
@@ -61,14 +61,14 @@ where
     }
 }
 
-impl<P> ProbeInterceptor<P> for RewriteNumber
+impl<P> ProbeHookSlot<P> for RewriteNumber
 where
     P: Probe + StatefulRewriteNumberHook + 'static,
     P::Score: Send + 'static,
     P::Artifact: Send + 'static,
     P::Error: Send + 'static,
 {
-    fn register_intercept(cx: &mut ProbeContext<'_, P>) {
+    fn register(cx: &mut ProbeContext<'_, P>) {
         let dispatcher = cx.dispatcher();
         cx.update_hooks(|h| h.register_rewrite_number(ProbeDispatchHook::new(dispatcher)));
     }
@@ -91,14 +91,14 @@ where
     }
 }
 
-impl<P> ProbeInterceptor<P> for DecorateLabel
+impl<P> ProbeHookSlot<P> for DecorateLabel
 where
     P: Probe + StatefulDecorateLabelHook + 'static,
     P::Score: Send + 'static,
     P::Artifact: Send + 'static,
     P::Error: Send + 'static,
 {
-    fn register_intercept(cx: &mut ProbeContext<'_, P>) {
+    fn register(cx: &mut ProbeContext<'_, P>) {
         let dispatcher = cx.dispatcher();
         cx.update_hooks(|h| h.register_decorate_label(ProbeDispatchHook::new(dispatcher)));
     }
@@ -121,14 +121,14 @@ where
     }
 }
 
-impl<P> ProbeInterceptor<P> for ValidateStep
+impl<P> ProbeHookSlot<P> for ValidateStep
 where
     P: Probe + StatefulValidateStepHook + 'static,
     P::Score: Send + 'static,
     P::Artifact: Send + 'static,
     P::Error: Send + 'static,
 {
-    fn register_intercept(cx: &mut ProbeContext<'_, P>) {
+    fn register(cx: &mut ProbeContext<'_, P>) {
         let dispatcher = cx.dispatcher();
         cx.update_hooks(|h| h.register_validate_step(ProbeDispatchHook::new(dispatcher)));
     }
@@ -161,8 +161,8 @@ impl Probe for TimelineProbe {
     type Error = Infallible;
 
     fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        cx.intercept::<RewriteNumber>();
-        cx.intercept::<DecorateLabel>();
+        cx.register_hook::<RewriteNumber>();
+        cx.register_hook::<DecorateLabel>();
     }
 
     fn on_trace_event(
@@ -327,7 +327,7 @@ impl Probe for HookErrorProbe {
     type Error = Infallible;
 
     fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        cx.intercept::<ValidateStep>();
+        cx.register_hook::<ValidateStep>();
     }
 
     fn on_trace_event(
