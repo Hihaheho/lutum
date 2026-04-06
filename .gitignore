@@ -5,6 +5,7 @@
 !Cargo.toml
 !Cargo.lock
 !**/*.rs
+!**/tests/ui/*.stderr
 target/
 !README.md
 !docs/**/*.md
