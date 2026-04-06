@@ -336,16 +336,8 @@ impl BudgetManager for SharedPoolBudgetManager {
             }));
         };
 
-        state.reserved_tokens = state.reserved_tokens.saturating_sub(reserved.total_tokens);
-        state.reserved_cost_micros_usd = state
-            .reserved_cost_micros_usd
-            .saturating_sub(reserved.cost_micros_usd);
-        state.committed_tokens = state.committed_tokens.saturating_add(usage.total_tokens);
-        state.committed_cost_micros_usd = state
-            .committed_cost_micros_usd
-            .saturating_add(usage.cost_micros_usd);
-
         if !request_budget.allows(usage.total_tokens, usage.cost_micros_usd) {
+            state.leases.insert(lease.id, (reserved, request_budget));
             return Err(AgentError::budget(
                 SharedPoolBudgetError::RequestBudgetExceeded {
                     requested_tokens: usage.total_tokens,
@@ -355,6 +347,15 @@ impl BudgetManager for SharedPoolBudgetManager {
                 },
             ));
         }
+
+        state.reserved_tokens = state.reserved_tokens.saturating_sub(reserved.total_tokens);
+        state.reserved_cost_micros_usd = state
+            .reserved_cost_micros_usd
+            .saturating_sub(reserved.cost_micros_usd);
+        state.committed_tokens = state.committed_tokens.saturating_add(usage.total_tokens);
+        state.committed_cost_micros_usd = state
+            .committed_cost_micros_usd
+            .saturating_add(usage.cost_micros_usd);
 
         Ok(())
     }
@@ -496,5 +497,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn record_used_request_budget_exceeded_leaves_pool_consistent() {
+        let manager = SharedPoolBudgetManager::new(SharedPoolBudgetOptions {
+            capacity_tokens: 100,
+            capacity_cost_micros_usd: 1_000,
+            stop_threshold_tokens: 0,
+            stop_threshold_cost_micros_usd: 0,
+        });
+        let extensions = RequestExtensions::new();
+
+        let lease = manager
+            .reserve(
+                &extensions,
+                &UsageEstimate {
+                    total_tokens: 8,
+                    cost_micros_usd: 80,
+                    ..UsageEstimate::zero()
+                },
+                RequestBudget::from_tokens(10),
+            )
+            .unwrap();
+        let lease_for_retry = lease.clone();
+
+        let remaining_before = manager.remaining(&extensions);
+        let err = manager
+            .record_used(
+                lease,
+                Usage {
+                    total_tokens: 12,
+                    cost_micros_usd: 120,
+                    ..Usage::zero()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            shared_pool_error(&err),
+            SharedPoolBudgetError::RequestBudgetExceeded { .. }
+        ));
+        assert_eq!(manager.remaining(&extensions), remaining_before);
+
+        manager.record_used(lease_for_retry, Usage::zero()).unwrap();
     }
 }
