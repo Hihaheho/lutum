@@ -2073,8 +2073,9 @@ fn finalize_budget(
 }
 
 fn record_budget_usage(owned_lease: &mut OwnedLease, usage: Usage) -> Result<(), AgentError> {
-    if let Some(lease) = owned_lease.lease.take() {
+    if let Some(lease) = owned_lease.lease.as_ref().cloned() {
         owned_lease.budget.record_used(lease, usage)?;
+        owned_lease.lease = None;
     }
     Ok(())
 }
@@ -2183,4 +2184,58 @@ fn test_pending_turns_are_send_sync() {
     assert_send_sync::<PendingStructuredTurnWithTools<lutum_protocol::toolset::NoTools, ()>>();
     assert_send_sync::<PendingStructuredCompletion<()>>();
     assert_send_sync::<PendingCompletion>();
+}
+
+#[test]
+fn record_budget_usage_keeps_lease_after_request_budget_exceeded() {
+    use lutum_protocol::budget::{
+        RequestBudget, SharedPoolBudgetError, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    };
+
+    let budget = Arc::new(SharedPoolBudgetManager::new(SharedPoolBudgetOptions {
+        capacity_tokens: 100,
+        capacity_cost_micros_usd: 1_000,
+        stop_threshold_tokens: 0,
+        stop_threshold_cost_micros_usd: 0,
+    }));
+    let extensions = RequestExtensions::new();
+    let lease = budget
+        .reserve(
+            &extensions,
+            &UsageEstimate {
+                total_tokens: 8,
+                cost_micros_usd: 80,
+                ..UsageEstimate::zero()
+            },
+            RequestBudget::from_tokens(10),
+        )
+        .unwrap();
+    let mut owned_lease = OwnedLease {
+        budget: budget.clone(),
+        lease: Some(lease),
+    };
+
+    let err = record_budget_usage(
+        &mut owned_lease,
+        Usage {
+            total_tokens: 12,
+            cost_micros_usd: 120,
+            ..Usage::zero()
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        AgentError::Budget(ref source)
+            if source
+                .downcast_ref::<SharedPoolBudgetError>()
+                .is_some_and(|err| matches!(err, SharedPoolBudgetError::RequestBudgetExceeded { .. })),
+    ));
+    assert!(owned_lease.lease.is_some());
+
+    record_budget_usage(&mut owned_lease, Usage::zero()).unwrap();
+    assert!(owned_lease.lease.is_none());
+    assert_eq!(budget.remaining(&extensions).tokens, 100);
+    assert_eq!(budget.remaining(&extensions).cost_micros_usd, 1_000);
 }
