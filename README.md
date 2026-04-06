@@ -185,10 +185,7 @@ let llm = Lutum::from_parts(
 );
 
 let result = llm
-    .structured_completion::<Contact>(
-        ModelName::new(&std::env::var("MODEL")?)?,
-        "Extract the email address from `Reach me at user@example.com`.",
-    )
+    .structured_completion::<Contact>("Extract the email address from `Reach me at user@example.com`.")
     .system("Return only the structured data.")
     .collect()
     .await?;

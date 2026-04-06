@@ -216,7 +216,6 @@ where
 #[derive(Builder, Clone, Debug, PartialEq)]
 #[builder(builder_type(name = StructuredCompletionRequestBuilder))]
 pub struct StructuredCompletionRequest<O: StructuredOutput> {
-    pub model: ModelName,
     pub system: Option<String>,
     #[builder(into)]
     pub prompt: String,
@@ -232,9 +231,8 @@ impl<O> StructuredCompletionRequest<O>
 where
     O: StructuredOutput,
 {
-    pub fn new(model: ModelName, prompt: impl Into<String>) -> Self {
+    pub fn new(prompt: impl Into<String>) -> Self {
         Self {
-            model,
             system: None,
             prompt: prompt.into(),
             generation: GenerationParams::default(),
@@ -292,7 +290,6 @@ pub struct AdapterStructuredTurn {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdapterStructuredCompletionRequest {
-    pub model: ModelName,
     pub system: Option<String>,
     pub prompt: String,
     pub generation: GenerationParams,
@@ -373,7 +370,6 @@ pub enum TemperatureError {
 #[derive(Builder, Clone, Debug, PartialEq)]
 #[builder(builder_type(name = CompletionRequestBuilder))]
 pub struct CompletionRequest {
-    pub model: ModelName,
     #[builder(into)]
     pub prompt: String,
     #[builder(default)]
@@ -383,9 +379,8 @@ pub struct CompletionRequest {
 }
 
 impl CompletionRequest {
-    pub fn new(model: ModelName, prompt: impl Into<String>) -> Self {
+    pub fn new(prompt: impl Into<String>) -> Self {
         Self {
-            model,
             prompt: prompt.into(),
             options: CompletionOptions::default(),
             budget: RequestBudget::unlimited(),

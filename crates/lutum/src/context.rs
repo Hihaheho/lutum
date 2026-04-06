@@ -148,23 +148,18 @@ impl Lutum {
         crate::builders::StructuredTurn::from_lutum(self, input)
     }
 
-    pub fn completion(
-        &self,
-        model: lutum_protocol::ModelName,
-        prompt: impl Into<String>,
-    ) -> crate::builders::Completion<'_> {
-        crate::builders::Completion::new(self, model, prompt)
+    pub fn completion(&self, prompt: impl Into<String>) -> crate::builders::Completion<'_> {
+        crate::builders::Completion::new(self, prompt)
     }
 
     pub fn structured_completion<O>(
         &self,
-        model: lutum_protocol::ModelName,
         prompt: impl Into<String>,
     ) -> crate::builders::StructuredCompletion<'_, O>
     where
         O: StructuredOutput,
     {
-        crate::builders::StructuredCompletion::new(self, model, prompt)
+        crate::builders::StructuredCompletion::new(self, prompt)
     }
 }
 
@@ -1745,7 +1740,6 @@ where
     O: StructuredOutput,
 {
     Ok(AdapterStructuredCompletionRequest {
-        model: request.model,
         system: request.system,
         prompt: request.prompt,
         generation: request.generation,

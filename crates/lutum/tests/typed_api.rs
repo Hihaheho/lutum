@@ -153,10 +153,10 @@ fn typed_public_api_compiles_and_constructs_requests() {
             seed: None,
         });
     let _completion = ctx
-        .completion(ModelName::new("gpt-4.1-mini").unwrap(), "hello")
+        .completion("hello")
         .budget(RequestBudget::from_tokens(128));
     let _structured_completion = ctx
-        .structured_completion::<Summary>(ModelName::new("gpt-4.1-mini").unwrap(), "hello")
+        .structured_completion::<Summary>("hello")
         .budget(RequestBudget::from_tokens(128));
     let _estimate = UsageEstimate::zero();
     let _extensions = RequestExtensions::new();

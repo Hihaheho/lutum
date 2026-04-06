@@ -302,7 +302,7 @@ impl CompletionAdapter for OpenAiAdapter {
         hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError> {
         let model = hooks
-            .select_openai_model(extensions, request.model.clone())
+            .select_openai_model(extensions, self.default_model.clone())
             .await;
         let body = self.prepare_completion_request(&request, model.as_ref());
         let stream = self
@@ -322,7 +322,7 @@ impl CompletionAdapter for OpenAiAdapter {
         hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
         let model = hooks
-            .select_openai_model(extensions, request.model.clone())
+            .select_openai_model(extensions, self.default_model.clone())
             .await;
         let body = self.prepare_structured_completion_request(&request, model.as_ref());
         let stream = self
@@ -1855,10 +1855,8 @@ mod tests {
         let responses_request = adapter
             .prepare_responses_request(&input, &config, "gpt-4.1", None, None)
             .unwrap();
-        let completion_request = adapter.prepare_completion_request(
-            &ProtocolCompletionRequest::new(ModelName::new("gpt-4.1").unwrap(), "hello"),
-            "gpt-4.1",
-        );
+        let completion_request =
+            adapter.prepare_completion_request(&ProtocolCompletionRequest::new("hello"), "gpt-4.1");
 
         assert_eq!(responses_request.models, Some(vec!["fallback".to_string()]));
         assert_eq!(

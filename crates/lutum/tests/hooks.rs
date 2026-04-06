@@ -7,7 +7,7 @@ use lutum::{
     CompletionAdapter, CompletionEventStream, CompletionRequest,
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
     ErasedTextTurnEventStream, HookReentrancyError, HookRegistry, InputMessageRole, Lutum,
-    MockLlmAdapter, ModelInput, ModelInputItem, ModelName, OperationKind, RequestExtensions,
+    MockLlmAdapter, ModelInput, ModelInputItem, OperationKind, RequestExtensions,
     ResolveUsageEstimateArgs, ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt,
     SharedPoolBudgetManager, SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage,
     UsageRecoveryAdapter, budget::UsageEstimate, hooks::ResolveUsageEstimateLutumExt,
@@ -429,16 +429,9 @@ fn context_entrypoints_pass_operation_kind_to_resolve_usage_estimate() {
 
     let _text = block_on(ctx.text_turn(input()).start()).unwrap();
     let _structured = block_on(ctx.structured_turn::<Summary>(input()).start()).unwrap();
-    let _completion = block_on(
-        ctx.completion(ModelName::new("gpt-4.1-mini").unwrap(), "hello")
-            .start(),
-    )
-    .unwrap();
-    let _structured_completion = block_on(
-        ctx.structured_completion::<Summary>(ModelName::new("gpt-4.1-mini").unwrap(), "hello")
-            .start(),
-    )
-    .unwrap();
+    let _completion = block_on(ctx.completion("hello").start()).unwrap();
+    let _structured_completion =
+        block_on(ctx.structured_completion::<Summary>("hello").start()).unwrap();
 
     assert_eq!(
         *seen.lock().unwrap(),

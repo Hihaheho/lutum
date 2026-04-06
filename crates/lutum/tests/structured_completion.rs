@@ -39,13 +39,10 @@ fn structured_completion_collects_structured_output() {
     let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
 
     let result = block_on(async {
-        ctx.structured_completion::<Contact>(
-            lutum::ModelName::new("gpt-4.1-mini").unwrap(),
-            "Extract the email address.",
-        )
-        .collect()
-        .await
-        .unwrap()
+        ctx.structured_completion::<Contact>("Extract the email address.")
+            .collect()
+            .await
+            .unwrap()
     });
 
     assert!(matches!(
@@ -80,13 +77,10 @@ fn structured_completion_collects_refusal() {
     let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
 
     let result = block_on(async {
-        ctx.structured_completion::<Contact>(
-            lutum::ModelName::new("gpt-4.1-mini").unwrap(),
-            "Extract the email address.",
-        )
-        .collect()
-        .await
-        .unwrap()
+        ctx.structured_completion::<Contact>("Extract the email address.")
+            .collect()
+            .await
+            .unwrap()
     });
 
     assert_eq!(
@@ -118,13 +112,10 @@ fn structured_completion_requires_semantic_output() {
     let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
 
     let err = block_on(async {
-        ctx.structured_completion::<Contact>(
-            lutum::ModelName::new("gpt-4.1-mini").unwrap(),
-            "Extract the email address.",
-        )
-        .collect()
-        .await
-        .unwrap_err()
+        ctx.structured_completion::<Contact>("Extract the email address.")
+            .collect()
+            .await
+            .unwrap_err()
     });
 
     assert!(matches!(
@@ -142,12 +133,9 @@ fn context_new_does_not_enable_structured_completion() {
     let ctx = lutum::Lutum::new(Arc::new(MockLlmAdapter::new()), budget);
 
     let err = block_on(async {
-        ctx.structured_completion::<Contact>(
-            lutum::ModelName::new("gpt-4.1-mini").unwrap(),
-            "Extract the email address.",
-        )
-        .start()
-        .await
+        ctx.structured_completion::<Contact>("Extract the email address.")
+            .start()
+            .await
     });
 
     let err = match err {

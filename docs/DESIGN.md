@@ -293,8 +293,8 @@ abandoned, `OwnedLease::drop()` releases the reserved capacity by recording zero
 
 There are now two completion-style APIs:
 
-- `Lutum::completion(model, prompt)` — raw text completion builder
-- `Lutum::structured_completion::<O>(model, prompt)` — prompt-based structured output builder
+- `Lutum::completion(prompt)` — raw text completion builder
+- `Lutum::structured_completion::<O>(prompt)` — prompt-based structured output builder
 
 Both return executable builders with the same inline request-metadata style as turn builders:
 
@@ -308,6 +308,9 @@ Both return executable builders with the same inline request-metadata style as t
 Internally these builders still compile into `CompletionRequest` /
 `StructuredCompletionRequest<O>` and stream `CompletionEvent` /
 `StructuredCompletionEvent<O>`.
+
+Like turn builders, the model is selected by the adapter's configured default plus request hooks,
+not by a per-request `ModelName` argument.
 
 Unlike turn-based execution, neither completion API produces a `CommittedTurn` or integrates with
 the transcript model.

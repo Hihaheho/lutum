@@ -4,7 +4,7 @@ use lutum_protocol::{
     NoTools, RequestBudget, RequestExtensions,
     conversation::ModelInput,
     llm::{
-        CompletionEventStream, CompletionOptions, CompletionRequest, GenerationParams, ModelName,
+        CompletionEventStream, CompletionOptions, CompletionRequest, GenerationParams,
         StructuredCompletionEventStream, StructuredCompletionRequest,
         StructuredTurn as ProtocolStructuredTurn,
         StructuredTurnEventStream as ProtocolStructuredTurnEventStream, Temperature,
@@ -643,11 +643,11 @@ pub struct Completion<'a> {
 }
 
 impl<'a> Completion<'a> {
-    pub(crate) fn new(lutum: &'a Lutum, model: ModelName, prompt: impl Into<String>) -> Self {
+    pub(crate) fn new(lutum: &'a Lutum, prompt: impl Into<String>) -> Self {
         Self {
             lutum,
             extensions: RequestExtensions::new(),
-            request: CompletionRequest::new(model, prompt),
+            request: CompletionRequest::new(prompt),
         }
     }
 
@@ -742,11 +742,11 @@ impl<'a, O> StructuredCompletion<'a, O>
 where
     O: StructuredOutput,
 {
-    pub(crate) fn new(lutum: &'a Lutum, model: ModelName, prompt: impl Into<String>) -> Self {
+    pub(crate) fn new(lutum: &'a Lutum, prompt: impl Into<String>) -> Self {
         Self {
             lutum,
             extensions: RequestExtensions::new(),
-            request: StructuredCompletionRequest::new(model, prompt),
+            request: StructuredCompletionRequest::new(prompt),
         }
     }
 
