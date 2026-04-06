@@ -10,10 +10,8 @@ use async_trait::async_trait;
 use lutum::{
     HookRegistry, Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
 };
-use lutum_eval::{
-    Probe, ProbeContext, ProbeDecision, ProbeDispatchHook, ProbeDispatcher, ProbeHookSlot,
-    ProbeRunError,
-};
+use lutum_eval::{Probe, ProbeContext, ProbeDecision, ProbeDispatcher, ProbeRunError};
+use lutum_eval::register_probe_hook;
 use tracing::instrument::WithSubscriber as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -32,106 +30,6 @@ type Validation = Result<(), &'static str>;
 #[lutum::def_hook(singleton)]
 async fn validate_step(_llm: &Lutum, _step: &str) -> Validation {
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// ProbeHookSlot + ProbeDispatchHook impls for the three test hook slots.
-//
-// These are written once per slot (not once per probe). Each ProbeDispatchHook
-// impl routes hook calls through the probe's event loop; the matching
-// ProbeHookSlot impl lets probes use `cx.register_hook::<Slot>()` with no
-// further boilerplate. ProbeHandle / ProbeDispatcher never appear in probe
-// or hook-implementation code.
-// ---------------------------------------------------------------------------
-
-#[async_trait]
-impl<P> RewriteNumberHook for ProbeDispatchHook<P, RewriteNumber>
-where
-    P: Probe + StatefulRewriteNumberHook + 'static,
-    P::Score: Send + 'static,
-    P::Artifact: Send + 'static,
-    P::Error: Send + 'static,
-{
-    async fn call(&self, ctx: &Lutum, args: RewriteNumberArgs) -> usize {
-        let ctx = ctx.clone();
-        self.dispatcher
-            .dispatch(move |probe| Box::pin(async move { probe.call_mut(&ctx, args).await }))
-            .await
-            .expect("probe dispatcher should stay alive")
-    }
-}
-
-impl<P> ProbeHookSlot<P> for RewriteNumber
-where
-    P: Probe + StatefulRewriteNumberHook + 'static,
-    P::Score: Send + 'static,
-    P::Artifact: Send + 'static,
-    P::Error: Send + 'static,
-{
-    fn register(cx: &mut ProbeContext<'_, P>) {
-        let dispatcher = cx.dispatcher();
-        cx.update_hooks(|h| h.register_rewrite_number(ProbeDispatchHook::new(dispatcher)));
-    }
-}
-
-#[async_trait]
-impl<P> DecorateLabelHook for ProbeDispatchHook<P, DecorateLabel>
-where
-    P: Probe + StatefulDecorateLabelHook + 'static,
-    P::Score: Send + 'static,
-    P::Artifact: Send + 'static,
-    P::Error: Send + 'static,
-{
-    async fn call(&self, ctx: &Lutum, args: DecorateLabelArgs) -> String {
-        let ctx = ctx.clone();
-        self.dispatcher
-            .dispatch(move |probe| Box::pin(async move { probe.call_mut(&ctx, args).await }))
-            .await
-            .expect("probe dispatcher should stay alive")
-    }
-}
-
-impl<P> ProbeHookSlot<P> for DecorateLabel
-where
-    P: Probe + StatefulDecorateLabelHook + 'static,
-    P::Score: Send + 'static,
-    P::Artifact: Send + 'static,
-    P::Error: Send + 'static,
-{
-    fn register(cx: &mut ProbeContext<'_, P>) {
-        let dispatcher = cx.dispatcher();
-        cx.update_hooks(|h| h.register_decorate_label(ProbeDispatchHook::new(dispatcher)));
-    }
-}
-
-#[async_trait]
-impl<P> ValidateStepHook for ProbeDispatchHook<P, ValidateStep>
-where
-    P: Probe + StatefulValidateStepHook + 'static,
-    P::Score: Send + 'static,
-    P::Artifact: Send + 'static,
-    P::Error: Send + 'static,
-{
-    async fn call(&self, ctx: &Lutum, args: ValidateStepArgs) -> Validation {
-        let ctx = ctx.clone();
-        self.dispatcher
-            .dispatch(move |probe| Box::pin(async move { probe.call_mut(&ctx, args).await }))
-            .await
-            .expect("probe dispatcher should stay alive")
-    }
-}
-
-impl<P> ProbeHookSlot<P> for ValidateStep
-where
-    P: Probe + StatefulValidateStepHook + 'static,
-    P::Score: Send + 'static,
-    P::Artifact: Send + 'static,
-    P::Error: Send + 'static,
-{
-    fn register(cx: &mut ProbeContext<'_, P>) {
-        let dispatcher = cx.dispatcher();
-        cx.update_hooks(|h| h.register_validate_step(ProbeDispatchHook::new(dispatcher)));
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,8 +59,8 @@ impl Probe for TimelineProbe {
     type Error = Infallible;
 
     fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        cx.register_hook::<RewriteNumber>();
-        cx.register_hook::<DecorateLabel>();
+        register_probe_hook!(cx, RewriteNumber);
+        register_probe_hook!(cx, DecorateLabel);
     }
 
     fn on_trace_event(
@@ -327,7 +225,7 @@ impl Probe for HookErrorProbe {
     type Error = Infallible;
 
     fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        cx.register_hook::<ValidateStep>();
+        register_probe_hook!(cx, ValidateStep);
     }
 
     fn on_trace_event(

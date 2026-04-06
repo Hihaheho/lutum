@@ -2,7 +2,13 @@ use std::future::Future;
 
 use async_trait::async_trait;
 
+mod macros;
 mod probe;
+
+/// Re-exported so `register_probe_hook!` can use `$crate::paste::paste!` without
+/// requiring users to add `paste` to their own `Cargo.toml`.
+#[doc(hidden)]
+pub use paste;
 
 pub use crate::probe::{
     Probe, ProbeContext, ProbeDecision, ProbeDispatchError, ProbeDispatchFuture, ProbeDispatcher,

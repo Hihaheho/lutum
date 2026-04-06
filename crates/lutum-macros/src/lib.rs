@@ -510,6 +510,11 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
         }
         other => other.clone(),
     };
+    // The owned inner type for Fn(CtxInner, XxxArgs) blanket (strips the leading `&`).
+    let ctx_inner_ty: Type = match &ctx_ty {
+        Type::Reference(r) => *r.elem.clone(),
+        other => other.clone(),
+    };
 
     item_fn.vis = syn::Visibility::Inherited;
     item_fn.sig.ident = default_fn_ident.clone();
@@ -826,6 +831,43 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
             } else {
                 quote! { F: Fn(#args_struct_ident) -> __Fut + Send + Sync }
             };
+            // Second blanket: Fn(CtxInner, XxxArgs) -> Fut — lets callers receive an owned
+            // clone of the context alongside args (useful for probe dispatch closures).
+            // Uses a (PhantomData<fn() -> CtxInner>, F) newtype to avoid conflicting with
+            // the F: Fn(XxxArgs) blanket above (different Self types, no overlap).
+            // Only generated for Lutum-ctx hooks because ctx.clone() requires CtxInner: Clone,
+            // and RequestExtensions does not implement Clone.
+            let ctx_fn_blanket = if is_lutum_hook {
+                let ctx_fn_bound = if trait_has_last {
+                    quote! { F: Fn(#ctx_inner_ty, #args_struct_ident, ::std::option::Option<#output_ty>) -> __Fut + Send + Sync }
+                } else {
+                    quote! { F: Fn(#ctx_inner_ty, #args_struct_ident) -> __Fut + Send + Sync }
+                };
+                let ctx_fn_call = if trait_has_last {
+                    quote! { (self.1)(#ctx_ident.clone(), args, last).await }
+                } else {
+                    quote! { (self.1)(#ctx_ident.clone(), args).await }
+                };
+                quote! {
+                    #[allow(dead_code)]
+                    #[::async_trait::async_trait]
+                    impl<F, __Fut> #hook_trait_ident for (::std::marker::PhantomData<fn() -> #ctx_inner_ty>, F)
+                    where
+                        #ctx_fn_bound,
+                        __Fut: ::std::future::Future<Output = #output_ty> + Send + 'static,
+                    {
+                        async fn call(
+                            &self,
+                            #ctx_ident: #ctx_ty,
+                            #(#hook_trait_args,)*
+                        ) -> #output_ty {
+                            #ctx_fn_call
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
             quote! {
                 #[allow(dead_code)]
                 #[::async_trait::async_trait]
@@ -842,6 +884,8 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
                         #fn_impl_call
                     }
                 }
+
+                #ctx_fn_blanket
             }
         };
         quote! { #struct_def #fn_impl }
