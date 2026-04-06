@@ -3,18 +3,18 @@ use std::sync::Arc;
 use lutum::*;
 
 #[def_hook(fallback)]
-async fn validate_prompt(_ctx: &Context, _prompt: &str) -> Result<(), String> {
+async fn validate_prompt(_ctx: &Lutum, _prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
 #[def_hook(fallback)]
-async fn validate_output(_ctx: &Context, _output: &str) -> Result<(), String> {
+async fn validate_output(_ctx: &Lutum, _output: &str) -> Result<(), String> {
     Ok(())
 }
 
 #[hook(ValidatePrompt)]
 async fn reject_empty_prompt(
-    _ctx: &Context,
+    _ctx: &Lutum,
     prompt: &str,
     last: Option<Result<(), String>>,
 ) -> Result<(), String> {
@@ -31,7 +31,7 @@ async fn reject_empty_prompt(
 
 #[hook(ValidateOutput)]
 async fn block_dangerous_output(
-    _ctx: &Context,
+    _ctx: &Lutum,
     output: &str,
     last: Option<Result<(), String>>,
 ) -> Result<(), String> {
@@ -46,8 +46,8 @@ async fn block_dangerous_output(
     }
 }
 
-async fn ask(ctx: &Context, system: &str, prompt: &str) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone());
+async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> {
+    let mut session = Session::new(llm.clone());
     session.push_system(system);
     session.push_user(prompt);
     let result = session.text_turn().collect().await?;
@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
     let hooks = HookRegistry::new()
         .register_validate_prompt(RejectEmptyPrompt)
         .register_validate_output(BlockDangerousOutput);
-    let ctx = Context::with_hooks(
+    let llm = Lutum::with_hooks(
         Arc::new(
             OpenAiAdapter::new(token)
                 .with_base_url(endpoint)
@@ -75,16 +75,16 @@ async fn main() -> anyhow::Result<()> {
         hooks,
     );
 
-    ctx.validate_prompt(prompt)
+    llm.validate_prompt(prompt)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     let output = ask(
-        &ctx,
+        &llm,
         "You are a shell expert. Output only the command, nothing else.",
         prompt,
     )
     .await?;
-    ctx.validate_output(&output)
+    llm.validate_output(&output)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     println!("{output}");

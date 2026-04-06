@@ -3,12 +3,12 @@ use std::sync::Arc;
 use lutum::*;
 
 async fn ask(
-    ctx: &Context,
+    llm: &Lutum,
     system: Option<&str>,
     prompt: &str,
     temperature: Option<Temperature>,
 ) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone());
+    let mut session = Session::new(llm.clone());
     if let Some(system) = system {
         session.push_system(system);
     }
@@ -36,11 +36,11 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let llm = Lutum::new(Arc::new(adapter), budget);
     let mut candidates = Vec::new();
 
     for _ in 0..3 {
-        candidates.push(ask(&ctx, None, "Suggest ONE name for a Rust async runtime library. Output only the name, nothing else.", Some(Temperature::try_from(1.0_f32)?)).await?);
+        candidates.push(ask(&llm, None, "Suggest ONE name for a Rust async runtime library. Output only the name, nothing else.", Some(Temperature::try_from(1.0_f32)?)).await?);
     }
 
     let options = candidates
@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         .join("\n");
     println!("Candidates:\n{options}\n");
 
-    let judge = ask(&ctx, Some("You are judging library names. Pick the best one based on: memorable, pronounceable, Rust-themed."), &format!("{options}\nWhich is best and why?"), None).await?;
+    let judge = ask(&llm, Some("You are judging library names. Pick the best one based on: memorable, pronounceable, Rust-themed."), &format!("{options}\nWhich is best and why?"), None).await?;
     println!("Judge:\n{judge}");
     Ok(())
 }

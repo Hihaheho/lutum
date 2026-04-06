@@ -7,8 +7,8 @@ const EVALUATE: &str =
     "Is this tagline catchy and memorable? Reply with YES or NO and one sentence why.";
 const REFLECT: &str = "What should be done differently to make the tagline catchier? One sentence.";
 
-async fn ask(ctx: &Context, system: &str, prompt: &str) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone());
+async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> {
+    let mut session = Session::new(llm.clone());
     session.push_system(system);
     session.push_user(prompt);
     let result = session.text_turn().collect().await?;
@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let llm = Lutum::new(Arc::new(adapter), budget);
     let mut memory = String::new();
 
     for round in 1..=3 {
@@ -34,10 +34,10 @@ async fn main() -> anyhow::Result<()> {
         } else {
             format!("Previous reflection: {memory}\nWrite the tagline.")
         };
-        let tagline = ask(&ctx, WRITE, &prompt).await?;
+        let tagline = ask(&llm, WRITE, &prompt).await?;
         println!("Round {round} tagline: {tagline}");
 
-        let evaluation = ask(&ctx, EVALUATE, &tagline).await?;
+        let evaluation = ask(&llm, EVALUATE, &tagline).await?;
         println!("Evaluation: {evaluation}");
         if evaluation
             .trim_start()
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let reflect_prompt = format!("Tagline: {tagline}\nEvaluation: {evaluation}");
-        memory = ask(&ctx, REFLECT, &reflect_prompt).await?;
+        memory = ask(&llm, REFLECT, &reflect_prompt).await?;
         println!("Reflection: {memory}\n");
     }
 

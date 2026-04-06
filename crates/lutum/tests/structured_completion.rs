@@ -36,7 +36,7 @@ fn structured_completion_collects_structured_output() {
     );
     let adapter = Arc::new(adapter);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = lutum::Context::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
+    let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
 
     let result = block_on(async {
         ctx.structured_completion::<Contact>(
@@ -77,7 +77,7 @@ fn structured_completion_collects_refusal() {
     );
     let adapter = Arc::new(adapter);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = lutum::Context::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
+    let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
 
     let result = block_on(async {
         ctx.structured_completion::<Contact>(
@@ -115,7 +115,7 @@ fn structured_completion_requires_semantic_output() {
     );
     let adapter = Arc::new(adapter);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = lutum::Context::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
+    let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
 
     let err = block_on(async {
         ctx.structured_completion::<Contact>(
@@ -139,7 +139,7 @@ fn structured_completion_requires_semantic_output() {
 #[test]
 fn context_new_does_not_enable_structured_completion() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = lutum::Context::new(Arc::new(MockLlmAdapter::new()), budget);
+    let ctx = lutum::Lutum::new(Arc::new(MockLlmAdapter::new()), budget);
 
     let err = block_on(async {
         ctx.structured_completion::<Contact>(

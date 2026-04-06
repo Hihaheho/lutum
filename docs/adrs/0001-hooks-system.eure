@@ -31,8 +31,8 @@ Two constraints remained non-negotiable:
 
 1. The library must never own a loop. Hooks are call points in user code, not
    lifecycle interceptors wired into an internal agent runtime.
-2. Hook storage must not live on `Context` as a global registry. It lives in a
-   separate `HookRegistry` passed to `Context::with_hooks`.
+2. Hook storage must not live on `Lutum` as a global registry. It lives in a
+   separate `HookRegistry` passed to `Lutum::with_hooks`.
 ```
 
 decision = ```markdown
@@ -40,7 +40,7 @@ Adopt `#[def_hook(always)]`, `#[def_hook(fallback)]`, and `#[def_hook(singleton)
 the canonical slot-definition syntax.
 
 `#[def_hook(...)]` is applied to an async function and generates the slot marker type,
-hook trait, `HookRegistry` extension methods, and `Context` forwarding method. The
+hook trait, `HookRegistry` extension methods, and `Lutum` forwarding method. The
 argument selects how the default body participates in execution:
 
 - `#[def_hook(always)]`: the default body always runs first, regardless of registration.
@@ -102,12 +102,12 @@ For `#[def_hook(singleton)]` slots:
 
 `HookRegistry` is a `HashMap<TypeId, Box<dyn Any + Send + Sync>>` where each slot stores
 either `Vec<Arc<dyn SlotHook>>` for chaining slots or `Arc<dyn SlotHook>` for singleton
-slots. It is built via generated `register_*` methods and passed to `Context::with_hooks`.
-`Context` stores it as `Arc<HookRegistry>` and exposes `hooks()` for direct registry access.
+slots. It is built via generated `register_*` methods and passed to `Lutum::with_hooks`.
+`Lutum` stores it as `Arc<HookRegistry>` and exposes `hooks()` for direct registry access.
 
 **Builtin hook**
 
-`select_model` is declared with `#[def_hook(singleton)]`. `Context` calls it before every
+`select_model` is declared with `#[def_hook(singleton)]`. `Lutum` calls it before every
 `text_turn` and `structured_turn`. The default implementation returns the configured
 model unchanged; registering a hook allows runtime model selection without modifying the
 adapter.
@@ -123,7 +123,7 @@ consequences = ```markdown
 - Slot definitions now read as definitions, and implementations still read as implementations:
   `#[def_hook(...)]` defines the slot, `#[hook(SlotType)]` implements it
 - Cross-cutting concerns such as validation, policy, and model selection can be defined
-  once and attached to any `Context` at construction time
+  once and attached to any `Lutum` at construction time
 - User code remains the explicit call site. The library invokes only the documented
   builtin `select_model` hook automatically
 - Default participation remains explicit at the definition site through the
@@ -133,7 +133,7 @@ consequences = ```markdown
   last-registration-wins semantics
 - Stateful hooks remain first-class: any type implementing the generated hook trait can
   be registered, not just closures
-- `Context::new` continues to work with an empty registry
+- `Lutum::new` continues to work with an empty registry
 - The adapter-level `ModelSelector` trait remains for adapter-internal routing; the
-  `select_model` hook still operates at the `Context` level before dispatch
+  `select_model` hook still operates at the `Lutum` level before dispatch
 ```

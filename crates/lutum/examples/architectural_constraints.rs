@@ -13,8 +13,8 @@ fn lint(output: &str) -> Option<String> {
     }
 }
 
-async fn ask(ctx: &Context, system: &str, prompt: &str) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone());
+async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> {
+    let mut session = Session::new(llm.clone());
     session.push_system(system);
     session.push_user(prompt);
     let result = session.text_turn().collect().await?;
@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
     let model = ModelName::new(&model_name)?;
-    let ctx = Context::new(
+    let llm = Lutum::new(
         Arc::new(
             OpenAiAdapter::new(token)
                 .with_base_url(endpoint)
@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
         "Define a Rust struct called `User` with fields: name (String), age (u32).".to_string();
 
     for attempt in 1..=2 {
-        let output = ask(&ctx, system, &prompt).await?;
+        let output = ask(&llm, system, &prompt).await?;
         match lint(&output) {
             None => {
                 println!("Lint passed");

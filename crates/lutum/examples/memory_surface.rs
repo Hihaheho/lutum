@@ -16,11 +16,11 @@ struct TaskState {
 }
 
 async fn update_task_state(
-    ctx: &Context,
+    llm: &Lutum,
     system: &str,
     prompt: impl Into<String>,
 ) -> anyhow::Result<TaskState> {
-    let mut session = Session::new(ctx.clone());
+    let mut session = Session::new(llm.clone());
     session.push_system(system);
     session.push_user(prompt);
     let result = session.structured_turn::<TaskState>().collect().await?;
@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
     let model = ModelName::new(&model_name)?;
-    let ctx = Context::new(
+    let llm = Lutum::new(
         Arc::new(
             OpenAiAdapter::new(token)
                 .with_base_url(endpoint)
@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     let task = "Implement a REST API endpoint for user registration";
 
     let session1_state = update_task_state(
-        &ctx,
+        &llm,
         system,
         format!(
             "Task: {task}\n\
@@ -116,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
 
     let saved_state = load_state()?;
     let session2_state = update_task_state(
-        &ctx,
+        &llm,
         system,
         format!(
             "You are resuming this task. Here is your current state:\n{}\n\

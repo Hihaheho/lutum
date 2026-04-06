@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use lutum::{Context, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions};
+use lutum::{Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions};
 use lutum_eval::{
     JudgeMetric, Metric, evaluate_collected, evaluate_live, judge_collected, judge_live,
 };
@@ -99,7 +99,7 @@ impl JudgeMetric for ArtifactJudge {
 
     async fn judge(
         &self,
-        _ctx: &Context,
+        _ctx: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
     ) -> Result<Self::Score, Self::Error> {
@@ -117,7 +117,7 @@ impl JudgeMetric for TraceJudge {
 
     async fn judge(
         &self,
-        _ctx: &Context,
+        _ctx: &Lutum,
         trace: &lutum_eval::TraceSnapshot,
         _artifact: &Self::Artifact,
     ) -> Result<Self::Score, Self::Error> {
@@ -135,7 +135,7 @@ impl JudgeMetric for CombinedJudge {
 
     async fn judge(
         &self,
-        _ctx: &Context,
+        _ctx: &Lutum,
         trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
     ) -> Result<Self::Score, Self::Error> {
@@ -167,7 +167,7 @@ impl JudgeMetric for DualModeMetric {
 
     async fn judge(
         &self,
-        _ctx: &Context,
+        _ctx: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
     ) -> Result<Self::Score, Self::Error> {
@@ -175,8 +175,8 @@ impl JudgeMetric for DualModeMetric {
     }
 }
 
-fn make_context() -> Context {
-    Context::new(
+fn make_context() -> Lutum {
+    Lutum::new(
         std::sync::Arc::new(MockLlmAdapter::new()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     )

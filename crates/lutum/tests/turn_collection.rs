@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 
 use lutum::{
-    AssistantTurnItem, AssistantTurnView, BudgetManager, CollectError, Context, EventHandler,
-    FinishReason, HandlerContext, HandlerDirective, InputMessageRole, MockError, MockLlmAdapter,
+    AssistantTurnItem, AssistantTurnView, BudgetManager, CollectError, EventHandler, FinishReason,
+    HandlerContext, HandlerDirective, InputMessageRole, Lutum, MockError, MockLlmAdapter,
     MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, OperationKind,
     RequestBudget, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
     StructuredTurnOutcome, TextTurnEventWithTools, TextTurnReducerWithTools,
@@ -109,7 +109,7 @@ fn text_turn_collects_assistant_output_and_tool_calls() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let ctx = Lutum::new(Arc::new(adapter), budget);
     let pending = block_on(weather_turn(ctx.text_turn(input())).start()).unwrap();
     let result = block_on(pending.collect()).unwrap();
 
@@ -146,7 +146,7 @@ fn structured_turn_collects_typed_output_and_appends_assistant_item() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let ctx = Lutum::new(Arc::new(adapter), budget);
     let result = block_on(ctx.structured_turn::<Summary>(input()).collect()).unwrap();
 
     assert!(matches!(
@@ -216,7 +216,7 @@ fn recorded_events_reduce_to_same_result_as_collect() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let ctx = Lutum::new(Arc::new(adapter), budget);
     let pending = block_on(weather_turn(ctx.text_turn(input())).start()).unwrap();
     let collected = block_on(pending.collect()).unwrap();
 
@@ -236,7 +236,7 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
         }),
         Ok(lutum::mock::RawTextTurnEvent::TextDelta { delta: "he".into() }),
     ]));
-    let ctx = Context::new(Arc::new(adapter), budget.clone());
+    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
     let pending = block_on(
         ctx.text_turn(input())
             .tools::<Tools>()
@@ -267,7 +267,7 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
 fn into_stream_releases_reserved_budget_without_collect() {
     let budget = test_budget();
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![]));
-    let ctx = Context::new(Arc::new(adapter), budget.clone());
+    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
     let pending = block_on(
         ctx.text_turn(input())
             .tools::<Tools>()
@@ -307,7 +307,7 @@ fn adapter_error_uses_recovered_usage_when_available() {
                 ..Usage::zero()
             },
         );
-    let ctx = Context::new(Arc::new(adapter), budget.clone());
+    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
     let pending = block_on(
         ctx.text_turn(input())
             .tools::<Tools>()
@@ -341,7 +341,7 @@ fn tool_call_deserialize_error_surfaces_as_execution_error() {
             arguments_json_delta: "{}".into(),
         }),
     ]));
-    let ctx = Context::new(Arc::new(adapter), budget.clone());
+    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
     let pending = block_on(
         weather_turn(ctx.text_turn(input()))
             .ext(UsageEstimate {
@@ -396,7 +396,7 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
                 },
             }),
         ]));
-    let ctx = Context::new(Arc::new(adapter), budget.clone());
+    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
     let pending = block_on(
         ctx.structured_turn::<Summary>(input())
             .ext(UsageEstimate {
@@ -430,7 +430,7 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
 fn request_budget_is_enforced_per_turn() {
     let adapter = MockLlmAdapter::new();
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let ctx = Lutum::new(Arc::new(adapter), budget);
 
     let err = match block_on(
         ctx.text_turn(input())

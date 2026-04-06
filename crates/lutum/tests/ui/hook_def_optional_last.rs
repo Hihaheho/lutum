@@ -1,7 +1,7 @@
-use lutum::{Context, HookRegistry};
+use lutum::{Lutum, HookRegistry};
 
 #[lutum::def_hook(always)]
-async fn validate_prompt(_ctx: &Context, prompt: &str) -> Result<(), String> {
+async fn validate_prompt(_ctx: &Lutum, prompt: &str) -> Result<(), String> {
     if prompt.trim().is_empty() {
         Err("empty prompt".into())
     } else {
@@ -11,7 +11,7 @@ async fn validate_prompt(_ctx: &Context, prompt: &str) -> Result<(), String> {
 
 #[lutum::hook(ValidatePrompt)]
 async fn reject_secrets(
-    _ctx: &Context,
+    _ctx: &Lutum,
     prompt: &str,
     last: Option<Result<(), String>>,
 ) -> Result<(), String> {
@@ -26,18 +26,18 @@ async fn reject_secrets(
 }
 
 #[lutum::def_hook(fallback)]
-async fn choose_label(_ctx: &Context, label: &str) -> String {
+async fn choose_label(_ctx: &Lutum, label: &str) -> String {
     format!("default:{label}")
 }
 
 #[lutum::hook(ChooseLabel)]
-async fn use_registered_label(_ctx: &Context, label: &str, last: Option<String>) -> String {
+async fn use_registered_label(_ctx: &Lutum, label: &str, last: Option<String>) -> String {
     assert!(last.is_none());
     format!("hook:{label}")
 }
 
 #[lutum::def_hook(singleton)]
-async fn select_label(_ctx: &Context, previous: Option<String>) -> String {
+async fn select_label(_ctx: &Lutum, previous: Option<String>) -> String {
     previous.unwrap_or_else(|| "default".into())
 }
 

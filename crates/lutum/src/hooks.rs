@@ -12,7 +12,7 @@
 //! use lutum::*;
 //!
 //! #[def_hook(always)]
-//! async fn validate_output(_ctx: &Context, output: &str) -> Result<(), String> {
+//! async fn validate_output(_ctx: &Lutum, output: &str) -> Result<(), String> {
 //!     if output.trim().is_empty() { Err("output must not be empty".into()) } else { Ok(()) }
 //! }
 //! ```
@@ -29,7 +29,7 @@
 //! - `ValidateOutput` - slot marker type
 //! - `ValidateOutputHook` - hook trait to implement
 //! - `ValidateOutputRegistryExt` - `register_validate_output` and `validate_output` on `HookRegistry`
-//! - `ValidateOutputContextExt` - `validate_output` on `Context` (only for `&Context` first-arg hooks)
+//! - `ValidateOutputLutumExt` - `validate_output` on `Lutum` (only for `&Lutum` first-arg hooks)
 //!
 //! ## Defining a named implementation
 //!
@@ -37,7 +37,7 @@
 //!
 //! ```rust,ignore
 //! #[hook(ValidateOutput)]
-//! async fn block_dangerous_output(_ctx: &Context, output: &str, last: Option<Result<(), String>>) -> Result<(), String> {
+//! async fn block_dangerous_output(_ctx: &Lutum, output: &str, last: Option<Result<(), String>>) -> Result<(), String> {
 //!     if let Some(Err(err)) = last { return Err(err); }
 //!     if output.contains("rm -rf") { Err("blocked dangerous command".into()) } else { Ok(()) }
 //! }
@@ -70,34 +70,34 @@
 //!     // or for mutable state:
 //!     // .register_validate_output(Stateful::new(MyMutableHook::default()));
 //!
-//! let ctx = Context::with_hooks(adapter, budget, hooks);
+//! let llm = Lutum::with_hooks(adapter, budget, hooks);
 //!
-//! // Explicit call via Context extension method:
-//! ctx.validate_output(&output).await?;
+//! // Explicit call via Lutum extension method:
+//! llm.validate_output(&output).await?;
 //! ```
 //!
 //! ## Hook kinds
 //!
-//! - **Core hooks** (`ctx: &Context` first arg): called by `Context` — provider-agnostic decisions
+//! - **Core hooks** (`llm: &Lutum` first arg): called by `Lutum` — provider-agnostic decisions
 //! - **Adapter-local hooks** (`extensions: &RequestExtensions` first arg): called by adapters
-//!   using the `&HookRegistry` passed from `Context` — provider-specific request shaping
+//!   using the `&HookRegistry` passed from `Lutum` — provider-specific request shaping
 //!
 //! ## Builtin adapter hooks
 //!
 //! Each adapter (`ClaudeAdapter`, `OpenAiAdapter`) defines its own model-selection and
 //! resolver hooks. Register them to override the adapter's default behaviour.
 //!
-//! `lutum` itself also defines `resolve_usage_estimate(&Context, &RequestExtensions,
+//! `lutum` itself also defines `resolve_usage_estimate(&Lutum, &RequestExtensions,
 //! OperationKind) -> UsageEstimate`. The default implementation reads a typed estimate from
 //! `RequestExtensions` and falls back to zero.
 
-use crate::{Context, OperationKind, RequestExtensions, budget::UsageEstimate};
+use crate::{Lutum, OperationKind, RequestExtensions, budget::UsageEstimate};
 
 pub use lutum_protocol::hooks::{HookReentrancyError, HookRegistry, Stateful};
 
 #[lutum_macros::def_hook(singleton)]
 pub async fn resolve_usage_estimate(
-    _ctx: &Context,
+    _ctx: &Lutum,
     extensions: &RequestExtensions,
     _kind: OperationKind,
 ) -> UsageEstimate {

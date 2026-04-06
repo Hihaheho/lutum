@@ -6,7 +6,7 @@ pub mod budget {
 
 mod builders;
 
-pub mod context;
+mod context;
 
 pub mod conversation {
     pub use lutum_protocol::conversation::*;
@@ -52,7 +52,7 @@ pub use builders::{
     TextTurnWithTools,
 };
 pub use context::{
-    CollectError, Context, ContextError, EventHandler, HandlerContext, HandlerDirective,
+    CollectError, EventHandler, HandlerContext, HandlerDirective, Lutum, LutumError,
     PendingCompletion, PendingStructuredCompletion, PendingStructuredTurn,
     PendingStructuredTurnWithTools, PendingTextTurn, PendingTextTurnWithTools,
     StructuredTurnPartial, StructuredTurnPartialWithTools,

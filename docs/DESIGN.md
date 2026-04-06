@@ -29,7 +29,7 @@ User code decides:
 
 ## Execution boundary
 
-`Context` is the only official execution boundary.
+`Lutum` is the only official execution boundary.
 
 That is where:
 
@@ -39,9 +39,9 @@ That is where:
 - streamed events are reduced into completed results
 
 Adapters are public because providers need an SPI boundary, but adapter-direct execution
-bypasses the library's execution contract. `Context::new(adapter, budget)` erases only
+bypasses the library's execution contract. `Lutum::new(adapter, budget)` erases only
 `dyn TurnAdapter` and `dyn UsageRecoveryAdapter`. Completion is wired explicitly through
-`Context::from_parts(turns, completion, recovery, budget)`, which allows mixing providers —
+`Lutum::from_parts(turns, completion, recovery, budget)`, which allows mixing providers —
 for example Claude turns with an OpenAI-compatible completion adapter.
 
 ## Canonical request surface
@@ -177,7 +177,7 @@ library's primary job.
 It owns:
 
 - a `ModelInput` (which contains `Turn` items for committed history)
-- an execution `Context`
+- an execution `Lutum`
 - optional turn defaults
 
 It deliberately does not own:
@@ -221,8 +221,8 @@ Execution config is shared across text and structured turns:
 
 Public builders in `lutum`:
 
-- `Session::text_turn()` / `Context::text_turn(input)` return `TextTurn`
-- `Session::structured_turn::<O>()` / `Context::structured_turn::<O>(input)` return
+- `Session::text_turn()` / `Lutum::text_turn(input)` return `TextTurn`
+- `Session::structured_turn::<O>()` / `Lutum::structured_turn::<O>(input)` return
   `StructuredTurn<O>`
 - `.tools::<T>()` upgrades those into `TextTurnWithTools<T>` /
   `StructuredTurnWithTools<T, O>`
@@ -261,7 +261,7 @@ Selectors also retain a typed path back to `ToolDef`:
 
 Execution is streaming-first.
 
-- start a turn with `Context` or `Session`
+- start a turn with `Lutum` or `Session`
 - stream typed events via `.stream().await?`
 - or collect through `.collect()` / `.collect_with(...)`
 
@@ -293,8 +293,8 @@ abandoned, `OwnedLease::drop()` releases the reserved capacity by recording zero
 
 There are now two completion-style APIs:
 
-- `Context::completion(model, prompt)` — raw text completion builder
-- `Context::structured_completion::<O>(model, prompt)` — prompt-based structured output builder
+- `Lutum::completion(model, prompt)` — raw text completion builder
+- `Lutum::structured_completion::<O>(model, prompt)` — prompt-based structured output builder
 
 Both return executable builders with the same inline request-metadata style as turn builders:
 
@@ -302,7 +302,7 @@ Both return executable builders with the same inline request-metadata style as t
 - `.temperature(...)`, `.max_output_tokens(...)`, `.budget(...)`
 - `.collect()`, `.collect_with(...)`, `.stream()`
 
-`Context::structured_completion::<O>(...)` also supports `.system(...)`, `.seed(...)`, and
+`Lutum::structured_completion::<O>(...)` also supports `.system(...)`, `.seed(...)`, and
 `.generation_config(...)`.
 
 Internally these builders still compile into `CompletionRequest` /
@@ -312,11 +312,11 @@ Internally these builders still compile into `CompletionRequest` /
 Unlike turn-based execution, neither completion API produces a `CommittedTurn` or integrates with
 the transcript model.
 
-`Context::new(...)` does not configure a completion adapter. Calling either completion API on that
-context returns an error; use `Context::from_parts(...)` when completion is needed.
+`Lutum::new(...)` does not configure a completion adapter. Calling either completion API on that
+context returns an error; use `Lutum::from_parts(...)` when completion is needed.
 
 If you need transcript/session/replay but still do not need tools, use
-`Session::structured_turn::<O>()` or `Context::structured_turn::<O>(input)`.
+`Session::structured_turn::<O>()` or `Lutum::structured_turn::<O>(input)`.
 
 Budget reservation, tracing, and usage recovery follow the same path as turn execution.
 
@@ -341,7 +341,7 @@ canonical request faithfully, that remains an adapter limitation.
 - `lutum-openai` — OpenAI Responses API plus OpenAI-compatible raw completion support
 - `lutum-claude` — Anthropic Claude Messages API with lossless thinking-block replay
 - `lutum-openrouter` — `OpenRouterGenerationClient` implements `UsageRecoveryAdapter`
-  via `GET /api/v1/generation`; can be composed with any `TurnAdapter` via `Context::from_parts`
+  via `GET /api/v1/generation`; can be composed with any `TurnAdapter` via `Lutum::from_parts`
 
 ## RequestExtensions
 
@@ -372,7 +372,7 @@ Each adapter also accepts a provider-specific `FallbackSerializer` for serializi
 
 ### Core owns
 
-- `Context` — canonical execution boundary; holds `TurnAdapter`, an explicitly supplied `CompletionAdapter`, and `UsageRecoveryAdapter`
+- `Lutum` — canonical execution boundary; holds `TurnAdapter`, an explicitly supplied `CompletionAdapter`, and `UsageRecoveryAdapter`
 - `ModelInput` / `ModelInputItem` — canonical request algebra
 - `TurnView` / `ItemView` — transcript view traits
 - `BudgetManager` / `OwnedLease` — budget lifecycle

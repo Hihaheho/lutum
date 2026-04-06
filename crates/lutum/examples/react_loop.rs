@@ -144,8 +144,8 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let llm = Lutum::new(Arc::new(adapter), budget);
+    let mut session = Session::new(llm);
 
     session.push_system(
         "You are investigating an in-memory database through tools. \

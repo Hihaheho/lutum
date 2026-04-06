@@ -14,11 +14,11 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(ModelName::new(&model_name)?);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let llm = Lutum::new(Arc::new(adapter), budget);
     let input = ModelInput::new()
         .user("Tell a very short story about a robot learning to bake in 2-3 sentences.");
 
-    let mut stream = ctx.text_turn(input).stream().await?;
+    let mut stream = llm.text_turn(input).stream().await?;
     let start = Instant::now();
 
     while let Some(event) = stream.next().await {

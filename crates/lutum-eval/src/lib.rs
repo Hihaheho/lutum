@@ -22,7 +22,7 @@ pub trait Metric {
 }
 
 /// Async evaluation over a trace snapshot and a strongly typed artifact with
-/// access to a [`lutum::Context`].
+/// access to a [`lutum::Lutum`].
 ///
 /// Judge metrics are intended for model-based scoring and other evaluation
 /// flows that need to execute through lutum at scoring time.
@@ -34,7 +34,7 @@ pub trait JudgeMetric {
 
     async fn judge(
         &self,
-        ctx: &lutum::Context,
+        ctx: &lutum::Lutum,
         trace: &TraceSnapshot,
         artifact: &Self::Artifact,
     ) -> Result<Self::Score, Self::Error>;
@@ -54,7 +54,7 @@ where
 /// Judge an existing [`Collected`] value with a [`JudgeMetric`].
 pub async fn judge_collected<M>(
     metric: &M,
-    ctx: &lutum::Context,
+    ctx: &lutum::Lutum,
     collected: &Collected<M::Artifact>,
 ) -> Result<M::Score, M::Error>
 where
@@ -82,7 +82,7 @@ where
 /// trace/artifact pair with `metric`.
 pub async fn judge_live<M, F>(
     metric: &M,
-    ctx: &lutum::Context,
+    ctx: &lutum::Lutum,
     future: F,
 ) -> Result<M::Score, M::Error>
 where

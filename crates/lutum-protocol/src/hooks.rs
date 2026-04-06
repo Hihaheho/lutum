@@ -10,7 +10,7 @@ use thiserror::Error;
 /// Storage for hook chains.
 ///
 /// Build a registry with [`HookRegistry::new`], register handlers with the
-/// generated `register_*` methods, then pass it to [`Context::with_hooks`].
+/// generated `register_*` methods, then pass it to [`lutum::Lutum::with_hooks`].
 pub struct HookRegistry {
     slots: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }

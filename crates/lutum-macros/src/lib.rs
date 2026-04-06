@@ -496,10 +496,10 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
     let stateful_hook_trait_ident = format_ident!("Stateful{slot_ident}Hook");
     let dyn_hook_trait_ident = format_ident!("__LutumDyn{slot_ident}Hook");
     let registry_ext_ident = format_ident!("{slot_ident}RegistryExt");
-    let context_ext_ident = format_ident!("{slot_ident}ContextExt");
+    let lutum_ext_ident = format_ident!("{slot_ident}LutumExt");
     let default_fn_ident = format_ident!("__lutum_hook_default_{}", fn_ident);
     let register_fn_ident = format_ident!("register_{}", fn_ident);
-    let is_context_hook = is_context_ref(&ctx_ty);
+    let is_lutum_hook = is_lutum_ref(&ctx_ty);
     // For the registry ext method, the first-arg type needs a lifetime annotation if it's a reference
     let ctx_ty_with_lifetime: Type = match &ctx_ty {
         Type::Reference(r) => {
@@ -726,10 +726,10 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
         },
     };
 
-    let context_ext = if is_context_hook {
+    let lutum_ext = if is_lutum_hook {
         quote! {
             #[allow(dead_code)]
-            #vis trait #context_ext_ident {
+            #vis trait #lutum_ext_ident {
                 fn #fn_ident<'a>(
                     &'a self,
                     #(#context_args,)*
@@ -737,7 +737,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
                 #clone_where;
             }
 
-            impl #context_ext_ident for ::lutum::Context {
+            impl #lutum_ext_ident for ::lutum::Lutum {
                 fn #fn_ident<'a>(
                     &'a self,
                     #(#context_args,)*
@@ -880,7 +880,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
             }
         }
 
-        #context_ext
+        #lutum_ext
     }
 }
 
@@ -977,14 +977,14 @@ fn analyze_hook_signature(
     if inputs.is_empty() {
         return Err(syn::Error::new_spanned(
             &item_fn.sig.inputs,
-            "hook attributes require a shared-reference first argument (e.g. `ctx: &Context`)",
+            "hook attributes require a shared-reference first argument (e.g. `llm: &Lutum`)",
         ));
     }
 
     let Some(FnArg::Typed(ctx_arg)) = inputs.first().copied() else {
         return Err(syn::Error::new_spanned(
             inputs.first().expect("hook must have inputs"),
-            "first hook argument must be a typed reference (e.g. `ctx: &Context` or `extensions: &RequestExtensions`)",
+            "first hook argument must be a typed reference (e.g. `llm: &Lutum` or `extensions: &RequestExtensions`)",
         ));
     };
     let Pat::Ident(PatIdent {
@@ -999,7 +999,7 @@ fn analyze_hook_signature(
     let Type::Reference(_) = ctx_arg.ty.as_ref() else {
         return Err(syn::Error::new_spanned(
             &ctx_arg.ty,
-            "first hook argument must be a shared reference (e.g. `&Context` or `&RequestExtensions`)",
+            "first hook argument must be a shared reference (e.g. `&Lutum` or `&RequestExtensions`)",
         ));
     };
     let ctx_ident = ctx_ident.clone();
@@ -1414,7 +1414,7 @@ fn wrapper_ident_for_type(ty: &Type) -> Ident {
     }
 }
 
-fn is_context_ref(ty: &Type) -> bool {
+fn is_lutum_ref(ty: &Type) -> bool {
     let Type::Reference(reference) = ty else {
         return false;
     };
@@ -1428,7 +1428,7 @@ fn is_context_ref(ty: &Type) -> bool {
         .path
         .segments
         .last()
-        .is_some_and(|segment| segment.ident == "Context")
+        .is_some_and(|segment| segment.ident == "Lutum")
 }
 
 fn option_inner_type(ty: &Type) -> Option<&Type> {

@@ -33,8 +33,8 @@ fn search<'a>(corpus: &[(&'a str, &'a str)], query: &str) -> Vec<(&'a str, &'a s
         .collect()
 }
 
-async fn ask(ctx: &Context, system: &str, user: String) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone());
+async fn ask(llm: &Lutum, system: &str, user: String) -> anyhow::Result<String> {
+    let mut session = Session::new(llm.clone());
     session.push_system(system);
     session.push_user(user);
     let result = session.text_turn().collect().await?;
@@ -52,10 +52,10 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let llm = Lutum::new(Arc::new(adapter), budget);
 
     let keywords = ask(
-        &ctx,
+        &llm,
         "Extract 2-3 search keywords from the question. Output only the keywords separated by spaces.",
         question.into(),
     )
@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         .collect::<Vec<_>>()
         .join("\n");
     let answer = ask(
-        &ctx,
+        &llm,
         "Answer using only the provided evidence. Cite the document title.",
         format!("Question: {question}\n\nEvidence:\n{docs}"),
     )

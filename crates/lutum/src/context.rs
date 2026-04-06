@@ -38,12 +38,12 @@ use lutum_protocol::{
 
 use lutum_protocol::hooks::HookRegistry;
 
-use crate::hooks::ResolveUsageEstimateContextExt;
+use crate::hooks::ResolveUsageEstimateLutumExt;
 
-pub type ContextError = AgentError;
+pub type LutumError = AgentError;
 
 #[derive(Debug, Error)]
-#[error("completion adapter is not configured; use Context::from_parts(...) to provide one")]
+#[error("completion adapter is not configured; use Lutum::from_parts(...) to provide one")]
 struct MissingCompletionAdapter;
 
 #[derive(Clone, Default)]
@@ -71,7 +71,7 @@ impl CompletionAdapter for UnsupportedCompletionAdapter {
 }
 
 #[derive(Clone)]
-pub struct Context {
+pub struct Lutum {
     budget: Arc<dyn BudgetManager>,
     turns: Arc<dyn TurnAdapter>,
     completion: Arc<dyn CompletionAdapter>,
@@ -79,7 +79,7 @@ pub struct Context {
     hooks: Arc<HookRegistry>,
 }
 
-impl Context {
+impl Lutum {
     pub fn new<T>(adapter: Arc<T>, budget: impl BudgetManager + 'static) -> Self
     where
         T: TurnAdapter + UsageRecoveryAdapter + 'static,
@@ -138,14 +138,14 @@ impl Context {
     }
 
     pub fn text_turn(&self, input: ModelInput) -> crate::builders::TextTurn<'_> {
-        crate::builders::TextTurn::from_context(self, input)
+        crate::builders::TextTurn::from_lutum(self, input)
     }
 
     pub fn structured_turn<O>(&self, input: ModelInput) -> crate::builders::StructuredTurn<'_, O>
     where
         O: StructuredOutput,
     {
-        crate::builders::StructuredTurn::from_context(self, input)
+        crate::builders::StructuredTurn::from_lutum(self, input)
     }
 
     pub fn completion(
@@ -408,13 +408,13 @@ where
     reducer: StructuredCompletionReducer<O>,
 }
 
-impl Context {
+impl Lutum {
     pub(crate) async fn run_text_turn(
         &self,
         extensions: RequestExtensions,
         input: ModelInput,
         turn: ProtocolTextTurn<NoTools>,
-    ) -> Result<PendingTextTurn, ContextError> {
+    ) -> Result<PendingTextTurn, LutumError> {
         input.validate()?;
         let estimate = self
             .resolve_usage_estimate(&extensions, OperationKind::TextTurn)
@@ -457,7 +457,7 @@ impl Context {
         extensions: RequestExtensions,
         input: ModelInput,
         turn: ProtocolTextTurn<T>,
-    ) -> Result<PendingTextTurnWithTools<T>, ContextError>
+    ) -> Result<PendingTextTurnWithTools<T>, LutumError>
     where
         T: Toolset,
     {
@@ -503,7 +503,7 @@ impl Context {
         extensions: RequestExtensions,
         input: ModelInput,
         turn: ProtocolStructuredTurn<NoTools, O>,
-    ) -> Result<PendingStructuredTurn<O>, ContextError>
+    ) -> Result<PendingStructuredTurn<O>, LutumError>
     where
         O: StructuredOutput,
     {
@@ -549,7 +549,7 @@ impl Context {
         extensions: RequestExtensions,
         input: ModelInput,
         turn: ProtocolStructuredTurn<T, O>,
-    ) -> Result<PendingStructuredTurnWithTools<T, O>, ContextError>
+    ) -> Result<PendingStructuredTurnWithTools<T, O>, LutumError>
     where
         T: Toolset,
         O: StructuredOutput,
@@ -595,7 +595,7 @@ impl Context {
         &self,
         extensions: RequestExtensions,
         request: CompletionRequest,
-    ) -> Result<PendingCompletion, ContextError> {
+    ) -> Result<PendingCompletion, LutumError> {
         let estimate = self
             .resolve_usage_estimate(&extensions, OperationKind::Completion)
             .await;
@@ -631,7 +631,7 @@ impl Context {
         &self,
         extensions: RequestExtensions,
         request: StructuredCompletionRequest<O>,
-    ) -> Result<PendingStructuredCompletion<O>, ContextError>
+    ) -> Result<PendingStructuredCompletion<O>, LutumError>
     where
         O: StructuredOutput,
     {

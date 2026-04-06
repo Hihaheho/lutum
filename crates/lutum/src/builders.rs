@@ -24,29 +24,28 @@ use lutum_protocol::{
 };
 
 use crate::{
-    CollectError, Context, ContextError, EventHandler, PendingCompletion,
-    PendingStructuredCompletion, PendingStructuredTurn, PendingStructuredTurnWithTools,
-    PendingTextTurn, PendingTextTurnWithTools, Session, StructuredStepOutcomeWithTools,
-    TextStepOutcomeWithTools,
+    CollectError, EventHandler, Lutum, LutumError, PendingCompletion, PendingStructuredCompletion,
+    PendingStructuredTurn, PendingStructuredTurnWithTools, PendingTextTurn,
+    PendingTextTurnWithTools, Session, StructuredStepOutcomeWithTools, TextStepOutcomeWithTools,
     context::{StructuredTurnPartial, StructuredTurnPartialWithTools},
 };
 
 enum TurnTarget<'a> {
-    Context { ctx: &'a Context, input: ModelInput },
+    Lutum { lutum: &'a Lutum, input: ModelInput },
     Session(&'a Session),
 }
 
 impl<'a> TurnTarget<'a> {
-    fn context(&self) -> &Context {
+    fn lutum(&self) -> &Lutum {
         match self {
-            Self::Context { ctx, .. } => ctx,
-            Self::Session(session) => session.context(),
+            Self::Lutum { lutum, .. } => lutum,
+            Self::Session(session) => session.lutum(),
         }
     }
 
     fn input(&self) -> ModelInput {
         match self {
-            Self::Context { input, .. } => input.clone(),
+            Self::Lutum { input, .. } => input.clone(),
             Self::Session(session) => session.snapshot_input(),
         }
     }
@@ -68,9 +67,9 @@ pub struct TextTurn<'a> {
 }
 
 impl<'a> TextTurn<'a> {
-    pub(crate) fn from_context(ctx: &'a Context, input: ModelInput) -> Self {
+    pub(crate) fn from_lutum(lutum: &'a Lutum, input: ModelInput) -> Self {
         Self {
-            target: TurnTarget::Context { ctx, input },
+            target: TurnTarget::Lutum { lutum, input },
             extensions: RequestExtensions::new(),
             turn: ProtocolTextTurn::new(),
         }
@@ -145,16 +144,16 @@ impl<'a> TextTurn<'a> {
         }
     }
 
-    pub async fn start(self) -> Result<PendingTextTurn, ContextError> {
+    pub async fn start(self) -> Result<PendingTextTurn, LutumError> {
         let mut turn = self.turn;
         self.target.apply_defaults(&mut turn.config);
         self.target
-            .context()
+            .lutum()
             .run_text_turn(self.extensions, self.target.input(), turn)
             .await
     }
 
-    pub async fn stream(self) -> Result<ProtocolTextTurnEventStream, ContextError> {
+    pub async fn stream(self) -> Result<ProtocolTextTurnEventStream, LutumError> {
         Ok(self.start().await?.into_stream())
     }
 
@@ -264,18 +263,18 @@ where
         self
     }
 
-    pub async fn start(self) -> Result<PendingTextTurnWithTools<T>, ContextError> {
+    pub async fn start(self) -> Result<PendingTextTurnWithTools<T>, LutumError> {
         let mut turn = self.turn;
         self.target.apply_defaults(&mut turn.config);
         self.target
-            .context()
+            .lutum()
             .run_text_turn_with_tools(self.extensions, self.target.input(), turn)
             .await
     }
 
     pub async fn stream(
         self,
-    ) -> Result<lutum_protocol::TextTurnEventStreamWithTools<T>, ContextError> {
+    ) -> Result<lutum_protocol::TextTurnEventStreamWithTools<T>, LutumError> {
         Ok(self.start().await?.into_stream())
     }
 
@@ -333,9 +332,9 @@ impl<'a, O> StructuredTurn<'a, O>
 where
     O: StructuredOutput,
 {
-    pub(crate) fn from_context(ctx: &'a Context, input: ModelInput) -> Self {
+    pub(crate) fn from_lutum(lutum: &'a Lutum, input: ModelInput) -> Self {
         Self {
-            target: TurnTarget::Context { ctx, input },
+            target: TurnTarget::Lutum { lutum, input },
             extensions: RequestExtensions::new(),
             turn: ProtocolStructuredTurn::new(),
         }
@@ -411,16 +410,16 @@ where
         }
     }
 
-    pub async fn start(self) -> Result<PendingStructuredTurn<O>, ContextError> {
+    pub async fn start(self) -> Result<PendingStructuredTurn<O>, LutumError> {
         let mut turn = self.turn;
         self.target.apply_defaults(&mut turn.config);
         self.target
-            .context()
+            .lutum()
             .run_structured_turn(self.extensions, self.target.input(), turn)
             .await
     }
 
-    pub async fn stream(self) -> Result<ProtocolStructuredTurnEventStream<O>, ContextError> {
+    pub async fn stream(self) -> Result<ProtocolStructuredTurnEventStream<O>, LutumError> {
         Ok(self.start().await?.into_stream())
     }
 
@@ -532,18 +531,18 @@ where
         self
     }
 
-    pub async fn start(self) -> Result<PendingStructuredTurnWithTools<T, O>, ContextError> {
+    pub async fn start(self) -> Result<PendingStructuredTurnWithTools<T, O>, LutumError> {
         let mut turn = self.turn;
         self.target.apply_defaults(&mut turn.config);
         self.target
-            .context()
+            .lutum()
             .run_structured_turn_with_tools(self.extensions, self.target.input(), turn)
             .await
     }
 
     pub async fn stream(
         self,
-    ) -> Result<lutum_protocol::StructuredTurnEventStreamWithTools<T, O>, ContextError> {
+    ) -> Result<lutum_protocol::StructuredTurnEventStreamWithTools<T, O>, LutumError> {
         Ok(self.start().await?.into_stream())
     }
 
@@ -638,15 +637,15 @@ where
 }
 
 pub struct Completion<'a> {
-    ctx: &'a Context,
+    lutum: &'a Lutum,
     extensions: RequestExtensions,
     request: CompletionRequest,
 }
 
 impl<'a> Completion<'a> {
-    pub(crate) fn new(ctx: &'a Context, model: ModelName, prompt: impl Into<String>) -> Self {
+    pub(crate) fn new(lutum: &'a Lutum, model: ModelName, prompt: impl Into<String>) -> Self {
         Self {
-            ctx,
+            lutum,
             extensions: RequestExtensions::new(),
             request: CompletionRequest::new(model, prompt),
         }
@@ -685,11 +684,13 @@ impl<'a> Completion<'a> {
         self
     }
 
-    pub async fn start(self) -> Result<PendingCompletion, ContextError> {
-        self.ctx.run_completion(self.extensions, self.request).await
+    pub async fn start(self) -> Result<PendingCompletion, LutumError> {
+        self.lutum
+            .run_completion(self.extensions, self.request)
+            .await
     }
 
-    pub async fn stream(self) -> Result<CompletionEventStream, ContextError> {
+    pub async fn stream(self) -> Result<CompletionEventStream, LutumError> {
         Ok(self.start().await?.into_stream())
     }
 
@@ -732,7 +733,7 @@ pub struct StructuredCompletion<'a, O>
 where
     O: StructuredOutput,
 {
-    ctx: &'a Context,
+    lutum: &'a Lutum,
     extensions: RequestExtensions,
     request: StructuredCompletionRequest<O>,
 }
@@ -741,9 +742,9 @@ impl<'a, O> StructuredCompletion<'a, O>
 where
     O: StructuredOutput,
 {
-    pub(crate) fn new(ctx: &'a Context, model: ModelName, prompt: impl Into<String>) -> Self {
+    pub(crate) fn new(lutum: &'a Lutum, model: ModelName, prompt: impl Into<String>) -> Self {
         Self {
-            ctx,
+            lutum,
             extensions: RequestExtensions::new(),
             request: StructuredCompletionRequest::new(model, prompt),
         }
@@ -792,13 +793,13 @@ where
         self
     }
 
-    pub async fn start(self) -> Result<PendingStructuredCompletion<O>, ContextError> {
-        self.ctx
+    pub async fn start(self) -> Result<PendingStructuredCompletion<O>, LutumError> {
+        self.lutum
             .run_structured_completion(self.extensions, self.request)
             .await
     }
 
-    pub async fn stream(self) -> Result<StructuredCompletionEventStream<O>, ContextError> {
+    pub async fn stream(self) -> Result<StructuredCompletionEventStream<O>, LutumError> {
         Ok(self.start().await?.into_stream())
     }
 

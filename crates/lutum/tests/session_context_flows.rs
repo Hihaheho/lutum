@@ -1,6 +1,6 @@
 use futures::executor::block_on;
 use lutum::{
-    Context, FinishReason, InputMessageRole, MockLlmAdapter, MockStructuredScenario,
+    FinishReason, InputMessageRole, Lutum, MockLlmAdapter, MockStructuredScenario,
     MockTextScenario, ModelInput, ModelInputItem, Session, SharedPoolBudgetManager,
     SharedPoolBudgetOptions, TextStepOutcomeWithTools, Usage,
 };
@@ -61,7 +61,7 @@ fn direct_context_text_turn_collects_without_session_helpers() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let ctx = Lutum::new(Arc::new(adapter), budget);
     let input = ModelInput::from_items(vec![ModelInputItem::text(
         InputMessageRole::User,
         "Run without session helpers.",
@@ -95,7 +95,7 @@ fn structured_session_turn_is_only_applied_after_commit() {
             }),
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = lutum::Context::new(Arc::new(adapter), budget);
+    let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
     let mut session = Session::new(ctx);
     session.push_user("Extract the email address.");
     let before_len = session.input().items().len();
@@ -144,7 +144,7 @@ fn session_commits_parallel_tool_results_in_order() {
         }),
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = lutum::Context::new(Arc::new(adapter), budget);
+    let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
     let mut session = Session::new(ctx);
     session.push_user("Get the weather and search for ramen.");
     let before_len = session.input().items().len();

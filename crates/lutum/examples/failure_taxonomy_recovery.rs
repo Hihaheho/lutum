@@ -18,8 +18,8 @@ struct RecoveryAction {
     reason: String,
 }
 
-async fn ask(ctx: &Context, system: &str, user: impl Into<String>) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone());
+async fn ask(llm: &Lutum, system: &str, user: impl Into<String>) -> anyhow::Result<String> {
+    let mut session = Session::new(llm.clone());
     session.push_system(system);
     session.push_user(user);
     let result = session.text_turn().collect().await?;
@@ -27,11 +27,11 @@ async fn ask(ctx: &Context, system: &str, user: impl Into<String>) -> anyhow::Re
 }
 
 async fn classify(
-    ctx: &Context,
+    llm: &Lutum,
     system: &str,
     user: impl Into<String>,
 ) -> anyhow::Result<RecoveryAction> {
-    let mut session = Session::new(ctx.clone());
+    let mut session = Session::new(llm.clone());
     session.push_system(system);
     session.push_user(user);
     let result = session
@@ -54,22 +54,22 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let llm = Lutum::new(Arc::new(adapter), budget);
     let translation = ask(
-        &ctx,
+        &llm,
         "Translate the following to Japanese. Output only the Japanese translation.",
         "Hello, how are you?",
     )
     .await?;
     println!("Translation: {translation}");
-    let recovery = classify(&ctx, "Classify the translation quality. Choose an action:\n  ACCEPT: looks like valid Japanese.\n  RETRY: output seems wrong but retryable.\n  COMPACT: prompt is confusing; simplify.\n  ESCALATE: cannot recover automatically.", format!("Translation: {translation}")).await?;
+    let recovery = classify(&llm, "Classify the translation quality. Choose an action:\n  ACCEPT: looks like valid Japanese.\n  RETRY: output seems wrong but retryable.\n  COMPACT: prompt is confusing; simplify.\n  ESCALATE: cannot recover automatically.", format!("Translation: {translation}")).await?;
     println!("Action: {:?} — {}", recovery.action, recovery.reason);
     match recovery.action {
         Action::Accept => println!("Done."),
         Action::Retry => println!(
             "Retry translation: {}",
             ask(
-                &ctx,
+                &llm,
                 "Translate the following to Japanese. Output Japanese characters only.",
                 "Hello, how are you?"
             )
@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         Action::Compact => println!(
             "Compact translation: {}",
             ask(
-                &ctx,
+                &llm,
                 "Translate the following to Japanese. Output only the Japanese translation, nothing else.",
                 "Hello, how are you?"
             )

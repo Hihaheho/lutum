@@ -4,56 +4,56 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 use lutum::{
     AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn, AgentError,
-    CompletionAdapter, CompletionEventStream, CompletionRequest, Context,
+    CompletionAdapter, CompletionEventStream, CompletionRequest,
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
-    ErasedTextTurnEventStream, HookReentrancyError, HookRegistry, InputMessageRole, MockLlmAdapter,
-    ModelInput, ModelInputItem, ModelName, OperationKind, RequestExtensions,
+    ErasedTextTurnEventStream, HookReentrancyError, HookRegistry, InputMessageRole, Lutum,
+    MockLlmAdapter, ModelInput, ModelInputItem, ModelName, OperationKind, RequestExtensions,
     ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt, SharedPoolBudgetManager,
     SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage, UsageRecoveryAdapter,
-    budget::UsageEstimate, hooks::ResolveUsageEstimateContextExt,
+    budget::UsageEstimate, hooks::ResolveUsageEstimateLutumExt,
 };
 use lutum_trace::FieldValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[lutum::def_hook(singleton)]
-async fn select_label(_ctx: &Context, default: String) -> String {
+async fn select_label(_ctx: &Lutum, default: String) -> String {
     default
 }
 
 #[lutum::hook(SelectLabel)]
-async fn prefix_label(_ctx: &Context, default: String) -> String {
+async fn prefix_label(_ctx: &Lutum, default: String) -> String {
     format!("hooked:{default}")
 }
 
 #[lutum::hook(SelectLabel)]
-async fn suffix_label(_ctx: &Context, default: String) -> String {
+async fn suffix_label(_ctx: &Lutum, default: String) -> String {
     format!("{default}:suffix")
 }
 
 #[lutum::def_hook(always)]
-async fn format_label(_ctx: &Context, label: &str) -> String {
+async fn format_label(_ctx: &Lutum, label: &str) -> String {
     format!("default:{label}")
 }
 
 #[lutum::hook(FormatLabel)]
-async fn append_suffix(_ctx: &Context, _label: &str, last: Option<String>) -> String {
+async fn append_suffix(_ctx: &Lutum, _label: &str, last: Option<String>) -> String {
     let previous = last.expect("always hooks should receive the default result");
     format!("{previous}:hook")
 }
 
 #[lutum::def_hook(always)]
-async fn legacy_format_label(_ctx: &Context, label: &str, _last: Option<String>) -> String {
+async fn legacy_format_label(_ctx: &Lutum, label: &str, _last: Option<String>) -> String {
     format!("legacy:{label}")
 }
 
 #[lutum::def_hook(fallback)]
-async fn choose_label(_ctx: &Context, label: &str) -> String {
+async fn choose_label(_ctx: &Lutum, label: &str) -> String {
     format!("default:{label}")
 }
 
 #[lutum::hook(ChooseLabel)]
-async fn pick_registered_label(_ctx: &Context, label: &str, last: Option<String>) -> String {
+async fn pick_registered_label(_ctx: &Lutum, label: &str, last: Option<String>) -> String {
     assert!(last.is_none(), "fallback chains should start from None");
     format!("hook:{label}")
 }
@@ -66,7 +66,7 @@ enum CounterError {
 type CounterResult = Result<usize, CounterError>;
 
 #[lutum::def_hook(singleton)]
-async fn next_counter(_ctx: &Context, seed: usize) -> CounterResult {
+async fn next_counter(_ctx: &Lutum, seed: usize) -> CounterResult {
     Ok(seed)
 }
 
@@ -80,7 +80,7 @@ impl StatefulNextCounterHook for CountingHook {
         Err(CounterError::Reentered(err))
     }
 
-    async fn call_mut(&mut self, _ctx: &Context, seed: usize) -> CounterResult {
+    async fn call_mut(&mut self, _ctx: &Lutum, seed: usize) -> CounterResult {
         let current = self.next.max(seed);
         self.next = current + 1;
         Ok(current)
@@ -95,7 +95,7 @@ impl StatefulNextCounterHook for ReentrantCounter {
         Err(CounterError::Reentered(err))
     }
 
-    async fn call_mut(&mut self, ctx: &Context, seed: usize) -> CounterResult {
+    async fn call_mut(&mut self, ctx: &Lutum, seed: usize) -> CounterResult {
         if seed == 0 {
             Ok(0)
         } else {
@@ -105,7 +105,7 @@ impl StatefulNextCounterHook for ReentrantCounter {
 }
 
 #[lutum::def_hook(singleton)]
-async fn describe_label(_ctx: &Context, label: &str) -> String {
+async fn describe_label(_ctx: &Lutum, label: &str) -> String {
     label.to_string()
 }
 
@@ -113,22 +113,22 @@ struct NestedLabelHook;
 
 #[async_trait]
 impl StatefulDescribeLabelHook for NestedLabelHook {
-    async fn call_mut(&mut self, ctx: &Context, label: &str) -> String {
+    async fn call_mut(&mut self, ctx: &Lutum, label: &str) -> String {
         ctx.select_label(label.to_string()).await
     }
 }
 
-fn test_context(hooks: HookRegistry) -> Context {
-    Context::with_hooks(
+fn test_context(hooks: HookRegistry) -> Lutum {
+    Lutum::with_hooks(
         Arc::new(MockLlmAdapter::new()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
         hooks,
     )
 }
 
-fn full_context(hooks: HookRegistry) -> Context {
+fn full_context(hooks: HookRegistry) -> Lutum {
     let adapter = Arc::new(NullAdapter);
-    Context::from_parts_with_hooks(
+    Lutum::from_parts_with_hooks(
         adapter.clone(),
         adapter.clone(),
         adapter,
@@ -209,7 +209,7 @@ struct FixedEstimate {
 impl ResolveUsageEstimateHook for FixedEstimate {
     async fn call(
         &self,
-        _ctx: &Context,
+        _ctx: &Lutum,
         _extensions: &RequestExtensions,
         _kind: OperationKind,
     ) -> UsageEstimate {
@@ -225,7 +225,7 @@ struct RecordOperationKinds {
 impl ResolveUsageEstimateHook for RecordOperationKinds {
     async fn call(
         &self,
-        _ctx: &Context,
+        _ctx: &Lutum,
         _extensions: &RequestExtensions,
         kind: OperationKind,
     ) -> UsageEstimate {

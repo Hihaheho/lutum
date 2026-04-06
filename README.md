@@ -27,7 +27,7 @@ If you want the design rationale rather than just the public surface, read
 
 | Crate | Role |
 |---|---|
-| `crates/lutum` | Public facade crate: `Context`, `Session`, turn APIs, mocks |
+| `crates/lutum` | Public facade crate: `Lutum`, `Session`, turn APIs, mocks |
 | `crates/lutum-protocol` | Core traits, request/response algebras, reducers, transcript views |
 | `crates/lutum-openai` | OpenAI Responses API adapter, also usable with OpenAI-compatible backends |
 | `crates/lutum-claude` | Anthropic Claude Messages API adapter |
@@ -61,7 +61,7 @@ lutum-eval = "0.1.0"
 
 ## Mental Model
 
-- `Context`: execution boundary. It validates input, reserves budget, emits tracing, and reduces
+- `Lutum`: execution boundary. It validates input, reserves budget, emits tracing, and reduces
   provider streams into typed results.
 - `TextTurn` / `StructuredTurn<O>`: no-tools-first executable turn builders.
 - `TextTurnWithTools<T>` / `StructuredTurnWithTools<T, O>`: tool-enabled turn builders reached
@@ -75,14 +75,14 @@ lutum-eval = "0.1.0"
 
 ## Quickstart
 
-This is the shortest useful path: build a `Context`, start a `Session`, run a text turn, then
+This is the shortest useful path: build a `Lutum`, start a `Session`, run a text turn, then
 explicitly commit the result.
 
 ```rust
 use std::sync::Arc;
 
 use lutum::{
-    Context, ModelName, OpenAiAdapter, Session, SharedPoolBudgetManager,
+    Lutum, ModelName, OpenAiAdapter, Session, SharedPoolBudgetManager,
     SharedPoolBudgetOptions,
 };
 
@@ -92,12 +92,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_base_url(std::env::var("ENDPOINT")?)
         .with_default_model(ModelName::new(&std::env::var("MODEL")?)?);
 
-    let ctx = Context::new(
+    let llm = Lutum::new(
         Arc::new(adapter),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
 
-    let mut session = Session::new(ctx);
+    let mut session = Session::new(llm);
     session.push_system("You are concise.");
     session.push_user("Say hello in one sentence.");
 
@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-If you do not want transcript management, call `Context::text_turn(input)` directly with a
+If you do not want transcript management, call `Lutum::text_turn(input)` directly with a
 `ModelInput`, then use `.stream().await?`, `.collect().await?`, or `.collect_with(handler).await?`
 on the returned builder.
 
@@ -153,14 +153,14 @@ match result.semantic.clone() {
 ```
 
 If you want one-off structured extraction without transcript integration, use
-`Context::structured_completion(...)`. That path requires `Context::from_parts(...)`, because
+`Lutum::structured_completion(...)`. That path requires `Lutum::from_parts(...)`, because
 completion adapters are wired separately from turn execution:
 
 ```rust
 use std::sync::Arc;
 
 use lutum::{
-    Context, ModelName, OpenAiAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    Lutum, ModelName, OpenAiAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
     StructuredTurnOutcome,
 };
 use schemars::JsonSchema;
@@ -177,14 +177,14 @@ let adapter = Arc::new(
         .with_default_model(ModelName::new(&std::env::var("MODEL")?)?),
 );
 
-let ctx = Context::from_parts(
+let llm = Lutum::from_parts(
     adapter.clone(),
     adapter.clone(),
     adapter,
     SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
 );
 
-let result = ctx
+let result = llm
     .structured_completion::<Contact>(
         ModelName::new(&std::env::var("MODEL")?)?,
         "Extract the email address from `Reach me at user@example.com`.",
@@ -208,7 +208,7 @@ tool loop, and `Session` only records committed turns and tool results.
 use std::sync::Arc;
 
 use lutum::{
-    Context, ModelName, OpenAiAdapter, Session, SharedPoolBudgetManager,
+    Lutum, ModelName, OpenAiAdapter, Session, SharedPoolBudgetManager,
     SharedPoolBudgetOptions, TextStepOutcomeWithTools,
 };
 use schemars::JsonSchema;
@@ -236,12 +236,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_base_url(std::env::var("ENDPOINT")?)
         .with_default_model(ModelName::new(&std::env::var("MODEL")?)?);
 
-    let ctx = Context::new(
+    let llm = Lutum::new(
         Arc::new(adapter),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
 
-    let mut session = Session::new(ctx);
+    let mut session = Session::new(llm);
     session.push_user("What is the weather in Tokyo?");
 
     loop {
@@ -287,19 +287,19 @@ than manually inspecting the vector.
 ## Hooks
 
 Hooks are named, typed async slots. Define a slot with `#[def_hook(...)]`, implement handlers with
-`#[hook(...)]`, register them in a `HookRegistry`, then build the `Context` with
-`Context::with_hooks(...)`.
+`#[hook(...)]`, register them in a `HookRegistry`, then build the `Lutum` with
+`Lutum::with_hooks(...)`.
 
 ```rust
 use std::sync::Arc;
 
 use lutum::{
-    Context, HookRegistry, ModelName, OpenAiAdapter, SharedPoolBudgetManager,
+    Lutum, HookRegistry, ModelName, OpenAiAdapter, SharedPoolBudgetManager,
     SharedPoolBudgetOptions,
 };
 
 #[lutum::def_hook(always)]
-async fn validate_prompt(_ctx: &Context, prompt: &str) -> Result<(), String> {
+async fn validate_prompt(_ctx: &Lutum, prompt: &str) -> Result<(), String> {
     if prompt.trim().is_empty() {
         Err("prompt must not be empty".into())
     } else {
@@ -309,7 +309,7 @@ async fn validate_prompt(_ctx: &Context, prompt: &str) -> Result<(), String> {
 
 #[lutum::hook(ValidatePrompt)]
 async fn reject_secrets(
-    _ctx: &Context,
+    _ctx: &Lutum,
     prompt: &str,
     last: Option<Result<(), String>>,
 ) -> Result<(), String> {
@@ -327,7 +327,7 @@ async fn reject_secrets(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hooks = HookRegistry::new().register_validate_prompt(RejectSecrets);
 
-    let ctx = Context::with_hooks(
+    let llm = Lutum::with_hooks(
         Arc::new(
             OpenAiAdapter::new(std::env::var("TOKEN")?)
                 .with_base_url(std::env::var("ENDPOINT")?)
@@ -337,7 +337,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         hooks,
     );
 
-    ctx.validate_prompt("Explain borrow checking in one paragraph.")
+    llm.validate_prompt("Explain borrow checking in one paragraph.")
         .await?;
 
     Ok(())
@@ -349,7 +349,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `fallback`: use registered hooks if present, otherwise run the default
 - `singleton`: pick one override or use the default; the last registration wins and emits a warning
 
-Core hooks take `&Context` as their first argument and are provider-agnostic. Adapter-local hooks
+Core hooks take `&Lutum` as their first argument and are provider-agnostic. Adapter-local hooks
 take `&RequestExtensions` as their first argument and let adapters expose provider-specific
 selection or request-shaping behavior.
 
@@ -372,8 +372,8 @@ let result = session
 debug tooling, and local observability when you want to inspect span fields and events without
 shipping traces anywhere.
 
-`Context` emits `llm_turn` spans during execution, so once the layer is installed you can capture
-request ids, finish reasons, and nested events. Assuming you already built `ctx` as in the
+`Lutum` emits `llm_turn` spans during execution, so once the layer is installed you can capture
+request ids, finish reasons, and nested events. Assuming you already built `llm` as in the
 quickstart, wrap the same turn execution with capture:
 
 ```rust
@@ -385,7 +385,7 @@ let subscriber = tracing_subscriber::registry().with(lutum_trace::layer());
 
 let collected = lutum_trace::capture(
     async {
-        let mut session = Session::new(ctx.clone());
+        let mut session = Session::new(llm.clone());
         session.push_user("Say hello.");
 
         let _ = session
@@ -415,13 +415,13 @@ top of the same machinery.
 captured `TraceSnapshot`.
 
 - `Metric`: sync, pure, replay-friendly evaluation over `&TraceSnapshot` and `&Artifact`
-- `JudgeMetric`: async evaluation that also receives `&Context`, useful for model-based scoring
+- `JudgeMetric`: async evaluation that also receives `&Lutum`, useful for model-based scoring
 
 Live evaluation uses the future output as the artifact directly:
 
 ```rust
 use async_trait::async_trait;
-use lutum::Context;
+use lutum::Lutum;
 use lutum_eval::{JudgeMetric, Metric, evaluate_live, judge_live};
 
 #[derive(Debug)]
@@ -455,7 +455,7 @@ impl JudgeMetric for JudgeLength {
 
     async fn judge(
         &self,
-        _ctx: &Context,
+        _ctx: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
     ) -> Result<Self::Score, Self::Error> {
@@ -463,18 +463,18 @@ impl JudgeMetric for JudgeLength {
     }
 }
 
-// Assume `ctx: Context` was already built as in the quickstart.
+// Assume `llm: Lutum` was already built as in the quickstart.
 let metric_score = evaluate_live(&LengthMetric, async {
     Draft { text: "hello".into() }
 }).await?;
 
-let judge_score = judge_live(&JudgeLength, &ctx, async {
+let judge_score = judge_live(&JudgeLength, &llm, async {
     Draft { text: "hello".into() }
 }).await?;
 ```
 
 `Metric` is for deterministic local scoring. `JudgeMetric` is for cases where scoring itself
-needs to call back into lutum through a `Context`.
+needs to call back into lutum through a `Lutum`.
 
 ## Examples
 

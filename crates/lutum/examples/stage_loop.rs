@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use lutum::*;
 
-async fn ask(ctx: &Context, prompt: impl Into<String>) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone());
+async fn ask(llm: &Lutum, prompt: impl Into<String>) -> anyhow::Result<String> {
+    let mut session = Session::new(llm.clone());
     session.push_user(prompt);
     let result = session.text_turn().collect().await?;
     Ok(result.assistant_text())
@@ -19,11 +19,11 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let llm = Lutum::new(Arc::new(adapter), budget);
     let base_prompt = "Write a haiku about programming. Output only the haiku.";
 
     // Stage 1: Act
-    let mut haiku = ask(&ctx, base_prompt).await?;
+    let mut haiku = ask(&llm, base_prompt).await?;
     let mut final_haiku = None;
 
     for attempt in 1..=3 {
@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Stage 2: Verify
         let verdict = ask(
-            &ctx,
+            &llm,
             format!(
                 "Does this haiku follow 5-7-5 syllables? Reply with just PASS or FAIL and why.\n\n{haiku}"
             ),
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Stage 3: Repair
         haiku = ask(
-            &ctx,
+            &llm,
             format!(
                 "{base_prompt}\nRepair the draft using this feedback: {verdict}\n\nDraft:\n{haiku}"
             ),

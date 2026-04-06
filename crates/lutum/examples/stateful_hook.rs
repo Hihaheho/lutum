@@ -2,7 +2,7 @@ use lutum::*;
 use std::sync::Arc;
 type Validation = Result<(), Vec<String>>;
 #[def_hook(fallback)]
-async fn validate_command(_ctx: &Context, _cmd: &str) -> Validation {
+async fn validate_command(_ctx: &Lutum, _cmd: &str) -> Validation {
     Ok(())
 }
 struct CommandPolicy {
@@ -13,12 +13,7 @@ struct CommandPolicy {
 // A struct is clearer here: multiple policy fields, shared helper logic, no capture noise.
 #[async_trait::async_trait]
 impl StatefulValidateCommandHook for CommandPolicy {
-    async fn call_mut(
-        &mut self,
-        _ctx: &Context,
-        cmd: &str,
-        last: Option<Validation>,
-    ) -> Validation {
+    async fn call_mut(&mut self, _ctx: &Lutum, cmd: &str, last: Option<Validation>) -> Validation {
         if let Some(Err(reasons)) = last {
             return Err(reasons);
         }
@@ -50,8 +45,8 @@ impl StatefulValidateCommandHook for CommandPolicy {
         }
     }
 }
-async fn ask(ctx: &Context, system: &str, prompt: &str) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone());
+async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> {
+    let mut session = Session::new(llm.clone());
     session.push_system(system);
     session.push_user(prompt);
     let result = session.text_turn().collect().await?;
@@ -62,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model = ModelName::new(&std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into()))?;
-    let ctx = Context::with_hooks(
+    let llm = Lutum::with_hooks(
         Arc::new(
             OpenAiAdapter::new(token)
                 .with_base_url(endpoint)
@@ -91,9 +86,9 @@ async fn main() -> anyhow::Result<()> {
                     .join("\n"),
             )
         };
-        let cmd = ask(&ctx, system, &prompt).await?;
+        let cmd = ask(&llm, system, &prompt).await?;
         println!("Attempt {attempt}: {cmd}");
-        match ctx.validate_command(&cmd).await {
+        match llm.validate_command(&cmd).await {
             Ok(()) => {
                 println!("Policy: pass");
                 return Ok(());

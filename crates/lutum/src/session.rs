@@ -15,7 +15,7 @@ use lutum_protocol::{
 use thiserror::Error;
 
 use crate::{
-    Context,
+    Lutum,
     builders::{StructuredTurn, TextTurn},
     context::StructuredTurnPartialWithTools,
 };
@@ -48,15 +48,15 @@ impl SessionDefaults {
 
 #[derive(Clone)]
 pub struct Session {
-    ctx: Context,
+    lutum: Lutum,
     input: ModelInput,
     defaults: SessionDefaults,
 }
 
 impl Session {
-    pub fn new(ctx: Context) -> Self {
+    pub fn new(lutum: Lutum) -> Self {
         Self {
-            ctx,
+            lutum,
             input: ModelInput::new(),
             defaults: SessionDefaults::default(),
         }
@@ -71,8 +71,8 @@ impl Session {
         &self.defaults
     }
 
-    pub fn context(&self) -> &Context {
-        &self.ctx
+    pub fn lutum(&self) -> &Lutum {
+        &self.lutum
     }
 
     pub fn input(&self) -> &ModelInput {

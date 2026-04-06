@@ -6,8 +6,8 @@ const NAVIGATION_SYSTEM: &str = "You are a codebase guide. Read the AGENTS.md co
 const ANSWER_SYSTEM: &str = "Answer the question using only the provided crate detail. Be concise.";
 const QUESTION: &str = "Which crate should I edit to fix a bug in the OpenAI SSE parser?";
 
-async fn ask(ctx: &Context, system: &str, user: impl Into<String>) -> anyhow::Result<String> {
-    let mut session = Session::new(ctx.clone());
+async fn ask(llm: &Lutum, system: &str, user: impl Into<String>) -> anyhow::Result<String> {
+    let mut session = Session::new(llm.clone());
     session.push_system(system);
     session.push_user(user);
     let result = session.text_turn().collect().await?;
@@ -207,10 +207,10 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::new(Arc::new(adapter), budget);
+    let llm = Lutum::new(Arc::new(adapter), budget);
 
     let raw_crate = ask(
-        &ctx,
+        &llm,
         NAVIGATION_SYSTEM,
         format!("AGENTS.md:\n{agents_content}\n\nQuestion: {QUESTION}"),
     )
@@ -222,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Extracted section:\n{crate_detail}");
 
     let answer = ask(
-        &ctx,
+        &llm,
         ANSWER_SYSTEM,
         format!("Crate detail:\n{crate_detail}\n\nQuestion: {QUESTION}"),
     )

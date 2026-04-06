@@ -38,7 +38,7 @@ fn normalize_phone(value: &str) -> String {
 }
 
 #[def_hook(always)]
-async fn audit_contact(_ctx: &Context, source: &str, contact: &Contact) -> Result<(), Vec<String>> {
+async fn audit_contact(_ctx: &Lutum, source: &str, contact: &Contact) -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
     let source_tokens = source
         .split_whitespace()
@@ -100,8 +100,8 @@ fn build_prompt(source: &str, prior_failure: Option<&GateFailure>) -> String {
     prompt
 }
 
-async fn extract(ctx: &Context, prompt: &str) -> anyhow::Result<Contact> {
-    let mut session = Session::new(ctx.clone());
+async fn extract(llm: &Lutum, prompt: &str) -> anyhow::Result<Contact> {
+    let mut session = Session::new(llm.clone());
     session.push_system(
         "You extract contacts from source text. Rust decides whether the extraction passes verification. Use only values grounded in the source.",
     );
@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = Context::with_hooks(Arc::new(adapter), budget, HookRegistry::new());
+    let llm = Lutum::with_hooks(Arc::new(adapter), budget, HookRegistry::new());
     let source = "Call John Smith at john@example.com or +1-555-0100";
     let mut prior_failure = None;
 
@@ -135,11 +135,11 @@ async fn main() -> anyhow::Result<()> {
         let prompt = build_prompt(source, prior_failure.as_ref());
         println!("\nAttempt {attempt}");
 
-        match extract(&ctx, &prompt).await {
+        match extract(&llm, &prompt).await {
             Ok(contact) => {
                 println!("Extracted contact: {contact:#?}");
 
-                match ctx.audit_contact(source, &contact).await {
+                match llm.audit_contact(source, &contact).await {
                     Ok(()) => {
                         println!("Rust gates: pass");
                         return Ok(());
