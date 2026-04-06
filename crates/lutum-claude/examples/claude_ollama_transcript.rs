@@ -2,7 +2,7 @@
 //!
 //! Requires a running Ollama instance with the qwen3.5 model:
 //!   ollama pull qwen3.5
-//!   cargo run --example ollama_transcript -p lutum-claude
+//!   cargo run --example claude_ollama_transcript -p lutum-claude
 //!
 //! NOTE: seed is not supported by Ollama's Anthropic-compatible endpoint.
 
