@@ -496,18 +496,16 @@ include `lutum_trace::layer()`.
 
 A probe that intercepts a hook receives each call through `StatefulXxxHook::call_mut`. The hook
 system generates an `XxxArgs` tuple struct whose fields hold owned copies of the hook arguments,
-so borrowed values like `&str` are already converted before they reach the probe. Write the
-`ProbeHookSlot` wiring once per hook slot (not once per probe), then any probe that implements
-`StatefulXxxHook` can register it with a single `cx.register_hook::<Slot>()` call.
+so borrowed values like `&str` are already converted before they reach the probe.
+Use `register_probe_hook!(cx, Slot)` inside `register_hooks` to wire each slot — no per-slot
+boilerplate impl needed.
 
 ```rust
 use async_trait::async_trait;
 use core::convert::Infallible;
 use lutum::Lutum;
-use lutum_eval::{
-    Probe, ProbeContext, ProbeDecision, ProbeDispatchHook, ProbeDispatcher,
-    ProbeHookSlot, TraceEvent, TraceSnapshot,
-};
+use lutum_eval::{Probe, ProbeContext, ProbeDecision, ProbeDispatcher, TraceEvent, TraceSnapshot};
+use lutum_eval::register_probe_hook;
 
 // -- Define a hook slot (once per slot, e.g. in a shared library) ----------------
 
@@ -516,39 +514,7 @@ async fn validate_response(_llm: &Lutum, response: &str) -> Result<(), String> {
     Ok(())
 }
 
-// -- Wire the slot to the probe dispatcher (once per slot) -----------------------
-
-#[async_trait]
-impl<P> ValidateResponseHook for ProbeDispatchHook<P, ValidateResponse>
-where
-    P: Probe + StatefulValidateResponseHook + 'static,
-    P::Score: Send + 'static,
-    P::Artifact: Send + 'static,
-    P::Error: Send + 'static,
-{
-    async fn call(&self, ctx: &Lutum, args: ValidateResponseArgs) -> Result<(), String> {
-        let ctx = ctx.clone();
-        self.dispatcher
-            .dispatch(move |probe| Box::pin(async move { probe.call_mut(&ctx, args).await }))
-            .await
-            .expect("probe dispatcher alive")
-    }
-}
-
-impl<P> ProbeHookSlot<P> for ValidateResponse
-where
-    P: Probe + StatefulValidateResponseHook + 'static,
-    P::Score: Send + 'static,
-    P::Artifact: Send + 'static,
-    P::Error: Send + 'static,
-{
-    fn register(cx: &mut ProbeContext<'_, P>) {
-        let dispatcher = cx.dispatcher();
-        cx.update_hooks(|h| h.register_validate_response(ProbeDispatchHook::new(dispatcher)));
-    }
-}
-
-// -- Implement the probe (once per probe) ----------------------------------------
+// -- Implement the probe ---------------------------------------------------------
 
 #[derive(Default)]
 struct ResponseQuality {
@@ -561,7 +527,7 @@ impl Probe for ResponseQuality {
     type Error = Infallible;
 
     fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        cx.register_hook::<ValidateResponse>();
+        register_probe_hook!(cx, ValidateResponse);
     }
 
     fn on_trace_event(
