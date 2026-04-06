@@ -38,8 +38,8 @@ async fn format_label(_ctx: &Lutum, label: &str) -> String {
 
 #[lutum::hook(FormatLabel)]
 async fn append_suffix(_ctx: &Lutum, source_label: &str, last: Option<String>) -> String {
-    let _ = source_label;
     let previous = last.expect("always hooks should receive the default result");
+    assert_eq!(previous, format!("default:{source_label}"));
     format!("{previous}:hook")
 }
 
