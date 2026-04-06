@@ -1,0 +1,5 @@
+error: #[def_hook(singleton)] does not accept a `last: Option<Return>` argument
+ --> tests/ui/hook_def_singleton_last.rs:2:61
+  |
+2 | async fn select_label(_ctx: &lutum::Lutum, default: String, last: Option<String>) -> String {
+  |                                                             ^^^^^^^^^^^^^^^^^^^^
