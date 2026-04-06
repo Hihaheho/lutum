@@ -256,8 +256,13 @@ struct OwnedLease {
 
 impl Drop for OwnedLease {
     fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
-            let _ = self.budget.record_used(lease, Usage::zero());
+        if let Some(lease) = self.lease.take()
+            && let Err(err) = self.budget.record_used(lease, Usage::zero())
+        {
+            tracing::error!(
+                error = %err,
+                "failed to finalize budget lease on drop; shared pool reservation may leak until the process restarts"
+            );
         }
     }
 }
@@ -2081,12 +2086,10 @@ async fn recover_or_release_budget(
     request_id: Option<&str>,
 ) -> Result<(), AgentError> {
     let recovered_usage = if let Some(request_id) = request_id {
-        recovery
-            .recover_usage(kind, request_id)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(Usage::zero)
+        match recovery.recover_usage(kind, request_id).await? {
+            Some(usage) => usage,
+            None => Usage::zero(),
+        }
     } else {
         Usage::zero()
     };
