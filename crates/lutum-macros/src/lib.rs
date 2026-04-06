@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -571,13 +573,37 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
     } else {
         quote! { #args_struct_ident }
     };
-    // Tuple struct fields: XxxArgs(pub T0, pub T1, ...).
-    // Positional access (args.0, args.1) avoids field-name mismatch between def_hook
-    // and #[hook] impl functions that may use different parameter names.
-    let args_struct_fields = explicit_args.iter().map(|(_, ty)| {
-        let field_ty = args_field_type(ty);
-        quote! { pub #field_ty }
-    });
+    let args_field_idents = normalized_hook_arg_field_idents(&explicit_args);
+    // Named XxxArgs fields preserve the slot-definition argument names (after trimming a
+    // leading `_` when it does not cause conflicts), while the generated constructor and
+    // `into_parts()` keep #[hook] impls working even if their parameter names differ.
+    let args_struct_fields =
+        explicit_args
+            .iter()
+            .zip(args_field_idents.iter())
+            .map(|((_, ty), field_ident)| {
+                let field_ty = args_field_type(ty);
+                quote! { pub #field_ident: #field_ty }
+            });
+    let args_struct_constructor_args = explicit_args
+        .iter()
+        .zip(args_field_idents.iter())
+        .map(|((_, ty), field_ident)| {
+            let field_ty = args_field_type(ty);
+            quote! { #field_ident: #field_ty }
+        })
+        .collect::<Vec<_>>();
+    let args_struct_field_names = args_field_idents
+        .iter()
+        .map(|field_ident| quote! { #field_ident })
+        .collect::<Vec<_>>();
+    let args_struct_into_parts_types = explicit_args
+        .iter()
+        .map(|(_, ty)| {
+            let field_ty = args_field_type(ty);
+            quote! { #field_ty }
+        })
+        .collect::<Vec<_>>();
     // Construct XxxArgs from individual registry method parameters.
     // &str → .to_owned(), &T → copy ref (no conversion), owned T → .clone() so
     // the original is still available for default_call.
@@ -586,7 +612,7 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
         quote! { #ident #conv }
     });
     let args_construction = if has_explicit_args {
-        quote! { let args = #args_struct_ident(#(#args_construction_fields,)*); }
+        quote! { let args = #args_struct_ident::new(#(#args_construction_fields,)*); }
     } else {
         quote! {}
     };
@@ -813,7 +839,23 @@ fn expand_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream 
         let struct_def = quote! {
             #[allow(dead_code)]
             #[derive(::std::clone::Clone)]
-            #vis struct #args_struct_ident #args_struct_lifetime(#(#args_struct_fields,)*);
+            #vis struct #args_struct_ident #args_struct_lifetime {
+                #(#args_struct_fields,)*
+            }
+
+            impl #args_struct_lifetime #args_struct_ident #args_struct_lifetime {
+                pub fn new(#(#args_struct_constructor_args),*) -> Self {
+                    Self {
+                        #(#args_struct_field_names,)*
+                    }
+                }
+
+                pub fn into_parts(self) -> (#(#args_struct_into_parts_types,)*) {
+                    (
+                        #(self.#args_struct_field_names,)*
+                    )
+                }
+            }
         };
         // Fn blanket impl only for structs without lifetime (fully owned args).
         // Structs with reference lifetimes require HRTB which is too complex to generate,
@@ -1064,20 +1106,24 @@ fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStr
         hook_trait_args.push(quote! { last: ::std::option::Option<#output_ty> });
     }
 
-    // When calling the original function, unpack args fields back to original types.
-    // XxxArgs is a tuple struct so access is positional: args.0, args.1, ...
-    // &str fields are stored as String; pass them back as &String (auto-derefs to &str).
-    // &T  fields are stored as &T; pass them directly.
-    // owned fields are stored as T; pass them directly (Copy or move).
+    // When calling the original function, unpack args back to original types through
+    // `into_parts()`. This keeps #[hook] impls decoupled from the public field names.
+    let args_unpack_bindings = explicit_args
+        .iter()
+        .map(|(ident, _)| quote! { #ident })
+        .collect::<Vec<_>>();
+    let args_unpack = if has_explicit_args {
+        quote! {
+            let (#(#args_unpack_bindings,)*) = args.into_parts();
+        }
+    } else {
+        quote! {}
+    };
     let mut fn_call_args: Vec<proc_macro2::TokenStream> = explicit_args
         .iter()
-        .enumerate()
-        .map(|(i, (_, ty))| {
-            let index = syn::Index::from(i);
-            match ty {
-                Type::Reference(r) if is_str_type(&r.elem) => quote! { &args.#index },
-                _ => quote! { args.#index },
-            }
+        .map(|(ident, ty)| match ty {
+            Type::Reference(r) if is_str_type(&r.elem) => quote! { &#ident },
+            _ => quote! { #ident },
         })
         .collect();
     if has_last {
@@ -1097,6 +1143,7 @@ fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStr
                 #ctx_ident: #ctx_ty,
                 #(#hook_trait_args,)*
             ) -> #output_ty {
+                #args_unpack
                 #fn_ident(#ctx_ident, #(#fn_call_args,)*).await
             }
         }
@@ -1678,4 +1725,22 @@ fn is_non_str_ref(ty: &Type) -> bool {
 
 fn is_str_type(ty: &Type) -> bool {
     matches!(ty, Type::Path(p) if p.path.is_ident("str"))
+}
+
+fn normalized_hook_arg_field_idents(explicit_args: &[(Ident, Type)]) -> Vec<Ident> {
+    let mut used = HashSet::new();
+    explicit_args
+        .iter()
+        .map(|(ident, _)| {
+            let original = ident.to_string();
+            let trimmed = original.trim_start_matches('_');
+            let candidate = if !trimmed.is_empty() && !used.contains(trimmed) {
+                trimmed.to_string()
+            } else {
+                original
+            };
+            used.insert(candidate.clone());
+            format_ident!("{}", candidate)
+        })
+        .collect()
 }

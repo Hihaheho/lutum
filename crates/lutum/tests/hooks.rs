@@ -8,9 +8,9 @@ use lutum::{
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
     ErasedTextTurnEventStream, HookReentrancyError, HookRegistry, InputMessageRole, Lutum,
     MockLlmAdapter, ModelInput, ModelInputItem, ModelName, OperationKind, RequestExtensions,
-    ResolveUsageEstimateArgs, ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage, UsageRecoveryAdapter,
-    budget::UsageEstimate, hooks::ResolveUsageEstimateLutumExt,
+    ResolveUsageEstimateArgs, ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage,
+    UsageRecoveryAdapter, budget::UsageEstimate, hooks::ResolveUsageEstimateLutumExt,
 };
 use lutum_trace::FieldValue;
 use schemars::JsonSchema;
@@ -37,8 +37,9 @@ async fn format_label(_ctx: &Lutum, label: &str) -> String {
 }
 
 #[lutum::hook(FormatLabel)]
-async fn append_suffix(_ctx: &Lutum, _label: &str, last: Option<String>) -> String {
+async fn append_suffix(_ctx: &Lutum, source_label: &str, last: Option<String>) -> String {
     let previous = last.expect("always hooks should receive the default result");
+    assert_eq!(previous, format!("default:{source_label}"));
     format!("{previous}:hook")
 }
 
@@ -81,7 +82,7 @@ impl StatefulNextCounterHook for CountingHook {
     }
 
     async fn call_mut(&mut self, _ctx: &Lutum, args: NextCounterArgs) -> CounterResult {
-        let current = self.next.max(args.0);
+        let current = self.next.max(args.seed);
         self.next = current + 1;
         Ok(current)
     }
@@ -96,10 +97,10 @@ impl StatefulNextCounterHook for ReentrantCounter {
     }
 
     async fn call_mut(&mut self, ctx: &Lutum, args: NextCounterArgs) -> CounterResult {
-        if args.0 == 0 {
+        if args.seed == 0 {
             Ok(0)
         } else {
-            ctx.next_counter(args.0 - 1).await
+            ctx.next_counter(args.seed - 1).await
         }
     }
 }
@@ -114,7 +115,7 @@ struct NestedLabelHook;
 #[async_trait]
 impl StatefulDescribeLabelHook for NestedLabelHook {
     async fn call_mut(&mut self, ctx: &Lutum, args: DescribeLabelArgs) -> String {
-        ctx.select_label(args.0).await
+        ctx.select_label(args.label).await
     }
 }
 
@@ -219,7 +220,7 @@ struct RecordOperationKinds {
 #[async_trait]
 impl ResolveUsageEstimateHook for RecordOperationKinds {
     async fn call(&self, _ctx: &Lutum, args: ResolveUsageEstimateArgs<'_>) -> UsageEstimate {
-        self.seen.lock().unwrap().push(args.1);
+        self.seen.lock().unwrap().push(args.kind);
         UsageEstimate::zero()
     }
 }

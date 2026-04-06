@@ -27,6 +27,7 @@
 //!
 //! This generates:
 //! - `ValidateOutput` - slot marker type
+//! - `ValidateOutputArgs` - named args struct for manual/stateful hook implementations
 //! - `ValidateOutputHook` - hook trait to implement
 //! - `ValidateOutputRegistryExt` - `register_validate_output` and `validate_output` on `HookRegistry`
 //! - `ValidateOutputLutumExt` - `validate_output` on `Lutum` (only for `&Lutum` first-arg hooks)

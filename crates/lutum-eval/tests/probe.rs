@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use lutum::{
     HookRegistry, Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
 };
-use lutum_eval::{Probe, ProbeContext, ProbeDecision, ProbeDispatcher, ProbeRunError};
 use lutum_eval::register_probe_hook;
+use lutum_eval::{Probe, ProbeContext, ProbeDecision, ProbeDispatcher, ProbeRunError};
 use tracing::instrument::WithSubscriber as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -94,16 +94,16 @@ impl Probe for TimelineProbe {
 #[async_trait]
 impl StatefulRewriteNumberHook for TimelineProbe {
     async fn call_mut(&mut self, _llm: &Lutum, args: RewriteNumberArgs) -> usize {
-        self.timeline.push(format!("hook:number:{}", args.0));
-        args.0 + 1
+        self.timeline.push(format!("hook:number:{}", args.value));
+        args.value + 1
     }
 }
 
 #[async_trait]
 impl StatefulDecorateLabelHook for TimelineProbe {
     async fn call_mut(&mut self, _llm: &Lutum, args: DecorateLabelArgs) -> String {
-        self.timeline.push(format!("hook:label:{}", args.0));
-        format!("probe:{}", args.0)
+        self.timeline.push(format!("hook:label:{}", args.label));
+        format!("probe:{}", args.label)
     }
 }
 
@@ -248,7 +248,7 @@ impl Probe for HookErrorProbe {
 impl StatefulValidateStepHook for HookErrorProbe {
     async fn call_mut(&mut self, _llm: &Lutum, args: ValidateStepArgs) -> Validation {
         self.hook_calls += 1;
-        if args.0 == "blocked" {
+        if args.step == "blocked" {
             Err("blocked")
         } else {
             Ok(())
