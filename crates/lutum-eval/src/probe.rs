@@ -50,6 +50,11 @@ pub struct ProbeContext<'a, P: Probe> {
 }
 
 impl<'a, P: Probe> ProbeContext<'a, P> {
+    /// Returns a cloneable handle to the probe's event loop.
+    ///
+    /// This is a lower-level escape hatch primarily used by [`ProbeHookSlot`]
+    /// implementors. Prefer [`register_hook`][ProbeContext::register_hook] for
+    /// the common case.
     pub fn dispatcher(&self) -> ProbeHandle<P> {
         self.dispatcher.clone()
     }
@@ -65,6 +70,52 @@ impl<'a, P: Probe> ProbeContext<'a, P> {
     pub fn update_hooks(&mut self, f: impl FnOnce(HookRegistry) -> HookRegistry) {
         let hooks = std::mem::take(self.hooks);
         *self.hooks = f(hooks);
+    }
+
+    /// Register a hook slot so this probe receives its calls.
+    ///
+    /// `Slot` must implement [`ProbeHookSlot<P>`], which is available for every
+    /// slot whose `Stateful*Hook` trait `P` implements.
+    ///
+    /// ```ignore
+    /// fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
+    ///     cx.register_hook::<RewriteNumber>();
+    ///     cx.register_hook::<DecorateLabel>();
+    /// }
+    /// ```
+    pub fn register_hook<Slot: ProbeHookSlot<P>>(&mut self) {
+        Slot::register(self);
+    }
+}
+
+/// Enables a hook slot to be driven by a probe.
+///
+/// Implement this for a slot marker type (e.g. `RewriteNumber`) alongside the
+/// corresponding `XxxHook` impl for [`ProbeDispatchHook<P, Slot>`]. Together
+/// they allow a probe to call `cx.register_hook::<Slot>()` in
+/// [`Probe::register_hooks`] without ever seeing `ProbeHandle` or
+/// `ProbeDispatcher`.
+pub trait ProbeHookSlot<P: Probe>: Sized {
+    fn register(cx: &mut ProbeContext<'_, P>);
+}
+
+/// Generic hook implementation that routes calls through the probe's event loop.
+///
+/// Used by [`ProbeHookSlot`] implementors. One instance is created per hook
+/// slot that a probe handles. The relevant `XxxHook` trait must be implemented
+/// for `ProbeDispatchHook<P, Slot>` alongside a [`ProbeHookSlot`] impl for the
+/// slot marker type; both together enable `cx.register_hook::<Slot>()`.
+pub struct ProbeDispatchHook<P: Probe, Slot> {
+    pub dispatcher: ProbeHandle<P>,
+    _slot: std::marker::PhantomData<fn() -> Slot>,
+}
+
+impl<P: Probe, Slot> ProbeDispatchHook<P, Slot> {
+    pub fn new(dispatcher: ProbeHandle<P>) -> Self {
+        Self {
+            dispatcher,
+            _slot: std::marker::PhantomData,
+        }
     }
 }
 

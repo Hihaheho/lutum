@@ -58,8 +58,8 @@ pub use context::{
     StructuredTurnPartial, StructuredTurnPartialWithTools,
 };
 pub use hooks::{
-    HookReentrancyError, HookRegistry, ResolveUsageEstimate, ResolveUsageEstimateHook,
-    ResolveUsageEstimateRegistryExt, Stateful,
+    HookReentrancyError, HookRegistry, ResolveUsageEstimate, ResolveUsageEstimateArgs,
+    ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt, Stateful,
 };
 
 #[cfg(feature = "claude")]
