@@ -1,0 +1,5 @@
+error[E0308]: mismatched types
+  --> tests/ui/mixed_selectors.rs:43:13
+   |
+43 |             OtherToolsSelector::Search,
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `AppToolsSelector`, found `OtherToolsSelector`

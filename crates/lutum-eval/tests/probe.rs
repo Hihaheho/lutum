@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use lutum::{
     HookRegistry, Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
 };
-use lutum_eval::{Probe, ProbeContext, ProbeDecision, ProbeDispatcher, ProbeHandle, ProbeRunError};
+use lutum_eval::{
+    Probe, ProbeContext, ProbeDecision, ProbeDispatchHook, ProbeDispatcher, ProbeInterceptor,
+    ProbeRunError,
+};
 use tracing::instrument::WithSubscriber as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -31,88 +34,109 @@ async fn validate_step(_llm: &Lutum, _step: &str) -> Validation {
     Ok(())
 }
 
-struct RewriteNumberProxy<P: Probe> {
-    dispatcher: ProbeHandle<P>,
-}
+// ---------------------------------------------------------------------------
+// ProbeInterceptor + ProbeDispatchHook impls for the three test hook slots.
+//
+// These are written once per slot (not once per probe). Each ProbeDispatchHook
+// impl routes hook calls through the probe's event loop; the matching
+// ProbeInterceptor impl lets probes use `cx.intercept::<Slot>()` with no
+// further boilerplate. ProbeHandle / ProbeDispatcher never appear in probe
+// or hook-implementation code.
+// ---------------------------------------------------------------------------
 
 #[async_trait]
-impl<P> RewriteNumberHook for RewriteNumberProxy<P>
+impl<P> RewriteNumberHook for ProbeDispatchHook<P, RewriteNumber>
 where
-    P: Probe + StatefulRewriteNumberHook + Send + 'static,
+    P: Probe + StatefulRewriteNumberHook + 'static,
+    P::Score: Send + 'static,
     P::Artifact: Send + 'static,
     P::Error: Send + 'static,
-    P::Score: Send + 'static,
 {
-    async fn call(&self, llm: &Lutum, value: usize) -> usize {
-        let dispatcher = self.dispatcher.clone();
-        let llm = llm.clone();
-
-        dispatcher
-            .dispatch(move |probe| {
-                Box::pin(async move {
-                    <P as StatefulRewriteNumberHook>::call_mut(probe, &llm, value).await
-                })
-            })
+    async fn call(&self, ctx: &Lutum, args: RewriteNumberArgs) -> usize {
+        let ctx = ctx.clone();
+        self.dispatcher
+            .dispatch(move |probe| Box::pin(async move { probe.call_mut(&ctx, args).await }))
             .await
             .expect("probe dispatcher should stay alive")
     }
 }
 
-struct DecorateLabelProxy<P: Probe> {
-    dispatcher: ProbeHandle<P>,
+impl<P> ProbeInterceptor<P> for RewriteNumber
+where
+    P: Probe + StatefulRewriteNumberHook + 'static,
+    P::Score: Send + 'static,
+    P::Artifact: Send + 'static,
+    P::Error: Send + 'static,
+{
+    fn register_intercept(cx: &mut ProbeContext<'_, P>) {
+        let dispatcher = cx.dispatcher();
+        cx.update_hooks(|h| h.register_rewrite_number(ProbeDispatchHook::new(dispatcher)));
+    }
 }
 
 #[async_trait]
-impl<P> DecorateLabelHook for DecorateLabelProxy<P>
+impl<P> DecorateLabelHook for ProbeDispatchHook<P, DecorateLabel>
 where
-    P: Probe + StatefulDecorateLabelHook + Send + 'static,
+    P: Probe + StatefulDecorateLabelHook + 'static,
+    P::Score: Send + 'static,
     P::Artifact: Send + 'static,
     P::Error: Send + 'static,
-    P::Score: Send + 'static,
 {
-    async fn call(&self, llm: &Lutum, label: &str) -> String {
-        let dispatcher = self.dispatcher.clone();
-        let llm = llm.clone();
-        let label = label.to_string();
-
-        dispatcher
-            .dispatch(move |probe| {
-                Box::pin(async move {
-                    <P as StatefulDecorateLabelHook>::call_mut(probe, &llm, &label).await
-                })
-            })
+    async fn call(&self, ctx: &Lutum, args: DecorateLabelArgs) -> String {
+        let ctx = ctx.clone();
+        self.dispatcher
+            .dispatch(move |probe| Box::pin(async move { probe.call_mut(&ctx, args).await }))
             .await
             .expect("probe dispatcher should stay alive")
     }
 }
 
-struct ValidateStepProxy<P: Probe> {
-    dispatcher: ProbeHandle<P>,
+impl<P> ProbeInterceptor<P> for DecorateLabel
+where
+    P: Probe + StatefulDecorateLabelHook + 'static,
+    P::Score: Send + 'static,
+    P::Artifact: Send + 'static,
+    P::Error: Send + 'static,
+{
+    fn register_intercept(cx: &mut ProbeContext<'_, P>) {
+        let dispatcher = cx.dispatcher();
+        cx.update_hooks(|h| h.register_decorate_label(ProbeDispatchHook::new(dispatcher)));
+    }
 }
 
 #[async_trait]
-impl<P> ValidateStepHook for ValidateStepProxy<P>
+impl<P> ValidateStepHook for ProbeDispatchHook<P, ValidateStep>
 where
-    P: Probe + StatefulValidateStepHook + Send + 'static,
+    P: Probe + StatefulValidateStepHook + 'static,
+    P::Score: Send + 'static,
     P::Artifact: Send + 'static,
     P::Error: Send + 'static,
-    P::Score: Send + 'static,
 {
-    async fn call(&self, llm: &Lutum, step: &str) -> Validation {
-        let dispatcher = self.dispatcher.clone();
-        let llm = llm.clone();
-        let step = step.to_string();
-
-        dispatcher
-            .dispatch(move |probe| {
-                Box::pin(async move {
-                    <P as StatefulValidateStepHook>::call_mut(probe, &llm, &step).await
-                })
-            })
+    async fn call(&self, ctx: &Lutum, args: ValidateStepArgs) -> Validation {
+        let ctx = ctx.clone();
+        self.dispatcher
+            .dispatch(move |probe| Box::pin(async move { probe.call_mut(&ctx, args).await }))
             .await
             .expect("probe dispatcher should stay alive")
     }
 }
+
+impl<P> ProbeInterceptor<P> for ValidateStep
+where
+    P: Probe + StatefulValidateStepHook + 'static,
+    P::Score: Send + 'static,
+    P::Artifact: Send + 'static,
+    P::Error: Send + 'static,
+{
+    fn register_intercept(cx: &mut ProbeContext<'_, P>) {
+        let dispatcher = cx.dispatcher();
+        cx.update_hooks(|h| h.register_validate_step(ProbeDispatchHook::new(dispatcher)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Probe implementations
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Eq, PartialEq)]
 struct ProbeArtifact {
@@ -137,14 +161,8 @@ impl Probe for TimelineProbe {
     type Error = Infallible;
 
     fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        let dispatcher = cx.dispatcher();
-        cx.update_hooks(move |hooks| {
-            hooks
-                .register_rewrite_number(RewriteNumberProxy {
-                    dispatcher: dispatcher.clone(),
-                })
-                .register_decorate_label(DecorateLabelProxy { dispatcher })
-        });
+        cx.intercept::<RewriteNumber>();
+        cx.intercept::<DecorateLabel>();
     }
 
     fn on_trace_event(
@@ -177,17 +195,17 @@ impl Probe for TimelineProbe {
 
 #[async_trait]
 impl StatefulRewriteNumberHook for TimelineProbe {
-    async fn call_mut(&mut self, _llm: &Lutum, value: usize) -> usize {
-        self.timeline.push(format!("hook:number:{value}"));
-        value + 1
+    async fn call_mut(&mut self, _llm: &Lutum, args: RewriteNumberArgs) -> usize {
+        self.timeline.push(format!("hook:number:{}", args.0));
+        args.0 + 1
     }
 }
 
 #[async_trait]
 impl StatefulDecorateLabelHook for TimelineProbe {
-    async fn call_mut(&mut self, _llm: &Lutum, label: &str) -> String {
-        self.timeline.push(format!("hook:label:{label}"));
-        format!("probe:{label}")
+    async fn call_mut(&mut self, _llm: &Lutum, args: DecorateLabelArgs) -> String {
+        self.timeline.push(format!("hook:label:{}", args.0));
+        format!("probe:{}", args.0)
     }
 }
 
@@ -309,10 +327,7 @@ impl Probe for HookErrorProbe {
     type Error = Infallible;
 
     fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        let dispatcher = cx.dispatcher();
-        cx.update_hooks(move |hooks| {
-            hooks.register_validate_step(ValidateStepProxy { dispatcher })
-        });
+        cx.intercept::<ValidateStep>();
     }
 
     fn on_trace_event(
@@ -333,9 +348,9 @@ impl Probe for HookErrorProbe {
 
 #[async_trait]
 impl StatefulValidateStepHook for HookErrorProbe {
-    async fn call_mut(&mut self, _llm: &Lutum, step: &str) -> Validation {
+    async fn call_mut(&mut self, _llm: &Lutum, args: ValidateStepArgs) -> Validation {
         self.hook_calls += 1;
-        if step == "blocked" {
+        if args.0 == "blocked" {
             Err("blocked")
         } else {
             Ok(())

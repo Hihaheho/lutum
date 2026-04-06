@@ -50,6 +50,11 @@ pub struct ProbeContext<'a, P: Probe> {
 }
 
 impl<'a, P: Probe> ProbeContext<'a, P> {
+    /// Returns a cloneable handle to the probe's event loop.
+    ///
+    /// This is a lower-level escape hatch primarily used by [`ProbeInterceptor`]
+    /// implementors. Prefer [`intercept`][ProbeContext::intercept] for the common
+    /// case.
     pub fn dispatcher(&self) -> ProbeHandle<P> {
         self.dispatcher.clone()
     }
@@ -65,6 +70,52 @@ impl<'a, P: Probe> ProbeContext<'a, P> {
     pub fn update_hooks(&mut self, f: impl FnOnce(HookRegistry) -> HookRegistry) {
         let hooks = std::mem::take(self.hooks);
         *self.hooks = f(hooks);
+    }
+
+    /// Register a hook slot to be intercepted by this probe.
+    ///
+    /// `Slot` must implement [`ProbeInterceptor<P>`], which is automatically
+    /// available for every slot whose `Stateful*Hook` trait `P` implements.
+    ///
+    /// ```ignore
+    /// fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
+    ///     cx.intercept::<RewriteNumber>();
+    ///     cx.intercept::<DecorateLabel>();
+    /// }
+    /// ```
+    pub fn intercept<Slot: ProbeInterceptor<P>>(&mut self) {
+        Slot::register_intercept(self);
+    }
+}
+
+/// Connects a hook slot marker type to probe-level interception.
+///
+/// When `P` implements the corresponding `Stateful*Hook` trait, this trait is
+/// implemented for the slot marker type (e.g. `RewriteNumber`). Calling
+/// [`ProbeContext::intercept::<Slot>()`] then registers a dispatch proxy that
+/// routes hook calls through the probe's event loop, keeping `ProbeHandle` and
+/// `ProbeDispatcher` invisible to Probe implementors.
+pub trait ProbeInterceptor<P: Probe>: Sized {
+    fn register_intercept(cx: &mut ProbeContext<'_, P>);
+}
+
+/// Generic hook implementation that routes calls through the probe's event loop.
+///
+/// Used by [`ProbeInterceptor`] implementors. One instance is created per hook
+/// slot that a probe wants to intercept. The relevant `XxxHook` trait must be
+/// implemented for `ProbeDispatchHook<P, Slot>` alongside a [`ProbeInterceptor`]
+/// impl for the slot marker type; both together enable `cx.intercept::<Slot>()`.
+pub struct ProbeDispatchHook<P: Probe, Slot> {
+    pub dispatcher: ProbeHandle<P>,
+    _slot: std::marker::PhantomData<fn() -> Slot>,
+}
+
+impl<P: Probe, Slot> ProbeDispatchHook<P, Slot> {
+    pub fn new(dispatcher: ProbeHandle<P>) -> Self {
+        Self {
+            dispatcher,
+            _slot: std::marker::PhantomData,
+        }
     }
 }
 
