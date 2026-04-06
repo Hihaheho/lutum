@@ -20,10 +20,10 @@ pub use lutum_trace::{
 
 /// Pure evaluation over a trace snapshot and a strongly typed artifact.
 ///
-/// Metrics are intentionally synchronous and borrow their inputs so the same
-/// collected result can be evaluated multiple times, both in live execution and
-/// future replay runners.
-pub trait Metric {
+/// Pure metrics are intentionally synchronous and borrow their inputs so the
+/// same collected result can be evaluated multiple times, both in live
+/// execution and future replay runners.
+pub trait PureMetric {
     type Artifact;
     type Score;
     type Error;
@@ -38,15 +38,15 @@ pub trait Metric {
 /// Async evaluation over a trace snapshot and a strongly typed artifact with
 /// access to a [`lutum::Lutum`].
 ///
-/// Judge metrics are intended for model-based scoring and other evaluation
-/// flows that need to execute through lutum at scoring time.
+/// `Metric` is the main scoring abstraction. [`PureMetric`] is the synchronous,
+/// context-free subset and is lifted automatically into `Metric`.
 #[async_trait]
-pub trait JudgeMetric {
+pub trait Metric {
     type Artifact;
     type Score;
     type Error;
 
-    async fn judge(
+    async fn evaluate(
         &self,
         ctx: &lutum::Lutum,
         trace: &TraceSnapshot,
@@ -54,27 +54,48 @@ pub trait JudgeMetric {
     ) -> Result<Self::Score, Self::Error>;
 }
 
-/// Evaluate a metric against an existing [`Collected`] value.
-pub fn evaluate_collected<M>(
+#[async_trait]
+impl<T> Metric for T
+where
+    T: PureMetric + Send + Sync,
+{
+    type Artifact = T::Artifact;
+    type Score = T::Score;
+    type Error = T::Error;
+
+    async fn evaluate(
+        &self,
+        _ctx: &lutum::Lutum,
+        trace: &TraceSnapshot,
+        artifact: &Self::Artifact,
+    ) -> Result<Self::Score, Self::Error> {
+        PureMetric::evaluate(self, trace, artifact)
+    }
+}
+
+/// Evaluate a pure metric against an existing [`Collected`] value.
+pub fn evaluate_pure_collected<M>(
     metric: &M,
     collected: &Collected<M::Artifact>,
 ) -> Result<M::Score, M::Error>
 where
-    M: Metric,
+    M: PureMetric,
 {
     metric.evaluate(&collected.trace, &collected.output)
 }
 
-/// Judge an existing [`Collected`] value with a [`JudgeMetric`].
-pub async fn judge_collected<M>(
+/// Evaluate a metric against an existing [`Collected`] value.
+pub async fn evaluate_collected<M>(
     metric: &M,
     ctx: &lutum::Lutum,
     collected: &Collected<M::Artifact>,
 ) -> Result<M::Score, M::Error>
 where
-    M: JudgeMetric,
+    M: Metric,
 {
-    metric.judge(ctx, &collected.trace, &collected.output).await
+    metric
+        .evaluate(ctx, &collected.trace, &collected.output)
+        .await
 }
 
 /// Capture `future` with [`lutum_trace::capture`] and evaluate the resulting
@@ -83,26 +104,26 @@ where
 /// Like [`lutum_trace::capture`], this requires the active subscriber stack to
 /// include [`lutum_trace::layer`]. If no layer is installed, the artifact is
 /// still evaluated but the trace will be empty.
-pub async fn evaluate_live<M, F>(metric: &M, future: F) -> Result<M::Score, M::Error>
+pub async fn evaluate_pure_live<M, F>(metric: &M, future: F) -> Result<M::Score, M::Error>
 where
-    M: Metric,
+    M: PureMetric,
     F: Future<Output = M::Artifact>,
 {
     let collected = lutum_trace::capture(future).await;
-    evaluate_collected(metric, &collected)
+    evaluate_pure_collected(metric, &collected)
 }
 
-/// Capture `future` with [`lutum_trace::capture`] and judge the resulting
+/// Capture `future` with [`lutum_trace::capture`] and evaluate the resulting
 /// trace/artifact pair with `metric`.
-pub async fn judge_live<M, F>(
+pub async fn evaluate_live<M, F>(
     metric: &M,
     ctx: &lutum::Lutum,
     future: F,
 ) -> Result<M::Score, M::Error>
 where
-    M: JudgeMetric,
+    M: Metric,
     F: Future<Output = M::Artifact>,
 {
     let collected = lutum_trace::capture(future).await;
-    judge_collected(metric, ctx, &collected).await
+    evaluate_collected(metric, ctx, &collected).await
 }

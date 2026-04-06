@@ -1,13 +1,16 @@
 use std::{future::Future, pin::Pin};
 
+use async_trait::async_trait;
+use lutum::{HookRegistry, Lutum};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 
-use lutum::HookRegistry;
 use lutum_trace::{TraceEvent, TraceSnapshot};
+
+use crate::Metric;
 
 /// A mutable, live-only evaluator over a stream of trace events plus a final
 /// trace/artifact pair.
@@ -15,6 +18,7 @@ use lutum_trace::{TraceEvent, TraceSnapshot};
 /// Probes do not own their dispatcher. An external [`ProbeDispatcher`] builds
 /// the hook registry, forwards trace events, and calls [`Probe::finalize`]
 /// after the traced future completes.
+#[async_trait]
 pub trait Probe: Send + 'static {
     type Score;
     type Artifact;
@@ -26,16 +30,39 @@ pub trait Probe: Send + 'static {
     {
     }
 
-    fn on_trace_event(
+    async fn on_trace_event(
         &mut self,
-        event: &TraceEvent,
-    ) -> Result<ProbeDecision<Self::Score>, Self::Error>;
+        _ctx: &Lutum,
+        _event: &TraceEvent,
+    ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
+        Ok(ProbeDecision::Continue)
+    }
 
-    fn finalize(
+    async fn finalize(
         &mut self,
+        ctx: &Lutum,
         trace: &TraceSnapshot,
         artifact: &Self::Artifact,
     ) -> Result<Self::Score, Self::Error>;
+}
+
+#[async_trait]
+impl<T> Probe for T
+where
+    T: Metric + Send + Sync + 'static,
+{
+    type Score = T::Score;
+    type Artifact = T::Artifact;
+    type Error = T::Error;
+
+    async fn finalize(
+        &mut self,
+        ctx: &Lutum,
+        trace: &TraceSnapshot,
+        artifact: &Self::Artifact,
+    ) -> Result<Self::Score, Self::Error> {
+        Metric::evaluate(self, ctx, trace, artifact).await
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -125,8 +152,12 @@ pub type ProbeDispatchFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a
 
 enum ProbeMessage<P: Probe> {
     Dispatch(ProbeTask<P>),
-    Trace(TraceEvent),
+    Trace {
+        ctx: Lutum,
+        event: TraceEvent,
+    },
     Finalize {
+        ctx: Lutum,
         trace: TraceSnapshot,
         artifact: P::Artifact,
         reply: oneshot::Sender<Result<P::Score, ProbeRunError<P::Error>>>,
@@ -193,26 +224,33 @@ where
     /// Like [`lutum_trace::capture_with_events`], this requires the active
     /// subscriber stack to include [`lutum_trace::layer`]. If the layer is
     /// absent, no live events are forwarded and `trace` will be empty.
-    pub async fn run_live<F>(self, future: F) -> Result<P::Score, ProbeRunError<P::Error>>
+    pub async fn run_live<F>(
+        self,
+        ctx: &Lutum,
+        future: F,
+    ) -> Result<P::Score, ProbeRunError<P::Error>>
     where
         F: Future<Output = P::Artifact>,
     {
         let dispatcher = self.dispatcher.clone();
+        let ctx = ctx.clone();
         let collected = lutum_trace::capture_with_events(future, move |event| {
-            let _ = dispatcher.send_trace(event);
+            let _ = dispatcher.send_trace(ctx.clone(), event);
         })
         .await;
 
-        self.finish(collected.trace, collected.output).await
+        self.finish(&ctx, collected.trace, collected.output).await
     }
 
     pub async fn finish(
         self,
+        ctx: &Lutum,
         trace: TraceSnapshot,
         artifact: P::Artifact,
     ) -> Result<P::Score, ProbeRunError<P::Error>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let send_result = self.dispatcher.send_message(ProbeMessage::Finalize {
+            ctx: ctx.clone(),
             trace,
             artifact,
             reply: reply_tx,
@@ -263,8 +301,8 @@ where
         reply_rx.await.map_err(|_| ProbeDispatchError)
     }
 
-    fn send_trace(&self, event: TraceEvent) -> Result<(), ProbeDispatchError> {
-        self.send_message(ProbeMessage::Trace(event))
+    fn send_trace(&self, ctx: Lutum, event: TraceEvent) -> Result<(), ProbeDispatchError> {
+        self.send_message(ProbeMessage::Trace { ctx, event })
     }
 
     fn send_message(&self, message: ProbeMessage<P>) -> Result<(), ProbeDispatchError> {
@@ -302,18 +340,19 @@ where
     while let Some(message) = rx.recv().await {
         match message {
             ProbeMessage::Dispatch(task) => task(&mut probe).await,
-            ProbeMessage::Trace(event) => {
+            ProbeMessage::Trace { ctx, event } => {
                 if completed.is_some() || failure.is_some() {
                     continue;
                 }
 
-                match probe.on_trace_event(&event) {
+                match probe.on_trace_event(&ctx, &event).await {
                     Ok(ProbeDecision::Continue) => {}
                     Ok(ProbeDecision::Complete(score)) => completed = Some(score),
                     Err(source) => failure = Some(source),
                 }
             }
             ProbeMessage::Finalize {
+                ctx,
                 trace,
                 artifact,
                 reply,
@@ -324,7 +363,8 @@ where
                     Err(ProbeRunError::Probe(source))
                 } else {
                     probe
-                        .finalize(&trace, &artifact)
+                        .finalize(&ctx, &trace, &artifact)
+                        .await
                         .map_err(ProbeRunError::Probe)
                 };
 
