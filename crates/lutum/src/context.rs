@@ -2087,9 +2087,18 @@ async fn recover_or_release_budget(
     request_id: Option<&str>,
 ) -> Result<(), AgentError> {
     let recovered_usage = if let Some(request_id) = request_id {
-        match recovery.recover_usage(kind, request_id).await? {
-            Some(usage) => usage,
-            None => Usage::zero(),
+        match recovery.recover_usage(kind, request_id).await {
+            Ok(Some(usage)) => usage,
+            Ok(None) => Usage::zero(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    kind = ?kind,
+                    request_id,
+                    "failed to recover usage; releasing reserved budget with zero usage"
+                );
+                Usage::zero()
+            }
         }
     } else {
         Usage::zero()

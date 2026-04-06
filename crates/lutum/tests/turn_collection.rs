@@ -84,6 +84,29 @@ impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
     }
 }
 
+struct FailOnTextDelta;
+
+#[async_trait]
+impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
+    for FailOnTextDelta
+{
+    type Error = MockError;
+
+    async fn on_event(
+        &mut self,
+        event: &TextTurnEventWithTools<Tools>,
+        _cx: &HandlerContext<TextTurnStateWithTools<Tools>>,
+    ) -> Result<HandlerDirective, Self::Error> {
+        if matches!(event, TextTurnEventWithTools::TextDelta { .. }) {
+            Err(MockError::Synthetic {
+                message: "handler failed".into(),
+            })
+        } else {
+            Ok(HandlerDirective::Continue)
+        }
+    }
+}
+
 #[test]
 fn text_turn_collects_assistant_output_and_tool_calls() {
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
@@ -252,6 +275,159 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
 
     match err {
         CollectError::Stopped { partial } => {
+            assert!(matches!(
+                partial.assistant_turn.as_slice(),
+                [AssistantTurnItem::Text(text)] if text == "he"
+            ));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
+}
+
+#[test]
+fn recovery_failure_does_not_replace_stopped_error() {
+    let budget = test_budget();
+    let adapter = MockLlmAdapter::new()
+        .with_text_scenario(MockTextScenario::events(vec![
+            Ok(lutum::mock::RawTextTurnEvent::Started {
+                request_id: Some("req-stop-recovery-error".into()),
+                model: "gpt-4.1".into(),
+            }),
+            Ok(lutum::mock::RawTextTurnEvent::TextDelta { delta: "he".into() }),
+        ]))
+        .with_recover_usage_error(
+            OperationKind::TextTurn,
+            "req-stop-recovery-error",
+            MockError::Synthetic {
+                message: "recovery failed".into(),
+            },
+        );
+    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
+    let pending = block_on(
+        ctx.text_turn(input())
+            .tools::<Tools>()
+            .ext(UsageEstimate {
+                total_tokens: 10,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    )
+    .unwrap();
+
+    let err = block_on(pending.collect_with(StopOnTextDelta)).unwrap_err();
+
+    match err {
+        CollectError::Stopped { partial } => {
+            assert_eq!(
+                partial.request_id.as_deref(),
+                Some("req-stop-recovery-error")
+            );
+            assert!(matches!(
+                partial.assistant_turn.as_slice(),
+                [AssistantTurnItem::Text(text)] if text == "he"
+            ));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
+}
+
+#[test]
+fn recovery_failure_does_not_replace_handler_error() {
+    let budget = test_budget();
+    let adapter = MockLlmAdapter::new()
+        .with_text_scenario(MockTextScenario::events(vec![
+            Ok(lutum::mock::RawTextTurnEvent::Started {
+                request_id: Some("req-handler-recovery-error".into()),
+                model: "gpt-4.1".into(),
+            }),
+            Ok(lutum::mock::RawTextTurnEvent::TextDelta { delta: "he".into() }),
+        ]))
+        .with_recover_usage_error(
+            OperationKind::TextTurn,
+            "req-handler-recovery-error",
+            MockError::Synthetic {
+                message: "recovery failed".into(),
+            },
+        );
+    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
+    let pending = block_on(
+        ctx.text_turn(input())
+            .tools::<Tools>()
+            .ext(UsageEstimate {
+                total_tokens: 10,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    )
+    .unwrap();
+
+    let err = block_on(pending.collect_with(FailOnTextDelta)).unwrap_err();
+
+    match err {
+        CollectError::Handler { source, partial } => {
+            assert_eq!(
+                source,
+                MockError::Synthetic {
+                    message: "handler failed".into(),
+                }
+            );
+            assert_eq!(
+                partial.request_id.as_deref(),
+                Some("req-handler-recovery-error")
+            );
+            assert!(matches!(
+                partial.assistant_turn.as_slice(),
+                [AssistantTurnItem::Text(text)] if text == "he"
+            ));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
+}
+
+#[test]
+fn recovery_failure_does_not_replace_unexpected_eof() {
+    let budget = test_budget();
+    let adapter = MockLlmAdapter::new()
+        .with_text_scenario(MockTextScenario::events(vec![
+            Ok(lutum::mock::RawTextTurnEvent::Started {
+                request_id: Some("req-eof-recovery-error".into()),
+                model: "gpt-4.1".into(),
+            }),
+            Ok(lutum::mock::RawTextTurnEvent::TextDelta { delta: "he".into() }),
+        ]))
+        .with_recover_usage_error(
+            OperationKind::TextTurn,
+            "req-eof-recovery-error",
+            MockError::Synthetic {
+                message: "recovery failed".into(),
+            },
+        );
+    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
+    let pending = block_on(
+        ctx.text_turn(input())
+            .tools::<Tools>()
+            .ext(UsageEstimate {
+                total_tokens: 10,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    )
+    .unwrap();
+
+    let err = block_on(pending.collect()).unwrap_err();
+
+    match err {
+        CollectError::UnexpectedEof { partial } => {
+            assert_eq!(
+                partial.request_id.as_deref(),
+                Some("req-eof-recovery-error")
+            );
             assert!(matches!(
                 partial.assistant_turn.as_slice(),
                 [AssistantTurnItem::Text(text)] if text == "he"

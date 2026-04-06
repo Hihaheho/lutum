@@ -181,6 +181,7 @@ pub struct MockLlmAdapter {
     completions: Arc<Mutex<VecDeque<MockCompletionScenario>>>,
     structured_completions: Arc<Mutex<VecDeque<MockStructuredCompletionScenario>>>,
     recovered_usage: Arc<Mutex<BTreeMap<(OperationKind, String), Usage>>>,
+    recover_usage_errors: Arc<Mutex<BTreeMap<(OperationKind, String), MockError>>>,
 }
 
 impl MockLlmAdapter {
@@ -224,6 +225,19 @@ impl MockLlmAdapter {
             .lock()
             .unwrap()
             .insert((kind, request_id.into()), usage);
+        self
+    }
+
+    pub fn with_recover_usage_error(
+        self,
+        kind: OperationKind,
+        request_id: impl Into<String>,
+        error: MockError,
+    ) -> Self {
+        self.recover_usage_errors
+            .lock()
+            .unwrap()
+            .insert((kind, request_id.into()), error);
         self
     }
 }
@@ -511,6 +525,16 @@ impl UsageRecoveryAdapter for MockLlmAdapter {
         kind: OperationKind,
         request_id: &str,
     ) -> Result<Option<Usage>, AgentError> {
+        if let Some(err) = self
+            .recover_usage_errors
+            .lock()
+            .unwrap()
+            .get(&(kind, request_id.to_string()))
+            .cloned()
+        {
+            return Err(AgentError::backend(err));
+        }
+
         Ok(self
             .recovered_usage
             .lock()
