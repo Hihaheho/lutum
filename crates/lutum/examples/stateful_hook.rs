@@ -1,9 +1,21 @@
+use std::{collections::HashSet, sync::Arc};
+
 use lutum::*;
-use std::sync::Arc;
+
 type Validation = Result<(), Vec<String>>;
-#[def_hook(fallback)]
-async fn validate_command(_ctx: &Lutum, _cmd: &str) -> Validation {
-    Ok(())
+
+const ALLOWED_PREFIXES: &[&str] = &["/var/log", "/tmp"];
+const FORBIDDEN_TOKENS: &[&str] = &["rm", "mv", "sudo", ">", ">>", "dd"];
+const MAX_PIPES: usize = 2;
+
+#[def_hook(always)]
+async fn validate_command(_ctx: &Lutum, cmd: &str) -> Validation {
+    let failures = policy_failures(cmd);
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
+    }
 }
 
 #[hooks]
@@ -11,46 +23,91 @@ struct ShellHooks {
     validators: ValidateCommand,
 }
 
-struct CommandPolicy {
-    allowed_prefixes: &'static [&'static str],
-    forbidden_tokens: &'static [&'static str],
-    max_pipes: usize,
+#[derive(Default)]
+struct RetryMemory {
+    rejected_commands: HashSet<String>,
+    rejection_count: usize,
 }
-// A struct is clearer here: multiple policy fields, shared helper logic, no capture noise.
+
 #[async_trait::async_trait]
-impl StatefulValidateCommandHook for CommandPolicy {
-    async fn call_mut(&mut self, _ctx: &Lutum, cmd: &str, last: Option<Validation>) -> Validation {
-        if let Some(Err(reasons)) = last {
-            return Err(reasons);
+impl StatefulValidateCommandHook for RetryMemory {
+    async fn call_mut(
+        &mut self,
+        _ctx: &Lutum,
+        args: ValidateCommandArgs,
+        last: Option<Validation>,
+    ) -> Validation {
+        let command = args.cmd.trim().to_string();
+        let mut failures = match last {
+            Some(Ok(())) | None => Vec::new(),
+            Some(Err(reasons)) => reasons,
+        };
+
+        if self.rejected_commands.contains(&command) {
+            failures.push(
+                "command was already rejected on an earlier attempt; return a materially different command"
+                    .into(),
+            );
         }
-        let mut failures = Vec::new();
-        let tokens = cmd.split_whitespace().collect::<Vec<_>>();
-        for &tok in self.forbidden_tokens {
-            if tokens.contains(&tok) {
-                failures.push(format!("forbidden token: `{tok}`"));
-            }
-        }
-        let pipe_count = cmd.chars().filter(|&ch| ch == '|').count();
-        if pipe_count > self.max_pipes {
-            failures.push(format!("too many pipes: {pipe_count} > {}", self.max_pipes));
-        }
-        for &tok in &tokens {
-            if tok.starts_with('/')
-                && !self
-                    .allowed_prefixes
-                    .iter()
-                    .any(|prefix| tok.starts_with(prefix))
-            {
-                failures.push(format!("path not in allowed roots: `{tok}`"));
-            }
-        }
+
         if failures.is_empty() {
             Ok(())
         } else {
+            self.rejection_count += 1;
+            self.rejected_commands.insert(command);
+            println!(
+                "[stateful hook] rejection #{} ({} unique rejected command(s) remembered)",
+                self.rejection_count,
+                self.rejected_commands.len()
+            );
             Err(failures)
         }
     }
 }
+
+fn policy_failures(cmd: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    let tokens = cmd.split_whitespace().collect::<Vec<_>>();
+
+    for &tok in FORBIDDEN_TOKENS {
+        if tokens.contains(&tok) {
+            failures.push(format!("forbidden token: `{tok}`"));
+        }
+    }
+
+    let pipe_count = cmd.chars().filter(|&ch| ch == '|').count();
+    if pipe_count > MAX_PIPES {
+        failures.push(format!("too many pipes: {pipe_count} > {MAX_PIPES}"));
+    }
+
+    for &tok in &tokens {
+        if tok.starts_with('/')
+            && !ALLOWED_PREFIXES
+                .iter()
+                .any(|prefix| tok.starts_with(prefix))
+        {
+            failures.push(format!("path not in allowed roots: `{tok}`"));
+        }
+    }
+
+    failures
+}
+
+fn build_prompt(request: &str, failures: &[String]) -> String {
+    if failures.is_empty() {
+        request.to_string()
+    } else {
+        format!(
+            "{request}\n\nPrevious attempt was rejected. Fix every issue and return a different command than any rejected attempt:\n{}",
+            failures
+                .iter()
+                .map(|reason| format!("- {reason}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+}
+
 async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> {
     let mut session = Session::new(llm.clone());
     session.push_system(system);
@@ -58,16 +115,13 @@ async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> 
     let result = session.text_turn().collect().await?;
     Ok(result.assistant_text())
 }
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model = ModelName::new(&std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into()))?;
-    let hooks = ShellHooks::new().with_validate_command(Stateful::new(CommandPolicy {
-        allowed_prefixes: &["/var/log", "/tmp"],
-        forbidden_tokens: &["rm", "mv", "sudo", ">", ">>", "dd"],
-        max_pipes: 2,
-    }));
+    let hooks = ShellHooks::new().with_validate_command(Stateful::new(RetryMemory::default()));
     let llm = Lutum::with_hooks(
         Arc::new(
             OpenAiAdapter::new(token)
@@ -80,21 +134,12 @@ async fn main() -> anyhow::Result<()> {
     let system = "You are a shell expert for log triage on a read-only system.\nOutput only the shell command, nothing else.";
     let request = "List the 5 most recent error lines from /var/log/syslog.";
     let mut failures = Vec::new();
+
     for attempt in 1..=3 {
-        let prompt = if failures.is_empty() {
-            request.to_string()
-        } else {
-            format!(
-                "{request}\n\nPrevious attempt was rejected. Fix every issue:\n{}",
-                failures
-                    .iter()
-                    .map(|reason| format!("- {reason}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-        };
+        let prompt = build_prompt(request, &failures);
         let cmd = ask(&llm, system, &prompt).await?;
         println!("Attempt {attempt}: {cmd}");
+
         match hooks.validate_command(&llm, &cmd).await {
             Ok(()) => {
                 println!("Policy: pass");
@@ -113,5 +158,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
     Ok(())
 }
