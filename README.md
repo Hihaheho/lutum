@@ -411,9 +411,16 @@ top of the same machinery.
 `lutum-eval` is a companion crate for scoring a strongly typed artifact together with a
 captured `TraceSnapshot`.
 
-- `PureMetric`: sync, pure, replay-friendly evaluation over `&TraceSnapshot` and `&Artifact`
-- `Metric`: async evaluation that also receives `&Lutum`; every `PureMetric` is also a `Metric`
-- `Probe`: async live evaluation over `TraceEvent` plus finalization; every `Metric` is also a `Probe`
+- `PureEval`: sync, pure, replay-friendly evaluation over `&TraceSnapshot` and `&Artifact`
+- `Eval`: async evaluation that also receives `&Lutum`; every `PureEval` is also an `Eval`
+- `Objective<R>`: converts a typed report into a scalar `Score` in `0..=1`, where larger is always better
+- `Probe`: async live evaluation over `TraceEvent` plus finalization; every `Eval` is also a `Probe`
+
+The design separates **observation** from **optimization**:
+
+- `Eval` produces a rich typed report
+- `Objective` decides how to scalarize that report into a `Score`
+- the same report can be rescored under different objectives
 
 Live evaluation uses the future output as the artifact directly:
 
@@ -421,7 +428,7 @@ Live evaluation uses the future output as the artifact directly:
 use async_trait::async_trait;
 use lutum::Lutum;
 use lutum_eval::{
-    Metric, PureMetric, evaluate_live, evaluate_pure_live,
+    Eval, EvalExt, PureEval, PureEvalExt, Score, maximize,
 };
 
 #[lutum::def_hook(singleton)]
@@ -434,28 +441,28 @@ struct Draft {
     text: String,
 }
 
-struct LengthMetric;
+struct LengthEval;
 
-impl PureMetric for LengthMetric {
+impl PureEval for LengthEval {
     type Artifact = Draft;
-    type Score = usize;
+    type Report = usize;
     type Error = core::convert::Infallible;
 
     fn evaluate(
         &self,
         _trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
+    ) -> Result<Self::Report, Self::Error> {
         Ok(artifact.text.len())
     }
 }
 
-struct ScaledLengthMetric;
+struct ScaledLengthEval;
 
 #[async_trait]
-impl Metric for ScaledLengthMetric {
+impl Eval for ScaledLengthEval {
     type Artifact = Draft;
-    type Score = usize;
+    type Report = usize;
     type Error = core::convert::Infallible;
 
     async fn evaluate(
@@ -463,23 +470,30 @@ impl Metric for ScaledLengthMetric {
         llm: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
+    ) -> Result<Self::Report, Self::Error> {
         Ok(llm.score_bias(artifact.text.len()).await)
     }
 }
 
 // Assume `llm: Lutum` was already built as in the quickstart.
-let pure_score = evaluate_pure_live(&LengthMetric, async {
+let pure_report = LengthEval.run_future(async {
     Draft { text: "hello".into() }
 }).await?;
 
-let metric_score = evaluate_live(&ScaledLengthMetric, &llm, async {
+let eval_report = ScaledLengthEval.run_future(&llm, async {
     Draft { text: "hello".into() }
 }).await?;
+
+let scored = ScaledLengthEval
+    .scored_by(&maximize(|report: &usize| Score::new_clamped(*report as f32 / 10.0)))
+    .run_future(&llm, async { Draft { text: "hello".into() } })
+    .await?;
+
+let score = scored.score;
 ```
 
-`PureMetric` is the small synchronous subset. `Metric` is the default async scoring abstraction
-that can execute through `Lutum`.
+`PureEval` is the small synchronous subset. `Eval` is the default async observation abstraction
+that can execute through `Lutum`. `Objective` is where scalar scoring lives.
 
 ### Probes
 
@@ -488,7 +502,7 @@ want hook calls to route back into the same mutable state machine.
 
 - `ProbeDispatcher` owns the runtime and builds the hook registry
 - `Probe::register_hooks` installs hook routing through `ProbeContext`
-- `ProbeRuntime::run_live(&llm, ...)` forwards live `TraceEvent`s, then calls `finalize(&llm, trace, artifact)`
+- `ProbeRuntime::run_future(&llm, ...)` forwards live `TraceEvent`s, then calls `finalize(&llm, trace, artifact)`
 
 As with `lutum_trace::capture(...)`, live probe events require the active subscriber stack to
 include `lutum_trace::layer()`.
@@ -522,7 +536,7 @@ struct ResponseQuality {
 
 impl Probe for ResponseQuality {
     type Artifact = String;
-    type Score = Vec<String>;
+    type Report = Vec<String>;
     type Error = Infallible;
 
     fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
@@ -533,7 +547,7 @@ impl Probe for ResponseQuality {
         &mut self,
         _llm: &Lutum,
         _event: &TraceEvent,
-    ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
+    ) -> Result<ProbeDecision<Self::Report>, Self::Error> {
         Ok(ProbeDecision::Continue)
     }
 
@@ -542,7 +556,7 @@ impl Probe for ResponseQuality {
         _llm: &Lutum,
         _trace: &TraceSnapshot,
         _artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
+    ) -> Result<Self::Report, Self::Error> {
         Ok(self.violations.clone())
     }
 }
@@ -570,10 +584,14 @@ let (hooks, runtime) = ProbeDispatcher::new(ResponseQuality::default()).into_par
 // Pass `hooks` to `Lutum::with_hooks(...)` so the probe intercepts validate_response calls.
 let llm = Lutum::with_hooks(/* adapter */, /* budget */, hooks);
 
-let score = runtime.run_live(&llm, async {
-    tracing::info!("draft-started");
-    "Here is your answer.".to_string()
-}).await?;
+let scored = runtime
+    .scored_by(&maximize(|violations: &Vec<String>| {
+        Score::new_clamped(1.0 - (violations.len() as f32 / 10.0))
+    }))
+    .run_future(&llm, async { "Here is your answer.".to_string() })
+    .await?;
+
+let score = scored.score;
 ```
 
 ## Examples

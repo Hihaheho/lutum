@@ -1,9 +1,12 @@
-use std::future::Future;
-
 use async_trait::async_trait;
+use thiserror::Error;
 
+mod combinators;
+mod judge;
 mod macros;
+mod objective;
 mod probe;
+mod score;
 
 /// Re-exported so `register_probe_hook!` can use `$crate::paste::paste!` without
 /// requiring users to add `paste` to their own `Cargo.toml`.
@@ -12,38 +15,50 @@ pub use paste;
 
 pub use crate::probe::{
     Probe, ProbeContext, ProbeDecision, ProbeDispatchError, ProbeDispatchFuture, ProbeDispatchHook,
-    ProbeDispatcher, ProbeHandle, ProbeHookSlot, ProbeRunError, ProbeRuntime,
+    ProbeDispatcher, ProbeHandle, ProbeHookSlot, ProbeRunError, ProbeRuntime, ProbeScoreError,
+    ProbeScoredBy,
 };
+pub use combinators::{
+    Combine, CombineError, ContramapArtifact, EvalExt, LiftPure, MapEvalError, MapReport,
+    PureEvalExt, PureScoredBy, ScoredBy,
+};
+pub use judge::{JudgeEval, JudgeEvalError};
 pub use lutum_trace::{
     Collected, EventRecord, FieldValue, SpanNode, TraceEvent, TraceSnapshot, TraceSpanId,
 };
+pub use objective::{
+    InvertObjective, MapObjectiveError, Maximize, Minimize, Objective, ObjectiveExt,
+    PassFailObjective, maximize, minimize, pass_fail,
+};
+pub use score::{Score, ScoreRangeError};
 
 /// Pure evaluation over a trace snapshot and a strongly typed artifact.
 ///
-/// Pure metrics are intentionally synchronous and borrow their inputs so the
-/// same collected result can be evaluated multiple times, both in live
-/// execution and future replay runners.
-pub trait PureMetric {
+/// Pure evals are intentionally synchronous and borrow their inputs so the same
+/// collected result can be evaluated multiple times, both in live execution and
+/// future replay runners.
+pub trait PureEval {
     type Artifact;
-    type Score;
+    type Report;
     type Error;
 
     fn evaluate(
         &self,
         trace: &TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error>;
+    ) -> Result<Self::Report, Self::Error>;
 }
 
 /// Async evaluation over a trace snapshot and a strongly typed artifact with
 /// access to a [`lutum::Lutum`].
 ///
-/// `Metric` is the main scoring abstraction. [`PureMetric`] is the synchronous,
-/// context-free subset and is lifted automatically into `Metric`.
+/// `Eval` is the main observation abstraction. [`PureEval`] is the
+/// synchronous, context-free subset; use [`PureEvalExt::lift`] when you want
+/// to run a pure eval through async `Eval` combinators.
 #[async_trait]
-pub trait Metric {
+pub trait Eval {
     type Artifact;
-    type Score;
+    type Report;
     type Error;
 
     async fn evaluate(
@@ -51,80 +66,19 @@ pub trait Metric {
         ctx: &lutum::Lutum,
         trace: &TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error>;
+    ) -> Result<Self::Report, Self::Error>;
 }
 
-#[async_trait]
-impl<T> Metric for T
-where
-    T: PureMetric + Send + Sync,
-    T::Artifact: Sync,
-{
-    type Artifact = T::Artifact;
-    type Score = T::Score;
-    type Error = T::Error;
-
-    async fn evaluate(
-        &self,
-        _ctx: &lutum::Lutum,
-        trace: &TraceSnapshot,
-        artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
-        PureMetric::evaluate(self, trace, artifact)
-    }
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scored<R> {
+    pub report: R,
+    pub score: Score,
 }
 
-/// Evaluate a pure metric against an existing [`Collected`] value.
-pub fn evaluate_pure_collected<M>(
-    metric: &M,
-    collected: &Collected<M::Artifact>,
-) -> Result<M::Score, M::Error>
-where
-    M: PureMetric,
-{
-    metric.evaluate(&collected.trace, &collected.output)
-}
-
-/// Evaluate a metric against an existing [`Collected`] value.
-pub async fn evaluate_collected<M>(
-    metric: &M,
-    ctx: &lutum::Lutum,
-    collected: &Collected<M::Artifact>,
-) -> Result<M::Score, M::Error>
-where
-    M: Metric,
-{
-    metric
-        .evaluate(ctx, &collected.trace, &collected.output)
-        .await
-}
-
-/// Capture `future` with [`lutum_trace::capture`] and evaluate the resulting
-/// trace/artifact pair with `metric`.
-///
-/// Like [`lutum_trace::capture`], this requires the active subscriber stack to
-/// include [`lutum_trace::layer`]. If no layer is installed, the artifact is
-/// still evaluated but the trace will be empty.
-pub async fn evaluate_pure_live<M, F>(metric: &M, future: F) -> Result<M::Score, M::Error>
-where
-    M: PureMetric,
-    F: Future<Output = M::Artifact>,
-{
-    let collected = lutum_trace::capture(future).await;
-    evaluate_pure_collected(metric, &collected)
-}
-
-/// Capture `future` with [`lutum_trace::capture`] and evaluate the resulting
-/// trace/artifact pair with `metric`.
-pub async fn evaluate_live<M, F>(
-    metric: &M,
-    ctx: &lutum::Lutum,
-    future: F,
-) -> Result<M::Score, M::Error>
-where
-    M: Metric,
-    F: Future<Output = M::Artifact>,
-{
-    let collected = lutum_trace::capture(future).await;
-    evaluate_collected(metric, ctx, &collected).await
+#[derive(Debug, Error)]
+pub enum ScoreEvalError<EE, OE> {
+    #[error("evaluation failed: {0}")]
+    Eval(EE),
+    #[error("objective failed: {0}")]
+    Objective(OE),
 }

@@ -10,7 +10,7 @@ use tokio::{
 
 use lutum_trace::{TraceEvent, TraceSnapshot};
 
-use crate::Metric;
+use crate::{Collected, Eval, Objective, Scored};
 
 /// A mutable, live-only evaluator over a stream of trace events plus a final
 /// trace/artifact pair.
@@ -20,7 +20,7 @@ use crate::Metric;
 /// after the traced future completes.
 #[async_trait]
 pub trait Probe: Send + 'static {
-    type Score;
+    type Report;
     type Artifact;
     type Error;
 
@@ -34,7 +34,7 @@ pub trait Probe: Send + 'static {
         &mut self,
         _ctx: &Lutum,
         _event: &TraceEvent,
-    ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
+    ) -> Result<ProbeDecision<Self::Report>, Self::Error> {
         Ok(ProbeDecision::Continue)
     }
 
@@ -43,16 +43,16 @@ pub trait Probe: Send + 'static {
         ctx: &Lutum,
         trace: &TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error>;
+    ) -> Result<Self::Report, Self::Error>;
 }
 
 #[async_trait]
 impl<T> Probe for T
 where
-    T: Metric + Send + Sync + 'static,
+    T: Eval + Send + Sync + 'static,
     T::Artifact: Sync,
 {
-    type Score = T::Score;
+    type Report = T::Report;
     type Artifact = T::Artifact;
     type Error = T::Error;
 
@@ -61,15 +61,15 @@ where
         ctx: &Lutum,
         trace: &TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
-        Metric::evaluate(self, ctx, trace, artifact).await
+    ) -> Result<Self::Report, Self::Error> {
+        Eval::evaluate(self, ctx, trace, artifact).await
     }
 }
 
 #[derive(Debug, PartialEq)]
-pub enum ProbeDecision<S> {
+pub enum ProbeDecision<R> {
     Continue,
-    Complete(S),
+    Complete(R),
 }
 
 pub struct ProbeContext<'a, P: Probe> {
@@ -78,11 +78,6 @@ pub struct ProbeContext<'a, P: Probe> {
 }
 
 impl<'a, P: Probe> ProbeContext<'a, P> {
-    /// Returns a cloneable handle to the probe's event loop.
-    ///
-    /// This is a lower-level escape hatch primarily used by [`ProbeHookSlot`]
-    /// implementors. Prefer [`register_hook`][ProbeContext::register_hook] for
-    /// the common case.
     pub fn dispatcher(&self) -> ProbeHandle<P> {
         self.dispatcher.clone()
     }
@@ -91,48 +86,20 @@ impl<'a, P: Probe> ProbeContext<'a, P> {
         self.hooks
     }
 
-    /// Replace the registry with the result of `f`.
-    ///
-    /// This is convenient because generated `register_*` methods consume and
-    /// return the registry by value.
     pub fn update_hooks(&mut self, f: impl FnOnce(HookRegistry) -> HookRegistry) {
         let hooks = std::mem::take(self.hooks);
         *self.hooks = f(hooks);
     }
 
-    /// Register a hook slot so this probe receives its calls.
-    ///
-    /// `Slot` must implement [`ProbeHookSlot<P>`], which is available for every
-    /// slot whose `Stateful*Hook` trait `P` implements.
-    ///
-    /// ```ignore
-    /// fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-    ///     cx.register_hook::<RewriteNumber>();
-    ///     cx.register_hook::<DecorateLabel>();
-    /// }
-    /// ```
     pub fn register_hook<Slot: ProbeHookSlot<P>>(&mut self) {
         Slot::register(self);
     }
 }
 
-/// Enables a hook slot to be driven by a probe.
-///
-/// Implement this for a slot marker type (e.g. `RewriteNumber`) alongside the
-/// corresponding `XxxHook` impl for [`ProbeDispatchHook<P, Slot>`]. Together
-/// they allow a probe to call `cx.register_hook::<Slot>()` in
-/// [`Probe::register_hooks`] without ever seeing `ProbeHandle` or
-/// `ProbeDispatcher`.
 pub trait ProbeHookSlot<P: Probe>: Sized {
     fn register(cx: &mut ProbeContext<'_, P>);
 }
 
-/// Generic hook implementation that routes calls through the probe's event loop.
-///
-/// Used by [`ProbeHookSlot`] implementors. One instance is created per hook
-/// slot that a probe handles. The relevant `XxxHook` trait must be implemented
-/// for `ProbeDispatchHook<P, Slot>` alongside a [`ProbeHookSlot`] impl for the
-/// slot marker type; both together enable `cx.register_hook::<Slot>()`.
 pub struct ProbeDispatchHook<P: Probe, Slot> {
     pub dispatcher: ProbeHandle<P>,
     _slot: std::marker::PhantomData<fn() -> Slot>,
@@ -161,7 +128,7 @@ enum ProbeMessage<P: Probe> {
         ctx: Lutum,
         trace: TraceSnapshot,
         artifact: P::Artifact,
-        reply: oneshot::Sender<Result<P::Score, ProbeRunError<P::Error>>>,
+        reply: oneshot::Sender<Result<P::Report, ProbeRunError<P::Error>>>,
     },
 }
 
@@ -175,7 +142,7 @@ where
     P: Probe,
     P::Artifact: Send + 'static,
     P::Error: Send + 'static,
-    P::Score: Send + 'static,
+    P::Report: Send + 'static,
 {
     pub fn new(probe: P) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -213,23 +180,17 @@ where
     P: Probe,
     P::Artifact: Send + 'static,
     P::Error: Send + 'static,
-    P::Score: Send + 'static,
+    P::Report: Send + 'static,
 {
     pub fn dispatcher(&self) -> ProbeHandle<P> {
         self.dispatcher.clone()
     }
 
-    /// Capture `future` with live [`TraceEvent`] forwarding and finish the
-    /// probe when the artifact is ready.
-    ///
-    /// Like [`lutum_trace::capture_with_events`], this requires the active
-    /// subscriber stack to include [`lutum_trace::layer`]. If the layer is
-    /// absent, no live events are forwarded and `trace` will be empty.
-    pub async fn run_live<F>(
+    pub async fn run_future<F>(
         self,
         ctx: &Lutum,
         future: F,
-    ) -> Result<P::Score, ProbeRunError<P::Error>>
+    ) -> Result<P::Report, ProbeRunError<P::Error>>
     where
         F: Future<Output = P::Artifact>,
     {
@@ -241,15 +202,33 @@ where
         })
         .await;
 
-        self.finish(&ctx, collected.trace, collected.output).await
+        self.run_collected(&ctx, collected).await
     }
 
-    pub async fn finish(
+    pub async fn run_collected(
+        self,
+        ctx: &Lutum,
+        collected: Collected<P::Artifact>,
+    ) -> Result<P::Report, ProbeRunError<P::Error>> {
+        self.run_parts(ctx, collected.trace, collected.output).await
+    }
+
+    pub fn scored_by<'a, O>(self, objective: &'a O) -> ProbeScoredBy<'a, P, O>
+    where
+        O: Objective<P::Report>,
+    {
+        ProbeScoredBy {
+            runtime: self,
+            objective,
+        }
+    }
+
+    async fn run_parts(
         self,
         ctx: &Lutum,
         trace: TraceSnapshot,
         artifact: P::Artifact,
-    ) -> Result<P::Score, ProbeRunError<P::Error>> {
+    ) -> Result<P::Report, ProbeRunError<P::Error>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let send_result = self.dispatcher.send_message(ProbeMessage::Finalize {
             ctx: ctx.clone(),
@@ -268,6 +247,57 @@ where
             Ok(()) => response.unwrap_or(Err(ProbeRunError::DispatcherClosed)),
             Err(source) => Err(ProbeRunError::Panicked { source }),
         }
+    }
+}
+
+pub struct ProbeScoredBy<'a, P: Probe, O> {
+    runtime: ProbeRuntime<P>,
+    objective: &'a O,
+}
+
+impl<'a, P, O> ProbeScoredBy<'a, P, O>
+where
+    P: Probe,
+    P::Artifact: Send + 'static,
+    P::Error: Send + 'static,
+    P::Report: Send + 'static,
+    O: Objective<P::Report>,
+{
+    pub async fn run_future<F>(
+        self,
+        ctx: &Lutum,
+        future: F,
+    ) -> Result<Scored<P::Report>, ProbeScoreError<P::Error, O::Error>>
+    where
+        F: Future<Output = P::Artifact>,
+    {
+        let report = self
+            .runtime
+            .run_future(ctx, future)
+            .await
+            .map_err(ProbeScoreError::Probe)?;
+        let score = self
+            .objective
+            .score(&report)
+            .map_err(ProbeScoreError::Objective)?;
+        Ok(Scored { report, score })
+    }
+
+    pub async fn run_collected(
+        self,
+        ctx: &Lutum,
+        collected: Collected<P::Artifact>,
+    ) -> Result<Scored<P::Report>, ProbeScoreError<P::Error, O::Error>> {
+        let report = self
+            .runtime
+            .run_collected(ctx, collected)
+            .await
+            .map_err(ProbeScoreError::Probe)?;
+        let score = self
+            .objective
+            .score(&report)
+            .map_err(ProbeScoreError::Objective)?;
+        Ok(Scored { report, score })
     }
 }
 
@@ -329,12 +359,20 @@ pub enum ProbeRunError<E> {
     },
 }
 
+#[derive(Debug, Error)]
+pub enum ProbeScoreError<PE, OE> {
+    #[error("probe failed: {0}")]
+    Probe(ProbeRunError<PE>),
+    #[error("objective failed: {0}")]
+    Objective(OE),
+}
+
 async fn run_probe<P>(mut probe: P, mut rx: mpsc::UnboundedReceiver<ProbeMessage<P>>)
 where
     P: Probe,
     P::Artifact: Send + 'static,
     P::Error: Send + 'static,
-    P::Score: Send + 'static,
+    P::Report: Send + 'static,
 {
     let mut completed = None;
     let mut failure = None;
@@ -349,7 +387,7 @@ where
 
                 match probe.on_trace_event(&ctx, &event).await {
                     Ok(ProbeDecision::Continue) => {}
-                    Ok(ProbeDecision::Complete(score)) => completed = Some(score),
+                    Ok(ProbeDecision::Complete(report)) => completed = Some(report),
                     Err(source) => failure = Some(source),
                 }
             }
@@ -359,8 +397,8 @@ where
                 artifact,
                 reply,
             } => {
-                let result = if let Some(score) = completed.take() {
-                    Ok(score)
+                let result = if let Some(report) = completed.take() {
+                    Ok(report)
                 } else if let Some(source) = failure.take() {
                     Err(ProbeRunError::Probe(source))
                 } else {

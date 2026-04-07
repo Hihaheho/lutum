@@ -11,7 +11,10 @@ use lutum::{
     HookRegistry, Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
 };
 use lutum_eval::register_probe_hook;
-use lutum_eval::{Metric, Probe, ProbeContext, ProbeDecision, ProbeDispatcher, ProbeRunError};
+use lutum_eval::{
+    Eval, ObjectiveExt, Probe, ProbeContext, ProbeDecision, ProbeDispatcher, ProbeRunError,
+    ProbeScoreError, Score, maximize,
+};
 use tracing::instrument::WithSubscriber as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -32,10 +35,6 @@ async fn validate_step(_llm: &Lutum, _step: &str) -> Validation {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Probe implementations
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Eq, PartialEq)]
 struct ProbeArtifact {
     number: usize,
@@ -55,7 +54,7 @@ struct TimelineProbe {
 
 #[async_trait]
 impl Probe for TimelineProbe {
-    type Score = Vec<String>;
+    type Report = Vec<String>;
     type Artifact = ProbeArtifact;
     type Error = Infallible;
 
@@ -68,7 +67,7 @@ impl Probe for TimelineProbe {
         &mut self,
         _ctx: &Lutum,
         event: &lutum_eval::TraceEvent,
-    ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
+    ) -> Result<ProbeDecision<Self::Report>, Self::Error> {
         if let lutum_eval::TraceEvent::Event { record, .. } = event
             && let Some(message) = record.message()
         {
@@ -83,7 +82,7 @@ impl Probe for TimelineProbe {
         _ctx: &Lutum,
         trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
+    ) -> Result<Self::Report, Self::Error> {
         self.timeline.push(format!(
             "finalize:{}:{}:{}",
             artifact.number,
@@ -114,7 +113,7 @@ struct NoHooksProbe;
 
 #[async_trait]
 impl Probe for NoHooksProbe {
-    type Score = (bool, usize);
+    type Report = (bool, usize);
     type Artifact = usize;
     type Error = Infallible;
 
@@ -122,7 +121,7 @@ impl Probe for NoHooksProbe {
         &mut self,
         _ctx: &Lutum,
         _event: &lutum_eval::TraceEvent,
-    ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
+    ) -> Result<ProbeDecision<Self::Report>, Self::Error> {
         Ok(ProbeDecision::Continue)
     }
 
@@ -131,7 +130,7 @@ impl Probe for NoHooksProbe {
         _ctx: &Lutum,
         trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
+    ) -> Result<Self::Report, Self::Error> {
         Ok((trace.has_event_message("plain-trace"), *artifact))
     }
 }
@@ -142,7 +141,7 @@ struct EarlyCompleteProbe {
 
 #[async_trait]
 impl Probe for EarlyCompleteProbe {
-    type Score = usize;
+    type Report = usize;
     type Artifact = usize;
     type Error = Infallible;
 
@@ -150,7 +149,7 @@ impl Probe for EarlyCompleteProbe {
         &mut self,
         _ctx: &Lutum,
         event: &lutum_eval::TraceEvent,
-    ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
+    ) -> Result<ProbeDecision<Self::Report>, Self::Error> {
         if let lutum_eval::TraceEvent::Event { record, .. } = event
             && record.message() == Some("stop-early")
         {
@@ -165,7 +164,7 @@ impl Probe for EarlyCompleteProbe {
         _ctx: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
         _artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
+    ) -> Result<Self::Report, Self::Error> {
         self.finalized.store(true, Ordering::SeqCst);
         Ok(0)
     }
@@ -175,7 +174,7 @@ struct TraceErrorProbe;
 
 #[async_trait]
 impl Probe for TraceErrorProbe {
-    type Score = usize;
+    type Report = usize;
     type Artifact = usize;
     type Error = TestProbeError;
 
@@ -183,7 +182,7 @@ impl Probe for TraceErrorProbe {
         &mut self,
         _ctx: &Lutum,
         event: &lutum_eval::TraceEvent,
-    ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
+    ) -> Result<ProbeDecision<Self::Report>, Self::Error> {
         if let lutum_eval::TraceEvent::Event { record, .. } = event
             && record.message() == Some("trace-error")
         {
@@ -198,7 +197,7 @@ impl Probe for TraceErrorProbe {
         _ctx: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
         _artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
+    ) -> Result<Self::Report, Self::Error> {
         Ok(1)
     }
 }
@@ -207,7 +206,7 @@ struct FinalizeErrorProbe;
 
 #[async_trait]
 impl Probe for FinalizeErrorProbe {
-    type Score = usize;
+    type Report = usize;
     type Artifact = usize;
     type Error = TestProbeError;
 
@@ -215,7 +214,7 @@ impl Probe for FinalizeErrorProbe {
         &mut self,
         _ctx: &Lutum,
         _event: &lutum_eval::TraceEvent,
-    ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
+    ) -> Result<ProbeDecision<Self::Report>, Self::Error> {
         Ok(ProbeDecision::Continue)
     }
 
@@ -224,7 +223,7 @@ impl Probe for FinalizeErrorProbe {
         _ctx: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
         _artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
+    ) -> Result<Self::Report, Self::Error> {
         Err(TestProbeError::FinalizeFailed)
     }
 }
@@ -236,7 +235,7 @@ struct HookErrorProbe {
 
 #[async_trait]
 impl Probe for HookErrorProbe {
-    type Score = usize;
+    type Report = usize;
     type Artifact = ();
     type Error = Infallible;
 
@@ -248,7 +247,7 @@ impl Probe for HookErrorProbe {
         &mut self,
         _ctx: &Lutum,
         _event: &lutum_eval::TraceEvent,
-    ) -> Result<ProbeDecision<Self::Score>, Self::Error> {
+    ) -> Result<ProbeDecision<Self::Report>, Self::Error> {
         Ok(ProbeDecision::Continue)
     }
 
@@ -257,7 +256,7 @@ impl Probe for HookErrorProbe {
         _ctx: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
         _artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
+    ) -> Result<Self::Report, Self::Error> {
         Ok(self.hook_calls)
     }
 }
@@ -286,11 +285,11 @@ fn subscriber() -> impl tracing::Subscriber + Send + Sync {
     tracing_subscriber::registry().with(lutum_trace::layer())
 }
 
-struct FinalArtifactMetric;
+struct FinalArtifactEval;
 
 #[async_trait]
-impl Metric for FinalArtifactMetric {
-    type Score = usize;
+impl Eval for FinalArtifactEval {
+    type Report = usize;
     type Artifact = usize;
     type Error = Infallible;
 
@@ -299,8 +298,8 @@ impl Metric for FinalArtifactMetric {
         _ctx: &Lutum,
         trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Result<Self::Score, Self::Error> {
-        Ok(*artifact + usize::from(trace.has_event_message("metric-probe")))
+    ) -> Result<Self::Report, Self::Error> {
+        Ok(*artifact + usize::from(trace.has_event_message("eval-probe")))
     }
 }
 
@@ -309,8 +308,8 @@ async fn probe_without_hooks_can_finalize() {
     let llm = make_lutum(HookRegistry::new());
     let (_, runtime) = ProbeDispatcher::new(NoHooksProbe).into_parts();
 
-    let score = runtime
-        .run_live(
+    let report = runtime
+        .run_future(
             &llm,
             async {
                 tracing::info!("plain-trace");
@@ -321,7 +320,7 @@ async fn probe_without_hooks_can_finalize() {
         .await
         .unwrap();
 
-    assert_eq!(score, (true, 7));
+    assert_eq!(report, (true, 7));
 }
 
 #[tokio::test]
@@ -330,8 +329,8 @@ async fn probe_dispatcher_serializes_trace_events_and_hook_rpcs() {
     let llm = make_lutum(hooks);
     let runtime_llm = llm.clone();
 
-    let score = runtime
-        .run_live(
+    let report = runtime
+        .run_future(
             &llm,
             async move {
                 tracing::info!("before-hook");
@@ -347,7 +346,7 @@ async fn probe_dispatcher_serializes_trace_events_and_hook_rpcs() {
         .unwrap();
 
     assert_eq!(
-        score,
+        report,
         vec![
             "trace:before-hook".to_string(),
             "hook:number:2".to_string(),
@@ -367,8 +366,8 @@ async fn complete_short_circuits_finalize() {
     })
     .into_parts();
 
-    let score = runtime
-        .run_live(
+    let report = runtime
+        .run_future(
             &llm,
             async {
                 tracing::info!("stop-early");
@@ -379,7 +378,7 @@ async fn complete_short_circuits_finalize() {
         .await
         .unwrap();
 
-    assert_eq!(score, 99);
+    assert_eq!(report, 99);
     assert!(!finalized.load(Ordering::SeqCst));
 }
 
@@ -389,8 +388,8 @@ async fn hook_proxy_can_return_probe_defined_errors() {
     let llm = make_lutum(hooks);
     let runtime_llm = llm.clone();
 
-    let score = runtime
-        .run_live(
+    let report = runtime
+        .run_future(
             &llm,
             async move {
                 let result = runtime_llm.validate_step("blocked").await;
@@ -401,7 +400,7 @@ async fn hook_proxy_can_return_probe_defined_errors() {
         .await
         .unwrap();
 
-    assert_eq!(score, 1);
+    assert_eq!(report, 1);
 }
 
 #[tokio::test]
@@ -410,7 +409,7 @@ async fn trace_errors_are_returned_from_runtime() {
     let (_, runtime) = ProbeDispatcher::new(TraceErrorProbe).into_parts();
 
     let err = runtime
-        .run_live(
+        .run_future(
             &llm,
             async {
                 tracing::info!("trace-error");
@@ -433,7 +432,7 @@ async fn finalize_errors_are_returned_from_runtime() {
     let (_, runtime) = ProbeDispatcher::new(FinalizeErrorProbe).into_parts();
 
     let err = runtime
-        .run_live(&llm, async { 1usize }.with_subscriber(subscriber()))
+        .run_future(&llm, async { 1usize }.with_subscriber(subscriber()))
         .await
         .unwrap_err();
 
@@ -444,15 +443,15 @@ async fn finalize_errors_are_returned_from_runtime() {
 }
 
 #[tokio::test]
-async fn metric_can_run_through_probe_runtime() {
+async fn eval_can_run_through_probe_runtime() {
     let llm = make_lutum(HookRegistry::new());
-    let (_, runtime) = ProbeDispatcher::new(FinalArtifactMetric).into_parts();
+    let (_, runtime) = ProbeDispatcher::new(FinalArtifactEval).into_parts();
 
-    let score = runtime
-        .run_live(
+    let report = runtime
+        .run_future(
             &llm,
             async {
-                tracing::info!("metric-probe");
+                tracing::info!("eval-probe");
                 7usize
             }
             .with_subscriber(subscriber()),
@@ -460,5 +459,69 @@ async fn metric_can_run_through_probe_runtime() {
         .await
         .unwrap();
 
-    assert_eq!(score, 8);
+    assert_eq!(report, 8);
+}
+
+#[tokio::test]
+async fn probe_runtime_can_score_reports_with_an_objective() {
+    let llm = make_lutum(HookRegistry::new());
+    let (_, runtime) = ProbeDispatcher::new(FinalArtifactEval).into_parts();
+    let objective = maximize(|report: &usize| Score::new_clamped(*report as f32 / 10.0));
+
+    let scored = runtime
+        .scored_by(&objective)
+        .run_future(
+            &llm,
+            async {
+                tracing::info!("eval-probe");
+                7usize
+            }
+            .with_subscriber(subscriber()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(scored.score, Score::new_clamped(0.8));
+    assert_eq!(scored.report, 8);
+}
+
+#[tokio::test]
+async fn objective_failures_are_returned_from_probe_scoring() {
+    let llm = make_lutum(HookRegistry::new());
+    let (_, runtime) = ProbeDispatcher::new(FinalArtifactEval).into_parts();
+    let objective = maximize(|_report: &usize| Score::new_clamped(1.0)).map_error(|_| "never");
+
+    let scored = runtime
+        .scored_by(&objective)
+        .run_future(
+            &llm,
+            async {
+                tracing::info!("eval-probe");
+                7usize
+            }
+            .with_subscriber(subscriber()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(scored.score, Score::pass());
+    assert_eq!(scored.report, 8);
+
+    let (_, runtime) = ProbeDispatcher::new(FinalArtifactEval).into_parts();
+    struct FailingObjective;
+    impl lutum_eval::Objective<usize> for FailingObjective {
+        type Error = &'static str;
+
+        fn score(&self, _report: &usize) -> Result<Score, Self::Error> {
+            Err("bad objective")
+        }
+    }
+
+    let err = runtime
+        .scored_by(&FailingObjective)
+        .run_future(&llm, async { 1usize }.with_subscriber(subscriber()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ProbeScoreError::Objective("bad objective")));
 }

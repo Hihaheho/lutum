@@ -828,6 +828,8 @@ dependencies = [
  "lutum-protocol",
  "lutum-trace",
  "paste",
+ "schemars",
+ "serde",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
