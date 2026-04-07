@@ -1,5 +1,3 @@
-$schema: https://raw.githubusercontent.com/Hihaheho/eure/refs/tags/v0.1.7/assets/schemas/eure-adr.schema.eure
-
 id = "0001-hooks-system"
 title = "Hooks System: Named, Typed, Pluggable Async Function Slots"
 tags = ["hooks", "extensibility", "macros"]
