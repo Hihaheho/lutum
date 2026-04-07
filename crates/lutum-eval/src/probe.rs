@@ -348,8 +348,8 @@ pub struct ProbeDispatchError;
 
 #[derive(Debug, Error)]
 pub enum ProbeRunError<E> {
-    #[error("probe failed")]
-    Probe(E),
+    #[error("probe failed: {0}")]
+    Probe(#[source] E),
     #[error("probe dispatcher closed")]
     DispatcherClosed,
     #[error("probe dispatcher task panicked: {source}")]
@@ -362,9 +362,9 @@ pub enum ProbeRunError<E> {
 #[derive(Debug, Error)]
 pub enum ProbeScoreError<PE, OE> {
     #[error("probe failed: {0}")]
-    Probe(ProbeRunError<PE>),
+    Probe(#[source] ProbeRunError<PE>),
     #[error("objective failed: {0}")]
-    Objective(OE),
+    Objective(#[source] OE),
 }
 
 async fn run_probe<P>(mut probe: P, mut rx: mpsc::UnboundedReceiver<ProbeMessage<P>>)

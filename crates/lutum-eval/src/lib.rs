@@ -78,7 +78,7 @@ pub struct Scored<R> {
 #[derive(Debug, Error)]
 pub enum ScoreEvalError<EE, OE> {
     #[error("evaluation failed: {0}")]
-    Eval(EE),
+    Eval(#[source] EE),
     #[error("objective failed: {0}")]
-    Objective(OE),
+    Objective(#[source] OE),
 }

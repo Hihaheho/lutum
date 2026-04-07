@@ -391,9 +391,9 @@ pub struct Combine<L, R, F> {
 #[derive(Debug, Error)]
 pub enum CombineError<LE, RE> {
     #[error("left eval failed: {0}")]
-    Left(LE),
+    Left(#[source] LE),
     #[error("right eval failed: {0}")]
-    Right(RE),
+    Right(#[source] RE),
 }
 
 impl<L, R, F, O> PureEval for Combine<L, R, F>
