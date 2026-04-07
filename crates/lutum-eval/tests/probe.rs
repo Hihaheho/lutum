@@ -272,50 +272,44 @@ impl StatefulValidateStepHook for HookErrorProbe {
 
 fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooks {
     ProbeHooks::new()
-        .with_rewrite_number((
-            std::marker::PhantomData::<fn() -> Lutum>,
-            {
+        .with_rewrite_number((std::marker::PhantomData::<fn() -> Lutum>, {
+            let dispatcher = dispatcher.clone();
+            move |ctx: Lutum, args: RewriteNumberArgs| {
                 let dispatcher = dispatcher.clone();
-                move |ctx: Lutum, args: RewriteNumberArgs| {
-                    let dispatcher = dispatcher.clone();
-                    async move {
-                        dispatcher
-                            .dispatch(move |probe| {
-                                Box::pin(async move {
-                                    <TimelineProbe as StatefulRewriteNumberHook>::call_mut(
-                                        probe, &ctx, args,
-                                    )
-                                    .await
-                                })
+                async move {
+                    dispatcher
+                        .dispatch(move |probe| {
+                            Box::pin(async move {
+                                <TimelineProbe as StatefulRewriteNumberHook>::call_mut(
+                                    probe, &ctx, args,
+                                )
+                                .await
                             })
-                            .await
-                            .expect("probe dispatcher alive")
-                    }
+                        })
+                        .await
+                        .expect("probe dispatcher alive")
                 }
-            },
-        ))
-        .with_decorate_label((
-            std::marker::PhantomData::<fn() -> Lutum>,
-            {
+            }
+        }))
+        .with_decorate_label((std::marker::PhantomData::<fn() -> Lutum>, {
+            let dispatcher = dispatcher.clone();
+            move |ctx: Lutum, args: DecorateLabelArgs| {
                 let dispatcher = dispatcher.clone();
-                move |ctx: Lutum, args: DecorateLabelArgs| {
-                    let dispatcher = dispatcher.clone();
-                    async move {
-                        dispatcher
-                            .dispatch(move |probe| {
-                                Box::pin(async move {
-                                    <TimelineProbe as StatefulDecorateLabelHook>::call_mut(
-                                        probe, &ctx, args,
-                                    )
-                                    .await
-                                })
+                async move {
+                    dispatcher
+                        .dispatch(move |probe| {
+                            Box::pin(async move {
+                                <TimelineProbe as StatefulDecorateLabelHook>::call_mut(
+                                    probe, &ctx, args,
+                                )
+                                .await
                             })
-                            .await
-                            .expect("probe dispatcher alive")
-                    }
+                        })
+                        .await
+                        .expect("probe dispatcher alive")
                 }
-            },
-        ))
+            }
+        }))
 }
 
 fn hook_error_hooks(dispatcher: ProbeHandle<HookErrorProbe>) -> ProbeHooks {

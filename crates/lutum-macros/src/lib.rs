@@ -1707,8 +1707,11 @@ fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
     let ident = item_struct.ident.clone();
     let vis = item_struct.vis.clone();
     let Fields::Named(fields) = item_struct.fields else {
-        return syn::Error::new_spanned(item_struct, "#[hooks] supports only structs with named fields")
-            .to_compile_error();
+        return syn::Error::new_spanned(
+            item_struct,
+            "#[hooks] supports only structs with named fields",
+        )
+        .to_compile_error();
     };
 
     let mut slot_idents = Vec::new();
@@ -2493,7 +2496,8 @@ fn normalized_hook_arg_field_idents(explicit_args: &[(Ident, Type)]) -> Vec<Iden
 }
 
 fn conditional_attrs(attrs: &[Attribute]) -> Vec<Attribute> {
-    attrs.iter()
+    attrs
+        .iter()
         .filter(|attr| {
             let path = attr.path();
             path.is_ident("cfg") || path.is_ident("cfg_attr")
