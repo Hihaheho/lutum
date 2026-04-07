@@ -96,7 +96,7 @@ use crate::{Lutum, OperationKind, RequestExtensions, budget::UsageEstimate};
 
 pub use lutum_protocol::hooks::{HookReentrancyError, HookRegistry, Stateful};
 
-#[lutum_macros::def_hook(singleton)]
+#[lutum_macros::def_global_hook(singleton)]
 pub async fn resolve_usage_estimate(
     _ctx: &Lutum,
     extensions: &RequestExtensions,

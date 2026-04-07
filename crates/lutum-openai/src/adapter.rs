@@ -52,12 +52,12 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply_to_completion(&self, request: &mut CompletionRequest);
 }
 
-#[lutum_macros::def_hook(singleton)]
+#[lutum_macros::def_global_hook(singleton)]
 pub async fn select_openai_model(_extensions: &RequestExtensions, default: ModelName) -> ModelName {
     default
 }
 
-#[lutum_macros::def_hook(singleton)]
+#[lutum_macros::def_global_hook(singleton)]
 pub async fn resolve_reasoning_effort(
     _extensions: &RequestExtensions,
 ) -> Option<OpenAiReasoningEffort> {

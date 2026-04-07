@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use futures::executor::block_on;
@@ -88,7 +88,9 @@ impl StatefulNextCounterHook for CountingHook {
     }
 }
 
-struct ReentrantCounter;
+struct ReentrantCounter {
+    hooks: Arc<OnceLock<TestHooks>>,
+}
 
 #[async_trait]
 impl StatefulNextCounterHook for ReentrantCounter {
@@ -100,7 +102,11 @@ impl StatefulNextCounterHook for ReentrantCounter {
         if args.seed == 0 {
             Ok(0)
         } else {
-            ctx.next_counter(args.seed - 1).await
+            self.hooks
+                .get()
+                .expect("reentrant hook container must be initialized")
+                .next_counter(ctx, args.seed - 1)
+                .await
         }
     }
 }
@@ -110,12 +116,24 @@ async fn describe_label(_ctx: &Lutum, label: &str) -> String {
     label.to_string()
 }
 
-struct NestedLabelHook;
+#[lutum::hooks]
+struct TestHooks {
+    label_slot: SelectLabel,
+    label_formatters: FormatLabel,
+    legacy_label_formatters: LegacyFormatLabel,
+    label_chooser: ChooseLabel,
+    counter_slot: NextCounter,
+    label_describer: DescribeLabel,
+}
+
+struct NestedLabelHook {
+    hooks: TestHooks,
+}
 
 #[async_trait]
 impl StatefulDescribeLabelHook for NestedLabelHook {
     async fn call_mut(&mut self, ctx: &Lutum, args: DescribeLabelArgs) -> String {
-        ctx.select_label(args.label).await
+        self.hooks.select_label(ctx, args.label).await
     }
 }
 
@@ -228,17 +246,19 @@ impl ResolveUsageEstimateHook for RecordOperationKinds {
 #[test]
 fn singleton_hook_uses_default_when_unregistered() {
     let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new();
 
-    let selected = block_on(ctx.select_label("base".into()));
+    let selected = block_on(hooks.select_label(&ctx, "base".into()));
 
     assert_eq!(selected, "base");
 }
 
 #[test]
 fn singleton_hook_uses_registered_override() {
-    let ctx = test_context(HookRegistry::new().register_select_label(PrefixLabel));
+    let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new().with_select_label(PrefixLabel);
 
-    let selected = block_on(ctx.select_label("base".into()));
+    let selected = block_on(hooks.select_label(&ctx, "base".into()));
 
     assert_eq!(selected, "hooked:base");
 }
@@ -246,13 +266,12 @@ fn singleton_hook_uses_registered_override() {
 #[test]
 fn singleton_hook_warns_and_uses_last_registered_override() {
     let collected = block_on(lutum_trace::test::collect(async {
-        let ctx = test_context(
-            HookRegistry::new()
-                .register_select_label(PrefixLabel)
-                .register_select_label(SuffixLabel),
-        );
+        let hooks = TestHooks::new()
+            .with_select_label(PrefixLabel)
+            .with_select_label(SuffixLabel);
+        let ctx = test_context(HookRegistry::new());
 
-        ctx.select_label("base".into()).await
+        hooks.select_label(&ctx, "base".into()).await
     }));
 
     assert_eq!(collected.output, "base:suffix");
@@ -277,17 +296,19 @@ fn singleton_hook_warns_and_uses_last_registered_override() {
 #[test]
 fn always_hook_uses_default_without_last_when_unregistered() {
     let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new();
 
-    let selected = block_on(ctx.format_label("base"));
+    let selected = block_on(hooks.format_label(&ctx, "base"));
 
     assert_eq!(selected, "default:base");
 }
 
 #[test]
 fn always_hook_passes_default_result_to_registered_hook() {
-    let ctx = test_context(HookRegistry::new().register_format_label(AppendSuffix));
+    let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new().with_format_label(AppendSuffix);
 
-    let selected = block_on(ctx.format_label("base"));
+    let selected = block_on(hooks.format_label(&ctx, "base"));
 
     assert_eq!(selected, "default:base:hook");
 }
@@ -295,8 +316,9 @@ fn always_hook_passes_default_result_to_registered_hook() {
 #[test]
 fn always_hook_keeps_supporting_default_definitions_with_last() {
     let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new();
 
-    let selected = block_on(ctx.legacy_format_label("base"));
+    let selected = block_on(hooks.legacy_format_label(&ctx, "base"));
 
     assert_eq!(selected, "legacy:base");
 }
@@ -304,29 +326,30 @@ fn always_hook_keeps_supporting_default_definitions_with_last() {
 #[test]
 fn fallback_hook_uses_default_without_last_when_unregistered() {
     let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new();
 
-    let selected = block_on(ctx.choose_label("base"));
+    let selected = block_on(hooks.choose_label(&ctx, "base"));
 
     assert_eq!(selected, "default:base");
 }
 
 #[test]
 fn fallback_hook_starts_registered_chain_without_default_result() {
-    let ctx = test_context(HookRegistry::new().register_choose_label(PickRegisteredLabel));
+    let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new().with_choose_label(PickRegisteredLabel);
 
-    let selected = block_on(ctx.choose_label("base"));
+    let selected = block_on(hooks.choose_label(&ctx, "base"));
 
     assert_eq!(selected, "hook:base");
 }
 
 #[test]
 fn stateful_hook_mutates_state_without_interior_mutability() {
-    let ctx = test_context(
-        HookRegistry::new().register_next_counter(Stateful::new(CountingHook { next: 0 })),
-    );
+    let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new().with_next_counter(Stateful::new(CountingHook { next: 0 }));
 
-    let first = block_on(ctx.next_counter(10));
-    let second = block_on(ctx.next_counter(10));
+    let first = block_on(hooks.next_counter(&ctx, 10));
+    let second = block_on(hooks.next_counter(&ctx, 10));
 
     assert_eq!(first, Ok(10));
     assert_eq!(second, Ok(11));
@@ -334,10 +357,14 @@ fn stateful_hook_mutates_state_without_interior_mutability() {
 
 #[test]
 fn stateful_hook_reentrancy_can_return_a_typed_error() {
-    let ctx =
-        test_context(HookRegistry::new().register_next_counter(Stateful::new(ReentrantCounter)));
+    let ctx = test_context(HookRegistry::new());
+    let shared_hooks = Arc::new(OnceLock::new());
+    let hooks = TestHooks::new().with_next_counter(Stateful::new(ReentrantCounter {
+        hooks: Arc::clone(&shared_hooks),
+    }));
+    assert!(shared_hooks.set(hooks.clone()).is_ok());
 
-    let result = block_on(ctx.next_counter(1));
+    let result = block_on(hooks.next_counter(&ctx, 1));
 
     assert_eq!(
         result,
@@ -350,13 +377,14 @@ fn stateful_hook_reentrancy_can_return_a_typed_error() {
 
 #[test]
 fn stateful_hook_can_call_other_hooks_without_registry_deadlock() {
-    let ctx = test_context(
-        HookRegistry::new()
-            .register_select_label(PrefixLabel)
-            .register_describe_label(Stateful::new(NestedLabelHook)),
-    );
+    let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new().with_select_label(PrefixLabel);
+    let nested_hooks = hooks.clone();
+    let hooks = hooks.with_describe_label(Stateful::new(NestedLabelHook {
+        hooks: nested_hooks,
+    }));
 
-    let described = block_on(ctx.describe_label("base"));
+    let described = block_on(hooks.describe_label(&ctx, "base"));
 
     assert_eq!(described, "hooked:base");
 }

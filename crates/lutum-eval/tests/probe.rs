@@ -10,9 +10,8 @@ use async_trait::async_trait;
 use lutum::{
     HookRegistry, Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
 };
-use lutum_eval::register_probe_hook;
 use lutum_eval::{
-    Eval, ObjectiveExt, Probe, ProbeContext, ProbeDecision, ProbeDispatcher, ProbeRunError,
+    Eval, ObjectiveExt, Probe, ProbeDecision, ProbeDispatcher, ProbeHandle, ProbeRunError,
     ProbeScoreError, Score, maximize,
 };
 use tracing::instrument::WithSubscriber as _;
@@ -33,6 +32,13 @@ type Validation = Result<(), &'static str>;
 #[lutum::def_hook(singleton)]
 async fn validate_step(_llm: &Lutum, _step: &str) -> Validation {
     Ok(())
+}
+
+#[lutum::hooks]
+struct ProbeHooks {
+    number_hooks: RewriteNumber,
+    label_hooks: DecorateLabel,
+    validation_hooks: ValidateStep,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -57,11 +63,6 @@ impl Probe for TimelineProbe {
     type Report = Vec<String>;
     type Artifact = ProbeArtifact;
     type Error = Infallible;
-
-    fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        register_probe_hook!(cx, RewriteNumber);
-        register_probe_hook!(cx, DecorateLabel);
-    }
 
     async fn on_trace_event(
         &mut self,
@@ -239,10 +240,6 @@ impl Probe for HookErrorProbe {
     type Artifact = ();
     type Error = Infallible;
 
-    fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        register_probe_hook!(cx, ValidateStep);
-    }
-
     async fn on_trace_event(
         &mut self,
         _ctx: &Lutum,
@@ -271,6 +268,76 @@ impl StatefulValidateStepHook for HookErrorProbe {
             Ok(())
         }
     }
+}
+
+fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooks {
+    ProbeHooks::new()
+        .with_rewrite_number((
+            std::marker::PhantomData::<fn() -> Lutum>,
+            {
+                let dispatcher = dispatcher.clone();
+                move |ctx: Lutum, args: RewriteNumberArgs| {
+                    let dispatcher = dispatcher.clone();
+                    async move {
+                        dispatcher
+                            .dispatch(move |probe| {
+                                Box::pin(async move {
+                                    <TimelineProbe as StatefulRewriteNumberHook>::call_mut(
+                                        probe, &ctx, args,
+                                    )
+                                    .await
+                                })
+                            })
+                            .await
+                            .expect("probe dispatcher alive")
+                    }
+                }
+            },
+        ))
+        .with_decorate_label((
+            std::marker::PhantomData::<fn() -> Lutum>,
+            {
+                let dispatcher = dispatcher.clone();
+                move |ctx: Lutum, args: DecorateLabelArgs| {
+                    let dispatcher = dispatcher.clone();
+                    async move {
+                        dispatcher
+                            .dispatch(move |probe| {
+                                Box::pin(async move {
+                                    <TimelineProbe as StatefulDecorateLabelHook>::call_mut(
+                                        probe, &ctx, args,
+                                    )
+                                    .await
+                                })
+                            })
+                            .await
+                            .expect("probe dispatcher alive")
+                    }
+                }
+            },
+        ))
+}
+
+fn hook_error_hooks(dispatcher: ProbeHandle<HookErrorProbe>) -> ProbeHooks {
+    ProbeHooks::new().with_validate_step((
+        std::marker::PhantomData::<fn() -> Lutum>,
+        move |ctx: Lutum, args: ValidateStepArgs| {
+            let dispatcher = dispatcher.clone();
+            async move {
+                dispatcher
+                    .dispatch(move |probe| {
+                        Box::pin(async move {
+                            <HookErrorProbe as StatefulValidateStepHook>::call_mut(
+                                probe, &ctx, args,
+                            )
+                            .await
+                        })
+                    })
+                    .await
+                    .expect("probe dispatcher alive")
+            }
+        },
+    ))
 }
 
 fn make_lutum(hooks: HookRegistry) -> Lutum {
@@ -325,8 +392,9 @@ async fn probe_without_hooks_can_finalize() {
 
 #[tokio::test]
 async fn probe_dispatcher_serializes_trace_events_and_hook_rpcs() {
-    let (hooks, runtime) = ProbeDispatcher::new(TimelineProbe::default()).into_parts();
-    let llm = make_lutum(hooks);
+    let (_, runtime) = ProbeDispatcher::new(TimelineProbe::default()).into_parts();
+    let probe_hooks = timeline_hooks(runtime.dispatcher());
+    let llm = make_lutum(HookRegistry::new());
     let runtime_llm = llm.clone();
 
     let report = runtime
@@ -334,8 +402,8 @@ async fn probe_dispatcher_serializes_trace_events_and_hook_rpcs() {
             &llm,
             async move {
                 tracing::info!("before-hook");
-                let number = runtime_llm.rewrite_number(2).await;
-                let label = runtime_llm.decorate_label("seed").await;
+                let number = probe_hooks.rewrite_number(&runtime_llm, 2).await;
+                let label = probe_hooks.decorate_label(&runtime_llm, "seed").await;
                 tracing::info!("after-hook");
 
                 ProbeArtifact { number, label }
@@ -384,15 +452,16 @@ async fn complete_short_circuits_finalize() {
 
 #[tokio::test]
 async fn hook_proxy_can_return_probe_defined_errors() {
-    let (hooks, runtime) = ProbeDispatcher::new(HookErrorProbe::default()).into_parts();
-    let llm = make_lutum(hooks);
+    let (_, runtime) = ProbeDispatcher::new(HookErrorProbe::default()).into_parts();
+    let probe_hooks = hook_error_hooks(runtime.dispatcher());
+    let llm = make_lutum(HookRegistry::new());
     let runtime_llm = llm.clone();
 
     let report = runtime
         .run_future(
             &llm,
             async move {
-                let result = runtime_llm.validate_step("blocked").await;
+                let result = probe_hooks.validate_step(&runtime_llm, "blocked").await;
                 assert_eq!(result, Err("blocked"));
             }
             .with_subscriber(subscriber()),

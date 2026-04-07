@@ -5,6 +5,8 @@ use thiserror::Error;
 
 use crate::{Collected, Eval, Objective, PureEval, ScoreEvalError, Scored};
 
+type ScoredResult<R, EE, OE> = Result<Scored<R>, ScoreEvalError<EE, OE>>;
+
 #[async_trait(?Send)]
 pub trait PureEvalExt: PureEval + Sized {
     fn lift(self) -> LiftPure<Self> {
@@ -172,7 +174,7 @@ where
     pub fn run_collected(
         &self,
         collected: &Collected<E::Artifact>,
-    ) -> Result<Scored<E::Report>, ScoreEvalError<E::Error, O::Error>> {
+    ) -> ScoredResult<E::Report, E::Error, O::Error> {
         let report = self
             .eval
             .run_collected(collected)
@@ -187,7 +189,7 @@ where
     pub async fn run_future<F>(
         &self,
         future: F,
-    ) -> Result<Scored<E::Report>, ScoreEvalError<E::Error, O::Error>>
+    ) -> ScoredResult<E::Report, E::Error, O::Error>
     where
         F: Future<Output = E::Artifact>,
     {
@@ -210,7 +212,7 @@ where
         &self,
         ctx: &lutum::Lutum,
         collected: &Collected<E::Artifact>,
-    ) -> Result<Scored<E::Report>, ScoreEvalError<E::Error, O::Error>>
+    ) -> ScoredResult<E::Report, E::Error, O::Error>
     where
         E::Artifact: Sync,
     {
@@ -230,7 +232,7 @@ where
         &self,
         ctx: &lutum::Lutum,
         future: F,
-    ) -> Result<Scored<E::Report>, ScoreEvalError<E::Error, O::Error>>
+    ) -> ScoredResult<E::Report, E::Error, O::Error>
     where
         E::Artifact: Sync,
         F: Future<Output = E::Artifact>,

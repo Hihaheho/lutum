@@ -78,6 +78,11 @@ async fn audit_contact(_ctx: &Lutum, source: &str, contact: &Contact) -> Result<
     }
 }
 
+#[hooks]
+struct VerificationHooks {
+    checks: AuditContact,
+}
+
 fn build_prompt(source: &str, prior_failure: Option<&GateFailure>) -> String {
     let mut prompt = format!(
         "Source text: \"{source}\"\n\
@@ -124,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
+    let hooks = VerificationHooks::new();
     let llm = Lutum::with_hooks(Arc::new(adapter), budget, HookRegistry::new());
     let source = "Call John Smith at john@example.com or +1-555-0100";
     let mut prior_failure = None;
@@ -139,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(contact) => {
                 println!("Extracted contact: {contact:#?}");
 
-                match llm.audit_contact(source, &contact).await {
+                match hooks.audit_contact(&llm, source, &contact).await {
                     Ok(()) => {
                         println!("Rust gates: pass");
                         return Ok(());

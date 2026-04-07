@@ -12,6 +12,12 @@ async fn validate_output(_ctx: &Lutum, _output: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[hooks]
+struct DeterministicHooks {
+    prompt_guards: ValidatePrompt,
+    output_guards: ValidateOutput,
+}
+
 #[hook(ValidatePrompt)]
 async fn reject_empty_prompt(
     _ctx: &Lutum,
@@ -62,9 +68,9 @@ async fn main() -> anyhow::Result<()> {
     let model = ModelName::new(&model_name)?;
     let prompt = "Write a shell command to list all .rs files recursively.";
 
-    let hooks = HookRegistry::new()
-        .register_validate_prompt(RejectEmptyPrompt)
-        .register_validate_output(BlockDangerousOutput);
+    let hooks = DeterministicHooks::new()
+        .with_validate_prompt(RejectEmptyPrompt)
+        .with_validate_output(BlockDangerousOutput);
     let llm = Lutum::with_hooks(
         Arc::new(
             OpenAiAdapter::new(token)
@@ -72,10 +78,10 @@ async fn main() -> anyhow::Result<()> {
                 .with_default_model(model),
         ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        hooks,
+        HookRegistry::new(),
     );
 
-    llm.validate_prompt(prompt)
+    hooks.validate_prompt(&llm, prompt)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     let output = ask(
@@ -84,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
         prompt,
     )
     .await?;
-    llm.validate_output(&output)
+    hooks.validate_output(&llm, &output)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     println!("{output}");

@@ -5,6 +5,12 @@ type Validation = Result<(), Vec<String>>;
 async fn validate_command(_ctx: &Lutum, _cmd: &str) -> Validation {
     Ok(())
 }
+
+#[hooks]
+struct ShellHooks {
+    validators: ValidateCommand,
+}
+
 struct CommandPolicy {
     allowed_prefixes: &'static [&'static str],
     forbidden_tokens: &'static [&'static str],
@@ -57,6 +63,11 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model = ModelName::new(&std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into()))?;
+    let hooks = ShellHooks::new().with_validate_command(Stateful::new(CommandPolicy {
+        allowed_prefixes: &["/var/log", "/tmp"],
+        forbidden_tokens: &["rm", "mv", "sudo", ">", ">>", "dd"],
+        max_pipes: 2,
+    }));
     let llm = Lutum::with_hooks(
         Arc::new(
             OpenAiAdapter::new(token)
@@ -64,11 +75,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_default_model(model),
         ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        HookRegistry::new().register_validate_command(Stateful::new(CommandPolicy {
-            allowed_prefixes: &["/var/log", "/tmp"],
-            forbidden_tokens: &["rm", "mv", "sudo", ">", ">>", "dd"],
-            max_pipes: 2,
-        })),
+        HookRegistry::new(),
     );
     let system = "You are a shell expert for log triage on a read-only system.\nOutput only the shell command, nothing else.";
     let request = "List the 5 most recent error lines from /var/log/syslog.";
@@ -88,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
         };
         let cmd = ask(&llm, system, &prompt).await?;
         println!("Attempt {attempt}: {cmd}");
-        match llm.validate_command(&cmd).await {
+        match hooks.validate_command(&llm, &cmd).await {
             Ok(()) => {
                 println!("Policy: pass");
                 return Ok(());

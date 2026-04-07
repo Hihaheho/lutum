@@ -68,7 +68,7 @@ pub use lutum_claude::{
     ResolveBudgetTokensHook, ResolveBudgetTokensRegistryExt, SelectClaudeModel,
     SelectClaudeModelHook, SelectClaudeModelRegistryExt,
 };
-pub use lutum_macros::{Toolset, def_hook, hook, tool_fn, tool_input};
+pub use lutum_macros::{Toolset, def_global_hook, def_hook, hook, hooks, tool_fn, tool_input};
 #[cfg(feature = "openai")]
 pub use lutum_openai::{
     OpenAiAdapter, OpenAiError, OpenAiReasoningEffort, ResolveReasoningEffort,
