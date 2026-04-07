@@ -10,7 +10,8 @@ use lutum::{
     MockLlmAdapter, ModelInput, ModelInputItem, OperationKind, RequestExtensions,
     ResolveUsageEstimateArgs, ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt,
     SharedPoolBudgetManager, SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage,
-    UsageRecoveryAdapter, budget::UsageEstimate, hooks::ResolveUsageEstimateLutumExt,
+    UsageRecoveryAdapter, budget::UsageEstimate, first_success,
+    hooks::ResolveUsageEstimateLutumExt, short_circuit,
 };
 use lutum_trace::FieldValue;
 use schemars::JsonSchema;
@@ -57,6 +58,66 @@ async fn choose_label(_ctx: &Lutum, label: &str) -> String {
 async fn pick_registered_label(_ctx: &Lutum, label: &str, last: Option<String>) -> String {
     assert!(last.is_none(), "fallback chains should start from None");
     format!("hook:{label}")
+}
+
+#[lutum::def_hook(always, chain = short_circuit)]
+async fn validate_chain_label(_ctx: &Lutum, label: &str) -> Result<String, String> {
+    Err(format!("default-blocked:{label}"))
+}
+
+#[lutum::hook(ValidateChainLabel)]
+async fn append_chain_suffix(_ctx: &Lutum, label: &str) -> Result<String, String> {
+    Ok(format!("hooked:{label}"))
+}
+
+#[lutum::def_hook(always, chain = short_circuit)]
+async fn transform_chain_label(_ctx: &Lutum, label: &str) -> Result<String, String> {
+    Ok(format!("default:{label}"))
+}
+
+#[lutum::hook(TransformChainLabel)]
+async fn transform_chain_middle(_ctx: &Lutum, label: &str) -> Result<String, String> {
+    Ok(format!("mid:{label}"))
+}
+
+#[lutum::hook(TransformChainLabel)]
+async fn transform_chain_final(_ctx: &Lutum, label: &str) -> Result<String, String> {
+    Ok(format!("final:{label}"))
+}
+
+#[lutum::def_hook(fallback, chain = first_success)]
+async fn choose_chain_label(_ctx: &Lutum, label: &str) -> Option<String> {
+    Some(format!("default:{label}"))
+}
+
+#[lutum::hook(ChooseChainLabel)]
+async fn choose_none(_ctx: &Lutum, _label: &str) -> Option<String> {
+    None
+}
+
+#[lutum::hook(ChooseChainLabel)]
+async fn choose_special(_ctx: &Lutum, label: &str) -> Option<String> {
+    Some(format!("hook:{label}"))
+}
+
+#[lutum::def_hook(fallback, chain = first_success)]
+async fn choose_chain_default_after_hooks(_ctx: &Lutum, label: &str) -> Option<String> {
+    Some(format!("fallback-default:{label}"))
+}
+
+#[lutum::hook(ChooseChainDefaultAfterHooks)]
+async fn choose_none_again(_ctx: &Lutum, _label: &str) -> Option<String> {
+    None
+}
+
+#[lutum::def_global_hook(always, chain = short_circuit)]
+async fn global_chain_label(_ctx: &Lutum, label: &str) -> Result<String, String> {
+    Ok(format!("global-default:{label}"))
+}
+
+#[lutum::hook(GlobalChainLabel)]
+async fn global_chain_override(_ctx: &Lutum, label: &str) -> Result<String, String> {
+    Ok(format!("global-hook:{label}"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,6 +183,10 @@ struct TestHooks {
     label_formatters: FormatLabel,
     legacy_label_formatters: LegacyFormatLabel,
     label_chooser: ChooseLabel,
+    chain_label_validator: ValidateChainLabel,
+    chain_label_transformer: TransformChainLabel,
+    chain_label_chooser: ChooseChainLabel,
+    chain_label_default_after_hooks: ChooseChainDefaultAfterHooks,
     counter_slot: NextCounter,
     label_describer: DescribeLabel,
 }
@@ -344,6 +409,50 @@ fn fallback_hook_starts_registered_chain_without_default_result() {
 }
 
 #[test]
+fn always_chain_short_circuit_stops_after_default_break() {
+    let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new().with_validate_chain_label(AppendChainSuffix);
+
+    let result = block_on(hooks.validate_chain_label(&ctx, "base"));
+
+    assert_eq!(result, Err("default-blocked:base".into()));
+}
+
+#[test]
+fn always_chain_returns_last_hook_result_when_all_continue() {
+    let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new()
+        .with_transform_chain_label(TransformChainMiddle)
+        .with_transform_chain_label(TransformChainFinal);
+
+    let result = block_on(hooks.transform_chain_label(&ctx, "base"));
+
+    assert_eq!(result, Ok("final:base".into()));
+}
+
+#[test]
+fn fallback_chain_first_success_stops_on_first_some() {
+    let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new()
+        .with_choose_chain_label(ChooseNone)
+        .with_choose_chain_label(ChooseSpecial);
+
+    let result = block_on(hooks.choose_chain_label(&ctx, "base"));
+
+    assert_eq!(result, Some("hook:base".into()));
+}
+
+#[test]
+fn fallback_chain_runs_default_when_all_hooks_continue() {
+    let ctx = test_context(HookRegistry::new());
+    let hooks = TestHooks::new().with_choose_chain_default_after_hooks(ChooseNoneAgain);
+
+    let result = block_on(hooks.choose_chain_default_after_hooks(&ctx, "base"));
+
+    assert_eq!(result, Some("fallback-default:base".into()));
+}
+
+#[test]
 fn stateful_hook_mutates_state_without_interior_mutability() {
     let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new().with_next_counter(Stateful::new(CountingHook { next: 0 }));
@@ -387,6 +496,21 @@ fn stateful_hook_can_call_other_hooks_without_registry_deadlock() {
     let described = block_on(hooks.describe_label(&ctx, "base"));
 
     assert_eq!(described, "hooked:base");
+}
+
+#[test]
+fn global_chain_hook_dispatches_through_registry_extension() {
+    let ctx = test_context(HookRegistry::new().register_global_chain_label(GlobalChainOverride));
+
+    let result = block_on(
+        <HookRegistry as GlobalChainLabelRegistryExt>::global_chain_label(
+            ctx.hooks(),
+            &ctx,
+            "base",
+        ),
+    );
+
+    assert_eq!(result, Ok("global-hook:base".into()));
 }
 
 #[test]

@@ -1,0 +1,5 @@
+error: #[hook(SlotType)] implementations for this slot must not declare `last: Option<Return>`
+  --> tests/ui/hook_impl_path_chain_last.rs:12:5
+   |
+12 |     last: Option<Result<String, String>>,
+   |     ^^^^

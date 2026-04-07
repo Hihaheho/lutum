@@ -1,0 +1,5 @@
+error: #[def_hook(singleton, chain = ...)] is not supported; singleton hooks do not use dispatch
+ --> tests/ui/hook_def_singleton_chain.rs:1:19
+  |
+1 | #[lutum::def_hook(singleton, chain = lutum::short_circuit)]
+  |                   ^^^^^^^^^

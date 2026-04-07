@@ -2,12 +2,12 @@ use std::collections::HashSet;
 
 use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use syn::{
     Attribute, Data, DeriveInput, Expr, Fields, FieldsNamed, FieldsUnnamed, FnArg, GenericArgument,
-    Ident, ItemEnum, ItemFn, ItemStruct, Lifetime, Lit, Meta, MetaNameValue, Pat, PatIdent,
+    Ident, ItemEnum, ItemFn, ItemStruct, Lifetime, Lit, Meta, MetaNameValue, Pat, PatIdent, Path,
     PathArguments, ReturnType, Token, Type, TypePath, parse::Parse, parse_macro_input,
-    punctuated::Punctuated,
+    punctuated::Punctuated, spanned::Spanned,
 };
 
 struct ToolInputArgs {
@@ -86,6 +86,33 @@ impl Parse for ToolFnArgs {
     }
 }
 
+#[derive(Clone)]
+struct HookDefAttrs {
+    mode: syn::Ident,
+    chain: Option<syn::Path>,
+}
+
+impl syn::parse::Parse for HookDefAttrs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mode: syn::Ident = input.parse()?;
+        let chain = if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            let ident: syn::Ident = input.parse()?;
+            if ident != "chain" {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    "expected 'chain' after comma",
+                ));
+            }
+            input.parse::<Token![=]>()?;
+            Some(input.parse::<syn::Path>()?)
+        } else {
+            None
+        };
+        Ok(Self { mode, chain })
+    }
+}
+
 #[proc_macro_attribute]
 pub fn tool_input(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as ToolInputArgs);
@@ -111,68 +138,98 @@ pub fn hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     if attr.is_empty() {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "use #[def_hook(always)], #[def_hook(fallback)], #[def_hook(singleton)], #[def_global_hook(always)], #[def_global_hook(fallback)], or #[def_global_hook(singleton)] to declare a hook slot, or #[hook(SlotType)] to implement one",
+            "use #[def_hook(always)], #[def_hook(fallback)], #[def_hook(singleton)], #[def_global_hook(always)], #[def_global_hook(fallback)], or #[def_global_hook(singleton)] to declare a hook slot, or #[hook(SlotType)] / #[hook(path::to::SlotType)] to implement one",
         )
         .to_compile_error()
         .into();
     }
-    let slot_ident = parse_macro_input!(attr as Ident);
+    let slot_path = parse_macro_input!(attr as Path);
     let item_fn = parse_macro_input!(item as ItemFn);
-    expand_hook_impl(item_fn, slot_ident).into()
+    expand_hook_impl(item_fn, slot_path).into()
 }
 
 #[proc_macro_attribute]
 pub fn def_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if attr.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "use #[def_hook(always)], #[def_hook(fallback)], or #[def_hook(singleton)]",
-        )
-        .to_compile_error()
-        .into();
-    }
-
-    let kind_ident = parse_macro_input!(attr as Ident);
-    let item_fn = parse_macro_input!(item as ItemFn);
-
-    match kind_ident.to_string().as_str() {
-        "always" => expand_local_hook(item_fn, HookKind::Always).into(),
-        "fallback" => expand_local_hook(item_fn, HookKind::Fallback).into(),
-        "singleton" => expand_local_hook(item_fn, HookKind::Singleton).into(),
-        _ => syn::Error::new_spanned(
-            kind_ident,
-            "#[def_hook(...)] expects `always`, `fallback`, or `singleton`",
-        )
-        .to_compile_error()
-        .into(),
-    }
+    let attrs: HookDefAttrs = match syn::parse(attr) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let item_fn = match syn::parse(item) {
+        Ok(f) => f,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let mode_str = attrs.mode.to_string();
+    let dispatch = attrs
+        .chain
+        .as_ref()
+        .map(|p| HookDispatch::Chain(p.clone()))
+        .unwrap_or(HookDispatch::Fold);
+    let kind = match mode_str.as_str() {
+        "always" => HookKind::Always { dispatch },
+        "fallback" => HookKind::Fallback { dispatch },
+        "singleton" => {
+            if attrs.chain.is_some() {
+                return syn::Error::new_spanned(
+                    attrs.mode,
+                    "#[def_hook(singleton, chain = ...)] is not supported; singleton hooks do not use dispatch",
+                )
+                .to_compile_error()
+                .into();
+            }
+            HookKind::Singleton
+        }
+        _ => {
+            return syn::Error::new_spanned(
+                attrs.mode,
+                "#[def_hook(...)] expects `always`, `fallback`, or `singleton` as first argument",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+    expand_local_hook(item_fn, kind).into()
 }
 
 #[proc_macro_attribute]
 pub fn def_global_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if attr.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "use #[def_global_hook(always)], #[def_global_hook(fallback)], or #[def_global_hook(singleton)]",
-        )
-        .to_compile_error()
-        .into();
-    }
-
-    let kind_ident = parse_macro_input!(attr as Ident);
-    let item_fn = parse_macro_input!(item as ItemFn);
-
-    match kind_ident.to_string().as_str() {
-        "always" => expand_global_hook(item_fn, HookKind::Always).into(),
-        "fallback" => expand_global_hook(item_fn, HookKind::Fallback).into(),
-        "singleton" => expand_global_hook(item_fn, HookKind::Singleton).into(),
-        _ => syn::Error::new_spanned(
-            kind_ident,
-            "#[def_global_hook(...)] expects `always`, `fallback`, or `singleton`",
-        )
-        .to_compile_error()
-        .into(),
-    }
+    let attrs: HookDefAttrs = match syn::parse(attr) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let item_fn = match syn::parse(item) {
+        Ok(f) => f,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let mode_str = attrs.mode.to_string();
+    let dispatch = attrs
+        .chain
+        .as_ref()
+        .map(|p| HookDispatch::Chain(p.clone()))
+        .unwrap_or(HookDispatch::Fold);
+    let kind = match mode_str.as_str() {
+        "always" => HookKind::Always { dispatch },
+        "fallback" => HookKind::Fallback { dispatch },
+        "singleton" => {
+            if attrs.chain.is_some() {
+                return syn::Error::new_spanned(
+                    attrs.mode,
+                    "#[def_global_hook(singleton, chain = ...)] is not supported; singleton hooks do not use dispatch",
+                )
+                .to_compile_error()
+                .into();
+            }
+            HookKind::Singleton
+        }
+        _ => {
+            return syn::Error::new_spanned(
+                attrs.mode,
+                "#[def_global_hook(...)] expects `always`, `fallback`, or `singleton` as first argument",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+    expand_global_hook(item_fn, kind).into()
 }
 
 #[proc_macro_attribute]
@@ -482,25 +539,62 @@ struct HookSignature {
     explicit_args: Vec<(Ident, Type)>,
     output_ty: Type,
     has_last: bool,
+    last_span: Option<proc_macro2::Span>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
+enum HookDispatch {
+    Fold,
+    Chain(syn::Path),
+}
+
 enum HookKind {
-    Always,
-    Fallback,
+    Always { dispatch: HookDispatch },
+    Fallback { dispatch: HookDispatch },
     Singleton,
 }
 
 impl HookKind {
     fn default_last_requirement(&self) -> HookLastRequirement {
         match self {
-            Self::Always | Self::Fallback => HookLastRequirement::Optional,
+            Self::Always { dispatch } | Self::Fallback { dispatch } => match dispatch {
+                HookDispatch::Fold => HookLastRequirement::Optional,
+                HookDispatch::Chain(_) => HookLastRequirement::Forbidden,
+            },
             Self::Singleton => HookLastRequirement::Forbidden,
         }
     }
 
     fn trait_has_last(&self) -> bool {
-        matches!(self, Self::Always | Self::Fallback)
+        match self {
+            Self::Always { dispatch } | Self::Fallback { dispatch } => {
+                matches!(dispatch, HookDispatch::Fold)
+            }
+            Self::Singleton => false,
+        }
+    }
+
+    fn is_chain(&self) -> bool {
+        matches!(
+            self,
+            Self::Always {
+                dispatch: HookDispatch::Chain(_),
+            } | Self::Fallback {
+                dispatch: HookDispatch::Chain(_),
+            }
+        )
+    }
+
+    fn dispatch_metadata_tokens(&self) -> proc_macro2::TokenStream {
+        if self.is_chain() {
+            quote! {
+                const __LUTUM_HOOK_ACCEPTS_LAST: bool = false;
+            }
+        } else {
+            quote! {
+                const __LUTUM_HOOK_ACCEPTS_LAST: bool = true;
+            }
+        }
     }
 }
 
@@ -522,15 +616,28 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
         explicit_args,
         output_ty,
         has_last: default_has_last,
+        last_span: _,
     } = match analyze_hook_signature(
         &item_fn,
         kind.default_last_requirement(),
+        if kind.is_chain() {
+            "chain-dispatch hook definitions do not accept a `last: Option<Return>` argument"
+        } else {
+            "#[def_global_hook(singleton)] does not accept a `last: Option<Return>` argument"
+        },
         HookLastRecognition::LastNamedCompatibleOption,
     ) {
         Ok(signature) => signature,
         Err(err) => return err.to_compile_error(),
     };
     let trait_has_last = kind.trait_has_last();
+    if !trait_has_last && default_has_last {
+        return syn::Error::new_spanned(
+            item_fn.sig.ident,
+            "hook function must not have a 'last' parameter for chain dispatch",
+        )
+        .to_compile_error();
+    }
 
     let fn_ident = item_fn.sig.ident.clone();
     let vis = item_fn.vis.clone();
@@ -661,8 +768,6 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
 
     // Trait method signatures: XxxHook and StatefulXxxHook take `args: XxxArgs` instead
     // of individual parameters.
-    // `hook_trait_args_no_last` is used for __LutumDynXxxHook::call_dyn which always
-    // appends `last` explicitly.
     let hook_trait_args_no_last: Vec<proc_macro2::TokenStream> = if has_explicit_args {
         vec![quote! { args: #args_struct_type }]
     } else {
@@ -678,6 +783,53 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
         hook_trait_args.push(quote! { last: ::std::option::Option<#output_ty> });
         hook_trait_call_arg_names.push(quote! { last });
     }
+
+    let hook_trait_method_sig = quote_spanned! { item_fn.sig.ident.span() =>
+        async fn call(
+            &self,
+            #ctx_ident: #ctx_ty,
+            #(#hook_trait_args,)*
+        ) -> #output_ty;
+    };
+    let stateful_hook_trait_method_sig = quote_spanned! { item_fn.sig.ident.span() =>
+        async fn call_mut(
+            &mut self,
+            #ctx_ident: #ctx_ty,
+            #(#hook_trait_args,)*
+        ) -> #output_ty;
+    };
+    let dyn_hook_trait_method_sig = quote_spanned! { item_fn.sig.ident.span() =>
+        async fn call_dyn(
+            &self,
+            #ctx_ident: #ctx_ty,
+            #(#hook_trait_args,)*
+        ) -> #output_ty;
+    };
+    let hook_trait_def = quote_spanned! { item_fn.sig.ident.span() =>
+        #[allow(dead_code)]
+        #[::async_trait::async_trait]
+        #vis trait #hook_trait_ident: Send + Sync {
+            #hook_trait_method_sig
+        }
+    };
+    let stateful_hook_trait_def = quote_spanned! { item_fn.sig.ident.span() =>
+        #[allow(dead_code)]
+        #[::async_trait::async_trait]
+        #vis trait #stateful_hook_trait_ident: Send {
+            fn on_reentrancy(err: ::lutum_protocol::hooks::HookReentrancyError) -> #output_ty {
+                panic!("stateful hook reentered: {err}");
+            }
+
+            #stateful_hook_trait_method_sig
+        }
+    };
+    let dyn_hook_trait_def = quote_spanned! { item_fn.sig.ident.span() =>
+        #[allow(dead_code)]
+        #[::async_trait::async_trait]
+        trait #dyn_hook_trait_ident: Send + Sync {
+            #dyn_hook_trait_method_sig
+        }
+    };
 
     let default_call = if default_has_last {
         quote! {
@@ -697,11 +849,16 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
             .await
         }
     };
-    // Dispatch call from the dyn hook loop: passes `args.clone()` since args is owned.
-    let dyn_hook_dispatch_call = if has_explicit_args {
-        quote! { hook.call_dyn(#ctx_ident, args.clone(), last).await }
+    let dyn_hook_dispatch_call = if trait_has_last {
+        if has_explicit_args {
+            quote! { hook.call_dyn(#ctx_ident, args.clone(), last).await }
+        } else {
+            quote! { hook.call_dyn(#ctx_ident, last).await }
+        }
+    } else if has_explicit_args {
+        quote! { hook.call_dyn(#ctx_ident, args.clone()).await }
     } else {
-        quote! { hook.call_dyn(#ctx_ident, last).await }
+        quote! { hook.call_dyn(#ctx_ident).await }
     };
     let dyn_hook_impl_call = if trait_has_last {
         if has_explicit_args {
@@ -710,15 +867,9 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
             quote! { <T as #hook_trait_ident>::call(self, #ctx_ident, last).await }
         }
     } else if has_explicit_args {
-        quote! {
-            let _ = last;
-            <T as #hook_trait_ident>::call(self, #ctx_ident, args).await
-        }
+        quote! { <T as #hook_trait_ident>::call(self, #ctx_ident, args).await }
     } else {
-        quote! {
-            let _ = last;
-            <T as #hook_trait_ident>::call(self, #ctx_ident).await
-        }
+        quote! { <T as #hook_trait_ident>::call(self, #ctx_ident).await }
     };
     let stateful_hook_impl_call = quote! {
         <T as #stateful_hook_trait_ident>::call_mut(
@@ -737,7 +888,7 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
         }
     };
     let register_impl = match kind {
-        HookKind::Always | HookKind::Fallback => quote! {
+        HookKind::Always { .. } | HookKind::Fallback { .. } => quote! {
             let slot = self
                 .slots_mut()
                 .entry(::std::any::TypeId::of::<#slot_ident>())
@@ -777,7 +928,7 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
         },
     };
     let slot_lookup = match kind {
-        HookKind::Always | HookKind::Fallback => quote! {
+        HookKind::Always { .. } | HookKind::Fallback { .. } => quote! {
             let chain = self
                 .slots()
                 .get(&::std::any::TypeId::of::<#slot_ident>())
@@ -798,8 +949,10 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
                 });
         },
     };
-    let dispatch = match kind {
-        HookKind::Always => quote! {
+    let dispatch = match &kind {
+        HookKind::Always {
+            dispatch: HookDispatch::Fold,
+        } => quote! {
             let mut last = ::std::option::Option::Some(
                 #default_call,
             );
@@ -812,7 +965,29 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
             }
             last.expect("hook chain unexpectedly empty")
         },
-        HookKind::Fallback => quote! {
+        HookKind::Always {
+            dispatch: HookDispatch::Chain(chain_path),
+        } => quote! {
+            let result = #default_call;
+            if #chain_path(&result).is_break() {
+                return result;
+            }
+            if let Some(hooks) = chain {
+                let mut result = result;
+                for hook in hooks {
+                    result = #dyn_hook_dispatch_call;
+                    if #chain_path(&result).is_break() {
+                        return result;
+                    }
+                }
+                result
+            } else {
+                result
+            }
+        },
+        HookKind::Fallback {
+            dispatch: HookDispatch::Fold,
+        } => quote! {
             match chain {
                 Some(hooks) if !hooks.is_empty() => {
                     let mut last = ::std::option::Option::None;
@@ -828,14 +1003,32 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
                 }
             }
         },
+        HookKind::Fallback {
+            dispatch: HookDispatch::Chain(chain_path),
+        } => quote! {
+            match chain {
+                Some(hooks) if !hooks.is_empty() => {
+                    for hook in hooks {
+                        let result = #dyn_hook_dispatch_call;
+                        if #chain_path(&result).is_break() {
+                            return result;
+                        }
+                    }
+                    #default_call
+                }
+                _ => {
+                    #default_call
+                }
+            }
+        },
         HookKind::Singleton => {
             let some_call = if has_explicit_args {
                 quote! {
-                    hook.call_dyn(#ctx_ident, args, ::std::option::Option::None).await
+                    hook.call_dyn(#ctx_ident, args).await
                 }
             } else {
                 quote! {
-                    hook.call_dyn(#ctx_ident, ::std::option::Option::None).await
+                    hook.call_dyn(#ctx_ident).await
                 }
             };
             quote! {
@@ -977,48 +1170,26 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
         quote! {}
     };
 
+    let slot_dispatch_metadata = kind.dispatch_metadata_tokens();
+
     quote! {
         #item_fn
 
         #[allow(dead_code)]
         #vis struct #slot_ident;
 
+        #[doc(hidden)]
+        impl #slot_ident {
+            #slot_dispatch_metadata
+        }
+
         #args_struct_and_fn_impl
 
-        #[allow(dead_code)]
-        #[::async_trait::async_trait]
-        #vis trait #hook_trait_ident: Send + Sync {
-            async fn call(
-                &self,
-                #ctx_ident: #ctx_ty,
-                #(#hook_trait_args,)*
-            ) -> #output_ty;
-        }
+        #hook_trait_def
 
-        #[allow(dead_code)]
-        #[::async_trait::async_trait]
-        #vis trait #stateful_hook_trait_ident: Send {
-            fn on_reentrancy(err: ::lutum_protocol::hooks::HookReentrancyError) -> #output_ty {
-                panic!("stateful hook reentered: {err}");
-            }
+        #stateful_hook_trait_def
 
-            async fn call_mut(
-                &mut self,
-                #ctx_ident: #ctx_ty,
-                #(#hook_trait_args,)*
-            ) -> #output_ty;
-        }
-
-        #[allow(dead_code)]
-        #[::async_trait::async_trait]
-        trait #dyn_hook_trait_ident: Send + Sync {
-            async fn call_dyn(
-                &self,
-                #ctx_ident: #ctx_ty,
-                #(#hook_trait_args_no_last,)*
-                last: ::std::option::Option<#output_ty>,
-            ) -> #output_ty;
-        }
+        #dyn_hook_trait_def
 
         #[::async_trait::async_trait]
         impl<T> #dyn_hook_trait_ident for T
@@ -1028,8 +1199,7 @@ fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::Token
             async fn call_dyn(
                 &self,
                 #ctx_ident: #ctx_ty,
-                #(#hook_trait_args_no_last,)*
-                last: ::std::option::Option<#output_ty>,
+                #(#hook_trait_args,)*
             ) -> #output_ty {
                 #dyn_hook_impl_call
             }
@@ -1116,15 +1286,28 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
         explicit_args,
         output_ty,
         has_last: default_has_last,
+        last_span: _,
     } = match analyze_hook_signature(
         &item_fn,
         kind.default_last_requirement(),
+        if kind.is_chain() {
+            "chain-dispatch hook definitions do not accept a `last: Option<Return>` argument"
+        } else {
+            "#[def_hook(singleton)] does not accept a `last: Option<Return>` argument"
+        },
         HookLastRecognition::LastNamedCompatibleOption,
     ) {
         Ok(signature) => signature,
         Err(err) => return err.to_compile_error(),
     };
     let trait_has_last = kind.trait_has_last();
+    if !trait_has_last && default_has_last {
+        return syn::Error::new_spanned(
+            item_fn.sig.ident,
+            "hook function must not have a 'last' parameter for chain dispatch",
+        )
+        .to_compile_error();
+    }
 
     let fn_ident = item_fn.sig.ident.clone();
     let vis = item_fn.vis.clone();
@@ -1241,6 +1424,53 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
         hook_trait_call_arg_names.push(quote! { last });
     }
 
+    let hook_trait_method_sig = quote_spanned! { item_fn.sig.ident.span() =>
+        async fn call(
+            &self,
+            #ctx_ident: #ctx_ty,
+            #(#hook_trait_args,)*
+        ) -> #output_ty;
+    };
+    let stateful_hook_trait_method_sig = quote_spanned! { item_fn.sig.ident.span() =>
+        async fn call_mut(
+            &mut self,
+            #ctx_ident: #ctx_ty,
+            #(#hook_trait_args,)*
+        ) -> #output_ty;
+    };
+    let dyn_hook_trait_method_sig = quote_spanned! { item_fn.sig.ident.span() =>
+        async fn call_dyn(
+            &self,
+            #ctx_ident: #ctx_ty,
+            #(#hook_trait_args,)*
+        ) -> #output_ty;
+    };
+    let hook_trait_def = quote_spanned! { item_fn.sig.ident.span() =>
+        #[allow(dead_code)]
+        #[::async_trait::async_trait]
+        #vis trait #hook_trait_ident: Send + Sync {
+            #hook_trait_method_sig
+        }
+    };
+    let stateful_hook_trait_def = quote_spanned! { item_fn.sig.ident.span() =>
+        #[allow(dead_code)]
+        #[::async_trait::async_trait]
+        #vis trait #stateful_hook_trait_ident: Send {
+            fn on_reentrancy(err: ::lutum_protocol::hooks::HookReentrancyError) -> #output_ty {
+                panic!("stateful hook reentered: {err}");
+            }
+
+            #stateful_hook_trait_method_sig
+        }
+    };
+    let dyn_hook_trait_def = quote_spanned! { item_fn.sig.ident.span() =>
+        #[allow(dead_code)]
+        #[::async_trait::async_trait]
+        trait #dyn_hook_trait_ident: Send + Sync {
+            #dyn_hook_trait_method_sig
+        }
+    };
+
     let default_impl_call = if default_has_last {
         quote! {
             #default_impl_fn_ident(
@@ -1266,10 +1496,16 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
         )
         .await
     };
-    let dyn_hook_dispatch_call = if has_explicit_args {
-        quote! { hook.call_dyn(#ctx_ident, args.clone(), last).await }
+    let dyn_hook_dispatch_call = if trait_has_last {
+        if has_explicit_args {
+            quote! { hook.call_dyn(#ctx_ident, args.clone(), last).await }
+        } else {
+            quote! { hook.call_dyn(#ctx_ident, last).await }
+        }
+    } else if has_explicit_args {
+        quote! { hook.call_dyn(#ctx_ident, args.clone()).await }
     } else {
-        quote! { hook.call_dyn(#ctx_ident, last).await }
+        quote! { hook.call_dyn(#ctx_ident).await }
     };
     let dyn_hook_impl_call = if trait_has_last {
         if has_explicit_args {
@@ -1278,15 +1514,9 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
             quote! { <T as #hook_trait_ident>::call(self, #ctx_ident, last).await }
         }
     } else if has_explicit_args {
-        quote! {
-            let _ = last;
-            <T as #hook_trait_ident>::call(self, #ctx_ident, args).await
-        }
+        quote! { <T as #hook_trait_ident>::call(self, #ctx_ident, args).await }
     } else {
-        quote! {
-            let _ = last;
-            <T as #hook_trait_ident>::call(self, #ctx_ident).await
-        }
+        quote! { <T as #hook_trait_ident>::call(self, #ctx_ident).await }
     };
     let stateful_hook_impl_call = quote! {
         <T as #stateful_hook_trait_ident>::call_mut(
@@ -1304,8 +1534,8 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
                 #(#clone_bounds,)*
         }
     };
-    let (field_ty, field_init, register_impl, dispatch) = match kind {
-        HookKind::Always => (
+    let (field_ty, field_init, register_impl) = match &kind {
+        HookKind::Always { .. } | HookKind::Fallback { .. } => (
             quote! {
                 ::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident>>
             },
@@ -1313,72 +1543,99 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
             quote! {
                 self.#field_ident.push(::std::sync::Arc::new(hook));
             },
+        ),
+        HookKind::Singleton => (
             quote! {
-                let mut last = ::std::option::Option::Some(
-                    #default_call,
+                ::std::option::Option<::std::sync::Arc<dyn #dyn_hook_trait_ident>>
+            },
+            quote! { ::std::option::Option::None },
+            quote! {
+                let hook = ::std::sync::Arc::new(hook)
+                    as ::std::sync::Arc<dyn #dyn_hook_trait_ident>;
+                if self.#field_ident.replace(hook).is_some() {
+                    ::tracing::warn!(
+                        slot = #hook_name,
+                        "singleton hook registration overwritten; last registered hook wins"
+                    );
+                }
+            },
+        ),
+    };
+    let dispatch = match &kind {
+        HookKind::Always {
+            dispatch: HookDispatch::Fold,
+        } => quote! {
+            let mut last = ::std::option::Option::Some(
+                #default_call,
+            );
+            for hook in &self.#field_ident {
+                last = ::std::option::Option::Some(
+                    #dyn_hook_dispatch_call,
                 );
+            }
+            last.expect("hook chain unexpectedly empty")
+        },
+        HookKind::Always {
+            dispatch: HookDispatch::Chain(chain_path),
+        } => quote! {
+            let mut result = #default_call;
+            if #chain_path(&result).is_break() {
+                return result;
+            }
+            for hook in &self.#field_ident {
+                result = #dyn_hook_dispatch_call;
+                if #chain_path(&result).is_break() {
+                    return result;
+                }
+            }
+            result
+        },
+        HookKind::Fallback {
+            dispatch: HookDispatch::Fold,
+        } => quote! {
+            if self.#field_ident.is_empty() {
+                #default_call
+            } else {
+                let mut last = ::std::option::Option::None;
                 for hook in &self.#field_ident {
                     last = ::std::option::Option::Some(
                         #dyn_hook_dispatch_call,
                     );
                 }
                 last.expect("hook chain unexpectedly empty")
-            },
-        ),
-        HookKind::Fallback => (
-            quote! {
-                ::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident>>
-            },
-            quote! { ::std::vec::Vec::new() },
-            quote! {
-                self.#field_ident.push(::std::sync::Arc::new(hook));
-            },
-            quote! {
-                if self.#field_ident.is_empty() {
-                    #default_call
-                } else {
-                    let mut last = ::std::option::Option::None;
-                    for hook in &self.#field_ident {
-                        last = ::std::option::Option::Some(
-                            #dyn_hook_dispatch_call,
-                        );
+            }
+        },
+        HookKind::Fallback {
+            dispatch: HookDispatch::Chain(chain_path),
+        } => quote! {
+            if self.#field_ident.is_empty() {
+                #default_call
+            } else {
+                for hook in &self.#field_ident {
+                    let result = #dyn_hook_dispatch_call;
+                    if #chain_path(&result).is_break() {
+                        return result;
                     }
-                    last.expect("hook chain unexpectedly empty")
                 }
-            },
-        ),
+                #default_call
+            }
+        },
         HookKind::Singleton => {
             let some_call = if has_explicit_args {
                 quote! {
-                    hook.call_dyn(#ctx_ident, args, ::std::option::Option::None).await
+                    hook.call_dyn(#ctx_ident, args).await
                 }
             } else {
                 quote! {
-                    hook.call_dyn(#ctx_ident, ::std::option::Option::None).await
+                    hook.call_dyn(#ctx_ident).await
                 }
             };
-            (
-                quote! {
-                    ::std::option::Option<::std::sync::Arc<dyn #dyn_hook_trait_ident>>
-                },
-                quote! { ::std::option::Option::None },
-                quote! {
-                    let hook = ::std::sync::Arc::new(hook)
-                        as ::std::sync::Arc<dyn #dyn_hook_trait_ident>;
-                    if self.#field_ident.replace(hook).is_some() {
-                        ::tracing::warn!(
-                            slot = #hook_name,
-                            "singleton hook registration overwritten; last registered hook wins"
-                        );
-                    }
-                },
-                quote! {
-                    match &self.#field_ident {
-                        Some(hook) => #some_call,
-                        None => #default_call,
-                    }
-                },
-            )
+            quote! {
+                match &self.#field_ident {
+                    Some(hook) => #some_call,
+                    None => #default_call,
+                }
+            }
         }
     };
 
@@ -1473,12 +1730,25 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
     } else {
         quote! {}
     };
-    let macro_reexport = if matches!(vis, syn::Visibility::Inherited) {
-        quote! {}
+    let macro_reexport = quote! {};
+    let named_impl_helper_macro_ident = hook_named_impl_helper_macro_ident(&slot_ident);
+    let helper_macro_reexport = quote! {
+        #[doc(hidden)]
+        pub(crate) use #named_impl_helper_macro_ident;
+    };
+
+    let slot_dispatch_metadata = kind.dispatch_metadata_tokens();
+    let named_impl_with_last_arm = if trait_has_last {
+        quote! {
+            (@named_impl_with_last { $($ok:tt)* } { $($err:tt)* }) => {
+                $($ok)*
+            };
+        }
     } else {
         quote! {
-            #[doc(hidden)]
-            #vis use #slot_ident;
+            (@named_impl_with_last { $($ok:tt)* } { $($err:tt)* }) => {
+                $($err)*
+            };
         }
     };
 
@@ -1486,6 +1756,7 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
         #item_fn
 
         #[doc(hidden)]
+        #[allow(unused_macros)]
         macro_rules! #slot_ident {
             (@field) => {
                 #field_ident: #field_ty,
@@ -1540,6 +1811,7 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
                     #default_impl_call
                 }
             };
+            #named_impl_with_last_arm
             (
                 @accumulate
                 $callback:ident
@@ -1605,47 +1877,30 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
             };
         }
 
+        #[doc(hidden)]
+        #[allow(unused_macros)]
+        macro_rules! #named_impl_helper_macro_ident {
+            #named_impl_with_last_arm
+        }
+
         #macro_reexport
+        #helper_macro_reexport
 
         #[allow(dead_code)]
         #vis struct #slot_ident;
 
+        #[doc(hidden)]
+        impl #slot_ident {
+            #slot_dispatch_metadata
+        }
+
         #args_struct_and_fn_impl
 
-        #[allow(dead_code)]
-        #[::async_trait::async_trait]
-        #vis trait #hook_trait_ident: Send + Sync {
-            async fn call(
-                &self,
-                #ctx_ident: #ctx_ty,
-                #(#hook_trait_args,)*
-            ) -> #output_ty;
-        }
+        #hook_trait_def
 
-        #[allow(dead_code)]
-        #[::async_trait::async_trait]
-        #vis trait #stateful_hook_trait_ident: Send {
-            fn on_reentrancy(err: ::lutum_protocol::hooks::HookReentrancyError) -> #output_ty {
-                panic!("stateful hook reentered: {err}");
-            }
+        #stateful_hook_trait_def
 
-            async fn call_mut(
-                &mut self,
-                #ctx_ident: #ctx_ty,
-                #(#hook_trait_args,)*
-            ) -> #output_ty;
-        }
-
-        #[allow(dead_code)]
-        #[::async_trait::async_trait]
-        trait #dyn_hook_trait_ident: Send + Sync {
-            async fn call_dyn(
-                &self,
-                #ctx_ident: #ctx_ty,
-                #(#hook_trait_args_no_last,)*
-                last: ::std::option::Option<#output_ty>,
-            ) -> #output_ty;
-        }
+        #dyn_hook_trait_def
 
         #[::async_trait::async_trait]
         impl<T> #dyn_hook_trait_ident for T
@@ -1655,8 +1910,7 @@ fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenS
             async fn call_dyn(
                 &self,
                 #ctx_ident: #ctx_ty,
-                #(#hook_trait_args_no_last,)*
-                last: ::std::option::Option<#output_ty>,
+                #(#hook_trait_args,)*
             ) -> #output_ty {
                 #dyn_hook_impl_call
             }
@@ -1817,16 +2071,31 @@ fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
     }
 }
 
-fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStream {
+fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenStream {
+    match slot_path.segments.last() {
+        Some(segment) if matches!(segment.arguments, PathArguments::None) => {}
+        _ => {
+            return syn::Error::new_spanned(
+                slot_path,
+                "#[hook(...)] expects a plain hook slot path like `SlotType` or `path::to::SlotType`",
+            )
+            .to_compile_error();
+        }
+    };
+
+    let helper_macro_path = hook_named_impl_helper_macro_path(&slot_path);
+
     let HookSignature {
         ctx_ident,
         ctx_ty,
         explicit_args,
         output_ty,
         has_last,
+        last_span,
     } = match analyze_hook_signature(
         &item_fn,
         HookLastRequirement::Optional,
+        "#[hook(SlotType)] received an invalid `last: Option<Return>` argument",
         HookLastRecognition::CompatibleOption,
     ) {
         Ok(signature) => signature,
@@ -1836,14 +2105,14 @@ fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStr
     let fn_ident = item_fn.sig.ident.clone();
     let vis = item_fn.vis.clone();
     let struct_ident = format_ident!("{}", fn_ident.to_string().to_upper_camel_case());
-    let hook_trait_ident = format_ident!("{slot_ident}Hook");
-    let args_struct_ident = format_ident!("{slot_ident}Args");
+    let hook_trait_path = hook_trait_path_for_slot_path(&slot_path);
+    let args_struct_path = args_struct_path_for_slot_path(&slot_path);
     let has_explicit_args = !explicit_args.is_empty();
     let has_ref_arg = explicit_args.iter().any(|(_, ty)| is_non_str_ref(ty));
     let args_struct_type: proc_macro2::TokenStream = if has_ref_arg {
-        quote! { #args_struct_ident<'_> }
+        quote! { #args_struct_path<'_> }
     } else {
-        quote! { #args_struct_ident }
+        quote! { #args_struct_path }
     };
 
     // Trait method signature: uses XxxArgs when there are explicit args.
@@ -1880,14 +2149,12 @@ fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStr
         fn_call_args.push(quote! { last });
     }
 
-    quote! {
-        #item_fn
-
+    let ok_impl = quote! {
         #[allow(dead_code)]
         #vis struct #struct_ident;
 
         #[::async_trait::async_trait]
-        impl #hook_trait_ident for #struct_ident {
+        impl #hook_trait_path for #struct_ident {
             async fn call(
                 &self,
                 #ctx_ident: #ctx_ty,
@@ -1897,12 +2164,33 @@ fn expand_hook_impl(item_fn: ItemFn, slot_ident: Ident) -> proc_macro2::TokenStr
                 #fn_ident(#ctx_ident, #(#fn_call_args,)*).await
             }
         }
+    };
+
+    let with_last_dispatch = if has_last {
+        let err_span = last_span.expect("last span must exist when last is present");
+        let err_impl = quote_spanned! { err_span =>
+            compile_error!(
+                "#[hook(SlotType)] implementations for this slot must not declare `last: Option<Return>`"
+            );
+        };
+        quote! {
+            #helper_macro_path!(@named_impl_with_last { #ok_impl } { #err_impl });
+        }
+    } else {
+        quote! { #ok_impl }
+    };
+
+    quote! {
+        #item_fn
+
+        #with_last_dispatch
     }
 }
 
 fn analyze_hook_signature(
     item_fn: &ItemFn,
     last_requirement: HookLastRequirement,
+    forbidden_last_message: &str,
     last_recognition: HookLastRecognition,
 ) -> syn::Result<HookSignature> {
     if item_fn.sig.receiver().is_some() {
@@ -1967,18 +2255,25 @@ fn analyze_hook_signature(
     let ctx_ident = ctx_ident.clone();
     let ctx_ty = (*ctx_arg.ty).clone();
 
-    let has_last = inputs
-        .last()
-        .copied()
+    let last_arg = inputs.last().copied();
+    let has_last = last_arg
         .map(|arg| hook_last_matches(arg, &output_ty, last_recognition))
         .transpose()?
         .unwrap_or(false);
+    let last_span = if has_last {
+        last_arg.map(|arg| match arg {
+            FnArg::Typed(pat_ty) => pat_ty.span(),
+            FnArg::Receiver(receiver) => receiver.span(),
+        })
+    } else {
+        None
+    };
 
     match last_requirement {
         HookLastRequirement::Forbidden if has_last => {
-            return Err(syn::Error::new_spanned(
-                inputs.last().expect("hook must have final input"),
-                "#[def_hook(singleton)] does not accept a `last: Option<Return>` argument",
+            return Err(syn::Error::new(
+                last_span.expect("last span must exist when last is present"),
+                forbidden_last_message,
             ));
         }
         _ => {}
@@ -2005,6 +2300,7 @@ fn analyze_hook_signature(
         explicit_args,
         output_ty,
         has_last,
+        last_span,
     })
 }
 
@@ -2374,6 +2670,43 @@ fn wrapper_ident_for_type(ty: &Type) -> Ident {
     } else {
         panic!("Toolset variant payloads must be path types");
     }
+}
+
+fn hook_named_impl_helper_macro_ident(slot_ident: &Ident) -> Ident {
+    format_ident!(
+        "__lutum_hook_named_impl_{}",
+        slot_ident.to_string().to_snake_case()
+    )
+}
+
+fn hook_named_impl_helper_macro_path(slot_path: &Path) -> Path {
+    let mut helper_path = slot_path.clone();
+    let last = helper_path
+        .segments
+        .last_mut()
+        .expect("hook slot paths must have at least one segment");
+    last.ident = hook_named_impl_helper_macro_ident(&last.ident);
+    helper_path
+}
+
+fn hook_trait_path_for_slot_path(slot_path: &Path) -> Path {
+    let mut trait_path = slot_path.clone();
+    let last = trait_path
+        .segments
+        .last_mut()
+        .expect("hook slot paths must have at least one segment");
+    last.ident = format_ident!("{}Hook", last.ident);
+    trait_path
+}
+
+fn args_struct_path_for_slot_path(slot_path: &Path) -> Path {
+    let mut args_path = slot_path.clone();
+    let last = args_path
+        .segments
+        .last_mut()
+        .expect("hook slot paths must have at least one segment");
+    last.ident = format_ident!("{}Args", last.ident);
+    args_path
 }
 
 fn is_lutum_ref(ty: &Type) -> bool {

@@ -1,0 +1,5 @@
+error: chain-dispatch hook definitions do not accept a `last: Option<Return>` argument
+ --> tests/ui/hook_def_chain_last.rs:5:5
+  |
+5 |     last: Option<Result<String, String>>,
+  |     ^^^^
