@@ -114,6 +114,35 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         quote! { hook.call_dyn(#(#cloned_field_idents,)*).await }
     };
 
+    // Companion chain field idents and tokens (only when chain option is set).
+    let chain_field_ident = format_ident!("{}_chain", fn_ident);
+    let chain_reg_fn_ident = format_ident!("{}_chain", fn_ident);
+    let chain_set_fn_ident = format_ident!("set_{}_chain", fn_ident);
+    let chain_companion_tokens = kind.opts().and_then(|o| o.chain.as_ref()).map(
+        |chain_default_ty| {
+            let chain_field_ty = quote! {
+                ::std::option::Option<
+                    ::std::sync::Arc<dyn ::lutum::Chain<#output_ty> + Send + Sync>
+                >
+            };
+            let chain_field_init = quote! { ::std::option::Option::None };
+            let check = quote! {
+                if {
+                    use ::lutum::Chain as _;
+                    let __cf = match &self.#chain_field_ident {
+                        ::std::option::Option::Some(__h) => (**__h).call(&__next),
+                        ::std::option::Option::None => {
+                            let __d: #chain_default_ty = ::std::default::Default::default();
+                            __d.call(&__next)
+                        }
+                    };
+                    __cf.is_break()
+                }
+            };
+            (chain_field_ty, chain_field_init, check)
+        },
+    );
+
     let (field_ty, field_init, register_impl) = match &kind {
         HookKind::Always { .. } | HookKind::Fallback { .. } => (
             quote! {
@@ -141,41 +170,79 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             },
         ),
     };
-    let inner_dispatch = match &kind {
-        HookKind::Always(HookOptions {
-            chain: None,
-            accumulate: None,
-            ..
-        }) => quote! {
+    // Flatten companion tokens into Vec for use in @accumulate arm (empty = no chain option).
+    let (chain_companion_field_tokens, chain_companion_field_init_tokens, chain_companion_register_tokens):
+        (Vec<_>, Vec<_>, Vec<_>) = match &chain_companion_tokens {
+        Some((chain_field_ty, chain_field_init, _)) => (
+            vec![quote! { #chain_field_ident: #chain_field_ty, }],
+            vec![quote! { #chain_field_ident: #chain_field_init, }],
+            vec![quote! {
+                #[allow(dead_code)]
+                pub fn #chain_reg_fn_ident(
+                    mut self,
+                    h: impl ::lutum::Chain<#output_ty> + 'static,
+                ) -> Self {
+                    self.#chain_field_ident =
+                        ::std::option::Option::Some(::std::sync::Arc::new(h));
+                    self
+                }
+
+                #[allow(dead_code)]
+                pub fn #chain_set_fn_ident(
+                    &mut self,
+                    h: impl ::lutum::Chain<#output_ty> + 'static,
+                ) {
+                    self.#chain_field_ident =
+                        ::std::option::Option::Some(::std::sync::Arc::new(h));
+                }
+            }],
+        ),
+        None => (vec![], vec![], vec![]),
+    };
+
+    let inner_dispatch = match (&kind, &chain_companion_tokens) {
+        (
+            HookKind::Always(HookOptions {
+                chain: None,
+                accumulate: None,
+                ..
+            }),
+            _,
+        ) => quote! {
             let mut last = ::std::option::Option::Some(#default_call);
             for hook in &self.#field_ident {
                 last = ::std::option::Option::Some(#dyn_hook_dispatch_call);
             }
             last.expect("hook chain unexpectedly empty")
         },
-        HookKind::Always(HookOptions {
-            chain: Some(chain_path),
-            accumulate: None,
-            ..
-        }) => quote! {
+        (
+            HookKind::Always(HookOptions {
+                chain: Some(_),
+                accumulate: None,
+                ..
+            }),
+            Some((_, _, chain_check)),
+        ) => quote! {
             let mut last = ::std::option::Option::Some(#default_call);
-            if #chain_path(last.as_ref().unwrap()).is_break() {
-                return last.unwrap();
+            {
+                let __next = last.as_ref().unwrap().clone();
+                #chain_check { return __next; }
             }
             for hook in &self.#field_ident {
-                let next = #dyn_hook_dispatch_call;
-                if #chain_path(&next).is_break() {
-                    return next;
-                }
-                last = ::std::option::Option::Some(next);
+                let __next = #dyn_hook_dispatch_call;
+                #chain_check { return __next; }
+                last = ::std::option::Option::Some(__next);
             }
             last.unwrap()
         },
-        HookKind::Always(HookOptions {
-            chain: None,
-            accumulate: Some(accumulate_fn),
-            ..
-        }) => quote! {
+        (
+            HookKind::Always(HookOptions {
+                chain: None,
+                accumulate: Some(accumulate_fn),
+                ..
+            }),
+            _,
+        ) => quote! {
             let mut __outputs = ::std::vec::Vec::new();
             __outputs.push(#default_call);
             for hook in &self.#field_ident {
@@ -183,33 +250,39 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             }
             #accumulate_fn(__outputs)
         },
-        HookKind::Always(HookOptions {
-            chain: Some(chain_path),
-            accumulate: Some(accumulate_fn),
-            ..
-        }) => quote! {
+        (
+            HookKind::Always(HookOptions {
+                chain: Some(_),
+                accumulate: Some(accumulate_fn),
+                ..
+            }),
+            Some((_, _, chain_check)),
+        ) => quote! {
             let mut __outputs = ::std::vec::Vec::new();
-            let __first = #default_call;
-            if #chain_path(&__first).is_break() {
-                __outputs.push(__first);
+            let __next = #default_call;
+            #chain_check {
+                __outputs.push(__next);
                 return #accumulate_fn(__outputs);
             }
-            __outputs.push(__first);
+            __outputs.push(__next);
             for hook in &self.#field_ident {
-                let __out = #dyn_hook_dispatch_call;
-                if #chain_path(&__out).is_break() {
-                    __outputs.push(__out);
+                let __next = #dyn_hook_dispatch_call;
+                #chain_check {
+                    __outputs.push(__next);
                     return #accumulate_fn(__outputs);
                 }
-                __outputs.push(__out);
+                __outputs.push(__next);
             }
             #accumulate_fn(__outputs)
         },
-        HookKind::Fallback(HookOptions {
-            chain: None,
-            accumulate: None,
-            ..
-        }) => quote! {
+        (
+            HookKind::Fallback(HookOptions {
+                chain: None,
+                accumulate: None,
+                ..
+            }),
+            _,
+        ) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
@@ -220,30 +293,34 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 last.expect("hook chain unexpectedly empty")
             }
         },
-        HookKind::Fallback(HookOptions {
-            chain: Some(chain_path),
-            accumulate: None,
-            ..
-        }) => quote! {
+        (
+            HookKind::Fallback(HookOptions {
+                chain: Some(_),
+                accumulate: None,
+                ..
+            }),
+            Some((_, _, chain_check)),
+        ) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
                 let mut last = ::std::option::Option::None;
                 for hook in &self.#field_ident {
-                    let next = #dyn_hook_dispatch_call;
-                    if #chain_path(&next).is_break() {
-                        return next;
-                    }
-                    last = ::std::option::Option::Some(next);
+                    let __next = #dyn_hook_dispatch_call;
+                    #chain_check { return __next; }
+                    last = ::std::option::Option::Some(__next);
                 }
                 #default_call
             }
         },
-        HookKind::Fallback(HookOptions {
-            chain: None,
-            accumulate: Some(accumulate_fn),
-            ..
-        }) => quote! {
+        (
+            HookKind::Fallback(HookOptions {
+                chain: None,
+                accumulate: Some(accumulate_fn),
+                ..
+            }),
+            _,
+        ) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
@@ -254,27 +331,30 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #accumulate_fn(__outputs)
             }
         },
-        HookKind::Fallback(HookOptions {
-            chain: Some(chain_path),
-            accumulate: Some(accumulate_fn),
-            ..
-        }) => quote! {
+        (
+            HookKind::Fallback(HookOptions {
+                chain: Some(_),
+                accumulate: Some(accumulate_fn),
+                ..
+            }),
+            Some((_, _, chain_check)),
+        ) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
                 let mut __outputs = ::std::vec::Vec::new();
                 for hook in &self.#field_ident {
-                    let __out = #dyn_hook_dispatch_call;
-                    if #chain_path(&__out).is_break() {
-                        __outputs.push(__out);
+                    let __next = #dyn_hook_dispatch_call;
+                    #chain_check {
+                        __outputs.push(__next);
                         return #accumulate_fn(__outputs);
                     }
-                    __outputs.push(__out);
+                    __outputs.push(__next);
                 }
                 #accumulate_fn(__outputs)
             }
         },
-        HookKind::Singleton => {
+        (HookKind::Singleton, _) => {
             let singleton_args: Vec<proc_macro2::TokenStream> =
                 dispatch_vars.iter().map(|v| quote! { #v }).collect();
             let some_call = quote! {
@@ -287,6 +367,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 }
             }
         }
+        _ => unreachable!("chain_companion_tokens is Some iff HookOptions.chain is Some"),
     };
 
     // Wrap with finalize if specified. Chain dispatch uses early `return`s, so we wrap
@@ -393,8 +474,14 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 [$($remaining:tt)*]
             ) => {
                 $callback!(
-                    [$($fields)* #field_ident: #field_ty,]
-                    [$($field_inits)* #field_ident: #field_init,]
+                    [$($fields)*
+                        #field_ident: #field_ty,
+                        #(#chain_companion_field_tokens)*
+                    ]
+                    [$($field_inits)*
+                        #field_ident: #field_init,
+                        #(#chain_companion_field_init_tokens)*
+                    ]
                     [$($register_methods)*
                         #[allow(dead_code)]
                         pub fn #with_fn_ident(
@@ -413,6 +500,8 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                             #register_impl
                             self
                         }
+
+                        #(#chain_companion_register_tokens)*
                     ]
                     [$($dispatch_methods)*
                         #[allow(dead_code)]

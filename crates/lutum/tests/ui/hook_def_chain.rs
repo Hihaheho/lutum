@@ -1,4 +1,4 @@
-#[lutum::def_hook(always, chain = lutum::short_circuit)]
+#[lutum::def_hook(always, chain = lutum::ShortCircuit<String, String>)]
 async fn validate_output(_ctx: &lutum::Lutum, output: &str) -> Result<String, String> {
     Ok(format!("default:{output}"))
 }
@@ -9,15 +9,25 @@ async fn append_suffix(_ctx: &lutum::Lutum, output: &str) -> Result<String, Stri
 }
 
 mod custom {
-    pub fn prefer_first_some<T>(value: &Option<T>) -> std::ops::ControlFlow<(), ()> {
-        match value {
-            Some(_) => std::ops::ControlFlow::Break(()),
-            None => std::ops::ControlFlow::Continue(()),
+    pub struct PreferFirstSome;
+
+    impl Default for PreferFirstSome {
+        fn default() -> Self {
+            Self
+        }
+    }
+
+    impl lutum::Chain<Option<String>> for PreferFirstSome {
+        fn call(&self, value: &Option<String>) -> std::ops::ControlFlow<()> {
+            match value {
+                Some(_) => std::ops::ControlFlow::Break(()),
+                None => std::ops::ControlFlow::Continue(()),
+            }
         }
     }
 }
 
-#[lutum::def_hook(fallback, chain = custom::prefer_first_some)]
+#[lutum::def_hook(fallback, chain = custom::PreferFirstSome)]
 async fn choose_label(_ctx: &lutum::Lutum, label: &str) -> Option<String> {
     Some(format!("default:{label}"))
 }

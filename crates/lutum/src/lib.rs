@@ -53,8 +53,8 @@ pub use context::{
     StructuredTurnPartial, StructuredTurnPartialWithTools,
 };
 pub use hooks::{
-    HookReentrancyError, HookRegistry, ResolveUsageEstimate, ResolveUsageEstimateRegistryExt,
-    Stateful, first_success, short_circuit,
+    Chain, FirstSuccess, HookReentrancyError, HookRegistry, ResolveUsageEstimate,
+    ResolveUsageEstimateRegistryExt, ShortCircuit, Stateful,
 };
 
 pub use lutum_macros::{Toolset, def_global_hook, def_hook, hook, hooks, tool_fn, tool_input};

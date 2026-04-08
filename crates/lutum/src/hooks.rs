@@ -56,22 +56,22 @@
 //!
 //! ### Chain dispatch
 //!
-//! Use `#[def_hook(always, chain = path::to::fn)]` or
-//! `#[def_hook(fallback, chain = path::to::fn)]` when dispatch should be controlled by a
-//! borrowed-result chain function instead of by passing `last` forward.
+//! Use `#[def_hook(always, chain = Type)]` or `#[def_hook(fallback, chain = Type)]` when
+//! dispatch should be controlled by a [`Chain<Output>`] implementation instead of passing
+//! `last` forward.
 //!
-//! Chain functions have the form
-//! `fn(&Output) -> std::ops::ControlFlow<(), ()>`.
+//! `chain = Type` specifies the **default** `Chain<Output>` implementation. The hooks struct
+//! companion field (`{hook_name}_chain`) can be set at runtime to override it.
 //!
-//! Two built-ins are provided:
+//! Two built-in implementations are provided:
 //!
-//! - [`short_circuit`] for `Result<T, E>`: stop on `Err(_)`
-//! - [`first_success`] for `Option<T>`: stop on `Some(_)`
+//! - [`ShortCircuit<T, E>`] for `Result<T, E>` hooks: stop on `Err(_)`
+//! - [`FirstSuccess<T>`] for `Option<T>` hooks: stop on `Some(_)`
 //!
 //! ```rust,ignore
 //! use lutum::*;
 //!
-//! #[def_hook(always, chain = lutum::short_circuit)]
+//! #[def_hook(always, chain = ShortCircuit<(), String>)]
 //! async fn validate_output(output: &str) -> Result<(), String> {
 //!     if output.trim().is_empty() { Err("output must not be empty".into()) } else { Ok(()) }
 //! }
@@ -88,7 +88,7 @@
 //!
 //! Chain dispatch semantics:
 //!
-//! - `#[def_hook(always, chain = ...)]`: run the default first; if the chain function returns
+//! - `#[def_hook(always, chain = ...)]`: run the default first; if the chain returns
 //!   `Break`, return that result immediately; otherwise run registered hooks in order
 //! - `#[def_hook(fallback, chain = ...)]`: if no hooks are registered, run the default; if hooks
 //!   are registered, run them first and only fall back to the default if all results continue
@@ -160,23 +160,55 @@ use crate::{OperationKind, RequestExtensions, budget::UsageEstimate};
 
 pub use lutum_protocol::hooks::{HookReentrancyError, HookRegistry, Stateful};
 
-/// Chain helper for `Result<T, E>` hooks.
+/// Companion chain trait — decides whether dispatch should stop after each result.
 ///
-/// Returns `Break(())` for `Err(_)` and `Continue(())` for `Ok(_)`.
-pub fn short_circuit<T, E>(result: &Result<T, E>) -> std::ops::ControlFlow<(), ()> {
-    match result {
-        Ok(_) => std::ops::ControlFlow::Continue(()),
-        Err(_) => std::ops::ControlFlow::Break(()),
+/// Use as `chain = ShortCircuit<T, E>` or `chain = FirstSuccess<T>` in
+/// `#[def_hook(always, chain = ...)]` or `#[def_hook(fallback, chain = ...)]`.
+/// The `chain = ...` value specifies the default implementation used when no custom
+/// `Chain<Output>` is registered on the hooks struct.
+pub trait Chain<Output: Send + Sync + 'static>: Send + Sync {
+    fn call(&self, output: &Output) -> std::ops::ControlFlow<()>;
+}
+
+/// Default chain implementation for `Result<T, E>` hooks — stops dispatch on the first `Err`.
+///
+/// Use as `chain = ShortCircuit<T, E>`.
+pub struct ShortCircuit<T, E>(std::marker::PhantomData<fn(T, E)>);
+
+impl<T, E> Default for ShortCircuit<T, E> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
     }
 }
 
-/// Chain helper for `Option<T>` hooks.
+impl<T: Send + Sync + 'static, E: Send + Sync + 'static> Chain<Result<T, E>>
+    for ShortCircuit<T, E>
+{
+    fn call(&self, output: &Result<T, E>) -> std::ops::ControlFlow<()> {
+        match output {
+            Ok(_) => std::ops::ControlFlow::Continue(()),
+            Err(_) => std::ops::ControlFlow::Break(()),
+        }
+    }
+}
+
+/// Default chain implementation for `Option<T>` hooks — stops dispatch on the first `Some`.
 ///
-/// Returns `Break(())` for `Some(_)` and `Continue(())` for `None`.
-pub fn first_success<T>(option: &Option<T>) -> std::ops::ControlFlow<(), ()> {
-    match option {
-        Some(_) => std::ops::ControlFlow::Break(()),
-        None => std::ops::ControlFlow::Continue(()),
+/// Use as `chain = FirstSuccess<T>`.
+pub struct FirstSuccess<T>(std::marker::PhantomData<fn(T)>);
+
+impl<T> Default for FirstSuccess<T> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<T: Send + Sync + 'static> Chain<Option<T>> for FirstSuccess<T> {
+    fn call(&self, output: &Option<T>) -> std::ops::ControlFlow<()> {
+        match output {
+            Some(_) => std::ops::ControlFlow::Break(()),
+            None => std::ops::ControlFlow::Continue(()),
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 mod slots {
-    #[lutum::def_hook(always, chain = lutum::short_circuit)]
+    #[lutum::def_hook(always, chain = lutum::ShortCircuit<String, String>)]
     pub async fn validate_output(_ctx: &lutum::Lutum, output: &str) -> Result<String, String> {
         Ok(format!("default:{output}"))
     }

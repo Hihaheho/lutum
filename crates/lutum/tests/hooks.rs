@@ -10,7 +10,7 @@ use lutum::{
     MockLlmAdapter, ModelInput, ModelInputItem, OperationKind, RequestExtensions,
     ResolveUsageEstimate, ResolveUsageEstimateRegistryExt, SharedPoolBudgetManager,
     SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage, UsageRecoveryAdapter,
-    budget::UsageEstimate, first_success, hooks::ResolveUsageEstimateLutumExt, short_circuit,
+    budget::UsageEstimate, hooks::ResolveUsageEstimateLutumExt,
 };
 use lutum_trace::FieldValue;
 use schemars::JsonSchema;
@@ -59,7 +59,7 @@ async fn pick_registered_label(label: &str, last: Option<String>) -> String {
     format!("hook:{label}")
 }
 
-#[lutum::def_hook(always, chain = short_circuit)]
+#[lutum::def_hook(always, chain = lutum::ShortCircuit<String, String>)]
 async fn validate_chain_label(label: &str) -> Result<String, String> {
     Err(format!("default-blocked:{label}"))
 }
@@ -69,7 +69,7 @@ async fn append_chain_suffix(label: &str) -> Result<String, String> {
     Ok(format!("hooked:{label}"))
 }
 
-#[lutum::def_hook(always, chain = short_circuit)]
+#[lutum::def_hook(always, chain = lutum::ShortCircuit<String, String>)]
 async fn transform_chain_label(label: &str) -> Result<String, String> {
     Ok(format!("default:{label}"))
 }
@@ -84,7 +84,7 @@ async fn transform_chain_final(label: &str) -> Result<String, String> {
     Ok(format!("final:{label}"))
 }
 
-#[lutum::def_hook(fallback, chain = first_success)]
+#[lutum::def_hook(fallback, chain = lutum::FirstSuccess<String>)]
 async fn choose_chain_label(label: &str) -> Option<String> {
     Some(format!("default:{label}"))
 }
@@ -99,7 +99,7 @@ async fn choose_special(label: &str) -> Option<String> {
     Some(format!("hook:{label}"))
 }
 
-#[lutum::def_hook(fallback, chain = first_success)]
+#[lutum::def_hook(fallback, chain = lutum::FirstSuccess<String>)]
 async fn choose_chain_default_after_hooks(label: &str) -> Option<String> {
     Some(format!("fallback-default:{label}"))
 }
@@ -110,7 +110,7 @@ async fn choose_none_again(_label: &str) -> Option<String> {
 }
 
 // fold + chain (try_fold): each hook sees the previous result AND can short-circuit.
-#[lutum::def_hook(always, chain = short_circuit)]
+#[lutum::def_hook(always, chain = lutum::ShortCircuit<String, String>)]
 async fn fold_chain_label(label: &str) -> Result<String, String> {
     Ok(format!("default:{label}"))
 }
@@ -142,7 +142,7 @@ async fn fold_chain_unreachable(
 }
 
 // fallback + fold + chain: hooks fold and can short-circuit; default is the fallback.
-#[lutum::def_hook(fallback, chain = first_success)]
+#[lutum::def_hook(fallback, chain = lutum::FirstSuccess<String>)]
 async fn fold_chain_pick(label: &str) -> Option<String> {
     Some(format!("fallback:{label}"))
 }
@@ -159,7 +159,7 @@ async fn fold_chain_pick_decide(label: &str, last: Option<Option<String>>) -> Op
     Some(format!("hook:{label}"))
 }
 
-#[lutum::def_global_hook(always, chain = short_circuit)]
+#[lutum::def_global_hook(always, chain = lutum::ShortCircuit<String, String>)]
 async fn global_chain_label(label: &str) -> Result<String, String> {
     Ok(format!("global-default:{label}"))
 }
@@ -190,15 +190,25 @@ async fn accumulate_hook_b(label: &str) -> String {
 }
 
 // accumulate + chain: early exit during accumulate.
-fn is_short_circuit_string(s: &str) -> std::ops::ControlFlow<()> {
-    if s.starts_with("stop:") {
-        std::ops::ControlFlow::Break(())
-    } else {
-        std::ops::ControlFlow::Continue(())
+struct IsShortCircuitString;
+
+impl Default for IsShortCircuitString {
+    fn default() -> Self {
+        Self
     }
 }
 
-#[lutum::def_hook(always, chain = is_short_circuit_string, accumulate = join_strings)]
+impl lutum::Chain<String> for IsShortCircuitString {
+    fn call(&self, s: &String) -> std::ops::ControlFlow<()> {
+        if s.starts_with("stop:") {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    }
+}
+
+#[lutum::def_hook(always, chain = IsShortCircuitString, accumulate = join_strings)]
 async fn accumulate_chain_label(label: &str) -> String {
     format!("default:{label}")
 }
@@ -229,7 +239,7 @@ async fn finalized_append(label: &str, last: Option<String>) -> String {
 }
 
 // chain + finalize: finalize captures early exits from chain dispatch.
-#[lutum::def_hook(always, chain = is_short_circuit_string, finalize = wrap_result)]
+#[lutum::def_hook(always, chain = IsShortCircuitString, finalize = wrap_result)]
 async fn chain_finalized_label(label: &str) -> String {
     format!("default:{label}")
 }

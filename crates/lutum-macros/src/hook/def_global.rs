@@ -184,6 +184,17 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                 });
         },
     };
+    // Helper macro for chain check in global hook dispatch (uses default type, no companion field).
+    let make_chain_check = |chain_default_ty: &syn::Path| {
+        quote! {
+            {
+                use ::lutum::Chain as _;
+                let __d: #chain_default_ty = ::std::default::Default::default();
+                __d.call(&__next).is_break()
+            }
+        }
+    };
+
     let inner_dispatch = match &kind {
         HookKind::Always(HookOptions {
             chain: None,
@@ -199,24 +210,26 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             last.expect("hook chain unexpectedly empty")
         },
         HookKind::Always(HookOptions {
-            chain: Some(chain_path),
+            chain: Some(chain_default_ty),
             accumulate: None,
             ..
-        }) => quote! {
-            let mut last = ::std::option::Option::Some(#default_call);
-            if #chain_path(last.as_ref().unwrap()).is_break() {
-                return last.unwrap();
-            }
-            if let Some(hooks) = chain {
-                for hook in hooks {
-                    let next = #dyn_hook_dispatch_call;
-                    if #chain_path(&next).is_break() {
-                        return next;
-                    }
-                    last = ::std::option::Option::Some(next);
+        }) => {
+            let chain_check = make_chain_check(chain_default_ty);
+            quote! {
+                let mut last = ::std::option::Option::Some(#default_call);
+                {
+                    let __next = last.as_ref().unwrap().clone();
+                    if #chain_check { return __next; }
                 }
+                if let Some(hooks) = chain {
+                    for hook in hooks {
+                        let __next = #dyn_hook_dispatch_call;
+                        if #chain_check { return __next; }
+                        last = ::std::option::Option::Some(__next);
+                    }
+                }
+                last.unwrap()
             }
-            last.unwrap()
         },
         HookKind::Always(HookOptions {
             chain: None,
@@ -233,28 +246,31 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             #accumulate_fn(__outputs)
         },
         HookKind::Always(HookOptions {
-            chain: Some(chain_path),
+            chain: Some(chain_default_ty),
             accumulate: Some(accumulate_fn),
             ..
-        }) => quote! {
-            let mut __outputs = ::std::vec::Vec::new();
-            let __first = #default_call;
-            if #chain_path(&__first).is_break() {
-                __outputs.push(__first);
-                return #accumulate_fn(__outputs);
-            }
-            __outputs.push(__first);
-            if let Some(hooks) = chain {
-                for hook in hooks {
-                    let __out = #dyn_hook_dispatch_call;
-                    if #chain_path(&__out).is_break() {
-                        __outputs.push(__out);
-                        return #accumulate_fn(__outputs);
-                    }
-                    __outputs.push(__out);
+        }) => {
+            let chain_check = make_chain_check(chain_default_ty);
+            quote! {
+                let mut __outputs = ::std::vec::Vec::new();
+                let __next = #default_call;
+                if #chain_check {
+                    __outputs.push(__next);
+                    return #accumulate_fn(__outputs);
                 }
+                __outputs.push(__next);
+                if let Some(hooks) = chain {
+                    for hook in hooks {
+                        let __next = #dyn_hook_dispatch_call;
+                        if #chain_check {
+                            __outputs.push(__next);
+                            return #accumulate_fn(__outputs);
+                        }
+                        __outputs.push(__next);
+                    }
+                }
+                #accumulate_fn(__outputs)
             }
-            #accumulate_fn(__outputs)
         },
         HookKind::Fallback(HookOptions {
             chain: None,
@@ -273,23 +289,24 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             }
         },
         HookKind::Fallback(HookOptions {
-            chain: Some(chain_path),
+            chain: Some(chain_default_ty),
             accumulate: None,
             ..
-        }) => quote! {
-            match chain {
-                Some(hooks) if !hooks.is_empty() => {
-                    let mut last = ::std::option::Option::None;
-                    for hook in hooks {
-                        let next = #dyn_hook_dispatch_call;
-                        if #chain_path(&next).is_break() {
-                            return next;
+        }) => {
+            let chain_check = make_chain_check(chain_default_ty);
+            quote! {
+                match chain {
+                    Some(hooks) if !hooks.is_empty() => {
+                        let mut last = ::std::option::Option::None;
+                        for hook in hooks {
+                            let __next = #dyn_hook_dispatch_call;
+                            if #chain_check { return __next; }
+                            last = ::std::option::Option::Some(__next);
                         }
-                        last = ::std::option::Option::Some(next);
+                        #default_call
                     }
-                    #default_call
+                    _ => #default_call,
                 }
-                _ => #default_call,
             }
         },
         HookKind::Fallback(HookOptions {
@@ -309,24 +326,27 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             }
         },
         HookKind::Fallback(HookOptions {
-            chain: Some(chain_path),
+            chain: Some(chain_default_ty),
             accumulate: Some(accumulate_fn),
             ..
-        }) => quote! {
-            match chain {
-                Some(hooks) if !hooks.is_empty() => {
-                    let mut __outputs = ::std::vec::Vec::new();
-                    for hook in hooks {
-                        let __out = #dyn_hook_dispatch_call;
-                        if #chain_path(&__out).is_break() {
-                            __outputs.push(__out);
-                            return #accumulate_fn(__outputs);
+        }) => {
+            let chain_check = make_chain_check(chain_default_ty);
+            quote! {
+                match chain {
+                    Some(hooks) if !hooks.is_empty() => {
+                        let mut __outputs = ::std::vec::Vec::new();
+                        for hook in hooks {
+                            let __next = #dyn_hook_dispatch_call;
+                            if #chain_check {
+                                __outputs.push(__next);
+                                return #accumulate_fn(__outputs);
+                            }
+                            __outputs.push(__next);
                         }
-                        __outputs.push(__out);
+                        #accumulate_fn(__outputs)
                     }
-                    #accumulate_fn(__outputs)
+                    _ => #default_call,
                 }
-                _ => #default_call,
             }
         },
         HookKind::Singleton => {
