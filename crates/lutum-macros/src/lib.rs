@@ -61,13 +61,21 @@ pub fn def_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     let mode_str = attrs.mode.to_string();
     let kind = match mode_str.as_str() {
-        "always" => HookKind::Always { chain: attrs.chain },
-        "fallback" => HookKind::Fallback { chain: attrs.chain },
+        "always" => HookKind::Always(HookOptions {
+            chain: attrs.chain,
+            accumulate: attrs.accumulate,
+            finalize: attrs.finalize,
+        }),
+        "fallback" => HookKind::Fallback(HookOptions {
+            chain: attrs.chain,
+            accumulate: attrs.accumulate,
+            finalize: attrs.finalize,
+        }),
         "singleton" => {
-            if attrs.chain.is_some() {
+            if attrs.chain.is_some() || attrs.accumulate.is_some() || attrs.finalize.is_some() {
                 return syn::Error::new_spanned(
                     attrs.mode,
-                    "#[def_hook(singleton, chain = ...)] is not supported; singleton hooks do not use dispatch",
+                    "#[def_hook(singleton)] does not support 'chain', 'accumulate', or 'finalize'",
                 )
                 .to_compile_error()
                 .into();
@@ -98,13 +106,21 @@ pub fn def_global_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     let mode_str = attrs.mode.to_string();
     let kind = match mode_str.as_str() {
-        "always" => HookKind::Always { chain: attrs.chain },
-        "fallback" => HookKind::Fallback { chain: attrs.chain },
+        "always" => HookKind::Always(HookOptions {
+            chain: attrs.chain,
+            accumulate: attrs.accumulate,
+            finalize: attrs.finalize,
+        }),
+        "fallback" => HookKind::Fallback(HookOptions {
+            chain: attrs.chain,
+            accumulate: attrs.accumulate,
+            finalize: attrs.finalize,
+        }),
         "singleton" => {
-            if attrs.chain.is_some() {
+            if attrs.chain.is_some() || attrs.accumulate.is_some() || attrs.finalize.is_some() {
                 return syn::Error::new_spanned(
                     attrs.mode,
-                    "#[def_global_hook(singleton, chain = ...)] is not supported; singleton hooks do not use dispatch",
+                    "#[def_global_hook(singleton)] does not support 'chain', 'accumulate', or 'finalize'",
                 )
                 .to_compile_error()
                 .into();

@@ -29,22 +29,36 @@ pub struct HookSignature {
     last_span: Option<proc_macro2::Span>,
 }
 
+pub struct HookOptions {
+    pub chain: Option<syn::Path>,
+    pub accumulate: Option<syn::Path>,
+    pub finalize: Option<syn::Path>,
+}
+
 pub enum HookKind {
-    Always { chain: Option<syn::Path> },
-    Fallback { chain: Option<syn::Path> },
+    Always(HookOptions),
+    Fallback(HookOptions),
     Singleton,
 }
 
 impl HookKind {
     fn default_last_requirement(&self) -> HookLastRequirement {
-        // The default function never receives `last` (it always runs first or as fallback).
         HookLastRequirement::Forbidden
     }
 
     fn trait_has_last(&self) -> bool {
-        matches!(self, Self::Always { .. } | Self::Fallback { .. })
+        match self {
+            Self::Always(opts) | Self::Fallback(opts) => opts.accumulate.is_none(),
+            Self::Singleton => false,
+        }
     }
 
+    fn opts(&self) -> Option<&HookOptions> {
+        match self {
+            Self::Always(opts) | Self::Fallback(opts) => Some(opts),
+            Self::Singleton => None,
+        }
+    }
 }
 
 enum HookLastRequirement {

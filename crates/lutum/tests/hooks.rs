@@ -161,6 +161,81 @@ async fn global_chain_override(_ctx: &Lutum, label: &str) -> Result<String, Stri
     Ok(format!("global-hook:{label}"))
 }
 
+// accumulate: each hook contributes independently (no `last`), outputs collected and reduced.
+fn join_strings(outputs: Vec<String>) -> String {
+    outputs.join("|")
+}
+
+#[lutum::def_hook(always, accumulate = join_strings)]
+async fn accumulate_label(_ctx: &Lutum, label: &str) -> String {
+    format!("default:{label}")
+}
+
+#[lutum::hook(AccumulateLabel)]
+async fn accumulate_hook_a(_ctx: &Lutum, label: &str) -> String {
+    format!("hook-a:{label}")
+}
+
+#[lutum::hook(AccumulateLabel)]
+async fn accumulate_hook_b(_ctx: &Lutum, label: &str) -> String {
+    format!("hook-b:{label}")
+}
+
+// accumulate + chain: early exit during accumulate.
+fn is_short_circuit_string(s: &str) -> std::ops::ControlFlow<()> {
+    if s.starts_with("stop:") {
+        std::ops::ControlFlow::Break(())
+    } else {
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
+#[lutum::def_hook(always, chain = is_short_circuit_string, accumulate = join_strings)]
+async fn accumulate_chain_label(_ctx: &Lutum, label: &str) -> String {
+    format!("default:{label}")
+}
+
+#[lutum::hook(AccumulateChainLabel)]
+async fn accumulate_chain_hook_stop(_ctx: &Lutum, _label: &str) -> String {
+    "stop:early".to_owned()
+}
+
+#[lutum::hook(AccumulateChainLabel)]
+async fn accumulate_chain_hook_unreachable(_ctx: &Lutum, _label: &str) -> String {
+    panic!("must not be called after stop")
+}
+
+// finalize: fold runs first, then finalize wraps the result.
+fn wrap_result(s: String) -> String {
+    format!("[{s}]")
+}
+
+#[lutum::def_hook(always, finalize = wrap_result)]
+async fn finalized_label(_ctx: &Lutum, label: &str) -> String {
+    format!("default:{label}")
+}
+
+#[lutum::hook(FinalizedLabel)]
+async fn finalized_append(_ctx: &Lutum, label: &str, last: Option<String>) -> String {
+    format!("{}+{label}", last.unwrap())
+}
+
+// chain + finalize: finalize captures early exits from chain dispatch.
+#[lutum::def_hook(always, chain = is_short_circuit_string, finalize = wrap_result)]
+async fn chain_finalized_label(_ctx: &Lutum, label: &str) -> String {
+    format!("default:{label}")
+}
+
+#[lutum::hook(ChainFinalizedLabel)]
+async fn chain_finalized_stop(_ctx: &Lutum, _label: &str) -> String {
+    "stop:chain".to_owned()
+}
+
+#[lutum::hook(ChainFinalizedLabel)]
+async fn chain_finalized_unreachable(_ctx: &Lutum, _label: &str) -> String {
+    panic!("must not be called after stop")
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CounterError {
     Reentered(HookReentrancyError),
@@ -709,4 +784,78 @@ fn context_entrypoints_pass_operation_kind_to_resolve_usage_estimate() {
             OperationKind::StructuredCompletion,
         ]
     );
+}
+
+#[lutum::hooks]
+struct AccumulateHooks {
+    accumulator: AccumulateLabel,
+    accumulate_chain: AccumulateChainLabel,
+    finalized: FinalizedLabel,
+    chain_finalized: ChainFinalizedLabel,
+}
+
+#[test]
+fn accumulate_no_hooks_returns_default_only() {
+    let ctx = test_context(HookRegistry::new());
+    let hooks = AccumulateHooks::new();
+    // No hooks: only default contributes → Vec with one entry, joined.
+    let result = block_on(hooks.accumulate_label(&ctx, "x"));
+    assert_eq!(result, "default:x");
+}
+
+#[test]
+fn accumulate_with_hooks_collects_all_independently() {
+    let ctx = test_context(HookRegistry::new());
+    // Two hooks plus default: all contribute independently (no `last`).
+    let hooks = AccumulateHooks::new()
+        .with_accumulate_label(AccumulateHookA)
+        .with_accumulate_label(AccumulateHookB);
+    let result = block_on(hooks.accumulate_label(&ctx, "x"));
+    assert_eq!(result, "default:x|hook-a:x|hook-b:x");
+}
+
+#[test]
+fn accumulate_chain_stops_early_on_break() {
+    let ctx = test_context(HookRegistry::new());
+    // stop hook produces "stop:early" which triggers Break; unreachable hook never runs.
+    let hooks = AccumulateHooks::new()
+        .with_accumulate_chain_label(AccumulateChainHookStop)
+        .with_accumulate_chain_label(AccumulateChainHookUnreachable);
+    let result = block_on(hooks.accumulate_chain_label(&ctx, "x"));
+    // default → Continue, stop → Break; accumulate collects [default:x, stop:early].
+    assert_eq!(result, "default:x|stop:early");
+}
+
+#[test]
+fn finalize_wraps_fold_result() {
+    let ctx = test_context(HookRegistry::new());
+    // One fold hook appends; finalize wraps the final result in brackets.
+    let hooks = AccumulateHooks::new().with_finalized_label(FinalizedAppend);
+    let result = block_on(hooks.finalized_label(&ctx, "x"));
+    // fold: default="default:x", append gets last=Some("default:x") → "default:x+x"
+    // finalize: "[default:x+x]"
+    assert_eq!(result, "[default:x+x]");
+}
+
+#[test]
+fn finalize_wraps_no_hooks_fold_result() {
+    let ctx = test_context(HookRegistry::new());
+    let hooks = AccumulateHooks::new();
+    // No hooks: only default runs, finalize wraps it.
+    let result = block_on(hooks.finalized_label(&ctx, "x"));
+    assert_eq!(result, "[default:x]");
+}
+
+#[test]
+fn chain_finalize_captures_early_exit() {
+    let ctx = test_context(HookRegistry::new());
+    // stop hook triggers Break; unreachable hook never runs.
+    // finalize must still wrap even though dispatch returned early.
+    let hooks = AccumulateHooks::new()
+        .with_chain_finalized_label(ChainFinalizedStop)
+        .with_chain_finalized_label(ChainFinalizedUnreachable);
+    let result = block_on(hooks.chain_finalized_label(&ctx, "x"));
+    // default → Continue, stop → "stop:chain" → Break (early return)
+    // finalize wraps: "[stop:chain]"
+    assert_eq!(result, "[stop:chain]");
 }

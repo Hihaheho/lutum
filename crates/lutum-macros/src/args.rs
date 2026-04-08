@@ -83,12 +83,16 @@ impl Parse for ToolFnArgs {
 pub struct HookDefAttrs {
     pub mode: syn::Ident,
     pub chain: Option<syn::Path>,
+    pub accumulate: Option<syn::Path>,
+    pub finalize: Option<syn::Path>,
 }
 
 impl syn::parse::Parse for HookDefAttrs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mode: syn::Ident = input.parse()?;
         let mut chain = None;
+        let mut accumulate = None;
+        let mut finalize = None;
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
             let key: syn::Ident = input.parse()?;
@@ -97,14 +101,24 @@ impl syn::parse::Parse for HookDefAttrs {
                     input.parse::<Token![=]>()?;
                     chain = Some(input.parse::<syn::Path>()?);
                 }
+                "accumulate" => {
+                    input.parse::<Token![=]>()?;
+                    accumulate = Some(input.parse::<syn::Path>()?);
+                }
+                "finalize" => {
+                    input.parse::<Token![=]>()?;
+                    finalize = Some(input.parse::<syn::Path>()?);
+                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("unknown #[def_hook] option '{other}'; expected 'chain'"),
+                        format!(
+                            "unknown #[def_hook] option '{other}'; expected 'chain', 'accumulate', or 'finalize'"
+                        ),
                     ));
                 }
             }
         }
-        Ok(Self { mode, chain })
+        Ok(Self { mode, chain, accumulate, finalize })
     }
 }

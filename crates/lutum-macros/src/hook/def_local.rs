@@ -168,21 +168,15 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             },
         ),
     };
-    let dispatch = match &kind {
-        HookKind::Always { chain: None } => quote! {
-            let mut last = ::std::option::Option::Some(
-                #default_call,
-            );
+    let inner_dispatch = match &kind {
+        HookKind::Always(HookOptions { chain: None, accumulate: None, .. }) => quote! {
+            let mut last = ::std::option::Option::Some(#default_call);
             for hook in &self.#field_ident {
-                last = ::std::option::Option::Some(
-                    #dyn_hook_dispatch_call,
-                );
+                last = ::std::option::Option::Some(#dyn_hook_dispatch_call);
             }
             last.expect("hook chain unexpectedly empty")
         },
-        HookKind::Always {
-            chain: Some(chain_path),
-        } => quote! {
+        HookKind::Always(HookOptions { chain: Some(chain_path), accumulate: None, .. }) => quote! {
             let mut last = ::std::option::Option::Some(#default_call);
             if #chain_path(last.as_ref().unwrap()).is_break() {
                 return last.unwrap();
@@ -196,22 +190,44 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             }
             last.unwrap()
         },
-        HookKind::Fallback { chain: None } => quote! {
+        HookKind::Always(HookOptions { chain: None, accumulate: Some(accumulate_fn), .. }) => quote! {
+            let mut __outputs = ::std::vec::Vec::new();
+            __outputs.push(#default_call);
+            for hook in &self.#field_ident {
+                __outputs.push(#dyn_hook_dispatch_call);
+            }
+            #accumulate_fn(__outputs)
+        },
+        HookKind::Always(HookOptions { chain: Some(chain_path), accumulate: Some(accumulate_fn), .. }) => quote! {
+            let mut __outputs = ::std::vec::Vec::new();
+            let __first = #default_call;
+            if #chain_path(&__first).is_break() {
+                __outputs.push(__first);
+                return #accumulate_fn(__outputs);
+            }
+            __outputs.push(__first);
+            for hook in &self.#field_ident {
+                let __out = #dyn_hook_dispatch_call;
+                if #chain_path(&__out).is_break() {
+                    __outputs.push(__out);
+                    return #accumulate_fn(__outputs);
+                }
+                __outputs.push(__out);
+            }
+            #accumulate_fn(__outputs)
+        },
+        HookKind::Fallback(HookOptions { chain: None, accumulate: None, .. }) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
                 let mut last = ::std::option::Option::None;
                 for hook in &self.#field_ident {
-                    last = ::std::option::Option::Some(
-                        #dyn_hook_dispatch_call,
-                    );
+                    last = ::std::option::Option::Some(#dyn_hook_dispatch_call);
                 }
                 last.expect("hook chain unexpectedly empty")
             }
         },
-        HookKind::Fallback {
-            chain: Some(chain_path),
-        } => quote! {
+        HookKind::Fallback(HookOptions { chain: Some(chain_path), accumulate: None, .. }) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
@@ -224,6 +240,33 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     last = ::std::option::Option::Some(next);
                 }
                 #default_call
+            }
+        },
+        HookKind::Fallback(HookOptions { chain: None, accumulate: Some(accumulate_fn), .. }) => quote! {
+            if self.#field_ident.is_empty() {
+                #default_call
+            } else {
+                let mut __outputs = ::std::vec::Vec::new();
+                for hook in &self.#field_ident {
+                    __outputs.push(#dyn_hook_dispatch_call);
+                }
+                #accumulate_fn(__outputs)
+            }
+        },
+        HookKind::Fallback(HookOptions { chain: Some(chain_path), accumulate: Some(accumulate_fn), .. }) => quote! {
+            if self.#field_ident.is_empty() {
+                #default_call
+            } else {
+                let mut __outputs = ::std::vec::Vec::new();
+                for hook in &self.#field_ident {
+                    let __out = #dyn_hook_dispatch_call;
+                    if #chain_path(&__out).is_break() {
+                        __outputs.push(__out);
+                        return #accumulate_fn(__outputs);
+                    }
+                    __outputs.push(__out);
+                }
+                #accumulate_fn(__outputs)
             }
         },
         HookKind::Singleton => {
@@ -239,6 +282,16 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 }
             }
         }
+    };
+
+    // Wrap with finalize if specified. Chain dispatch uses early `return`s, so we wrap
+    // in an async block to capture all exit paths through the same finalize call.
+    let dispatch = match kind.opts().and_then(|o| o.finalize.as_ref()) {
+        Some(finalize_fn) => quote! {
+            let __result = async move { #inner_dispatch }.await;
+            #finalize_fn(__result)
+        },
+        None => inner_dispatch,
     };
 
     let macro_reexport = quote! {};
