@@ -39,3 +39,9 @@ fn hook_impl_singleton_rejects_last_argument() {
     let cases = trybuild::TestCases::new();
     cases.compile_fail("tests/ui/hook_impl_singleton_last.rs");
 }
+
+#[test]
+fn hooks_path_slot_compiles() {
+    let cases = trybuild::TestCases::new();
+    cases.pass("tests/ui/hooks_path_slot.rs");
+}

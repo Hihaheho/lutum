@@ -40,7 +40,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         other => other.clone(),
     };
 
-    item_fn.vis = syn::Visibility::Inherited;
+    item_fn.vis = syn::parse_quote!(pub(crate));
     item_fn.sig.ident = default_impl_fn_ident.clone();
     item_fn.attrs.push(syn::parse_quote!(#[allow(dead_code)]));
 
@@ -294,7 +294,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         None => inner_dispatch,
     };
 
-    let macro_reexport = quote! {};
+    let hooks_slot_ident = format_ident!("__lutum_hooks_{}", slot_ident);
+    let macro_reexport = quote! {
+        #[doc(hidden)]
+        pub(crate) use #slot_ident as #hooks_slot_ident;
+    };
     let named_impl_helper_macro_ident = hook_named_impl_helper_macro_ident(&slot_ident);
     let helper_macro_reexport = quote! {
         #[doc(hidden)]
@@ -383,7 +387,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 [$($register_methods:tt)*]
                 [$($dispatch_methods:tt)*]
                 [$($default_impls:tt)*]
-                [$($remaining:ident),*]
+                [$($remaining:tt)*]
             ) => {
                 $callback!(
                     [$($fields)* #field_ident: #field_ty,]
@@ -435,7 +439,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                             #default_impl_call
                         }
                     ]
-                    [$($remaining),*]
+                    [$($remaining)*]
                 );
             };
         }

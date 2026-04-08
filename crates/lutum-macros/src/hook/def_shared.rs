@@ -179,7 +179,7 @@ pub fn generate_hook_trait_defs(
     let dyn_hook_trait_def = quote_spanned! { def_span =>
         #[allow(dead_code)]
         #[::async_trait::async_trait]
-        trait #dyn_hook_trait_ident: Send + Sync {
+        pub(crate) trait #dyn_hook_trait_ident: Send + Sync {
             async fn call_dyn(
                 &self,
                 #ctx_ident: #ctx_ty,
