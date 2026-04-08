@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     budget::Usage,
-    conversation::{AssistantTurn, AssistantTurnItem, RawJson, ToolCallId},
+    conversation::{AssistantTurn, AssistantTurnItem, RawJson, ToolCallId, UncommittedAssistantTurn},
     llm::{
         CompletionEvent, FinishReason, StructuredCompletionEvent, StructuredTurnEvent,
         StructuredTurnEventWithTools, TextTurnEvent, TextTurnEventWithTools,
@@ -101,7 +101,7 @@ impl TextTurnState {
     /// received a `Completed` event, and
     /// [`TextTurnReductionError::EmptyAssistantOutput`] if the completed turn
     /// produced no assistant items.
-    pub fn finish(self) -> Result<TextTurnResult, TextTurnReductionError> {
+    pub fn finish(self) -> Result<StagedTextTurnResult, TextTurnReductionError> {
         // Check completion first so callers get Incomplete (not EmptyAssistantOutput)
         // when finish() is called on a fresh or mid-stream state.
         let finish_reason = self
@@ -113,25 +113,27 @@ impl TextTurnState {
             .ok_or(TextTurnReductionError::Incomplete)?;
         let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
             .map_err(|_| TextTurnReductionError::EmptyAssistantOutput)?;
-        Ok(TextTurnResult {
+        Ok(StagedTextTurnResult {
             request_id: self.request_id,
             model: self.model,
-            assistant_turn,
+            turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
             finish_reason,
             usage,
-            committed_turn,
         })
     }
 }
 
-#[derive(Debug)]
+/// Result of a completed no-tools text turn that has been auto-committed to the session.
+///
+/// Returned by `TextTurn::collect()` on session-originated builders. The turn is already in
+/// the session transcript; only the content is accessible here.
+#[derive(Clone, Debug)]
 pub struct TextTurnResult {
     pub request_id: Option<String>,
     pub model: String,
     pub assistant_turn: AssistantTurn,
     pub finish_reason: FinishReason,
     pub usage: Usage,
-    pub committed_turn: CommittedTurn,
 }
 
 impl TextTurnResult {
@@ -140,16 +142,23 @@ impl TextTurnResult {
     }
 }
 
-impl Clone for TextTurnResult {
-    fn clone(&self) -> Self {
-        Self {
-            request_id: self.request_id.clone(),
-            model: self.model.clone(),
-            assistant_turn: self.assistant_turn.clone(),
-            finish_reason: self.finish_reason.clone(),
-            usage: self.usage,
-            committed_turn: self.committed_turn.clone(),
-        }
+/// Staged (not yet committed) result of a no-tools text turn.
+///
+/// Returned by `TextTurn::collect_staged()` and by `PendingTextTurn::collect()`.
+/// Call `turn.commit_into()` or use the `CommitTurn` extension trait to commit.
+#[derive(Debug)]
+#[must_use = "call turn.commit_into() / CommitTurn::commit() to commit, or turn.discard() to opt out"]
+pub struct StagedTextTurnResult {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub turn: UncommittedAssistantTurn,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+}
+
+impl StagedTextTurnResult {
+    pub fn assistant_text(&self) -> String {
+        self.turn.assistant_text()
     }
 }
 
@@ -269,7 +278,7 @@ where
         Ok(())
     }
 
-    pub fn finish(self) -> Result<TextTurnResultWithTools<T>, TextTurnReductionError> {
+    pub fn finish(self) -> Result<StagedTextTurnResultWithTools<T>, TextTurnReductionError> {
         let finish_reason = self
             .finish_reason
             .ok_or(TextTurnReductionError::Incomplete)?;
@@ -279,14 +288,13 @@ where
             .ok_or(TextTurnReductionError::Incomplete)?;
         let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
             .map_err(|_| TextTurnReductionError::EmptyAssistantOutput)?;
-        Ok(TextTurnResultWithTools {
+        Ok(StagedTextTurnResultWithTools {
             request_id: self.request_id,
             model: self.model,
-            assistant_turn,
+            turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
             tool_calls: self.tool_calls,
             finish_reason,
             usage,
-            committed_turn,
         })
     }
 }
@@ -297,7 +305,8 @@ pub enum StructuredTurnOutcome<O> {
     Refusal(String),
 }
 
-#[derive(Debug)]
+/// Result of a completed tool-enabled text turn that has been auto-committed to the session.
+#[derive(Clone, Debug)]
 pub struct TextTurnResultWithTools<T: Toolset> {
     pub request_id: Option<String>,
     pub model: String,
@@ -305,7 +314,6 @@ pub struct TextTurnResultWithTools<T: Toolset> {
     pub tool_calls: Vec<T::ToolCall>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
-    pub committed_turn: CommittedTurn,
 }
 
 impl<T> TextTurnResultWithTools<T>
@@ -317,20 +325,24 @@ where
     }
 }
 
-impl<T> Clone for TextTurnResultWithTools<T>
+/// Staged (not yet committed) result of a tool-enabled text turn.
+#[derive(Debug)]
+#[must_use = "call turn.commit_into() / CommitTurn::commit() to commit, or turn.discard() to opt out"]
+pub struct StagedTextTurnResultWithTools<T: Toolset> {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub turn: UncommittedAssistantTurn,
+    pub tool_calls: Vec<T::ToolCall>,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+}
+
+impl<T> StagedTextTurnResultWithTools<T>
 where
     T: Toolset,
 {
-    fn clone(&self) -> Self {
-        Self {
-            request_id: self.request_id.clone(),
-            model: self.model.clone(),
-            assistant_turn: self.assistant_turn.clone(),
-            tool_calls: self.tool_calls.clone(),
-            finish_reason: self.finish_reason.clone(),
-            usage: self.usage,
-            committed_turn: self.committed_turn.clone(),
-        }
+    pub fn assistant_text(&self) -> String {
+        self.turn.assistant_text()
     }
 }
 
@@ -455,7 +467,7 @@ where
         Ok(())
     }
 
-    pub fn finish(self) -> Result<StructuredTurnResult<O>, StructuredTurnReductionError> {
+    pub fn finish(self) -> Result<StagedStructuredTurnResult<O>, StructuredTurnReductionError> {
         let finish_reason = self
             .finish_reason
             .ok_or(StructuredTurnReductionError::Incomplete)?;
@@ -472,14 +484,13 @@ where
             (Some(_), Some(_)) => return Err(StructuredTurnReductionError::ConflictingSemantic),
         };
 
-        Ok(StructuredTurnResult {
+        Ok(StagedStructuredTurnResult {
             request_id: self.request_id,
             model: self.model,
-            assistant_turn,
+            turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
             semantic,
             finish_reason,
             usage,
-            committed_turn,
         })
     }
 }
@@ -626,7 +637,7 @@ where
 
     pub fn finish(
         self,
-    ) -> Result<StructuredTurnResultWithTools<T, O>, StructuredTurnReductionError> {
+    ) -> Result<StagedStructuredTurnResultWithTools<T, O>, StructuredTurnReductionError> {
         let finish_reason = self
             .finish_reason
             .ok_or(StructuredTurnReductionError::Incomplete)?;
@@ -643,20 +654,20 @@ where
             (Some(_), Some(_)) => return Err(StructuredTurnReductionError::ConflictingSemantic),
         };
 
-        Ok(StructuredTurnResultWithTools {
+        Ok(StagedStructuredTurnResultWithTools {
             request_id: self.request_id,
             model: self.model,
-            assistant_turn,
+            turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
             tool_calls: self.tool_calls,
             semantic,
             finish_reason,
             usage,
-            committed_turn,
         })
     }
 }
 
-#[derive(Debug)]
+/// Result of a completed no-tools structured turn that has been auto-committed to the session.
+#[derive(Clone, Debug)]
 pub struct StructuredTurnResult<O: StructuredOutput> {
     pub request_id: Option<String>,
     pub model: String,
@@ -664,27 +675,22 @@ pub struct StructuredTurnResult<O: StructuredOutput> {
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
-    pub committed_turn: CommittedTurn,
 }
 
-impl<O> Clone for StructuredTurnResult<O>
-where
-    O: StructuredOutput,
-{
-    fn clone(&self) -> Self {
-        Self {
-            request_id: self.request_id.clone(),
-            model: self.model.clone(),
-            assistant_turn: self.assistant_turn.clone(),
-            semantic: self.semantic.clone(),
-            finish_reason: self.finish_reason.clone(),
-            usage: self.usage,
-            committed_turn: self.committed_turn.clone(),
-        }
-    }
-}
-
+/// Staged (not yet committed) result of a no-tools structured turn.
 #[derive(Debug)]
+#[must_use = "call turn.commit_into() / CommitTurn::commit() to commit, or turn.discard() to opt out"]
+pub struct StagedStructuredTurnResult<O: StructuredOutput> {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub turn: UncommittedAssistantTurn,
+    pub semantic: StructuredTurnOutcome<O>,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+}
+
+/// Result of a completed tool-enabled structured turn that has been auto-committed to the session.
+#[derive(Clone, Debug)]
 pub struct StructuredTurnResultWithTools<T: Toolset, O: StructuredOutput> {
     pub request_id: Option<String>,
     pub model: String,
@@ -693,26 +699,19 @@ pub struct StructuredTurnResultWithTools<T: Toolset, O: StructuredOutput> {
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
-    pub committed_turn: CommittedTurn,
 }
 
-impl<T, O> Clone for StructuredTurnResultWithTools<T, O>
-where
-    T: Toolset,
-    O: StructuredOutput,
-{
-    fn clone(&self) -> Self {
-        Self {
-            request_id: self.request_id.clone(),
-            model: self.model.clone(),
-            assistant_turn: self.assistant_turn.clone(),
-            tool_calls: self.tool_calls.clone(),
-            semantic: self.semantic.clone(),
-            finish_reason: self.finish_reason.clone(),
-            usage: self.usage,
-            committed_turn: self.committed_turn.clone(),
-        }
-    }
+/// Staged (not yet committed) result of a tool-enabled structured turn.
+#[derive(Debug)]
+#[must_use = "call turn.commit_into() / CommitTurn::commit() to commit, or turn.discard() to opt out"]
+pub struct StagedStructuredTurnResultWithTools<T: Toolset, O: StructuredOutput> {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub turn: UncommittedAssistantTurn,
+    pub tool_calls: Vec<T::ToolCall>,
+    pub semantic: StructuredTurnOutcome<O>,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
@@ -963,7 +962,7 @@ impl TextTurnReducer {
         self.state.apply(event)
     }
 
-    pub fn into_result(self) -> Result<TextTurnResult, TextTurnReductionError> {
+    pub fn into_result(self) -> Result<StagedTextTurnResult, TextTurnReductionError> {
         self.state.finish()
     }
 }
@@ -1006,7 +1005,7 @@ where
         self.state.apply(event)
     }
 
-    pub fn into_result(self) -> Result<TextTurnResultWithTools<T>, TextTurnReductionError> {
+    pub fn into_result(self) -> Result<StagedTextTurnResultWithTools<T>, TextTurnReductionError> {
         self.state.finish()
     }
 }
@@ -1051,7 +1050,7 @@ where
 
     pub fn into_result(
         self,
-    ) -> Result<StructuredTurnResult<O>, (StructuredTurnReductionError, Option<CommittedTurn>)>
+    ) -> Result<StagedStructuredTurnResult<O>, (StructuredTurnReductionError, Option<CommittedTurn>)>
     {
         let committed_turn = self.state.committed_turn.clone();
         self.state
@@ -1103,7 +1102,7 @@ where
     pub fn into_result(
         self,
     ) -> Result<
-        StructuredTurnResultWithTools<T, O>,
+        StagedStructuredTurnResultWithTools<T, O>,
         (StructuredTurnReductionError, Option<CommittedTurn>),
     > {
         let committed_turn = self.state.committed_turn.clone();
@@ -1447,8 +1446,8 @@ mod tests {
             .unwrap();
 
         let result = reducer.into_result().unwrap();
-        assert_eq!(result.assistant_turn.items().len(), 2);
-        assert_eq!(result.assistant_turn.assistant_text(), "checking ");
+        assert_eq!(result.turn.items().len(), 2);
+        assert_eq!(result.turn.assistant_text(), "checking ");
     }
 
     #[test]

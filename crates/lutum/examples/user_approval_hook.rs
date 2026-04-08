@@ -249,7 +249,7 @@ async fn main() -> anyhow::Result<()> {
             .await?;
 
         match outcome {
-            TextStepOutcomeWithTools::NeedsToolResults(round) => {
+            TextStepOutcomeWithTools::NeedsTools(round) => {
                 let mut tool_uses = Vec::with_capacity(round.tool_calls.len());
 
                 for tool_call in round.tool_calls.iter().cloned() {
@@ -364,11 +364,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                session.commit_tool_round(round, tool_uses).unwrap();
+                round.commit(&mut session, tool_uses).unwrap();
             }
             TextStepOutcomeWithTools::Finished(result) => {
                 println!("\n{}", result.assistant_text().trim());
-                session.commit_text_with_tools(result);
                 return Ok(());
             }
         }

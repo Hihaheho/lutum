@@ -36,7 +36,7 @@ fn seed_history(session: &mut Session) {
         }
     }
 }
-async fn ask(session: &Session) -> anyhow::Result<(String, Usage)> {
+async fn ask(session: &mut Session) -> anyhow::Result<(String, Usage)> {
     let result = session.text_turn().collect().await?;
     Ok((result.assistant_text(), result.usage))
 }
@@ -47,7 +47,7 @@ async fn ask_with_prompt(
     let mut session = session(llm);
     seed_history(&mut session);
     session.push_user(prompt);
-    ask(&session).await
+    ask(&mut session).await
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
             "Summary of the previous troubleshooting session:\n{summary}"
         ));
         compact.push_user("What should the user try next?");
-        let (compacted_answer, _) = ask(&compact).await?;
+        let (compacted_answer, _) = ask(&mut compact).await?;
 
         println!("\nFull-history answer:   {full_answer}");
         println!("Compacted answer:      {compacted_answer}");

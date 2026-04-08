@@ -25,11 +25,10 @@ async fn update_task_state(
     session.push_system(system);
     session.push_user(prompt);
     let result = session.structured_turn::<TaskState>().collect().await?;
-    let state = match result.semantic.clone() {
-        StructuredTurnOutcome::Structured(state) => state,
-        StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),
+    let state = match &result.semantic {
+        StructuredTurnOutcome::Structured(state) => state.clone(),
+        StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason.clone()),
     };
-    session.commit_structured(result);
     Ok(state)
 }
 

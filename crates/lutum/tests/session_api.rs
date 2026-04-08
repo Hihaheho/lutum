@@ -1,5 +1,5 @@
 use lutum::{
-    FinishReason, MockLlmAdapter, MockStructuredScenario, MockTextScenario, Session,
+    CommitTurn, FinishReason, MockLlmAdapter, MockStructuredScenario, MockTextScenario, Session,
     SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcomeWithTools,
     TextStepOutcomeWithTools, Usage,
 };
@@ -24,7 +24,7 @@ enum Tools {
 }
 
 #[test]
-fn prepare_and_collect_do_not_mutate_transcript_before_commit() {
+fn collect_auto_commits_collect_staged_does_not() {
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
         Ok(lutum::RawTextTurnEvent::Started {
             request_id: Some("req-session-1".into()),
@@ -47,15 +47,50 @@ fn prepare_and_collect_do_not_mutate_transcript_before_commit() {
     let mut session = Session::new(ctx);
     session.push_user("Hi.");
     let before_len = session.input().items().len();
-    let before_turns = session.list_turns().count();
 
+    // collect() auto-commits immediately
     let result =
         futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
 
-    assert_eq!(session.input().items().len(), before_len);
-    assert_eq!(session.list_turns().count(), before_turns);
+    assert_eq!(result.assistant_text(), "hello");
+    assert_eq!(session.input().items().len(), before_len + 1);
+    assert_eq!(session.list_turns().count(), 1);
+}
 
-    session.commit_text(result);
+#[test]
+fn collect_staged_does_not_commit_until_explicit() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-session-staged".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "hello staged".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-session-staged".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 4,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
+    let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
+    let mut session = Session::new(ctx);
+    session.push_user("Hi.");
+    let before_len = session.input().items().len();
+
+    let staged = futures::executor::block_on(async { session.text_turn().collect_staged().await })
+        .unwrap();
+
+    // Not committed yet
+    assert_eq!(session.input().items().len(), before_len);
+    assert_eq!(session.list_turns().count(), 0);
+
+    // Commit explicitly via CommitTurn trait
+    staged.turn.commit(&mut session);
 
     assert_eq!(session.input().items().len(), before_len + 1);
     assert_eq!(session.list_turns().count(), 1);
@@ -99,20 +134,19 @@ fn tool_round_is_only_applied_on_explicit_commit() {
             .unwrap()
     });
 
+    // NeedsTools does NOT auto-commit
     assert_eq!(session.input().items().len(), before_len);
     assert_eq!(session.list_turns().count(), before_turns);
 
     match outcome {
-        TextStepOutcomeWithTools::NeedsToolResults(round) => {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
             assert_eq!(round.tool_count(), 1);
+            // Non-consuming expect_at_most_one and expect_one
             assert!(matches!(
-                round.clone().expect_at_most_one().unwrap(),
+                round.expect_at_most_one().unwrap(),
                 Some(ToolsCall::Weather(_))
             ));
-            assert!(matches!(
-                round.clone().expect_one().unwrap(),
-                ToolsCall::Weather(_)
-            ));
+            assert!(matches!(round.expect_one().unwrap(), ToolsCall::Weather(_)));
             let tool_uses = round
                 .tool_calls
                 .iter()
@@ -125,7 +159,7 @@ fn tool_round_is_only_applied_on_explicit_commit() {
                         .unwrap(),
                 })
                 .collect::<Vec<_>>();
-            session.commit_tool_round(round, tool_uses).unwrap();
+            round.commit(&mut session, tool_uses).unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => unreachable!(),
     }
@@ -135,7 +169,7 @@ fn tool_round_is_only_applied_on_explicit_commit() {
 }
 
 #[test]
-fn session_can_drive_a_stateful_step_loop() {
+fn session_auto_commits_across_multiple_turns() {
     let adapter = MockLlmAdapter::new()
         .with_text_scenario(MockTextScenario::events(vec![
             Ok(lutum::RawTextTurnEvent::Started {
@@ -175,11 +209,10 @@ fn session_can_drive_a_stateful_step_loop() {
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
     let mut session = Session::new(ctx);
 
+    // collect() auto-commits each turn; no explicit commit needed
     for prompt in ["step one", "step two"] {
         session.push_user(prompt);
-        let result =
-            futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
-        session.commit_text(result);
+        futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
     }
 
     assert_eq!(session.input().items().len(), 4);
@@ -243,7 +276,7 @@ fn structured_tool_round_stays_explicit_until_commit() {
     assert_eq!(session.list_turns().count(), before_turns);
 
     match outcome {
-        StructuredStepOutcomeWithTools::NeedsToolResults(round) => {
+        StructuredStepOutcomeWithTools::NeedsTools(round) => {
             let tool_uses = round
                 .tool_calls
                 .iter()
@@ -256,7 +289,7 @@ fn structured_tool_round_stays_explicit_until_commit() {
                         .unwrap(),
                 })
                 .collect::<Vec<_>>();
-            session.commit_tool_round(round, tool_uses).unwrap();
+            round.commit(&mut session, tool_uses).unwrap();
         }
         StructuredStepOutcomeWithTools::Finished(_) => unreachable!(),
     }

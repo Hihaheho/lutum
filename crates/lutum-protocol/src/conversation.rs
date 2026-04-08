@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, fmt};
+use std::{borrow::Borrow, fmt, ops::Deref};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::value::RawValue;
@@ -280,6 +280,59 @@ impl AssistantTurn {
             }
         }
         text
+    }
+}
+
+/// An assistant turn that has been produced by the LLM but not yet committed to a session or
+/// model input.
+///
+/// This is the only type that carries a `commit_into()` method. Once committed, only the turn
+/// content (`AssistantTurn`) is accessible from the resulting `TextTurnResult`.
+///
+/// Drop without committing or discarding triggers a `#[must_use]` lint.
+#[derive(Debug)]
+#[must_use = "call .commit_into(), or .discard() to explicitly opt out of committing"]
+pub struct UncommittedAssistantTurn {
+    inner: AssistantTurn,
+    committed_turn: CommittedTurn,
+}
+
+impl UncommittedAssistantTurn {
+    /// Construct from raw parts. Intended for adapter implementations and internal protocol use.
+    pub fn new(inner: AssistantTurn, committed_turn: CommittedTurn) -> Self {
+        Self {
+            inner,
+            committed_turn,
+        }
+    }
+
+    /// Commit this turn into a `ModelInput`, appending it to the ordered input.
+    pub fn commit_into(self, input: &mut ModelInput) {
+        input.push(ModelInputItem::Turn(self.committed_turn));
+    }
+
+    /// Explicitly discard this turn without committing it.
+    ///
+    /// Use this to opt out of committing when you have intentionally decided not to record
+    /// the turn in the transcript.
+    pub fn discard(self) {}
+
+    /// Access the assistant turn content.
+    pub fn assistant_turn(&self) -> &AssistantTurn {
+        &self.inner
+    }
+
+    /// Concatenate all `Text` items in this turn.
+    pub fn assistant_text(&self) -> String {
+        self.inner.assistant_text()
+    }
+}
+
+impl Deref for UncommittedAssistantTurn {
+    type Target = AssistantTurn;
+
+    fn deref(&self) -> &AssistantTurn {
+        &self.inner
     }
 }
 

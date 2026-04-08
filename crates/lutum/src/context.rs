@@ -25,12 +25,12 @@ use lutum_protocol::{
     },
     reducer::{
         CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
-        StructuredCompletionReducer, StructuredCompletionReductionError,
-        StructuredCompletionResult, StructuredCompletionState, StructuredTurnReducer,
-        StructuredTurnReducerWithTools, StructuredTurnReductionError, StructuredTurnResult,
-        StructuredTurnResultWithTools, StructuredTurnState, StructuredTurnStateWithTools,
-        TextTurnReducer, TextTurnReducerWithTools, TextTurnReductionError, TextTurnResult,
-        TextTurnResultWithTools, TextTurnState, TextTurnStateWithTools,
+        StagedStructuredTurnResult, StagedStructuredTurnResultWithTools, StagedTextTurnResult,
+        StagedTextTurnResultWithTools, StructuredCompletionReducer,
+        StructuredCompletionReductionError, StructuredCompletionResult, StructuredCompletionState,
+        StructuredTurnReducer, StructuredTurnReducerWithTools, StructuredTurnReductionError,
+        StructuredTurnState, StructuredTurnStateWithTools, TextTurnReducer,
+        TextTurnReducerWithTools, TextTurnReductionError, TextTurnState, TextTurnStateWithTools,
     },
     structured::StructuredOutput,
     toolset::{ToolSelector, Toolset},
@@ -683,7 +683,7 @@ impl PendingTextTurn {
     pub async fn collect_with<H>(
         mut self,
         mut handler: H,
-    ) -> Result<TextTurnResult, CollectError<H::Error, TextTurnReductionError, TextTurnState>>
+    ) -> Result<StagedTextTurnResult, CollectError<H::Error, TextTurnReductionError, TextTurnState>>
     where
         H: EventHandler<TextTurnEvent, TextTurnState>,
     {
@@ -803,7 +803,7 @@ impl PendingTextTurn {
 
     pub async fn collect(
         self,
-    ) -> Result<TextTurnResult, CollectError<Infallible, TextTurnReductionError, TextTurnState>>
+    ) -> Result<StagedTextTurnResult, CollectError<Infallible, TextTurnReductionError, TextTurnState>>
     {
         self.collect_with(NoopHandler).await
     }
@@ -841,7 +841,7 @@ where
         mut self,
         mut handler: H,
     ) -> Result<
-        TextTurnResultWithTools<T>,
+        StagedTextTurnResultWithTools<T>,
         CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
@@ -964,7 +964,7 @@ where
     pub async fn collect(
         self,
     ) -> Result<
-        TextTurnResultWithTools<T>,
+        StagedTextTurnResultWithTools<T>,
         CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
     > {
         self.collect_with(NoopHandler).await
@@ -1003,7 +1003,7 @@ where
         mut self,
         mut handler: H,
     ) -> Result<
-        StructuredTurnResult<O>,
+        StagedStructuredTurnResult<O>,
         CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartial<O>>,
     >
     where
@@ -1146,7 +1146,7 @@ where
     pub async fn collect(
         self,
     ) -> Result<
-        StructuredTurnResult<O>,
+        StagedStructuredTurnResult<O>,
         CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<O>>,
     > {
         self.collect_with(NoopHandler).await
@@ -1186,7 +1186,7 @@ where
         mut self,
         mut handler: H,
     ) -> Result<
-        StructuredTurnResultWithTools<T, O>,
+        StagedStructuredTurnResultWithTools<T, O>,
         CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
     >
     where
@@ -1335,7 +1335,7 @@ where
     pub async fn collect(
         self,
     ) -> Result<
-        StructuredTurnResultWithTools<T, O>,
+        StagedStructuredTurnResultWithTools<T, O>,
         CollectError<
             Infallible,
             StructuredTurnReductionError,

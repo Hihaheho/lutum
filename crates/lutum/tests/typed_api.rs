@@ -222,7 +222,7 @@ fn reducer_is_public_and_directly_usable() {
     let result = reducer.into_result().unwrap();
     assert_eq!(result.assistant_text(), "hello");
     assert!(matches!(
-        result.assistant_turn.items()[0],
+        result.turn.items()[0],
         AssistantTurnItem::Text(ref text) if text == "hello"
     ));
 }

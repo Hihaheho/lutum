@@ -139,11 +139,11 @@ fn text_turn_collects_assistant_output_and_tool_calls() {
     assert_eq!(result.assistant_text(), "looking up ");
     assert_eq!(result.tool_calls.len(), 1);
     assert!(matches!(
-        &result.assistant_turn.items()[0],
+        &result.turn.items()[0],
         AssistantTurnItem::Text(text) if text == "looking up "
     ));
     assert!(matches!(
-        &result.assistant_turn.items()[1],
+        &result.turn.items()[1],
         AssistantTurnItem::ToolCall { .. }
     ));
 }
@@ -243,7 +243,7 @@ fn recorded_events_reduce_to_same_result_as_collect() {
     let pending = block_on(weather_turn(ctx.text_turn(input())).start()).unwrap();
     let collected = block_on(pending.collect()).unwrap();
 
-    assert_eq!(reduced.assistant_turn, collected.assistant_turn);
+    assert_eq!(*reduced.turn, *collected.turn);
     assert_eq!(reduced.tool_calls, collected.tool_calls);
     assert_eq!(reduced.finish_reason, collected.finish_reason);
     assert_eq!(reduced.usage, collected.usage);

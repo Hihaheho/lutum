@@ -3,12 +3,11 @@ use std::collections::BTreeMap;
 use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
     GenerationParams, InputMessageRole, ModelInput, ModelInputItem, RequestBudget, ToolUse,
-    Toolset, TurnConfig, TurnView,
+    Toolset, TurnConfig, TurnView, UncommittedAssistantTurn,
     budget::Usage,
     reducer::{
-        StructuredTurnResult as StructuredTurnResultNoTools, StructuredTurnResultWithTools,
-        StructuredTurnStateWithTools, TextTurnResult as TextTurnResultNoTools,
-        TextTurnResultWithTools,
+        StagedStructuredTurnResultWithTools, StagedTextTurnResultWithTools,
+        StructuredTurnResultWithTools, TextTurnResultWithTools,
     },
     structured::StructuredOutput,
 };
@@ -17,7 +16,6 @@ use thiserror::Error;
 use crate::{
     Lutum,
     builders::{StructuredTurn, TextTurn},
-    context::StructuredTurnPartialWithTools,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -87,11 +85,15 @@ impl Session {
         self.input
     }
 
-    pub fn text_turn(&self) -> TextTurn<'_> {
+    /// Create a text turn builder. Calling `collect()` on the builder will auto-commit the turn
+    /// to this session. Use `collect_staged()` to opt out of auto-commit.
+    pub fn text_turn(&mut self) -> TextTurn<'_> {
         TextTurn::from_session(self)
     }
 
-    pub fn structured_turn<O>(&self) -> StructuredTurn<'_, O>
+    /// Create a structured turn builder. Calling `collect()` on the builder will auto-commit the
+    /// turn to this session. Use `collect_staged()` to opt out of auto-commit.
+    pub fn structured_turn<O>(&mut self) -> StructuredTurn<'_, O>
     where
         O: StructuredOutput,
     {
@@ -131,64 +133,101 @@ impl Session {
             _ => None,
         })
     }
+}
 
-    /// Commit a completed no-tools text turn into the session transcript.
-    pub fn commit_text(&mut self, result: TextTurnResultNoTools) {
-        self.input.push(ModelInputItem::Turn(result.committed_turn));
+/// Extension trait that adds `commit(&mut Session)` to [`UncommittedAssistantTurn`].
+///
+/// Import this trait to use `turn.commit(&mut session)` syntax.
+pub trait CommitTurn {
+    fn commit(self, session: &mut Session);
+}
+
+impl CommitTurn for UncommittedAssistantTurn {
+    fn commit(self, session: &mut Session) {
+        self.commit_into(session.input_mut());
+    }
+}
+
+/// An assistant turn round that needs tool results before it can be committed.
+///
+/// The assistant turn is NOT committed to the session yet. After executing the tool calls,
+/// commit everything atomically with [`UncommittedToolRound::commit`].
+#[derive(Debug)]
+#[must_use = "call .commit() to commit the turn and tool results, or .discard() to opt out"]
+pub struct UncommittedToolRound<T: Toolset> {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub tool_calls: Vec<T::ToolCall>,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+    turn: UncommittedAssistantTurn,
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum ToolRoundArityError {
+    #[error("expected exactly one tool call, got {actual}")]
+    ExpectedOne { actual: usize },
+    #[error("expected at most one tool call, got {actual}")]
+    ExpectedAtMostOne { actual: usize },
+}
+
+impl<T> UncommittedToolRound<T>
+where
+    T: Toolset,
+{
+    pub fn tool_count(&self) -> usize {
+        self.tool_calls.len()
     }
 
-    /// Commit a completed tool-enabled text turn into the session transcript.
-    pub fn commit_text_with_tools<T>(&mut self, result: TextTurnResultWithTools<T>)
-    where
-        T: Toolset,
-    {
-        self.input.push(ModelInputItem::Turn(result.committed_turn));
+    /// Validate that there is exactly one tool call. Non-consuming.
+    pub fn expect_one(&self) -> Result<&T::ToolCall, ToolRoundArityError> {
+        match self.tool_calls.as_slice() {
+            [one] => Ok(one),
+            calls => Err(ToolRoundArityError::ExpectedOne {
+                actual: calls.len(),
+            }),
+        }
     }
 
-    /// Commit a completed no-tools structured turn into the session transcript.
-    pub fn commit_structured<O>(&mut self, result: StructuredTurnResultNoTools<O>)
-    where
-        O: StructuredOutput,
-    {
-        self.input.push(ModelInputItem::Turn(result.committed_turn));
+    /// Validate that there is at most one tool call. Non-consuming.
+    pub fn expect_at_most_one(&self) -> Result<Option<&T::ToolCall>, ToolRoundArityError> {
+        match self.tool_calls.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(one)),
+            calls => Err(ToolRoundArityError::ExpectedAtMostOne {
+                actual: calls.len(),
+            }),
+        }
     }
 
-    /// Commit a completed tool-enabled structured turn into the session transcript.
-    pub fn commit_structured_with_tools<T, O>(
-        &mut self,
-        result: StructuredTurnResultWithTools<T, O>,
-    ) where
-        T: Toolset,
-        O: StructuredOutput,
-    {
-        self.input.push(ModelInputItem::Turn(result.committed_turn));
-    }
-
-    /// Commit a completed tool-call round into the session transcript.
-    pub fn commit_tool_round<T>(
-        &mut self,
-        round: ToolRound<T>,
+    /// Validate `tool_uses`, then commit the assistant turn and all tool results to the session.
+    ///
+    /// Returns an error if the tool uses don't match the assistant turn's tool calls (missing,
+    /// extra, or mismatched id/name/arguments).
+    pub fn commit(
+        self,
+        session: &mut Session,
         tool_uses: impl IntoIterator<Item = ToolUse>,
     ) -> Result<(), AssistantTurnInputError>
     where
         T: Toolset,
     {
-        let ordered_tool_uses = validate_and_order_tool_uses(&round, tool_uses)?;
-        self.input.push(ModelInputItem::Turn(round.committed_turn));
+        let ordered_tool_uses = validate_and_order_tool_uses(&self.turn, tool_uses)?;
+        self.turn.commit_into(session.input_mut());
         for tool_use in ordered_tool_uses {
-            self.input.push(ModelInputItem::ToolUse(tool_use));
+            session.input.push(ModelInputItem::ToolUse(tool_use));
         }
         Ok(())
     }
+
+    /// Explicitly discard this round without committing.
+    pub fn discard(self) {}
 }
 
-fn validate_and_order_tool_uses<T>(
-    round: &ToolRound<T>,
+fn validate_and_order_tool_uses(
+    assistant_turn: &AssistantTurn,
     tool_uses: impl IntoIterator<Item = ToolUse>,
-) -> Result<Vec<ToolUse>, AssistantTurnInputError>
-where
-    T: Toolset,
-{
+) -> Result<Vec<ToolUse>, AssistantTurnInputError> {
     let mut tool_use_map = BTreeMap::new();
     for tool_use in tool_uses {
         let duplicate_id = tool_use.id.clone();
@@ -201,7 +240,7 @@ where
     }
 
     let mut ordered = Vec::new();
-    for item in round.assistant_turn.items() {
+    for item in assistant_turn.items() {
         let AssistantTurnItem::ToolCall {
             id,
             name,
@@ -238,89 +277,55 @@ where
     Ok(ordered)
 }
 
-#[derive(Clone, Debug)]
-pub struct ToolRound<T: Toolset> {
-    pub request_id: Option<String>,
-    pub model: String,
-    pub assistant_turn: AssistantTurn,
-    pub tool_calls: Vec<T::ToolCall>,
-    pub finish_reason: FinishReason,
-    pub usage: Usage,
-    pub committed_turn: CommittedTurn,
-}
-
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
-pub enum ToolRoundArityError {
-    #[error("expected exactly one tool call, got {actual}")]
-    ExpectedOne { actual: usize },
-    #[error("expected at most one tool call, got {actual}")]
-    ExpectedAtMostOne { actual: usize },
-}
-
-impl<T> ToolRound<T>
-where
-    T: Toolset,
-{
-    pub fn tool_count(&self) -> usize {
-        self.tool_calls.len()
-    }
-
-    pub fn expect_one(self) -> Result<T::ToolCall, ToolRoundArityError> {
-        let actual = self.tool_calls.len();
-        if actual != 1 {
-            return Err(ToolRoundArityError::ExpectedOne { actual });
-        }
-        Ok(self
-            .tool_calls
-            .into_iter()
-            .next()
-            .expect("length checked above"))
-    }
-
-    pub fn expect_at_most_one(self) -> Result<Option<T::ToolCall>, ToolRoundArityError> {
-        let actual = self.tool_calls.len();
-        if actual > 1 {
-            return Err(ToolRoundArityError::ExpectedAtMostOne { actual });
-        }
-        Ok(self.tool_calls.into_iter().next())
-    }
-
-    pub fn into_tool_calls(self) -> Vec<T::ToolCall> {
-        self.tool_calls
-    }
-}
-
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum TextStepOutcomeWithTools<T: Toolset> {
+    /// The model finished without requesting tool calls. The assistant turn has already been
+    /// committed to the session.
     Finished(TextTurnResultWithTools<T>),
-    NeedsToolResults(ToolRound<T>),
+    /// The model requested tool calls. Execute them, then call `round.commit(&mut session, uses)`.
+    NeedsTools(UncommittedToolRound<T>),
 }
 
 impl<T> TextStepOutcomeWithTools<T>
 where
     T: Toolset,
 {
-    pub(crate) fn from_result(result: TextTurnResultWithTools<T>) -> Self {
-        let TextTurnResultWithTools {
-            request_id,
-            model,
-            assistant_turn,
-            tool_calls,
-            finish_reason,
-            usage,
-            committed_turn,
-        } = result;
-        if finish_reason == FinishReason::ToolCall && !tool_calls.is_empty() {
-            Self::NeedsToolResults(ToolRound {
+    pub(crate) fn from_staged(
+        staged: StagedTextTurnResultWithTools<T>,
+        session: Option<&mut ModelInput>,
+    ) -> Self {
+        if staged.finish_reason == FinishReason::ToolCall && !staged.tool_calls.is_empty() {
+            let StagedTextTurnResultWithTools {
                 request_id,
                 model,
-                assistant_turn,
+                turn,
                 tool_calls,
                 finish_reason,
                 usage,
-                committed_turn,
+            } = staged;
+            Self::NeedsTools(UncommittedToolRound {
+                request_id,
+                model,
+                turn,
+                tool_calls,
+                finish_reason,
+                usage,
             })
         } else {
+            let StagedTextTurnResultWithTools {
+                request_id,
+                model,
+                turn,
+                tool_calls,
+                finish_reason,
+                usage,
+            } = staged;
+            let assistant_turn = turn.assistant_turn().clone();
+            if let Some(input) = session {
+                turn.commit_into(input);
+            } else {
+                turn.discard();
+            }
             Self::Finished(TextTurnResultWithTools {
                 request_id,
                 model,
@@ -328,16 +333,18 @@ where
                 tool_calls,
                 finish_reason,
                 usage,
-                committed_turn,
             })
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum StructuredStepOutcomeWithTools<T: Toolset, O: StructuredOutput> {
+    /// The model finished without requesting tool calls. The assistant turn has already been
+    /// committed to the session.
     Finished(StructuredTurnResultWithTools<T, O>),
-    NeedsToolResults(ToolRound<T>),
+    /// The model requested tool calls. Execute them, then call `round.commit(&mut session, uses)`.
+    NeedsTools(UncommittedToolRound<T>),
 }
 
 impl<T, O> StructuredStepOutcomeWithTools<T, O>
@@ -345,28 +352,44 @@ where
     T: Toolset,
     O: StructuredOutput,
 {
-    pub(crate) fn from_result(result: StructuredTurnResultWithTools<T, O>) -> Self {
-        let StructuredTurnResultWithTools {
-            request_id,
-            model,
-            assistant_turn,
-            tool_calls,
-            semantic,
-            finish_reason,
-            usage,
-            committed_turn,
-        } = result;
-        if finish_reason == FinishReason::ToolCall && !tool_calls.is_empty() {
-            Self::NeedsToolResults(ToolRound {
+    pub(crate) fn from_staged(
+        staged: StagedStructuredTurnResultWithTools<T, O>,
+        session: Option<&mut ModelInput>,
+    ) -> Self {
+        if staged.finish_reason == FinishReason::ToolCall && !staged.tool_calls.is_empty() {
+            let StagedStructuredTurnResultWithTools {
                 request_id,
                 model,
-                assistant_turn,
+                turn,
+                tool_calls,
+                semantic: _,
+                finish_reason,
+                usage,
+            } = staged;
+            Self::NeedsTools(UncommittedToolRound {
+                request_id,
+                model,
+                turn,
                 tool_calls,
                 finish_reason,
                 usage,
-                committed_turn,
             })
         } else {
+            let StagedStructuredTurnResultWithTools {
+                request_id,
+                model,
+                turn,
+                tool_calls,
+                semantic,
+                finish_reason,
+                usage,
+            } = staged;
+            let assistant_turn = turn.assistant_turn().clone();
+            if let Some(input) = session {
+                turn.commit_into(input);
+            } else {
+                turn.discard();
+            }
             Self::Finished(StructuredTurnResultWithTools {
                 request_id,
                 model,
@@ -375,38 +398,26 @@ where
                 semantic,
                 finish_reason,
                 usage,
-                committed_turn,
             })
         }
     }
 
-    pub(crate) fn from_partial(partial: StructuredTurnPartialWithTools<T, O>) -> Option<Self> {
-        let StructuredTurnPartialWithTools {
-            state,
-            committed_turn,
-        } = partial;
-        if state.finish_reason != Some(FinishReason::ToolCall) || state.tool_calls.is_empty() {
-            return None;
-        }
-        let committed_turn = committed_turn?;
-        let StructuredTurnStateWithTools {
+    pub(crate) fn from_partial(
+        assistant_turn: AssistantTurn,
+        committed_turn: CommittedTurn,
+        tool_calls: Vec<T::ToolCall>,
+        request_id: Option<String>,
+        model: String,
+        finish_reason: FinishReason,
+        usage: Usage,
+    ) -> Self {
+        Self::NeedsTools(UncommittedToolRound {
             request_id,
             model,
-            assistant_turn,
+            turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
             tool_calls,
+            finish_reason,
             usage,
-            ..
-        } = state;
-        let assistant_turn = AssistantTurn::from_items(assistant_turn).ok()?;
-        let usage = usage?;
-        Some(Self::NeedsToolResults(ToolRound {
-            request_id,
-            model,
-            assistant_turn,
-            tool_calls,
-            finish_reason: FinishReason::ToolCall,
-            usage,
-            committed_turn,
-        }))
+        })
     }
 }

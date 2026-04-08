@@ -75,7 +75,7 @@ fn direct_context_text_turn_collects_without_session_helpers() {
 }
 
 #[test]
-fn structured_session_turn_is_only_applied_after_commit() {
+fn structured_session_turn_auto_commits_on_collect() {
     let adapter =
         MockLlmAdapter::new().with_structured_scenario(MockStructuredScenario::events(vec![
             Ok(lutum::RawStructuredTurnEvent::Started {
@@ -99,22 +99,18 @@ fn structured_session_turn_is_only_applied_after_commit() {
     let mut session = Session::new(ctx);
     session.push_user("Extract the email address.");
     let before_len = session.input().items().len();
-    let before_turns = session.list_turns().count();
 
     let result = block_on(async { session.structured_turn::<Contact>().collect().await }).unwrap();
 
-    assert_eq!(session.input().items().len(), before_len);
-    assert_eq!(session.list_turns().count(), before_turns);
+    // collect() auto-commits
+    assert_eq!(session.input().items().len(), before_len + 1);
+    assert_eq!(session.list_turns().count(), 1);
 
     assert!(matches!(
         result.semantic,
         lutum::StructuredTurnOutcome::Structured(Contact { ref email })
             if email == "user@example.com"
     ));
-    session.commit_structured(result);
-
-    assert_eq!(session.input().items().len(), before_len + 1);
-    assert_eq!(session.list_turns().count(), 1);
 }
 
 #[test]
@@ -164,10 +160,10 @@ fn session_commits_parallel_tool_results_in_order() {
     assert_eq!(session.list_turns().count(), before_turns);
 
     match outcome {
-        TextStepOutcomeWithTools::NeedsToolResults(round) => {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
             assert_eq!(round.tool_count(), 2);
             assert_eq!(
-                round.clone().expect_at_most_one().unwrap_err(),
+                round.expect_at_most_one().unwrap_err(),
                 lutum::ToolRoundArityError::ExpectedAtMostOne { actual: 2 }
             );
             assert_eq!(round.tool_calls.len(), 2);
@@ -197,7 +193,7 @@ fn session_commits_parallel_tool_results_in_order() {
                         .unwrap(),
                 })
                 .collect::<Vec<_>>();
-            session.commit_tool_round(round, tool_uses).unwrap();
+            round.commit(&mut session, tool_uses).unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => unreachable!(),
     }
