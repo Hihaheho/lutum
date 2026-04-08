@@ -59,7 +59,7 @@ pub use context::{
 };
 pub use hooks::{
     HookReentrancyError, HookRegistry, ResolveUsageEstimate, ResolveUsageEstimateArgs,
-    ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt, Stateful, first_success,
+    ResolveUsageEstimateRegistryExt, Stateful, first_success,
     short_circuit,
 };
 

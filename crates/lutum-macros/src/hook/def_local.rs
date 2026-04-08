@@ -37,9 +37,9 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
     let vis = item_fn.vis.clone();
     let hook_name = fn_ident.to_string();
     let slot_ident = format_ident!("{}", hook_name.to_upper_camel_case());
-    let hook_trait_ident = format_ident!("{slot_ident}Hook");
-    let stateful_hook_trait_ident = format_ident!("Stateful{slot_ident}Hook");
-    let dyn_hook_trait_ident = format_ident!("__LutumDyn{slot_ident}Hook");
+    let hook_trait_ident = slot_ident.clone();
+    let stateful_hook_trait_ident = format_ident!("Stateful{slot_ident}");
+    let dyn_hook_trait_ident = format_ident!("__LutumDyn{slot_ident}");
     let args_struct_ident = format_ident!("{slot_ident}Args");
     let default_impl_fn_ident = format_ident!("__lutum_hook_default_impl_{}", fn_ident);
     let default_method_ident = format_ident!("__lutum_hook_default_{}", fn_ident);
@@ -461,7 +461,6 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         pub(crate) use #named_impl_helper_macro_ident;
     };
 
-    let slot_dispatch_metadata = kind.dispatch_metadata_tokens();
     let named_impl_with_last_arm = if trait_has_last {
         quote! {
             (@named_impl_with_last { $($ok:tt)* } { $($err:tt)* }) => {
@@ -609,14 +608,6 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
 
         #macro_reexport
         #helper_macro_reexport
-
-        #[allow(dead_code)]
-        #vis struct #slot_ident;
-
-        #[doc(hidden)]
-        impl #slot_ident {
-            #slot_dispatch_metadata
-        }
 
         #args_struct_and_fn_impl
 

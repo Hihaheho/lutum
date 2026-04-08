@@ -1,4 +1,4 @@
-error[E0050]: method `call_mut` has 4 parameters but the declaration in trait `StatefulValidateOutputHook::call_mut` has 3
+error[E0050]: method `call_mut` has 4 parameters but the declaration in trait `StatefulValidateOutput::call_mut` has 3
   --> tests/ui/stateful_hook_impl_chain_last.rs:11:9
    |
  1 |   #[lutum::def_hook(always, chain = lutum::short_circuit)]

@@ -69,17 +69,6 @@ impl HookKind {
         )
     }
 
-    fn dispatch_metadata_tokens(&self) -> proc_macro2::TokenStream {
-        if self.is_chain() {
-            quote! {
-                const __LUTUM_HOOK_ACCEPTS_LAST: bool = false;
-            }
-        } else {
-            quote! {
-                const __LUTUM_HOOK_ACCEPTS_LAST: bool = true;
-            }
-        }
-    }
 }
 
 enum HookLastRequirement {

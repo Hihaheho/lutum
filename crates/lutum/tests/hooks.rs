@@ -8,7 +8,7 @@ use lutum::{
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
     ErasedTextTurnEventStream, HookReentrancyError, HookRegistry, InputMessageRole, Lutum,
     MockLlmAdapter, ModelInput, ModelInputItem, OperationKind, RequestExtensions,
-    ResolveUsageEstimateArgs, ResolveUsageEstimateHook, ResolveUsageEstimateRegistryExt,
+    ResolveUsageEstimate, ResolveUsageEstimateArgs, ResolveUsageEstimateRegistryExt,
     SharedPoolBudgetManager, SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage,
     UsageRecoveryAdapter, budget::UsageEstimate, first_success,
     hooks::ResolveUsageEstimateLutumExt, short_circuit,
@@ -137,7 +137,7 @@ struct CountingHook {
 }
 
 #[async_trait]
-impl StatefulNextCounterHook for CountingHook {
+impl StatefulNextCounter for CountingHook {
     fn on_reentrancy(err: HookReentrancyError) -> CounterResult {
         Err(CounterError::Reentered(err))
     }
@@ -154,7 +154,7 @@ struct ReentrantCounter {
 }
 
 #[async_trait]
-impl StatefulNextCounterHook for ReentrantCounter {
+impl StatefulNextCounter for ReentrantCounter {
     fn on_reentrancy(err: HookReentrancyError) -> CounterResult {
         Err(CounterError::Reentered(err))
     }
@@ -196,7 +196,7 @@ struct NestedLabelHook {
 }
 
 #[async_trait]
-impl StatefulDescribeLabelHook for NestedLabelHook {
+impl StatefulDescribeLabel for NestedLabelHook {
     async fn call_mut(&mut self, ctx: &Lutum, args: DescribeLabelArgs) -> String {
         self.hooks.select_label(ctx, args.label).await
     }
@@ -290,7 +290,7 @@ struct FixedEstimate {
 }
 
 #[async_trait]
-impl ResolveUsageEstimateHook for FixedEstimate {
+impl ResolveUsageEstimate for FixedEstimate {
     async fn call(&self, _ctx: &Lutum, _args: ResolveUsageEstimateArgs<'_>) -> UsageEstimate {
         self.estimate
     }
@@ -301,7 +301,7 @@ struct RecordOperationKinds {
 }
 
 #[async_trait]
-impl ResolveUsageEstimateHook for RecordOperationKinds {
+impl ResolveUsageEstimate for RecordOperationKinds {
     async fn call(&self, _ctx: &Lutum, args: ResolveUsageEstimateArgs<'_>) -> UsageEstimate {
         self.seen.lock().unwrap().push(args.kind);
         UsageEstimate::zero()

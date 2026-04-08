@@ -21,7 +21,7 @@ struct CommandPolicy {
 
 // A struct is clearer here: multiple policy fields, shared helper logic, no capture noise.
 #[async_trait::async_trait]
-impl ValidateCommandHook for CommandPolicy {
+impl ValidateCommand for CommandPolicy {
     async fn call(
         &self,
         _ctx: &Lutum,

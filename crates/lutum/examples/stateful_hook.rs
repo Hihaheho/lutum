@@ -30,7 +30,7 @@ struct RetryMemory {
 }
 
 #[async_trait::async_trait]
-impl StatefulValidateCommandHook for RetryMemory {
+impl StatefulValidateCommand for RetryMemory {
     async fn call_mut(
         &mut self,
         _ctx: &Lutum,

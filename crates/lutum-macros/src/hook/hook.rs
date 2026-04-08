@@ -36,7 +36,7 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
     let fn_ident = item_fn.sig.ident.clone();
     let vis = item_fn.vis.clone();
     let struct_ident = format_ident!("{}", fn_ident.to_string().to_upper_camel_case());
-    let hook_trait_path = hook_trait_path_for_slot_path(&slot_path);
+    let hook_trait_path = slot_path.clone();
     let args_struct_path = args_struct_path_for_slot_path(&slot_path);
     let has_explicit_args = !explicit_args.is_empty();
     let has_ref_arg = explicit_args.iter().any(|(_, ty)| is_non_str_ref(ty));
@@ -136,16 +136,6 @@ fn hook_named_impl_helper_macro_path(slot_path: &Path) -> Path {
         .expect("hook slot paths must have at least one segment");
     last.ident = hook_named_impl_helper_macro_ident(&last.ident);
     helper_path
-}
-
-fn hook_trait_path_for_slot_path(slot_path: &Path) -> Path {
-    let mut trait_path = slot_path.clone();
-    let last = trait_path
-        .segments
-        .last_mut()
-        .expect("hook slot paths must have at least one segment");
-    last.ident = format_ident!("{}Hook", last.ident);
-    trait_path
 }
 
 fn is_str_type(ty: &Type) -> bool {

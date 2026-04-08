@@ -6,7 +6,7 @@ async fn validate_output(_ctx: &lutum::Lutum, output: &str) -> Result<String, St
 struct StatefulAppender;
 
 #[async_trait::async_trait]
-impl StatefulValidateOutputHook for StatefulAppender {
+impl StatefulValidateOutput for StatefulAppender {
     async fn call_mut(
         &mut self,
         _ctx: &lutum::Lutum,

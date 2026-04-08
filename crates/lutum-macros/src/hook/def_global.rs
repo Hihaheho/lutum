@@ -48,9 +48,9 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
     let vis = item_fn.vis.clone();
     let hook_name = fn_ident.to_string();
     let slot_ident = format_ident!("{}", hook_name.to_upper_camel_case());
-    let hook_trait_ident = format_ident!("{slot_ident}Hook");
-    let stateful_hook_trait_ident = format_ident!("Stateful{slot_ident}Hook");
-    let dyn_hook_trait_ident = format_ident!("__LutumDyn{slot_ident}Hook");
+    let hook_trait_ident = slot_ident.clone();
+    let stateful_hook_trait_ident = format_ident!("Stateful{slot_ident}");
+    let dyn_hook_trait_ident = format_ident!("__LutumDyn{slot_ident}");
     let registry_ext_ident = format_ident!("{slot_ident}RegistryExt");
     let lutum_ext_ident = format_ident!("{slot_ident}LutumExt");
     let args_struct_ident = format_ident!("{slot_ident}Args");
@@ -296,7 +296,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         HookKind::Always { .. } | HookKind::Fallback { .. } => quote! {
             let slot = self
                 .slots_mut()
-                .entry(::std::any::TypeId::of::<#slot_ident>())
+                .entry(::std::any::TypeId::of::<::std::boxed::Box<dyn #slot_ident>>())
                 .or_insert_with(|| {
                     ::std::boxed::Box::new(
                         ::std::vec::Vec::<::std::sync::Arc<dyn #dyn_hook_trait_ident>>::new(),
@@ -310,7 +310,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             let hook = ::std::sync::Arc::new(hook) as ::std::sync::Arc<dyn #dyn_hook_trait_ident>;
             match self
                 .slots_mut()
-                .entry(::std::any::TypeId::of::<#slot_ident>())
+                .entry(::std::any::TypeId::of::<::std::boxed::Box<dyn #slot_ident>>())
             {
                 ::std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(
@@ -336,7 +336,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         HookKind::Always { .. } | HookKind::Fallback { .. } => quote! {
             let chain = self
                 .slots()
-                .get(&::std::any::TypeId::of::<#slot_ident>())
+                .get(&::std::any::TypeId::of::<::std::boxed::Box<dyn #slot_ident>>())
                 .and_then(|slot| {
                     slot.downcast_ref::<
                         ::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident>>,
@@ -346,7 +346,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         HookKind::Singleton => quote! {
             let hook = self
                 .slots()
-                .get(&::std::any::TypeId::of::<#slot_ident>())
+                .get(&::std::any::TypeId::of::<::std::boxed::Box<dyn #slot_ident>>())
                 .and_then(|slot| {
                     slot.downcast_ref::<
                         ::std::sync::Arc<dyn #dyn_hook_trait_ident>,
@@ -575,18 +575,8 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         quote! {}
     };
 
-    let slot_dispatch_metadata = kind.dispatch_metadata_tokens();
-
     quote! {
         #item_fn
-
-        #[allow(dead_code)]
-        #vis struct #slot_ident;
-
-        #[doc(hidden)]
-        impl #slot_ident {
-            #slot_dispatch_metadata
-        }
 
         #args_struct_and_fn_impl
 

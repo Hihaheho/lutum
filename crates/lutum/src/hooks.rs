@@ -105,9 +105,8 @@
 //! `singleton` does not support `chain = ...`.
 //!
 //! This generates:
-//! - `ValidateOutput` - slot marker type
 //! - `ValidateOutputArgs` - named args struct for manual/stateful hook implementations
-//! - `ValidateOutputHook` - hook trait to implement
+//! - `ValidateOutput` - hook trait to implement
 //! - `ValidateOutputRegistryExt` - `register_validate_output` and `validate_output` on `HookRegistry`
 //! - `ValidateOutputLutumExt` - `validate_output` on `Lutum` (only for `&Lutum` first-arg hooks)
 //!
@@ -118,8 +117,8 @@
 //! In fold mode, the generated trait includes `last`.
 //! In chain mode and singleton mode, it does not.
 //!
-//! This generates a `BlockDangerousOutput` struct implementing `ValidateOutputHook`.
-//! For mutable state, implement the generated `StatefulValidateOutputHook` trait on your
+//! This generates a `BlockDangerousOutput` struct implementing `ValidateOutput`.
+//! For mutable state, implement the generated `StatefulValidateOutput` trait on your
 //! type and register it with [`Stateful`].
 //!
 //! ## Registration and usage

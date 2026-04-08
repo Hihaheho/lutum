@@ -95,7 +95,7 @@ impl Probe for TimelineProbe {
 }
 
 #[async_trait]
-impl StatefulRewriteNumberHook for TimelineProbe {
+impl StatefulRewriteNumber for TimelineProbe {
     async fn call_mut(&mut self, _llm: &Lutum, args: RewriteNumberArgs) -> usize {
         self.timeline.push(format!("hook:number:{}", args.value));
         args.value + 1
@@ -103,7 +103,7 @@ impl StatefulRewriteNumberHook for TimelineProbe {
 }
 
 #[async_trait]
-impl StatefulDecorateLabelHook for TimelineProbe {
+impl StatefulDecorateLabel for TimelineProbe {
     async fn call_mut(&mut self, _llm: &Lutum, args: DecorateLabelArgs) -> String {
         self.timeline.push(format!("hook:label:{}", args.label));
         format!("probe:{}", args.label)
@@ -259,7 +259,7 @@ impl Probe for HookErrorProbe {
 }
 
 #[async_trait]
-impl StatefulValidateStepHook for HookErrorProbe {
+impl StatefulValidateStep for HookErrorProbe {
     async fn call_mut(&mut self, _llm: &Lutum, args: ValidateStepArgs) -> Validation {
         self.hook_calls += 1;
         if args.step == "blocked" {
@@ -280,7 +280,7 @@ fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooks {
                     dispatcher
                         .dispatch(move |probe| {
                             Box::pin(async move {
-                                <TimelineProbe as StatefulRewriteNumberHook>::call_mut(
+                                <TimelineProbe as StatefulRewriteNumber>::call_mut(
                                     probe, &ctx, args,
                                 )
                                 .await
@@ -299,7 +299,7 @@ fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooks {
                     dispatcher
                         .dispatch(move |probe| {
                             Box::pin(async move {
-                                <TimelineProbe as StatefulDecorateLabelHook>::call_mut(
+                                <TimelineProbe as StatefulDecorateLabel>::call_mut(
                                     probe, &ctx, args,
                                 )
                                 .await
@@ -321,7 +321,7 @@ fn hook_error_hooks(dispatcher: ProbeHandle<HookErrorProbe>) -> ProbeHooks {
                 dispatcher
                     .dispatch(move |probe| {
                         Box::pin(async move {
-                            <HookErrorProbe as StatefulValidateStepHook>::call_mut(
+                            <HookErrorProbe as StatefulValidateStep>::call_mut(
                                 probe, &ctx, args,
                             )
                             .await
