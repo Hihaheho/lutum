@@ -39,7 +39,7 @@ fn parse_crate_name(raw: &str) -> anyhow::Result<String> {
         .split_whitespace()
         .next()
         .unwrap_or("")
-        .trim_end_matches(|c: char| matches!(c, ',' | '.' | ':' | ';' | '`' | '|'))
+        .trim_end_matches([',', '.', ':', ';', '`', '|'])
         .to_string();
 
     if candidate.is_empty() {
@@ -68,27 +68,29 @@ fn extract_crate_detail(agents_content: &str, crate_name: &str) -> anyhow::Resul
         }
     }
 
-    for idx in table_start..=table_start.saturating_add(1).min(table_end) {
-        section.push(lines[idx]);
+    for line in lines
+        .iter()
+        .take(table_start.saturating_add(1).min(table_end) + 1)
+        .skip(table_start)
+    {
+        section.push(line);
     }
     section.push(lines[row_index]);
 
-    if let Some(paragraph) = adjacent_paragraph(&lines, table_start, Direction::Backward) {
-        if paragraph
+    if let Some(paragraph) = adjacent_paragraph(&lines, table_start, Direction::Backward)
+        && paragraph
             .iter()
             .any(|line| line_mentions_crate(line, crate_name))
-        {
-            append_block(&mut section, paragraph);
-        }
+    {
+        append_block(&mut section, paragraph);
     }
 
-    if let Some(paragraph) = adjacent_paragraph(&lines, table_end, Direction::Forward) {
-        if paragraph
+    if let Some(paragraph) = adjacent_paragraph(&lines, table_end, Direction::Forward)
+        && paragraph
             .iter()
             .any(|line| line_mentions_crate(line, crate_name))
-        {
-            append_block(&mut section, paragraph);
-        }
+    {
+        append_block(&mut section, paragraph);
     }
 
     Ok(section.join("\n"))
@@ -103,8 +105,7 @@ fn table_row_crate_name(line: &str) -> Option<&str> {
     let first_cell = trimmed
         .split('|')
         .map(str::trim)
-        .filter(|cell| !cell.is_empty())
-        .next()?;
+        .find(|cell| !cell.is_empty())?;
     let crate_path = first_cell.trim_matches('`');
 
     crate_path.strip_prefix("crates/")

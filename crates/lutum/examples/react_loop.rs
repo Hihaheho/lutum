@@ -39,37 +39,37 @@ const ORDERS: [Order; 7] = [
     Order {
         order_id: 101,
         user_id: 1,
-        amount_cents: 120_00,
+        amount_cents: 12_000,
     },
     Order {
         order_id: 102,
         user_id: 3,
-        amount_cents: 90_00,
+        amount_cents: 9_000,
     },
     Order {
         order_id: 103,
         user_id: 2,
-        amount_cents: 350_00,
+        amount_cents: 35_000,
     },
     Order {
         order_id: 104,
         user_id: 1,
-        amount_cents: 80_00,
+        amount_cents: 8_000,
     },
     Order {
         order_id: 105,
         user_id: 4,
-        amount_cents: 210_00,
+        amount_cents: 21_000,
     },
     Order {
         order_id: 106,
         user_id: 2,
-        amount_cents: 50_00,
+        amount_cents: 5_000,
     },
     Order {
         order_id: 107,
         user_id: 4,
-        amount_cents: 180_00,
+        amount_cents: 18_000,
     },
 ];
 
@@ -127,7 +127,7 @@ fn lookup_orders(user_id: u32) -> DbText {
 }
 
 fn format_cents(amount_cents: u32) -> String {
-    if amount_cents % 100 == 0 {
+    if amount_cents.is_multiple_of(100) {
         format!("${}", amount_cents / 100)
     } else {
         format!("${}.{:02}", amount_cents / 100, amount_cents % 100)
