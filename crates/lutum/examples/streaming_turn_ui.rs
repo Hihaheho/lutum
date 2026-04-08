@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

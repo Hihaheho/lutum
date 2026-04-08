@@ -1,5 +1,6 @@
 use anyhow::bail;
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, sync::Arc};

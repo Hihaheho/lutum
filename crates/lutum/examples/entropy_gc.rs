@@ -1,4 +1,5 @@
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 use std::sync::Arc;
 
 const COMPACTION_THRESHOLD_WORDS: usize = 80;

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 
 #[def_hook(fallback)]
 async fn validate_prompt(_ctx: &Lutum, _prompt: &str) -> Result<(), String> {

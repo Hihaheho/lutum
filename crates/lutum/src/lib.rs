@@ -28,11 +28,6 @@ pub mod hooks;
 
 pub mod mock;
 
-#[cfg(feature = "claude")]
-pub use lutum_claude as claude;
-#[cfg(feature = "openai")]
-pub use lutum_openai as openai;
-
 pub mod reducer {
     pub use lutum_protocol::reducer::*;
 }
@@ -62,19 +57,7 @@ pub use hooks::{
     Stateful, first_success, short_circuit,
 };
 
-#[cfg(feature = "claude")]
-pub use lutum_claude::{
-    ClaudeAdapter, ClaudeCommittedTurn, ClaudeError, ClaudeTurnItem, ResolveBudgetTokens,
-    ResolveBudgetTokensHook, ResolveBudgetTokensRegistryExt, SelectClaudeModel,
-    SelectClaudeModelHook, SelectClaudeModelRegistryExt,
-};
 pub use lutum_macros::{Toolset, def_global_hook, def_hook, hook, hooks, tool_fn, tool_input};
-#[cfg(feature = "openai")]
-pub use lutum_openai::{
-    OpenAiAdapter, OpenAiError, OpenAiReasoningEffort, ResolveReasoningEffort,
-    ResolveReasoningEffortHook, ResolveReasoningEffortRegistryExt, SelectOpenaiModel,
-    SelectOpenaiModelHook, SelectOpenaiModelRegistryExt,
-};
 pub use lutum_protocol::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
     AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AgentError,

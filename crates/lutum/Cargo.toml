@@ -11,13 +11,9 @@ keywords = ["llm", "ai", "orchestration", "streaming"]
 
 [features]
 default = []
-claude = ["dep:lutum-claude"]
-openai = ["dep:lutum-openai"]
 
 [dependencies]
-lutum-claude = { workspace = true, optional = true }
 lutum-macros.workspace = true
-lutum-openai = { workspace = true, optional = true }
 lutum-protocol.workspace = true
 async-trait.workspace = true
 futures.workspace = true
@@ -34,75 +30,59 @@ schemars.workspace = true
 serde.workspace = true
 tokio.workspace = true
 trybuild = "1"
+# for examples
+lutum-openai.workspace = true
 
 [[example]]
 name = "contract_first_turn"
-required-features = ["openai"]
 
 [[example]]
 name = "stage_loop"
-required-features = ["openai"]
 
 [[example]]
 name = "verification_gates"
-required-features = ["openai"]
 
 [[example]]
 name = "streaming_turn_ui"
-required-features = ["openai"]
 
 [[example]]
 name = "planner_generator_evaluator"
-required-features = ["openai"]
 
 [[example]]
 name = "reflexion"
-required-features = ["openai"]
 
 [[example]]
 name = "failure_taxonomy_recovery"
-required-features = ["openai"]
 
 [[example]]
 name = "multi_candidate"
-required-features = ["openai"]
 
 [[example]]
 name = "react_loop"
-required-features = ["openai"]
 
 [[example]]
 name = "memory_surface"
-required-features = ["openai"]
 
 [[example]]
 name = "rag"
-required-features = ["openai"]
 
 [[example]]
 name = "repo_ssot"
-required-features = ["openai"]
 
 [[example]]
 name = "deterministic_hooks"
-required-features = ["openai"]
 
 [[example]]
 name = "policy_hook"
-required-features = ["openai"]
 
 [[example]]
 name = "stateful_hook"
-required-features = ["openai"]
 
 [[example]]
 name = "architectural_constraints"
-required-features = ["openai"]
 
 [[example]]
 name = "entropy_gc"
-required-features = ["openai"]
 
 [[example]]
 name = "user_approval_hook"
-required-features = ["openai"]

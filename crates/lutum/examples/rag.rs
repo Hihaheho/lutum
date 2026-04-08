@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 
 const CORPUS: &[(&str, &str)] = &[
     (

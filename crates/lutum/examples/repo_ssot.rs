@@ -1,5 +1,6 @@
 use anyhow::Context as _;
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 use std::{fs, sync::Arc};
 
 const NAVIGATION_SYSTEM: &str = "You are a codebase guide. Read the AGENTS.md content. The user has a question. Identify which crate is most relevant. Reply with ONLY the crate name (e.g. `lutum-openai`), nothing else.";

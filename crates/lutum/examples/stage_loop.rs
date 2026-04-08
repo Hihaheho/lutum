@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 
 async fn ask(llm: &Lutum, prompt: impl Into<String>) -> anyhow::Result<String> {
     let mut session = Session::new(llm.clone());

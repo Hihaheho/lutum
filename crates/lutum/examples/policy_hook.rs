@@ -1,4 +1,5 @@
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 use std::sync::Arc;
 
 type Validation = Result<(), Vec<String>>;
@@ -22,12 +23,7 @@ struct CommandPolicy {
 // A struct is clearer here: multiple policy fields, shared helper logic, no capture noise.
 #[async_trait::async_trait]
 impl ValidateCommand for CommandPolicy {
-    async fn call(
-        &self,
-        _ctx: &Lutum,
-        cmd: String,
-        last: Option<Validation>,
-    ) -> Validation {
+    async fn call(&self, _ctx: &Lutum, cmd: String, last: Option<Validation>) -> Validation {
         if let Some(Err(reasons)) = last {
             return Err(reasons);
         }

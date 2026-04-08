@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 
 const SUBJECT: &str = "fn add(a: i32, b: i32) -> i32 { a + b }";
 

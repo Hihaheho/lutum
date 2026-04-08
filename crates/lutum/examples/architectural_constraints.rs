@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 
 fn lint(output: &str) -> Option<String> {
     if output.contains("#[derive(") && output.contains("Debug") {

@@ -1,6 +1,7 @@
 use std::{fs, sync::Arc};
 
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

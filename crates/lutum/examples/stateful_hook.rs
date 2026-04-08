@@ -1,6 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 
 type Validation = Result<(), Vec<String>>;
 

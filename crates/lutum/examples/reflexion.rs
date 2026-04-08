@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use lutum::*;
+use lutum_openai::OpenAiAdapter;
 
 const WRITE: &str = "Write a short, catchy tagline for a Rust HTTP client library. One line only.";
 const EVALUATE: &str =
