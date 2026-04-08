@@ -102,3 +102,7 @@ required-features = ["openai"]
 [[example]]
 name = "entropy_gc"
 required-features = ["openai"]
+
+[[example]]
+name = "user_approval_hook"
+required-features = ["openai"]

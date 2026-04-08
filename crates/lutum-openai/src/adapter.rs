@@ -871,6 +871,16 @@ impl ToolCallTracker {
         explicit_arguments_json: Option<String>,
     ) -> Result<Option<ToolMetadata>, OpenAiError> {
         let buffered = self.buffers.remove(&key);
+
+        // Prefer the id registered by observe_call (from response.output_item.added) over
+        // the event-provided id. Some providers (e.g. Ollama with Qwen) use item_id in
+        // delta/done events but call_id in output_item events, so the buffer holds the
+        // authoritative call_id while the event carries only the item_id.
+        let resolved_id = buffered
+            .as_ref()
+            .map(|b| b.id.clone())
+            .unwrap_or(id);
+
         let arguments_json = if let Some(args) = explicit_arguments_json {
             args
         } else {
@@ -899,7 +909,7 @@ impl ToolCallTracker {
         };
 
         if let Some(existing) = self.finalized.get(&key) {
-            if existing.id == id
+            if existing.id == resolved_id
                 && existing.name == resolved_name
                 && existing.arguments_json == arguments_json
             {
@@ -908,17 +918,40 @@ impl ToolCallTracker {
             return Err(OpenAiError::Sse {
                 message: format!(
                     "conflicting duplicate tool call completion for `{}`",
-                    id.as_str()
+                    resolved_id.as_str()
                 ),
             });
         }
 
+        // Cross-key dedup: some providers (e.g. Ollama with Qwen) emit both
+        // FunctionCallArgumentsDone (keyed by item_id) and ResponseOutputItemDone (keyed by
+        // call_id) for the same logical tool call. After resolving to the canonical id, a
+        // matching entry under a different key means the call was already finalized.
+        //
+        // If name and arguments also match it is a true duplicate — suppress it.
+        // If they differ (e.g. the first event had a partial/empty buffer and this one carries
+        // the full payload), update the stored record with the authoritative data. The
+        // ToolCallReady that was already yielded cannot be retracted, but at least the committed
+        // transcript entry is corrected for future replay.
+        if let Some((existing_key, existing)) = self
+            .finalized
+            .iter_mut()
+            .find(|(_, f)| f.id == resolved_id)
+        {
+            let _ = existing_key; // key differs by design in the cross-key case
+            if existing.name != resolved_name || existing.arguments_json != arguments_json {
+                existing.name = resolved_name;
+                existing.arguments_json = arguments_json;
+            }
+            return Ok(None);
+        }
+
         let arguments = RawJson::parse(arguments_json.clone())?;
-        let metadata = ToolMetadata::new(id.clone(), resolved_name.clone(), arguments);
+        let metadata = ToolMetadata::new(resolved_id.clone(), resolved_name.clone(), arguments);
         self.finalized.insert(
             key,
             FinalizedToolCall {
-                id,
+                id: resolved_id,
                 name: resolved_name,
                 arguments_json,
             },
