@@ -20,29 +20,18 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         ctx_ty,
         explicit_args,
         output_ty,
-        has_last: default_has_last,
+        has_last: _,
         last_span: _,
     } = match analyze_hook_signature(
         &item_fn,
         kind.default_last_requirement(),
-        if kind.is_chain() {
-            "chain-dispatch hook definitions do not accept a `last: Option<Return>` argument"
-        } else {
-            "#[def_global_hook(singleton)] does not accept a `last: Option<Return>` argument"
-        },
+        "#[def_global_hook(singleton)] does not accept a `last: Option<Return>` argument",
         HookLastRecognition::LastNamedCompatibleOption,
     ) {
         Ok(signature) => signature,
         Err(err) => return err.to_compile_error(),
     };
     let trait_has_last = kind.trait_has_last();
-    if !trait_has_last && default_has_last {
-        return syn::Error::new_spanned(
-            item_fn.sig.ident,
-            "hook function must not have a 'last' parameter for chain dispatch",
-        )
-        .to_compile_error();
-    }
 
     let fn_ident = item_fn.sig.ident.clone();
     let vis = item_fn.vis.clone();
@@ -151,23 +140,12 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         &hook_name,
     );
 
-    let default_call = if default_has_last {
-        quote! {
-            #default_fn_ident(
-                #ctx_ident,
-                #(#cloned_hook_call_arg_names,)*
-                None,
-            )
-            .await
-        }
-    } else {
-        quote! {
-            #default_fn_ident(
-                #ctx_ident,
-                #(#cloned_hook_call_arg_names,)*
-            )
-            .await
-        }
+    let default_call = quote! {
+        #default_fn_ident(
+            #ctx_ident,
+            #(#cloned_hook_call_arg_names,)*
+        )
+        .await
     };
     let dyn_hook_dispatch_call = if trait_has_last {
         quote! { hook.call_dyn(#ctx_ident, #(#cloned_field_idents,)* last).await }
@@ -238,9 +216,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         },
     };
     let dispatch = match &kind {
-        HookKind::Always {
-            dispatch: HookDispatch::Fold,
-        } => quote! {
+        HookKind::Always { chain: None } => quote! {
             let mut last = ::std::option::Option::Some(
                 #default_call,
             );
@@ -254,28 +230,24 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             last.expect("hook chain unexpectedly empty")
         },
         HookKind::Always {
-            dispatch: HookDispatch::Chain(chain_path),
+            chain: Some(chain_path),
         } => quote! {
-            let result = #default_call;
-            if #chain_path(&result).is_break() {
-                return result;
+            let mut last = ::std::option::Option::Some(#default_call);
+            if #chain_path(last.as_ref().unwrap()).is_break() {
+                return last.unwrap();
             }
             if let Some(hooks) = chain {
-                let mut result = result;
                 for hook in hooks {
-                    result = #dyn_hook_dispatch_call;
-                    if #chain_path(&result).is_break() {
-                        return result;
+                    let next = #dyn_hook_dispatch_call;
+                    if #chain_path(&next).is_break() {
+                        return next;
                     }
+                    last = ::std::option::Option::Some(next);
                 }
-                result
-            } else {
-                result
             }
+            last.unwrap()
         },
-        HookKind::Fallback {
-            dispatch: HookDispatch::Fold,
-        } => quote! {
+        HookKind::Fallback { chain: None } => quote! {
             match chain {
                 Some(hooks) if !hooks.is_empty() => {
                     let mut last = ::std::option::Option::None;
@@ -292,15 +264,17 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             }
         },
         HookKind::Fallback {
-            dispatch: HookDispatch::Chain(chain_path),
+            chain: Some(chain_path),
         } => quote! {
             match chain {
                 Some(hooks) if !hooks.is_empty() => {
+                    let mut last = ::std::option::Option::None;
                     for hook in hooks {
-                        let result = #dyn_hook_dispatch_call;
-                        if #chain_path(&result).is_break() {
-                            return result;
+                        let next = #dyn_hook_dispatch_call;
+                        if #chain_path(&next).is_break() {
+                            return next;
                         }
+                        last = ::std::option::Option::Some(next);
                     }
                     #default_call
                 }
@@ -353,8 +327,31 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         quote! {}
     };
 
+    let named_impl_helper_macro_ident = hook_named_impl_helper_macro_ident(&slot_ident);
+    let named_impl_with_last_arm = if trait_has_last {
+        quote! {
+            (@named_impl_with_last { $($ok:tt)* } { $($err:tt)* }) => {
+                $($ok)*
+            };
+        }
+    } else {
+        quote! {
+            (@named_impl_with_last { $($ok:tt)* } { $($err:tt)* }) => {
+                $($err)*
+            };
+        }
+    };
+
     quote! {
         #item_fn
+
+        #[doc(hidden)]
+        #[allow(unused_macros)]
+        macro_rules! #named_impl_helper_macro_ident {
+            #named_impl_with_last_arm
+        }
+        #[doc(hidden)]
+        pub(crate) use #named_impl_helper_macro_ident;
 
         #fn_impl
 

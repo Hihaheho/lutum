@@ -88,20 +88,23 @@ pub struct HookDefAttrs {
 impl syn::parse::Parse for HookDefAttrs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mode: syn::Ident = input.parse()?;
-        let chain = if input.peek(Token![,]) {
+        let mut chain = None;
+        while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
-            let ident: syn::Ident = input.parse()?;
-            if ident != "chain" {
-                return Err(syn::Error::new(
-                    ident.span(),
-                    "expected 'chain' after comma",
-                ));
+            let key: syn::Ident = input.parse()?;
+            match key.to_string().as_str() {
+                "chain" => {
+                    input.parse::<Token![=]>()?;
+                    chain = Some(input.parse::<syn::Path>()?);
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!("unknown #[def_hook] option '{other}'; expected 'chain'"),
+                    ));
+                }
             }
-            input.parse::<Token![=]>()?;
-            Some(input.parse::<syn::Path>()?)
-        } else {
-            None
-        };
+        }
         Ok(Self { mode, chain })
     }
 }

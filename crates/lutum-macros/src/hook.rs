@@ -29,47 +29,20 @@ pub struct HookSignature {
     last_span: Option<proc_macro2::Span>,
 }
 
-#[derive(Clone)]
-pub enum HookDispatch {
-    Fold,
-    Chain(syn::Path),
-}
-
 pub enum HookKind {
-    Always { dispatch: HookDispatch },
-    Fallback { dispatch: HookDispatch },
+    Always { chain: Option<syn::Path> },
+    Fallback { chain: Option<syn::Path> },
     Singleton,
 }
 
 impl HookKind {
     fn default_last_requirement(&self) -> HookLastRequirement {
-        match self {
-            Self::Always { dispatch } | Self::Fallback { dispatch } => match dispatch {
-                HookDispatch::Fold => HookLastRequirement::Optional,
-                HookDispatch::Chain(_) => HookLastRequirement::Forbidden,
-            },
-            Self::Singleton => HookLastRequirement::Forbidden,
-        }
+        // The default function never receives `last` (it always runs first or as fallback).
+        HookLastRequirement::Forbidden
     }
 
     fn trait_has_last(&self) -> bool {
-        match self {
-            Self::Always { dispatch } | Self::Fallback { dispatch } => {
-                matches!(dispatch, HookDispatch::Fold)
-            }
-            Self::Singleton => false,
-        }
-    }
-
-    fn is_chain(&self) -> bool {
-        matches!(
-            self,
-            Self::Always {
-                dispatch: HookDispatch::Chain(_),
-            } | Self::Fallback {
-                dispatch: HookDispatch::Chain(_),
-            }
-        )
+        matches!(self, Self::Always { .. } | Self::Fallback { .. })
     }
 
 }

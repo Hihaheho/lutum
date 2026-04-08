@@ -9,29 +9,18 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         ctx_ty,
         explicit_args,
         output_ty,
-        has_last: default_has_last,
+        has_last: _,
         last_span: _,
     } = match analyze_hook_signature(
         &item_fn,
         kind.default_last_requirement(),
-        if kind.is_chain() {
-            "chain-dispatch hook definitions do not accept a `last: Option<Return>` argument"
-        } else {
-            "#[def_hook(singleton)] does not accept a `last: Option<Return>` argument"
-        },
+        "#[def_hook(singleton)] does not accept a `last: Option<Return>` argument",
         HookLastRecognition::LastNamedCompatibleOption,
     ) {
         Ok(signature) => signature,
         Err(err) => return err.to_compile_error(),
     };
     let trait_has_last = kind.trait_has_last();
-    if !trait_has_last && default_has_last {
-        return syn::Error::new_spanned(
-            item_fn.sig.ident,
-            "hook function must not have a 'last' parameter for chain dispatch",
-        )
-        .to_compile_error();
-    }
 
     let fn_ident = item_fn.sig.ident.clone();
     let vis = item_fn.vis.clone();
@@ -132,23 +121,12 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         &hook_name,
     );
 
-    let default_impl_call = if default_has_last {
-        quote! {
-            #default_impl_fn_ident(
-                #ctx_ident,
-                #(#hook_call_arg_names,)*
-                ::std::option::Option::None,
-            )
-            .await
-        }
-    } else {
-        quote! {
-            #default_impl_fn_ident(
-                #ctx_ident,
-                #(#hook_call_arg_names,)*
-            )
-            .await
-        }
+    let default_impl_call = quote! {
+        #default_impl_fn_ident(
+            #ctx_ident,
+            #(#hook_call_arg_names,)*
+        )
+        .await
     };
     let default_call = quote! {
         Self::#default_method_ident(
@@ -191,9 +169,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         ),
     };
     let dispatch = match &kind {
-        HookKind::Always {
-            dispatch: HookDispatch::Fold,
-        } => quote! {
+        HookKind::Always { chain: None } => quote! {
             let mut last = ::std::option::Option::Some(
                 #default_call,
             );
@@ -205,23 +181,22 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             last.expect("hook chain unexpectedly empty")
         },
         HookKind::Always {
-            dispatch: HookDispatch::Chain(chain_path),
+            chain: Some(chain_path),
         } => quote! {
-            let mut result = #default_call;
-            if #chain_path(&result).is_break() {
-                return result;
+            let mut last = ::std::option::Option::Some(#default_call);
+            if #chain_path(last.as_ref().unwrap()).is_break() {
+                return last.unwrap();
             }
             for hook in &self.#field_ident {
-                result = #dyn_hook_dispatch_call;
-                if #chain_path(&result).is_break() {
-                    return result;
+                let next = #dyn_hook_dispatch_call;
+                if #chain_path(&next).is_break() {
+                    return next;
                 }
+                last = ::std::option::Option::Some(next);
             }
-            result
+            last.unwrap()
         },
-        HookKind::Fallback {
-            dispatch: HookDispatch::Fold,
-        } => quote! {
+        HookKind::Fallback { chain: None } => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
@@ -235,16 +210,18 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             }
         },
         HookKind::Fallback {
-            dispatch: HookDispatch::Chain(chain_path),
+            chain: Some(chain_path),
         } => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
+                let mut last = ::std::option::Option::None;
                 for hook in &self.#field_ident {
-                    let result = #dyn_hook_dispatch_call;
-                    if #chain_path(&result).is_break() {
-                        return result;
+                    let next = #dyn_hook_dispatch_call;
+                    if #chain_path(&next).is_break() {
+                        return next;
                     }
+                    last = ::std::option::Option::Some(next);
                 }
                 #default_call
             }

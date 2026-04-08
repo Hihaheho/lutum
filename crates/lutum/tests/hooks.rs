@@ -45,7 +45,7 @@ async fn append_suffix(_ctx: &Lutum, source_label: &str, last: Option<String>) -
 }
 
 #[lutum::def_hook(always)]
-async fn legacy_format_label(_ctx: &Lutum, label: &str, _last: Option<String>) -> String {
+async fn legacy_format_label(_ctx: &Lutum, label: &str) -> String {
     format!("legacy:{label}")
 }
 
@@ -108,6 +108,47 @@ async fn choose_chain_default_after_hooks(_ctx: &Lutum, label: &str) -> Option<S
 #[lutum::hook(ChooseChainDefaultAfterHooks)]
 async fn choose_none_again(_ctx: &Lutum, _label: &str) -> Option<String> {
     None
+}
+
+// fold + chain (try_fold): each hook sees the previous result AND can short-circuit.
+#[lutum::def_hook(always, chain = short_circuit)]
+async fn fold_chain_label(_ctx: &Lutum, label: &str) -> Result<String, String> {
+    Ok(format!("default:{label}"))
+}
+
+#[lutum::hook(FoldChainLabel)]
+async fn fold_chain_append(_ctx: &Lutum, label: &str, last: Option<Result<String, String>>) -> Result<String, String> {
+    let prev = last.unwrap().unwrap();
+    Ok(format!("{prev}+{label}"))
+}
+
+#[lutum::hook(FoldChainLabel)]
+async fn fold_chain_err(_ctx: &Lutum, _label: &str, last: Option<Result<String, String>>) -> Result<String, String> {
+    let prev = last.unwrap().unwrap();
+    Err(format!("blocked:{prev}"))
+}
+
+#[lutum::hook(FoldChainLabel)]
+async fn fold_chain_unreachable(_ctx: &Lutum, _label: &str, _last: Option<Result<String, String>>) -> Result<String, String> {
+    panic!("must not be called after Err short-circuits")
+}
+
+// fallback + fold + chain: hooks fold and can short-circuit; default is the fallback.
+#[lutum::def_hook(fallback, chain = first_success)]
+async fn fold_chain_pick(_ctx: &Lutum, label: &str) -> Option<String> {
+    Some(format!("fallback:{label}"))
+}
+
+#[lutum::hook(FoldChainPick)]
+async fn fold_chain_pick_pass(_ctx: &Lutum, _label: &str, last: Option<Option<String>>) -> Option<String> {
+    // Propagate whatever was accumulated; None means "keep going"
+    last.flatten()
+}
+
+#[lutum::hook(FoldChainPick)]
+async fn fold_chain_pick_decide(_ctx: &Lutum, label: &str, last: Option<Option<String>>) -> Option<String> {
+    assert!(last.unwrap().is_none(), "previous hook passed None through");
+    Some(format!("hook:{label}"))
 }
 
 #[lutum::def_global_hook(always, chain = short_circuit)]
@@ -578,6 +619,70 @@ fn resolve_usage_estimate_registered_override_wins_over_default_extensions_looku
             ..UsageEstimate::zero()
         }
     );
+}
+
+#[lutum::hooks]
+struct FoldChainHooks {
+    fold_chain_validator: FoldChainLabel,
+    fold_chain_picker: FoldChainPick,
+}
+
+#[test]
+fn fold_chain_always_no_hooks_returns_default() {
+    let ctx = test_context(HookRegistry::new());
+    let hooks = FoldChainHooks::new();
+    // No hooks: chain checks default (Ok → Continue), returns default.
+    let result = block_on(hooks.fold_chain_label(&ctx, "x"));
+    assert_eq!(result, Ok("default:x".to_owned()));
+}
+
+#[test]
+fn fold_chain_fallback_no_hooks_returns_default() {
+    let ctx = test_context(HookRegistry::new());
+    let hooks = FoldChainHooks::new();
+    // No hooks: fallback default runs.
+    let result = block_on(hooks.fold_chain_pick(&ctx, "y"));
+    assert_eq!(result, Some("fallback:y".to_owned()));
+}
+
+#[test]
+fn fold_chain_always_all_continue_returns_last_fold_result() {
+    let ctx = test_context(HookRegistry::new());
+    // Two fold hooks, both Continue: second gets last=Ok("default:x+x") and folds again.
+    let hooks = FoldChainHooks::new()
+        .with_fold_chain_label(FoldChainAppend)
+        .with_fold_chain_label(FoldChainAppend);
+    let result = block_on(hooks.fold_chain_label(&ctx, "x"));
+    // default="default:x", append1 sees last=Ok("default:x") → Ok("default:x+x"),
+    // append2 sees last=Ok("default:x+x") → Ok("default:x+x+x"), both Continue.
+    assert_eq!(result, Ok("default:x+x+x".to_owned()));
+}
+
+#[test]
+fn fold_and_chain_are_orthogonal_always() {
+    // always + chain: default runs first, hooks see `last` and can short-circuit.
+    // Hook order: fold_chain_append (continues), fold_chain_err (Err → Break),
+    // fold_chain_unreachable (never reached).
+    let ctx = test_context(HookRegistry::new());
+    let hooks = FoldChainHooks::new()
+        .with_fold_chain_label(FoldChainAppend)
+        .with_fold_chain_label(FoldChainErr)
+        .with_fold_chain_label(FoldChainUnreachable);
+    let result = block_on(hooks.fold_chain_label(&ctx, "x"));
+    // default → Ok("default:x"), append gets last=Ok("default:x") → Ok("default:x+x"),
+    // err gets last=Ok("default:x+x") → Err("blocked:default:x+x") → Break.
+    assert_eq!(result, Err("blocked:default:x+x".to_owned()));
+}
+
+#[test]
+fn fold_and_chain_are_orthogonal_fallback() {
+    // fallback + chain: hooks fold through None → Some; default is never called.
+    let ctx = test_context(HookRegistry::new());
+    let hooks = FoldChainHooks::new()
+        .with_fold_chain_pick(FoldChainPickPass)
+        .with_fold_chain_pick(FoldChainPickDecide);
+    let result = block_on(hooks.fold_chain_pick(&ctx, "y"));
+    assert_eq!(result, Some("hook:y".to_owned()));
 }
 
 #[test]

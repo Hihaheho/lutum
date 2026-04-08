@@ -41,8 +41,8 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
     // Field idents: original param names with leading `_` stripped where unambiguous.
     let args_field_idents = normalized_hook_arg_field_idents(&explicit_args);
 
-    // Trait method params: individual field_ident: hook_param_type (no *Args struct).
-    let mut hook_trait_args: Vec<proc_macro2::TokenStream> = explicit_args
+    // Base trait method params (without `last`).
+    let trait_args_no_last: Vec<proc_macro2::TokenStream> = explicit_args
         .iter()
         .zip(args_field_idents.iter())
         .map(|((_, ty), fi)| {
@@ -50,9 +50,6 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
             quote! { #fi: #param_ty }
         })
         .collect();
-    if has_last {
-        hook_trait_args.push(quote! { last: ::std::option::Option<#output_ty> });
-    }
 
     // fn_call_args: expressions to forward to the original function.
     // Uses field_idents (from the trait method params), re-adding `&` for &str args.
@@ -68,23 +65,31 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
         fn_call_args.push(quote! { last });
     }
 
-    let ok_impl = quote! {
-        #[allow(dead_code)]
-        #vis struct #struct_ident;
+    // Impl body: trait `call` method forwards to the original fn.
+    // `trait_args` and `fn_call_args` vary based on whether `last` is present.
+    let make_impl = |trait_args: Vec<proc_macro2::TokenStream>| {
+        quote! {
+            #[allow(dead_code)]
+            #vis struct #struct_ident;
 
-        #[::async_trait::async_trait]
-        impl #hook_trait_path for #struct_ident {
-            async fn call(
-                &self,
-                #ctx_ident: #ctx_ty,
-                #(#hook_trait_args,)*
-            ) -> #output_ty {
-                #fn_ident(#ctx_ident, #(#fn_call_args,)*).await
+            #[::async_trait::async_trait]
+            impl #hook_trait_path for #struct_ident {
+                async fn call(
+                    &self,
+                    #ctx_ident: #ctx_ty,
+                    #(#trait_args,)*
+                ) -> #output_ty {
+                    #fn_ident(#ctx_ident, #(#fn_call_args,)*).await
+                }
             }
         }
     };
 
     let with_last_dispatch = if has_last {
+        // User opted into `last` — trait must also have it. Error for singleton slots.
+        let mut trait_args_with_last = trait_args_no_last.clone();
+        trait_args_with_last.push(quote! { last: ::std::option::Option<#output_ty> });
+        let ok_impl = make_impl(trait_args_with_last);
         let err_span = last_span.expect("last span must exist when last is present");
         let err_impl = quote_spanned! { err_span =>
             compile_error!(
@@ -95,7 +100,16 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
             #helper_macro_path!(@named_impl_with_last { #ok_impl } { #err_impl });
         }
     } else {
-        quote! { #ok_impl }
+        // User did not opt into `last`. Dispatch on whether the slot trait has `last`:
+        // - always/fallback slots: trait has `last`, accept it but don't forward to user fn
+        // - singleton slots: trait has no `last`, emit without it
+        let mut trait_args_with_last = trait_args_no_last.clone();
+        trait_args_with_last.push(quote! { last: ::std::option::Option<#output_ty> });
+        let ok_with_last = make_impl(trait_args_with_last);
+        let ok_no_last = make_impl(trait_args_no_last);
+        quote! {
+            #helper_macro_path!(@named_impl_with_last { #ok_with_last } { #ok_no_last });
+        }
     };
 
     quote! {

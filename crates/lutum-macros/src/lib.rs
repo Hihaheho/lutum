@@ -60,14 +60,9 @@ pub fn def_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
     let mode_str = attrs.mode.to_string();
-    let dispatch = attrs
-        .chain
-        .as_ref()
-        .map(|p| HookDispatch::Chain(p.clone()))
-        .unwrap_or(HookDispatch::Fold);
     let kind = match mode_str.as_str() {
-        "always" => HookKind::Always { dispatch },
-        "fallback" => HookKind::Fallback { dispatch },
+        "always" => HookKind::Always { chain: attrs.chain },
+        "fallback" => HookKind::Fallback { chain: attrs.chain },
         "singleton" => {
             if attrs.chain.is_some() {
                 return syn::Error::new_spanned(
@@ -102,14 +97,9 @@ pub fn def_global_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
     let mode_str = attrs.mode.to_string();
-    let dispatch = attrs
-        .chain
-        .as_ref()
-        .map(|p| HookDispatch::Chain(p.clone()))
-        .unwrap_or(HookDispatch::Fold);
     let kind = match mode_str.as_str() {
-        "always" => HookKind::Always { dispatch },
-        "fallback" => HookKind::Fallback { dispatch },
+        "always" => HookKind::Always { chain: attrs.chain },
+        "fallback" => HookKind::Fallback { chain: attrs.chain },
         "singleton" => {
             if attrs.chain.is_some() {
                 return syn::Error::new_spanned(
