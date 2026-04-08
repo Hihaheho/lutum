@@ -230,7 +230,10 @@ fn slot_use_imports(slot_path: &Path) -> proc_macro2::TokenStream {
 /// Returns a copy of `path` with the last segment's ident replaced by `new_ident`.
 fn replace_last_segment(path: &Path, new_ident: proc_macro2::Ident) -> Path {
     let mut p = path.clone();
-    p.segments.last_mut().expect("path must have at least one segment").ident = new_ident;
+    p.segments
+        .last_mut()
+        .expect("path must have at least one segment")
+        .ident = new_ident;
     p
 }
 

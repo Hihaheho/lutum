@@ -8,156 +8,164 @@ use lutum::{
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
     ErasedTextTurnEventStream, HookReentrancyError, HookRegistry, InputMessageRole, Lutum,
     MockLlmAdapter, ModelInput, ModelInputItem, OperationKind, RequestExtensions,
-    ResolveUsageEstimate, ResolveUsageEstimateRegistryExt,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage,
-    UsageRecoveryAdapter, budget::UsageEstimate, first_success,
-    hooks::ResolveUsageEstimateLutumExt, short_circuit,
+    ResolveUsageEstimate, ResolveUsageEstimateRegistryExt, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage, UsageRecoveryAdapter,
+    budget::UsageEstimate, first_success, hooks::ResolveUsageEstimateLutumExt, short_circuit,
 };
 use lutum_trace::FieldValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[lutum::def_hook(singleton)]
-async fn select_label(_ctx: &Lutum, default: String) -> String {
+async fn select_label(default: String) -> String {
     default
 }
 
 #[lutum::hook(SelectLabel)]
-async fn prefix_label(_ctx: &Lutum, default: String) -> String {
+async fn prefix_label(default: String) -> String {
     format!("hooked:{default}")
 }
 
 #[lutum::hook(SelectLabel)]
-async fn suffix_label(_ctx: &Lutum, default: String) -> String {
+async fn suffix_label(default: String) -> String {
     format!("{default}:suffix")
 }
 
 #[lutum::def_hook(always)]
-async fn format_label(_ctx: &Lutum, label: &str) -> String {
+async fn format_label(label: &str) -> String {
     format!("default:{label}")
 }
 
 #[lutum::hook(FormatLabel)]
-async fn append_suffix(_ctx: &Lutum, source_label: &str, last: Option<String>) -> String {
+async fn append_suffix(source_label: &str, last: Option<String>) -> String {
     let previous = last.expect("always hooks should receive the default result");
     assert_eq!(previous, format!("default:{source_label}"));
     format!("{previous}:hook")
 }
 
 #[lutum::def_hook(always)]
-async fn legacy_format_label(_ctx: &Lutum, label: &str) -> String {
+async fn legacy_format_label(label: &str) -> String {
     format!("legacy:{label}")
 }
 
 #[lutum::def_hook(fallback)]
-async fn choose_label(_ctx: &Lutum, label: &str) -> String {
+async fn choose_label(label: &str) -> String {
     format!("default:{label}")
 }
 
 #[lutum::hook(ChooseLabel)]
-async fn pick_registered_label(_ctx: &Lutum, label: &str, last: Option<String>) -> String {
+async fn pick_registered_label(label: &str, last: Option<String>) -> String {
     assert!(last.is_none(), "fallback chains should start from None");
     format!("hook:{label}")
 }
 
 #[lutum::def_hook(always, chain = short_circuit)]
-async fn validate_chain_label(_ctx: &Lutum, label: &str) -> Result<String, String> {
+async fn validate_chain_label(label: &str) -> Result<String, String> {
     Err(format!("default-blocked:{label}"))
 }
 
 #[lutum::hook(ValidateChainLabel)]
-async fn append_chain_suffix(_ctx: &Lutum, label: &str) -> Result<String, String> {
+async fn append_chain_suffix(label: &str) -> Result<String, String> {
     Ok(format!("hooked:{label}"))
 }
 
 #[lutum::def_hook(always, chain = short_circuit)]
-async fn transform_chain_label(_ctx: &Lutum, label: &str) -> Result<String, String> {
+async fn transform_chain_label(label: &str) -> Result<String, String> {
     Ok(format!("default:{label}"))
 }
 
 #[lutum::hook(TransformChainLabel)]
-async fn transform_chain_middle(_ctx: &Lutum, label: &str) -> Result<String, String> {
+async fn transform_chain_middle(label: &str) -> Result<String, String> {
     Ok(format!("mid:{label}"))
 }
 
 #[lutum::hook(TransformChainLabel)]
-async fn transform_chain_final(_ctx: &Lutum, label: &str) -> Result<String, String> {
+async fn transform_chain_final(label: &str) -> Result<String, String> {
     Ok(format!("final:{label}"))
 }
 
 #[lutum::def_hook(fallback, chain = first_success)]
-async fn choose_chain_label(_ctx: &Lutum, label: &str) -> Option<String> {
+async fn choose_chain_label(label: &str) -> Option<String> {
     Some(format!("default:{label}"))
 }
 
 #[lutum::hook(ChooseChainLabel)]
-async fn choose_none(_ctx: &Lutum, _label: &str) -> Option<String> {
+async fn choose_none(_label: &str) -> Option<String> {
     None
 }
 
 #[lutum::hook(ChooseChainLabel)]
-async fn choose_special(_ctx: &Lutum, label: &str) -> Option<String> {
+async fn choose_special(label: &str) -> Option<String> {
     Some(format!("hook:{label}"))
 }
 
 #[lutum::def_hook(fallback, chain = first_success)]
-async fn choose_chain_default_after_hooks(_ctx: &Lutum, label: &str) -> Option<String> {
+async fn choose_chain_default_after_hooks(label: &str) -> Option<String> {
     Some(format!("fallback-default:{label}"))
 }
 
 #[lutum::hook(ChooseChainDefaultAfterHooks)]
-async fn choose_none_again(_ctx: &Lutum, _label: &str) -> Option<String> {
+async fn choose_none_again(_label: &str) -> Option<String> {
     None
 }
 
 // fold + chain (try_fold): each hook sees the previous result AND can short-circuit.
 #[lutum::def_hook(always, chain = short_circuit)]
-async fn fold_chain_label(_ctx: &Lutum, label: &str) -> Result<String, String> {
+async fn fold_chain_label(label: &str) -> Result<String, String> {
     Ok(format!("default:{label}"))
 }
 
 #[lutum::hook(FoldChainLabel)]
-async fn fold_chain_append(_ctx: &Lutum, label: &str, last: Option<Result<String, String>>) -> Result<String, String> {
+async fn fold_chain_append(
+    label: &str,
+    last: Option<Result<String, String>>,
+) -> Result<String, String> {
     let prev = last.unwrap().unwrap();
     Ok(format!("{prev}+{label}"))
 }
 
 #[lutum::hook(FoldChainLabel)]
-async fn fold_chain_err(_ctx: &Lutum, _label: &str, last: Option<Result<String, String>>) -> Result<String, String> {
+async fn fold_chain_err(
+    _label: &str,
+    last: Option<Result<String, String>>,
+) -> Result<String, String> {
     let prev = last.unwrap().unwrap();
     Err(format!("blocked:{prev}"))
 }
 
 #[lutum::hook(FoldChainLabel)]
-async fn fold_chain_unreachable(_ctx: &Lutum, _label: &str, _last: Option<Result<String, String>>) -> Result<String, String> {
+async fn fold_chain_unreachable(
+    _label: &str,
+    _last: Option<Result<String, String>>,
+) -> Result<String, String> {
     panic!("must not be called after Err short-circuits")
 }
 
 // fallback + fold + chain: hooks fold and can short-circuit; default is the fallback.
 #[lutum::def_hook(fallback, chain = first_success)]
-async fn fold_chain_pick(_ctx: &Lutum, label: &str) -> Option<String> {
+async fn fold_chain_pick(label: &str) -> Option<String> {
     Some(format!("fallback:{label}"))
 }
 
 #[lutum::hook(FoldChainPick)]
-async fn fold_chain_pick_pass(_ctx: &Lutum, _label: &str, last: Option<Option<String>>) -> Option<String> {
+async fn fold_chain_pick_pass(_label: &str, last: Option<Option<String>>) -> Option<String> {
     // Propagate whatever was accumulated; None means "keep going"
     last.flatten()
 }
 
 #[lutum::hook(FoldChainPick)]
-async fn fold_chain_pick_decide(_ctx: &Lutum, label: &str, last: Option<Option<String>>) -> Option<String> {
+async fn fold_chain_pick_decide(label: &str, last: Option<Option<String>>) -> Option<String> {
     assert!(last.unwrap().is_none(), "previous hook passed None through");
     Some(format!("hook:{label}"))
 }
 
 #[lutum::def_global_hook(always, chain = short_circuit)]
-async fn global_chain_label(_ctx: &Lutum, label: &str) -> Result<String, String> {
+async fn global_chain_label(label: &str) -> Result<String, String> {
     Ok(format!("global-default:{label}"))
 }
 
 #[lutum::hook(GlobalChainLabel)]
-async fn global_chain_override(_ctx: &Lutum, label: &str) -> Result<String, String> {
+async fn global_chain_override(label: &str) -> Result<String, String> {
     Ok(format!("global-hook:{label}"))
 }
 
@@ -167,17 +175,17 @@ fn join_strings(outputs: Vec<String>) -> String {
 }
 
 #[lutum::def_hook(always, accumulate = join_strings)]
-async fn accumulate_label(_ctx: &Lutum, label: &str) -> String {
+async fn accumulate_label(label: &str) -> String {
     format!("default:{label}")
 }
 
 #[lutum::hook(AccumulateLabel)]
-async fn accumulate_hook_a(_ctx: &Lutum, label: &str) -> String {
+async fn accumulate_hook_a(label: &str) -> String {
     format!("hook-a:{label}")
 }
 
 #[lutum::hook(AccumulateLabel)]
-async fn accumulate_hook_b(_ctx: &Lutum, label: &str) -> String {
+async fn accumulate_hook_b(label: &str) -> String {
     format!("hook-b:{label}")
 }
 
@@ -191,17 +199,17 @@ fn is_short_circuit_string(s: &str) -> std::ops::ControlFlow<()> {
 }
 
 #[lutum::def_hook(always, chain = is_short_circuit_string, accumulate = join_strings)]
-async fn accumulate_chain_label(_ctx: &Lutum, label: &str) -> String {
+async fn accumulate_chain_label(label: &str) -> String {
     format!("default:{label}")
 }
 
 #[lutum::hook(AccumulateChainLabel)]
-async fn accumulate_chain_hook_stop(_ctx: &Lutum, _label: &str) -> String {
+async fn accumulate_chain_hook_stop(_label: &str) -> String {
     "stop:early".to_owned()
 }
 
 #[lutum::hook(AccumulateChainLabel)]
-async fn accumulate_chain_hook_unreachable(_ctx: &Lutum, _label: &str) -> String {
+async fn accumulate_chain_hook_unreachable(_label: &str) -> String {
     panic!("must not be called after stop")
 }
 
@@ -211,28 +219,28 @@ fn wrap_result(s: String) -> String {
 }
 
 #[lutum::def_hook(always, finalize = wrap_result)]
-async fn finalized_label(_ctx: &Lutum, label: &str) -> String {
+async fn finalized_label(label: &str) -> String {
     format!("default:{label}")
 }
 
 #[lutum::hook(FinalizedLabel)]
-async fn finalized_append(_ctx: &Lutum, label: &str, last: Option<String>) -> String {
+async fn finalized_append(label: &str, last: Option<String>) -> String {
     format!("{}+{label}", last.unwrap())
 }
 
 // chain + finalize: finalize captures early exits from chain dispatch.
 #[lutum::def_hook(always, chain = is_short_circuit_string, finalize = wrap_result)]
-async fn chain_finalized_label(_ctx: &Lutum, label: &str) -> String {
+async fn chain_finalized_label(label: &str) -> String {
     format!("default:{label}")
 }
 
 #[lutum::hook(ChainFinalizedLabel)]
-async fn chain_finalized_stop(_ctx: &Lutum, _label: &str) -> String {
+async fn chain_finalized_stop(_label: &str) -> String {
     "stop:chain".to_owned()
 }
 
 #[lutum::hook(ChainFinalizedLabel)]
-async fn chain_finalized_unreachable(_ctx: &Lutum, _label: &str) -> String {
+async fn chain_finalized_unreachable(_label: &str) -> String {
     panic!("must not be called after stop")
 }
 
@@ -244,7 +252,7 @@ enum CounterError {
 type CounterResult = Result<usize, CounterError>;
 
 #[lutum::def_hook(singleton)]
-async fn next_counter(_ctx: &Lutum, seed: usize) -> CounterResult {
+async fn next_counter(seed: usize) -> CounterResult {
     Ok(seed)
 }
 
@@ -258,7 +266,7 @@ impl StatefulNextCounter for CountingHook {
         Err(CounterError::Reentered(err))
     }
 
-    async fn call_mut(&mut self, _ctx: &Lutum, seed: usize) -> CounterResult {
+    async fn call_mut(&mut self, seed: usize) -> CounterResult {
         let current = self.next.max(seed);
         self.next = current + 1;
         Ok(current)
@@ -275,21 +283,21 @@ impl StatefulNextCounter for ReentrantCounter {
         Err(CounterError::Reentered(err))
     }
 
-    async fn call_mut(&mut self, ctx: &Lutum, seed: usize) -> CounterResult {
+    async fn call_mut(&mut self, seed: usize) -> CounterResult {
         if seed == 0 {
             Ok(0)
         } else {
             self.hooks
                 .get()
                 .expect("reentrant hook container must be initialized")
-                .next_counter(ctx, seed - 1)
+                .next_counter(seed - 1)
                 .await
         }
     }
 }
 
 #[lutum::def_hook(singleton)]
-async fn describe_label(_ctx: &Lutum, label: &str) -> String {
+async fn describe_label(label: &str) -> String {
     label.to_string()
 }
 
@@ -313,8 +321,8 @@ struct NestedLabelHook {
 
 #[async_trait]
 impl StatefulDescribeLabel for NestedLabelHook {
-    async fn call_mut(&mut self, ctx: &Lutum, label: String) -> String {
-        self.hooks.select_label(ctx, label).await
+    async fn call_mut(&mut self, label: String) -> String {
+        self.hooks.select_label(label).await
     }
 }
 
@@ -407,12 +415,7 @@ struct FixedEstimate {
 
 #[async_trait]
 impl ResolveUsageEstimate for FixedEstimate {
-    async fn call(
-        &self,
-        _ctx: &Lutum,
-        _extensions: &RequestExtensions,
-        _kind: OperationKind,
-    ) -> UsageEstimate {
+    async fn call(&self, _extensions: &RequestExtensions, _kind: OperationKind) -> UsageEstimate {
         self.estimate
     }
 }
@@ -423,12 +426,7 @@ struct RecordOperationKinds {
 
 #[async_trait]
 impl ResolveUsageEstimate for RecordOperationKinds {
-    async fn call(
-        &self,
-        _ctx: &Lutum,
-        _extensions: &RequestExtensions,
-        kind: OperationKind,
-    ) -> UsageEstimate {
+    async fn call(&self, _extensions: &RequestExtensions, kind: OperationKind) -> UsageEstimate {
         self.seen.lock().unwrap().push(kind);
         UsageEstimate::zero()
     }
@@ -436,20 +434,18 @@ impl ResolveUsageEstimate for RecordOperationKinds {
 
 #[test]
 fn singleton_hook_uses_default_when_unregistered() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new();
 
-    let selected = block_on(hooks.select_label(&ctx, "base".into()));
+    let selected = block_on(hooks.select_label("base".into()));
 
     assert_eq!(selected, "base");
 }
 
 #[test]
 fn singleton_hook_uses_registered_override() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new().with_select_label(PrefixLabel);
 
-    let selected = block_on(hooks.select_label(&ctx, "base".into()));
+    let selected = block_on(hooks.select_label("base".into()));
 
     assert_eq!(selected, "hooked:base");
 }
@@ -460,9 +456,8 @@ fn singleton_hook_warns_and_uses_last_registered_override() {
         let hooks = TestHooks::new()
             .with_select_label(PrefixLabel)
             .with_select_label(SuffixLabel);
-        let ctx = test_context(HookRegistry::new());
 
-        hooks.select_label(&ctx, "base".into()).await
+        hooks.select_label("base".into()).await
     }));
 
     assert_eq!(collected.output, "base:suffix");
@@ -486,105 +481,95 @@ fn singleton_hook_warns_and_uses_last_registered_override() {
 
 #[test]
 fn always_hook_uses_default_without_last_when_unregistered() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new();
 
-    let selected = block_on(hooks.format_label(&ctx, "base"));
+    let selected = block_on(hooks.format_label("base"));
 
     assert_eq!(selected, "default:base");
 }
 
 #[test]
 fn always_hook_passes_default_result_to_registered_hook() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new().with_format_label(AppendSuffix);
 
-    let selected = block_on(hooks.format_label(&ctx, "base"));
+    let selected = block_on(hooks.format_label("base"));
 
     assert_eq!(selected, "default:base:hook");
 }
 
 #[test]
 fn always_hook_keeps_supporting_default_definitions_with_last() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new();
 
-    let selected = block_on(hooks.legacy_format_label(&ctx, "base"));
+    let selected = block_on(hooks.legacy_format_label("base"));
 
     assert_eq!(selected, "legacy:base");
 }
 
 #[test]
 fn fallback_hook_uses_default_without_last_when_unregistered() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new();
 
-    let selected = block_on(hooks.choose_label(&ctx, "base"));
+    let selected = block_on(hooks.choose_label("base"));
 
     assert_eq!(selected, "default:base");
 }
 
 #[test]
 fn fallback_hook_starts_registered_chain_without_default_result() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new().with_choose_label(PickRegisteredLabel);
 
-    let selected = block_on(hooks.choose_label(&ctx, "base"));
+    let selected = block_on(hooks.choose_label("base"));
 
     assert_eq!(selected, "hook:base");
 }
 
 #[test]
 fn always_chain_short_circuit_stops_after_default_break() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new().with_validate_chain_label(AppendChainSuffix);
 
-    let result = block_on(hooks.validate_chain_label(&ctx, "base"));
+    let result = block_on(hooks.validate_chain_label("base"));
 
     assert_eq!(result, Err("default-blocked:base".into()));
 }
 
 #[test]
 fn always_chain_returns_last_hook_result_when_all_continue() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new()
         .with_transform_chain_label(TransformChainMiddle)
         .with_transform_chain_label(TransformChainFinal);
 
-    let result = block_on(hooks.transform_chain_label(&ctx, "base"));
+    let result = block_on(hooks.transform_chain_label("base"));
 
     assert_eq!(result, Ok("final:base".into()));
 }
 
 #[test]
 fn fallback_chain_first_success_stops_on_first_some() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new()
         .with_choose_chain_label(ChooseNone)
         .with_choose_chain_label(ChooseSpecial);
 
-    let result = block_on(hooks.choose_chain_label(&ctx, "base"));
+    let result = block_on(hooks.choose_chain_label("base"));
 
     assert_eq!(result, Some("hook:base".into()));
 }
 
 #[test]
 fn fallback_chain_runs_default_when_all_hooks_continue() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new().with_choose_chain_default_after_hooks(ChooseNoneAgain);
 
-    let result = block_on(hooks.choose_chain_default_after_hooks(&ctx, "base"));
+    let result = block_on(hooks.choose_chain_default_after_hooks("base"));
 
     assert_eq!(result, Some("fallback-default:base".into()));
 }
 
 #[test]
 fn stateful_hook_mutates_state_without_interior_mutability() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new().with_next_counter(Stateful::new(CountingHook { next: 0 }));
 
-    let first = block_on(hooks.next_counter(&ctx, 10));
-    let second = block_on(hooks.next_counter(&ctx, 10));
+    let first = block_on(hooks.next_counter(10));
+    let second = block_on(hooks.next_counter(10));
 
     assert_eq!(first, Ok(10));
     assert_eq!(second, Ok(11));
@@ -592,14 +577,13 @@ fn stateful_hook_mutates_state_without_interior_mutability() {
 
 #[test]
 fn stateful_hook_reentrancy_can_return_a_typed_error() {
-    let ctx = test_context(HookRegistry::new());
     let shared_hooks = Arc::new(OnceLock::new());
     let hooks = TestHooks::new().with_next_counter(Stateful::new(ReentrantCounter {
         hooks: Arc::clone(&shared_hooks),
     }));
     assert!(shared_hooks.set(hooks.clone()).is_ok());
 
-    let result = block_on(hooks.next_counter(&ctx, 1));
+    let result = block_on(hooks.next_counter(1));
 
     assert_eq!(
         result,
@@ -612,14 +596,13 @@ fn stateful_hook_reentrancy_can_return_a_typed_error() {
 
 #[test]
 fn stateful_hook_can_call_other_hooks_without_registry_deadlock() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = TestHooks::new().with_select_label(PrefixLabel);
     let nested_hooks = hooks.clone();
     let hooks = hooks.with_describe_label(Stateful::new(NestedLabelHook {
         hooks: nested_hooks,
     }));
 
-    let described = block_on(hooks.describe_label(&ctx, "base"));
+    let described = block_on(hooks.describe_label("base"));
 
     assert_eq!(described, "hooked:base");
 }
@@ -629,11 +612,7 @@ fn global_chain_hook_dispatches_through_registry_extension() {
     let ctx = test_context(HookRegistry::new().register_global_chain_label(GlobalChainOverride));
 
     let result = block_on(
-        <HookRegistry as GlobalChainLabelRegistryExt>::global_chain_label(
-            ctx.hooks(),
-            &ctx,
-            "base",
-        ),
+        <HookRegistry as GlobalChainLabelRegistryExt>::global_chain_label(ctx.hooks(), "base"),
     );
 
     assert_eq!(result, Ok("global-hook:base".into()));
@@ -704,30 +683,27 @@ struct FoldChainHooks {
 
 #[test]
 fn fold_chain_always_no_hooks_returns_default() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = FoldChainHooks::new();
     // No hooks: chain checks default (Ok → Continue), returns default.
-    let result = block_on(hooks.fold_chain_label(&ctx, "x"));
+    let result = block_on(hooks.fold_chain_label("x"));
     assert_eq!(result, Ok("default:x".to_owned()));
 }
 
 #[test]
 fn fold_chain_fallback_no_hooks_returns_default() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = FoldChainHooks::new();
     // No hooks: fallback default runs.
-    let result = block_on(hooks.fold_chain_pick(&ctx, "y"));
+    let result = block_on(hooks.fold_chain_pick("y"));
     assert_eq!(result, Some("fallback:y".to_owned()));
 }
 
 #[test]
 fn fold_chain_always_all_continue_returns_last_fold_result() {
-    let ctx = test_context(HookRegistry::new());
     // Two fold hooks, both Continue: second gets last=Ok("default:x+x") and folds again.
     let hooks = FoldChainHooks::new()
         .with_fold_chain_label(FoldChainAppend)
         .with_fold_chain_label(FoldChainAppend);
-    let result = block_on(hooks.fold_chain_label(&ctx, "x"));
+    let result = block_on(hooks.fold_chain_label("x"));
     // default="default:x", append1 sees last=Ok("default:x") → Ok("default:x+x"),
     // append2 sees last=Ok("default:x+x") → Ok("default:x+x+x"), both Continue.
     assert_eq!(result, Ok("default:x+x+x".to_owned()));
@@ -738,12 +714,11 @@ fn fold_and_chain_are_orthogonal_always() {
     // always + chain: default runs first, hooks see `last` and can short-circuit.
     // Hook order: fold_chain_append (continues), fold_chain_err (Err → Break),
     // fold_chain_unreachable (never reached).
-    let ctx = test_context(HookRegistry::new());
     let hooks = FoldChainHooks::new()
         .with_fold_chain_label(FoldChainAppend)
         .with_fold_chain_label(FoldChainErr)
         .with_fold_chain_label(FoldChainUnreachable);
-    let result = block_on(hooks.fold_chain_label(&ctx, "x"));
+    let result = block_on(hooks.fold_chain_label("x"));
     // default → Ok("default:x"), append gets last=Ok("default:x") → Ok("default:x+x"),
     // err gets last=Ok("default:x+x") → Err("blocked:default:x+x") → Break.
     assert_eq!(result, Err("blocked:default:x+x".to_owned()));
@@ -752,11 +727,10 @@ fn fold_and_chain_are_orthogonal_always() {
 #[test]
 fn fold_and_chain_are_orthogonal_fallback() {
     // fallback + chain: hooks fold through None → Some; default is never called.
-    let ctx = test_context(HookRegistry::new());
     let hooks = FoldChainHooks::new()
         .with_fold_chain_pick(FoldChainPickPass)
         .with_fold_chain_pick(FoldChainPickDecide);
-    let result = block_on(hooks.fold_chain_pick(&ctx, "y"));
+    let result = block_on(hooks.fold_chain_pick("y"));
     assert_eq!(result, Some("hook:y".to_owned()));
 }
 
@@ -796,42 +770,38 @@ struct AccumulateHooks {
 
 #[test]
 fn accumulate_no_hooks_returns_default_only() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = AccumulateHooks::new();
     // No hooks: only default contributes → Vec with one entry, joined.
-    let result = block_on(hooks.accumulate_label(&ctx, "x"));
+    let result = block_on(hooks.accumulate_label("x"));
     assert_eq!(result, "default:x");
 }
 
 #[test]
 fn accumulate_with_hooks_collects_all_independently() {
-    let ctx = test_context(HookRegistry::new());
     // Two hooks plus default: all contribute independently (no `last`).
     let hooks = AccumulateHooks::new()
         .with_accumulate_label(AccumulateHookA)
         .with_accumulate_label(AccumulateHookB);
-    let result = block_on(hooks.accumulate_label(&ctx, "x"));
+    let result = block_on(hooks.accumulate_label("x"));
     assert_eq!(result, "default:x|hook-a:x|hook-b:x");
 }
 
 #[test]
 fn accumulate_chain_stops_early_on_break() {
-    let ctx = test_context(HookRegistry::new());
     // stop hook produces "stop:early" which triggers Break; unreachable hook never runs.
     let hooks = AccumulateHooks::new()
         .with_accumulate_chain_label(AccumulateChainHookStop)
         .with_accumulate_chain_label(AccumulateChainHookUnreachable);
-    let result = block_on(hooks.accumulate_chain_label(&ctx, "x"));
+    let result = block_on(hooks.accumulate_chain_label("x"));
     // default → Continue, stop → Break; accumulate collects [default:x, stop:early].
     assert_eq!(result, "default:x|stop:early");
 }
 
 #[test]
 fn finalize_wraps_fold_result() {
-    let ctx = test_context(HookRegistry::new());
     // One fold hook appends; finalize wraps the final result in brackets.
     let hooks = AccumulateHooks::new().with_finalized_label(FinalizedAppend);
-    let result = block_on(hooks.finalized_label(&ctx, "x"));
+    let result = block_on(hooks.finalized_label("x"));
     // fold: default="default:x", append gets last=Some("default:x") → "default:x+x"
     // finalize: "[default:x+x]"
     assert_eq!(result, "[default:x+x]");
@@ -839,22 +809,20 @@ fn finalize_wraps_fold_result() {
 
 #[test]
 fn finalize_wraps_no_hooks_fold_result() {
-    let ctx = test_context(HookRegistry::new());
     let hooks = AccumulateHooks::new();
     // No hooks: only default runs, finalize wraps it.
-    let result = block_on(hooks.finalized_label(&ctx, "x"));
+    let result = block_on(hooks.finalized_label("x"));
     assert_eq!(result, "[default:x]");
 }
 
 #[test]
 fn chain_finalize_captures_early_exit() {
-    let ctx = test_context(HookRegistry::new());
     // stop hook triggers Break; unreachable hook never runs.
     // finalize must still wrap even though dispatch returned early.
     let hooks = AccumulateHooks::new()
         .with_chain_finalized_label(ChainFinalizedStop)
         .with_chain_finalized_label(ChainFinalizedUnreachable);
-    let result = block_on(hooks.chain_finalized_label(&ctx, "x"));
+    let result = block_on(hooks.chain_finalized_label("x"));
     // default → Continue, stop → "stop:chain" → Break (early return)
     // finalize wraps: "[stop:chain]"
     assert_eq!(result, "[stop:chain]");

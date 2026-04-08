@@ -18,19 +18,19 @@ use tracing::instrument::WithSubscriber as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
 #[lutum::def_hook(singleton)]
-async fn rewrite_number(_llm: &Lutum, value: usize) -> usize {
+async fn rewrite_number(value: usize) -> usize {
     value
 }
 
 #[lutum::def_hook(singleton)]
-async fn decorate_label(_llm: &Lutum, label: &str) -> String {
+async fn decorate_label(label: &str) -> String {
     label.to_string()
 }
 
 type Validation = Result<(), &'static str>;
 
 #[lutum::def_hook(singleton)]
-async fn validate_step(_llm: &Lutum, _step: &str) -> Validation {
+async fn validate_step(_step: &str) -> Validation {
     Ok(())
 }
 
@@ -96,7 +96,7 @@ impl Probe for TimelineProbe {
 
 #[async_trait]
 impl StatefulRewriteNumber for TimelineProbe {
-    async fn call_mut(&mut self, _llm: &Lutum, value: usize) -> usize {
+    async fn call_mut(&mut self, value: usize) -> usize {
         self.timeline.push(format!("hook:number:{value}"));
         value + 1
     }
@@ -104,7 +104,7 @@ impl StatefulRewriteNumber for TimelineProbe {
 
 #[async_trait]
 impl StatefulDecorateLabel for TimelineProbe {
-    async fn call_mut(&mut self, _llm: &Lutum, label: String) -> String {
+    async fn call_mut(&mut self, label: String) -> String {
         self.timeline.push(format!("hook:label:{label}"));
         format!("probe:{label}")
     }
@@ -260,7 +260,7 @@ impl Probe for HookErrorProbe {
 
 #[async_trait]
 impl StatefulValidateStep for HookErrorProbe {
-    async fn call_mut(&mut self, _llm: &Lutum, step: String) -> Validation {
+    async fn call_mut(&mut self, step: String) -> Validation {
         self.hook_calls += 1;
         if step == "blocked" {
             Err("blocked")
@@ -272,64 +272,56 @@ impl StatefulValidateStep for HookErrorProbe {
 
 fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooks {
     ProbeHooks::new()
-        .with_rewrite_number((std::marker::PhantomData::<fn() -> Lutum>, {
+        .with_rewrite_number({
             let dispatcher = dispatcher.clone();
-            move |ctx: Lutum, value: usize| {
+            move |value: usize| {
                 let dispatcher = dispatcher.clone();
                 async move {
                     dispatcher
                         .dispatch(move |probe| {
                             Box::pin(async move {
-                                <TimelineProbe as StatefulRewriteNumber>::call_mut(
-                                    probe, &ctx, value,
-                                )
-                                .await
+                                <TimelineProbe as StatefulRewriteNumber>::call_mut(probe, value)
+                                    .await
                             })
                         })
                         .await
                         .expect("probe dispatcher alive")
                 }
             }
-        }))
-        .with_decorate_label((std::marker::PhantomData::<fn() -> Lutum>, {
+        })
+        .with_decorate_label({
             let dispatcher = dispatcher.clone();
-            move |ctx: Lutum, label: String| {
+            move |label: String| {
                 let dispatcher = dispatcher.clone();
                 async move {
                     dispatcher
                         .dispatch(move |probe| {
                             Box::pin(async move {
-                                <TimelineProbe as StatefulDecorateLabel>::call_mut(
-                                    probe, &ctx, label,
-                                )
-                                .await
+                                <TimelineProbe as StatefulDecorateLabel>::call_mut(probe, label)
+                                    .await
                             })
                         })
                         .await
                         .expect("probe dispatcher alive")
                 }
             }
-        }))
+        })
 }
 
 fn hook_error_hooks(dispatcher: ProbeHandle<HookErrorProbe>) -> ProbeHooks {
-    ProbeHooks::new().with_validate_step((
-        std::marker::PhantomData::<fn() -> Lutum>,
-        move |ctx: Lutum, step: String| {
-            let dispatcher = dispatcher.clone();
-            async move {
-                dispatcher
-                    .dispatch(move |probe| {
-                        Box::pin(async move {
-                            <HookErrorProbe as StatefulValidateStep>::call_mut(probe, &ctx, step)
-                                .await
-                        })
+    ProbeHooks::new().with_validate_step(move |step: String| {
+        let dispatcher = dispatcher.clone();
+        async move {
+            dispatcher
+                .dispatch(move |probe| {
+                    Box::pin(async move {
+                        <HookErrorProbe as StatefulValidateStep>::call_mut(probe, step).await
                     })
-                    .await
-                    .expect("probe dispatcher alive")
-            }
-        },
-    ))
+                })
+                .await
+                .expect("probe dispatcher alive")
+        }
+    })
 }
 
 fn make_lutum(hooks: HookRegistry) -> Lutum {
@@ -387,15 +379,14 @@ async fn probe_dispatcher_serializes_trace_events_and_hook_rpcs() {
     let (_, runtime) = ProbeDispatcher::new(TimelineProbe::default()).into_parts();
     let probe_hooks = timeline_hooks(runtime.dispatcher());
     let llm = make_lutum(HookRegistry::new());
-    let runtime_llm = llm.clone();
 
     let report = runtime
         .run_future(
             &llm,
             async move {
                 tracing::info!("before-hook");
-                let number = probe_hooks.rewrite_number(&runtime_llm, 2).await;
-                let label = probe_hooks.decorate_label(&runtime_llm, "seed").await;
+                let number = probe_hooks.rewrite_number(2).await;
+                let label = probe_hooks.decorate_label("seed").await;
                 tracing::info!("after-hook");
 
                 ProbeArtifact { number, label }
@@ -447,13 +438,12 @@ async fn hook_proxy_can_return_probe_defined_errors() {
     let (_, runtime) = ProbeDispatcher::new(HookErrorProbe::default()).into_parts();
     let probe_hooks = hook_error_hooks(runtime.dispatcher());
     let llm = make_lutum(HookRegistry::new());
-    let runtime_llm = llm.clone();
 
     let report = runtime
         .run_future(
             &llm,
             async move {
-                let result = probe_hooks.validate_step(&runtime_llm, "blocked").await;
+                let result = probe_hooks.validate_step("blocked").await;
                 assert_eq!(result, Err("blocked"));
             }
             .with_subscriber(subscriber()),

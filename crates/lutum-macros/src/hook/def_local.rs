@@ -1,12 +1,10 @@
 use super::*;
 use heck::ToUpperCamelCase;
 use quote::{format_ident, quote};
-use syn::{ItemFn, Type};
+use syn::ItemFn;
 
 pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream {
     let HookSignature {
-        ctx_ident,
-        ctx_ty,
         explicit_args,
         output_ty,
         has_last: _,
@@ -34,11 +32,6 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
     let with_fn_ident = format_ident!("with_{}", fn_ident);
     let register_fn_ident = format_ident!("register_{}", fn_ident);
     let field_ident = fn_ident.clone();
-    let is_lutum_hook = is_lutum_ref(&ctx_ty);
-    let ctx_inner_ty: Type = match &ctx_ty {
-        Type::Reference(r) => *r.elem.clone(),
-        other => other.clone(),
-    };
 
     item_fn.vis = syn::parse_quote!(pub(crate));
     item_fn.sig.ident = default_impl_fn_ident.clone();
@@ -62,7 +55,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
     let cloned_hook_call_arg_names = explicit_args
         .iter()
         .map(|(ident, ty)| {
-            if matches!(ty, Type::Reference(_)) {
+            if matches!(ty, syn::Type::Reference(_)) {
                 quote! { #ident }
             } else {
                 quote! { #ident.clone() }
@@ -74,7 +67,12 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
     let has_ref_arg = explicit_args.iter().any(|(_, ty)| is_non_str_ref(ty));
 
     let def_span = item_fn.sig.ident.span();
-    let arg_tokens = compute_hook_arg_tokens(&explicit_args, &args_field_idents, &output_ty, trait_has_last);
+    let arg_tokens = compute_hook_arg_tokens(
+        &explicit_args,
+        &args_field_idents,
+        &output_ty,
+        trait_has_last,
+    );
     let dispatch_vars = &arg_tokens.dispatch_vars;
     let cloned_field_idents = &arg_tokens.cloned;
     let args_pre_conversion = &arg_tokens.pre_conversion;
@@ -87,58 +85,33 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
     };
     let flags = HookSlotFlags {
         trait_has_last,
-        is_lutum_hook,
         has_explicit_args,
         has_ref_arg,
     };
 
-    let hook_trait_defs = generate_hook_trait_defs(
-        def_span,
-        &vis,
-        &ctx_ty,
-        &ctx_ident,
-        &output_ty,
-        &slot,
-        &arg_tokens.trait_args,
-    );
+    let hook_trait_defs =
+        generate_hook_trait_defs(def_span, &vis, &output_ty, &slot, &arg_tokens.trait_args);
 
-    let fn_impl = generate_fn_blanket_impl(
-        &slot,
-        &flags,
-        &ctx_ty,
-        &ctx_inner_ty,
-        &ctx_ident,
-        &output_ty,
-        &arg_tokens,
-    );
+    let fn_impl = generate_fn_blanket_impl(&slot, &flags, &output_ty, &arg_tokens);
 
-    let blanket_impls = generate_blanket_impls(
-        &slot,
-        &ctx_ty,
-        &ctx_ident,
-        &output_ty,
-        &arg_tokens,
-        &hook_name,
-    );
+    let blanket_impls = generate_blanket_impls(&slot, &output_ty, &arg_tokens, &hook_name);
 
     let default_impl_call = quote! {
         #default_impl_fn_ident(
-            #ctx_ident,
             #(#hook_call_arg_names,)*
         )
         .await
     };
     let default_call = quote! {
         Self::#default_method_ident(
-            #ctx_ident,
             #(#cloned_hook_call_arg_names,)*
         )
         .await
     };
     let dyn_hook_dispatch_call = if trait_has_last {
-        quote! { hook.call_dyn(#ctx_ident, #(#cloned_field_idents,)* last).await }
+        quote! { hook.call_dyn(#(#cloned_field_idents,)* last).await }
     } else {
-        quote! { hook.call_dyn(#ctx_ident, #(#cloned_field_idents,)*).await }
+        quote! { hook.call_dyn(#(#cloned_field_idents,)*).await }
     };
 
     let (field_ty, field_init, register_impl) = match &kind {
@@ -169,14 +142,22 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         ),
     };
     let inner_dispatch = match &kind {
-        HookKind::Always(HookOptions { chain: None, accumulate: None, .. }) => quote! {
+        HookKind::Always(HookOptions {
+            chain: None,
+            accumulate: None,
+            ..
+        }) => quote! {
             let mut last = ::std::option::Option::Some(#default_call);
             for hook in &self.#field_ident {
                 last = ::std::option::Option::Some(#dyn_hook_dispatch_call);
             }
             last.expect("hook chain unexpectedly empty")
         },
-        HookKind::Always(HookOptions { chain: Some(chain_path), accumulate: None, .. }) => quote! {
+        HookKind::Always(HookOptions {
+            chain: Some(chain_path),
+            accumulate: None,
+            ..
+        }) => quote! {
             let mut last = ::std::option::Option::Some(#default_call);
             if #chain_path(last.as_ref().unwrap()).is_break() {
                 return last.unwrap();
@@ -190,7 +171,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             }
             last.unwrap()
         },
-        HookKind::Always(HookOptions { chain: None, accumulate: Some(accumulate_fn), .. }) => quote! {
+        HookKind::Always(HookOptions {
+            chain: None,
+            accumulate: Some(accumulate_fn),
+            ..
+        }) => quote! {
             let mut __outputs = ::std::vec::Vec::new();
             __outputs.push(#default_call);
             for hook in &self.#field_ident {
@@ -198,7 +183,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             }
             #accumulate_fn(__outputs)
         },
-        HookKind::Always(HookOptions { chain: Some(chain_path), accumulate: Some(accumulate_fn), .. }) => quote! {
+        HookKind::Always(HookOptions {
+            chain: Some(chain_path),
+            accumulate: Some(accumulate_fn),
+            ..
+        }) => quote! {
             let mut __outputs = ::std::vec::Vec::new();
             let __first = #default_call;
             if #chain_path(&__first).is_break() {
@@ -216,7 +205,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             }
             #accumulate_fn(__outputs)
         },
-        HookKind::Fallback(HookOptions { chain: None, accumulate: None, .. }) => quote! {
+        HookKind::Fallback(HookOptions {
+            chain: None,
+            accumulate: None,
+            ..
+        }) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
@@ -227,7 +220,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 last.expect("hook chain unexpectedly empty")
             }
         },
-        HookKind::Fallback(HookOptions { chain: Some(chain_path), accumulate: None, .. }) => quote! {
+        HookKind::Fallback(HookOptions {
+            chain: Some(chain_path),
+            accumulate: None,
+            ..
+        }) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
@@ -242,7 +239,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #default_call
             }
         },
-        HookKind::Fallback(HookOptions { chain: None, accumulate: Some(accumulate_fn), .. }) => quote! {
+        HookKind::Fallback(HookOptions {
+            chain: None,
+            accumulate: Some(accumulate_fn),
+            ..
+        }) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
@@ -253,7 +254,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #accumulate_fn(__outputs)
             }
         },
-        HookKind::Fallback(HookOptions { chain: Some(chain_path), accumulate: Some(accumulate_fn), .. }) => quote! {
+        HookKind::Fallback(HookOptions {
+            chain: Some(chain_path),
+            accumulate: Some(accumulate_fn),
+            ..
+        }) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
             } else {
@@ -273,7 +278,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             let singleton_args: Vec<proc_macro2::TokenStream> =
                 dispatch_vars.iter().map(|v| quote! { #v }).collect();
             let some_call = quote! {
-                hook.call_dyn(#ctx_ident, #(#singleton_args,)*).await
+                hook.call_dyn(#(#singleton_args,)*).await
             };
             quote! {
                 match &self.#field_ident {
@@ -354,7 +359,6 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #[allow(dead_code)]
                 pub async fn #fn_ident(
                     &self,
-                    #ctx_ident: #ctx_ty,
                     #(#dispatch_args,)*
                 ) -> #output_ty
                 #clone_where {
@@ -372,7 +376,6 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             (@default_impl) => {
                 #[allow(dead_code)]
                 async fn #default_method_ident(
-                    #ctx_ident: #ctx_ty,
                     #(#dispatch_args,)*
                 ) -> #output_ty {
                     #default_impl_call
@@ -415,7 +418,6 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                         #[allow(dead_code)]
                         pub async fn #fn_ident(
                             &self,
-                            #ctx_ident: #ctx_ty,
                             #(#dispatch_args,)*
                         ) -> #output_ty
                         #clone_where {
@@ -433,7 +435,6 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     [$($default_impls)*
                         #[allow(dead_code)]
                         async fn #default_method_ident(
-                            #ctx_ident: #ctx_ty,
                             #(#dispatch_args,)*
                         ) -> #output_ty {
                             #default_impl_call

@@ -120,7 +120,7 @@ enum Approval {
 /// Default: auto-accept (useful for non-interactive contexts and tests).
 /// Override with `ApprovalHooks::new().with_approve(impl ApproveToolCall)`.
 #[def_hook(fallback)]
-async fn approve_tool_call(_ctx: &Lutum, _name: &str, _args: &serde_json::Value) -> Approval {
+async fn approve_tool_call(_name: &str, _args: &serde_json::Value) -> Approval {
     Approval::Accept
 }
 
@@ -139,7 +139,6 @@ struct CliApprover;
 impl ApproveToolCall for CliApprover {
     async fn call(
         &self,
-        _ctx: &Lutum,
         name: String,
         args: &serde_json::Value,
         _last: Option<Approval>,
@@ -255,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
 
                 for tool_call in round.tool_calls.iter().cloned() {
                     let (name, raw_args) = extract_name_and_args(&tool_call);
-                    let approval = hooks.approve_tool_call(&llm, &name, &raw_args).await;
+                    let approval = hooks.approve_tool_call(&name, &raw_args).await;
 
                     match tool_call {
                         FsToolsCall::ListFiles(call) => match approval {

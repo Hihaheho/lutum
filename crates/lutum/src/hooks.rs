@@ -21,13 +21,12 @@
 //! use lutum::*;
 //!
 //! #[def_hook(always)]
-//! async fn validate_output(_ctx: &Lutum, output: &str) -> Result<(), String> {
+//! async fn validate_output(output: &str) -> Result<(), String> {
 //!     if output.trim().is_empty() { Err("output must not be empty".into()) } else { Ok(()) }
 //! }
 //!
 //! #[hook(ValidateOutput)]
 //! async fn block_dangerous_output(
-//!     _ctx: &Lutum,
 //!     output: &str,
 //!     last: Option<Result<(), String>>,
 //! ) -> Result<(), String> {
@@ -73,12 +72,12 @@
 //! use lutum::*;
 //!
 //! #[def_hook(always, chain = lutum::short_circuit)]
-//! async fn validate_output(_ctx: &Lutum, output: &str) -> Result<(), String> {
+//! async fn validate_output(output: &str) -> Result<(), String> {
 //!     if output.trim().is_empty() { Err("output must not be empty".into()) } else { Ok(()) }
 //! }
 //!
 //! #[hook(ValidateOutput)]
-//! async fn block_dangerous_output(_ctx: &Lutum, output: &str) -> Result<(), String> {
+//! async fn block_dangerous_output(output: &str) -> Result<(), String> {
 //!     if output.contains("rm -rf") {
 //!         Err("blocked dangerous command".into())
 //!     } else {
@@ -108,7 +107,7 @@
 //! - `ValidateOutputArgs` - named args struct for manual/stateful hook implementations
 //! - `ValidateOutput` - hook trait to implement
 //! - `ValidateOutputRegistryExt` - `register_validate_output` and `validate_output` on `HookRegistry`
-//! - `ValidateOutputLutumExt` - `validate_output` on `Lutum` (only for `&Lutum` first-arg hooks)
+//! - `ValidateOutputLutumExt` - `validate_output` on `Lutum`
 //!
 //! ## Defining a named implementation
 //!
@@ -141,20 +140,23 @@
 //!
 //! ## Hook kinds
 //!
-//! - **Core hooks** (`llm: &Lutum` first arg): called by `Lutum` — provider-agnostic decisions
-//! - **Adapter-local hooks** (`extensions: &RequestExtensions` first arg): called by adapters
-//!   using the `&HookRegistry` passed from `Lutum` — provider-specific request shaping
+//! - **Core hooks**: called by `Lutum` — provider-agnostic decisions
+//! - **Adapter-local hooks**: called by adapters using the `&HookRegistry` passed from `Lutum`
+//!   — provider-specific request shaping
+//!
+//! If a hook needs `&Lutum` or any other context, either store it in the implementing struct or
+//! add it as a normal explicit argument.
 //!
 //! ## Builtin adapter hooks
 //!
 //! Each adapter (`ClaudeAdapter`, `OpenAiAdapter`) defines its own model-selection and
 //! resolver hooks. Register them to override the adapter's default behaviour.
 //!
-//! `lutum` itself also defines `resolve_usage_estimate(&Lutum, &RequestExtensions,
+//! `lutum` itself also defines `resolve_usage_estimate(&RequestExtensions,
 //! OperationKind) -> UsageEstimate`. The default implementation reads a typed estimate from
 //! `RequestExtensions` and falls back to zero.
 
-use crate::{Lutum, OperationKind, RequestExtensions, budget::UsageEstimate};
+use crate::{OperationKind, RequestExtensions, budget::UsageEstimate};
 
 pub use lutum_protocol::hooks::{HookReentrancyError, HookRegistry, Stateful};
 
@@ -180,7 +182,6 @@ pub fn first_success<T>(option: &Option<T>) -> std::ops::ControlFlow<(), ()> {
 
 #[lutum_macros::def_global_hook(singleton)]
 pub async fn resolve_usage_estimate(
-    _ctx: &Lutum,
     extensions: &RequestExtensions,
     _kind: OperationKind,
 ) -> UsageEstimate {

@@ -39,7 +39,7 @@ fn normalize_phone(value: &str) -> String {
 }
 
 #[def_hook(always)]
-async fn audit_contact(_ctx: &Lutum, source: &str, contact: &Contact) -> Result<(), Vec<String>> {
+async fn audit_contact(source: &str, contact: &Contact) -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
     let source_tokens = source
         .split_whitespace()
@@ -146,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(contact) => {
                 println!("Extracted contact: {contact:#?}");
 
-                match hooks.audit_contact(&llm, source, &contact).await {
+                match hooks.audit_contact(source, &contact).await {
                     Ok(()) => {
                         println!("Rust gates: pass");
                         return Ok(());

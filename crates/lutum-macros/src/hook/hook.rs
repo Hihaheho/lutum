@@ -17,8 +17,6 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
     let helper_macro_path = hook_named_impl_helper_macro_path(&slot_path);
 
     let HookSignature {
-        ctx_ident,
-        ctx_ty,
         explicit_args,
         output_ty,
         has_last,
@@ -76,10 +74,9 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
             impl #hook_trait_path for #struct_ident {
                 async fn call(
                     &self,
-                    #ctx_ident: #ctx_ty,
                     #(#trait_args,)*
                 ) -> #output_ty {
-                    #fn_ident(#ctx_ident, #(#fn_call_args,)*).await
+                    #fn_ident(#(#fn_call_args,)*).await
                 }
             }
         }

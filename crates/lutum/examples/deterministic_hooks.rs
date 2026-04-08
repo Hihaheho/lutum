@@ -4,12 +4,12 @@ use lutum::*;
 use lutum_openai::OpenAiAdapter;
 
 #[def_hook(fallback)]
-async fn validate_prompt(_ctx: &Lutum, _prompt: &str) -> Result<(), String> {
+async fn validate_prompt(_prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
 #[def_hook(fallback)]
-async fn validate_output(_ctx: &Lutum, _output: &str) -> Result<(), String> {
+async fn validate_output(_output: &str) -> Result<(), String> {
     Ok(())
 }
 
@@ -20,11 +20,7 @@ struct DeterministicHooks {
 }
 
 #[hook(ValidatePrompt)]
-async fn reject_empty_prompt(
-    _ctx: &Lutum,
-    prompt: &str,
-    last: Option<Result<(), String>>,
-) -> Result<(), String> {
+async fn reject_empty_prompt(prompt: &str, last: Option<Result<(), String>>) -> Result<(), String> {
     if let Some(Err(err)) = last {
         return Err(err);
     }
@@ -38,7 +34,6 @@ async fn reject_empty_prompt(
 
 #[hook(ValidateOutput)]
 async fn block_dangerous_output(
-    _ctx: &Lutum,
     output: &str,
     last: Option<Result<(), String>>,
 ) -> Result<(), String> {
@@ -83,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     hooks
-        .validate_prompt(&llm, prompt)
+        .validate_prompt(prompt)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     let output = ask(
@@ -93,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     hooks
-        .validate_output(&llm, &output)
+        .validate_output(&output)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     println!("{output}");

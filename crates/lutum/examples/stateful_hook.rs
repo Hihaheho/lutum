@@ -10,7 +10,7 @@ const FORBIDDEN_TOKENS: &[&str] = &["rm", "mv", "sudo", ">", ">>", "dd"];
 const MAX_PIPES: usize = 2;
 
 #[def_hook(always)]
-async fn validate_command(_ctx: &Lutum, cmd: &str) -> Validation {
+async fn validate_command(cmd: &str) -> Validation {
     let failures = policy_failures(cmd);
     if failures.is_empty() {
         Ok(())
@@ -32,12 +32,7 @@ struct RetryMemory {
 
 #[async_trait::async_trait]
 impl StatefulValidateCommand for RetryMemory {
-    async fn call_mut(
-        &mut self,
-        _ctx: &Lutum,
-        cmd: String,
-        last: Option<Validation>,
-    ) -> Validation {
+    async fn call_mut(&mut self, cmd: String, last: Option<Validation>) -> Validation {
         let command = cmd.trim().to_string();
         let mut failures = match last {
             Some(Ok(())) | None => Vec::new(),
@@ -121,7 +116,7 @@ async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> 
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
-    let model = ModelName::new(&std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into()))?;
+    let model = ModelName::new(std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into()))?;
     let hooks = ShellHooks::new().with_validate_command(Stateful::new(RetryMemory::default()));
     let llm = Lutum::with_hooks(
         Arc::new(
@@ -141,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         let cmd = ask(&llm, system, &prompt).await?;
         println!("Attempt {attempt}: {cmd}");
 
-        match hooks.validate_command(&llm, &cmd).await {
+        match hooks.validate_command(&cmd).await {
             Ok(()) => {
                 println!("Policy: pass");
                 return Ok(());

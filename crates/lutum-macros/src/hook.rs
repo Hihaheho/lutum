@@ -21,8 +21,6 @@ use syn::{
 };
 
 pub struct HookSignature {
-    ctx_ident: Ident,
-    ctx_ty: Type,
     explicit_args: Vec<(Ident, Type)>,
     output_ty: Type,
     has_last: bool,
@@ -109,36 +107,6 @@ fn analyze_hook_signature(
 
     let output_ty = output_type_or_unit(&item_fn.sig.output);
     let inputs = item_fn.sig.inputs.iter().collect::<Vec<_>>();
-    if inputs.is_empty() {
-        return Err(syn::Error::new_spanned(
-            &item_fn.sig.inputs,
-            "hook attributes require a shared-reference dispatch context as the first argument (e.g. `llm: &Lutum`)",
-        ));
-    }
-
-    let Some(FnArg::Typed(ctx_arg)) = inputs.first().copied() else {
-        return Err(syn::Error::new_spanned(
-            inputs.first().expect("hook must have inputs"),
-            "first hook argument must be a typed shared-reference dispatch context (e.g. `llm: &Lutum` or `extensions: &RequestExtensions`)",
-        ));
-    };
-    let Pat::Ident(PatIdent {
-        ident: ctx_ident, ..
-    }) = ctx_arg.pat.as_ref()
-    else {
-        return Err(syn::Error::new_spanned(
-            &ctx_arg.pat,
-            "expected an identifier for the first hook argument",
-        ));
-    };
-    let Type::Reference(_) = ctx_arg.ty.as_ref() else {
-        return Err(syn::Error::new_spanned(
-            &ctx_arg.ty,
-            "first hook argument must be a shared-reference dispatch context (e.g. `&Lutum` or `&RequestExtensions`)",
-        ));
-    };
-    let ctx_ident = ctx_ident.clone();
-    let ctx_ty = (*ctx_arg.ty).clone();
 
     let last_arg = inputs.last().copied();
     let has_last = last_arg
@@ -166,7 +134,7 @@ fn analyze_hook_signature(
 
     let mut explicit_args = Vec::new();
     let explicit_end = inputs.len() - usize::from(has_last);
-    for arg in &inputs[1..explicit_end] {
+    for arg in &inputs[..explicit_end] {
         let FnArg::Typed(pat_ty) = arg else {
             return Err(syn::Error::new_spanned(arg, "unsupported hook argument"));
         };
@@ -180,8 +148,6 @@ fn analyze_hook_signature(
     }
 
     Ok(HookSignature {
-        ctx_ident,
-        ctx_ty,
         explicit_args,
         output_ty,
         has_last,
@@ -290,23 +256,6 @@ fn is_str_ref(ty: &Type) -> bool {
 
 fn is_str_type(ty: &Type) -> bool {
     matches!(ty, Type::Path(p) if p.path.is_ident("str"))
-}
-
-fn is_lutum_ref(ty: &Type) -> bool {
-    let Type::Reference(reference) = ty else {
-        return false;
-    };
-    if reference.mutability.is_some() {
-        return false;
-    }
-    let Type::Path(type_path) = reference.elem.as_ref() else {
-        return false;
-    };
-    type_path
-        .path
-        .segments
-        .last()
-        .is_some_and(|segment| segment.ident == "Lutum")
 }
 
 fn normalized_hook_arg_field_idents(explicit_args: &[(Ident, Type)]) -> Vec<Ident> {

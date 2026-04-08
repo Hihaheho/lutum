@@ -7,7 +7,6 @@ mod objective;
 mod probe;
 mod score;
 
-
 pub use crate::probe::{
     Probe, ProbeContext, ProbeDecision, ProbeDispatchError, ProbeDispatchFuture, ProbeDispatchHook,
     ProbeDispatcher, ProbeHandle, ProbeHookSlot, ProbeRunError, ProbeRuntime, ProbeScoreError,

@@ -1,6 +1,6 @@
 use super::*;
 use quote::{format_ident, quote, quote_spanned};
-use syn::{Ident, Type, Visibility};
+use syn::{Type, Visibility};
 
 /// The three generated trait identifiers for a hook slot.
 pub struct HookSlotIdents {
@@ -12,7 +12,6 @@ pub struct HookSlotIdents {
 /// Boolean properties of a hook slot derived from its definition.
 pub struct HookSlotFlags {
     pub trait_has_last: bool,
-    pub is_lutum_hook: bool,
     pub has_explicit_args: bool,
     pub has_ref_arg: bool,
 }
@@ -110,8 +109,10 @@ pub fn compute_hook_arg_tokens(
 
     let field_ident_names: Vec<proc_macro2::TokenStream> =
         args_field_idents.iter().map(|fi| quote! { #fi }).collect();
-    let fn_bound_types: Vec<proc_macro2::TokenStream> =
-        explicit_args.iter().map(|(_, ty)| hook_param_type(ty)).collect();
+    let fn_bound_types: Vec<proc_macro2::TokenStream> = explicit_args
+        .iter()
+        .map(|(_, ty)| hook_param_type(ty))
+        .collect();
 
     let clone_bounds: Vec<proc_macro2::TokenStream> = explicit_args
         .iter()
@@ -141,8 +142,6 @@ pub fn compute_hook_arg_tokens(
 pub fn generate_hook_trait_defs(
     def_span: proc_macro2::Span,
     vis: &Visibility,
-    ctx_ty: &Type,
-    ctx_ident: &Ident,
     output_ty: &Type,
     slot: &HookSlotIdents,
     trait_args: &[proc_macro2::TokenStream],
@@ -156,7 +155,6 @@ pub fn generate_hook_trait_defs(
         #vis trait #hook_trait_ident: Send + Sync {
             async fn call(
                 &self,
-                #ctx_ident: #ctx_ty,
                 #(#trait_args,)*
             ) -> #output_ty;
         }
@@ -171,7 +169,6 @@ pub fn generate_hook_trait_defs(
 
             async fn call_mut(
                 &mut self,
-                #ctx_ident: #ctx_ty,
                 #(#trait_args,)*
             ) -> #output_ty;
         }
@@ -182,7 +179,6 @@ pub fn generate_hook_trait_defs(
         pub(crate) trait #dyn_hook_trait_ident: Send + Sync {
             async fn call_dyn(
                 &self,
-                #ctx_ident: #ctx_ty,
                 #(#trait_args,)*
             ) -> #output_ty;
         }
@@ -196,9 +192,6 @@ pub fn generate_hook_trait_defs(
 pub fn generate_fn_blanket_impl(
     slot: &HookSlotIdents,
     flags: &HookSlotFlags,
-    ctx_ty: &Type,
-    ctx_inner_ty: &Type,
-    ctx_ident: &Ident,
     output_ty: &Type,
     arg_tokens: &HookArgTokens,
 ) -> proc_macro2::TokenStream {
@@ -208,7 +201,6 @@ pub fn generate_fn_blanket_impl(
 
     let hook_trait_ident = &slot.hook_trait;
     let trait_has_last = flags.trait_has_last;
-    let is_lutum_hook = flags.is_lutum_hook;
 
     let HookArgTokens {
         trait_args,
@@ -228,39 +220,6 @@ pub fn generate_fn_blanket_impl(
         quote! { F: Fn(#(#fn_bound_types,)*) -> __Fut + Send + Sync }
     };
 
-    let ctx_fn_blanket = if is_lutum_hook {
-        let ctx_fn_bound = if trait_has_last {
-            quote! { F: Fn(#ctx_inner_ty, #(#fn_bound_types,)* ::std::option::Option<#output_ty>) -> __Fut + Send + Sync }
-        } else {
-            quote! { F: Fn(#ctx_inner_ty, #(#fn_bound_types,)*) -> __Fut + Send + Sync }
-        };
-        let ctx_fn_call = if trait_has_last {
-            quote! { (self.1)(#ctx_ident.clone(), #(#field_ident_names,)* last).await }
-        } else {
-            quote! { (self.1)(#ctx_ident.clone(), #(#field_ident_names,)*).await }
-        };
-        quote! {
-            #[allow(dead_code)]
-            #[::async_trait::async_trait]
-            impl<F, __Fut> #hook_trait_ident
-                for (::std::marker::PhantomData<fn() -> #ctx_inner_ty>, F)
-            where
-                #ctx_fn_bound,
-                __Fut: ::std::future::Future<Output = #output_ty> + Send + 'static,
-            {
-                async fn call(
-                    &self,
-                    #ctx_ident: #ctx_ty,
-                    #(#trait_args,)*
-                ) -> #output_ty {
-                    #ctx_fn_call
-                }
-            }
-        }
-    } else {
-        quote! {}
-    };
-
     quote! {
         #[allow(dead_code)]
         #[::async_trait::async_trait]
@@ -271,22 +230,17 @@ pub fn generate_fn_blanket_impl(
         {
             async fn call(
                 &self,
-                _: #ctx_ty,
                 #(#trait_args,)*
             ) -> #output_ty {
                 #fn_impl_call
             }
         }
-
-        #ctx_fn_blanket
     }
 }
 
 /// Emits the dyn-wrapper and `Stateful<T>` blanket impls for the hook slot.
 pub fn generate_blanket_impls(
     slot: &HookSlotIdents,
-    ctx_ty: &Type,
-    ctx_ident: &Ident,
     output_ty: &Type,
     arg_tokens: &HookArgTokens,
     hook_name: &str,
@@ -301,12 +255,11 @@ pub fn generate_blanket_impls(
     } = arg_tokens;
 
     let dyn_hook_impl_call = quote! {
-        <T as #hook_trait_ident>::call(self, #ctx_ident, #(#trait_call_arg_names,)*).await
+        <T as #hook_trait_ident>::call(self, #(#trait_call_arg_names,)*).await
     };
     let stateful_hook_impl_call = quote! {
         <T as #stateful_hook_trait_ident>::call_mut(
             &mut *hook,
-            #ctx_ident,
             #(#trait_call_arg_names,)*
         )
         .await
@@ -320,7 +273,6 @@ pub fn generate_blanket_impls(
         {
             async fn call_dyn(
                 &self,
-                #ctx_ident: #ctx_ty,
                 #(#trait_args,)*
             ) -> #output_ty {
                 #dyn_hook_impl_call
@@ -335,7 +287,6 @@ pub fn generate_blanket_impls(
         {
             async fn call(
                 &self,
-                #ctx_ident: #ctx_ty,
                 #(#trait_args,)*
             ) -> #output_ty {
                 let Some(mut hook) = self.try_lock() else {

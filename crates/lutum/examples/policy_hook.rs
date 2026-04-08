@@ -5,7 +5,7 @@ use std::sync::Arc;
 type Validation = Result<(), Vec<String>>;
 
 #[def_hook(fallback)]
-async fn validate_command(_ctx: &Lutum, _cmd: &str) -> Validation {
+async fn validate_command(_cmd: &str) -> Validation {
     Ok(())
 }
 
@@ -23,7 +23,7 @@ struct CommandPolicy {
 // A struct is clearer here: multiple policy fields, shared helper logic, no capture noise.
 #[async_trait::async_trait]
 impl ValidateCommand for CommandPolicy {
-    async fn call(&self, _ctx: &Lutum, cmd: String, last: Option<Validation>) -> Validation {
+    async fn call(&self, cmd: String, last: Option<Validation>) -> Validation {
         if let Some(Err(reasons)) = last {
             return Err(reasons);
         }
@@ -68,7 +68,7 @@ async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> 
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
-    let model = ModelName::new(&std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into()))?;
+    let model = ModelName::new(std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into()))?;
     let hooks = ShellHooks::new().with_validate_command(CommandPolicy {
         allowed_prefixes: &["/var/log", "/tmp"],
         forbidden_tokens: &["rm", "mv", "sudo", ">", ">>", "dd"],
@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
         };
         let cmd = ask(&llm, system, &prompt).await?;
         println!("Attempt {attempt}: {cmd}");
-        match hooks.validate_command(&llm, &cmd).await {
+        match hooks.validate_command(&cmd).await {
             Ok(()) => {
                 println!("Policy: pass");
                 return Ok(());

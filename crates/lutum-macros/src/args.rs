@@ -119,6 +119,11 @@ impl syn::parse::Parse for HookDefAttrs {
                 }
             }
         }
-        Ok(Self { mode, chain, accumulate, finalize })
+        Ok(Self {
+            mode,
+            chain,
+            accumulate,
+            finalize,
+        })
     }
 }
