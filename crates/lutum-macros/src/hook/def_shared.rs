@@ -2,6 +2,18 @@ use super::*;
 use quote::{format_ident, quote, quote_spanned};
 use syn::{Type, Visibility};
 
+fn trait_generics_tokens(
+    generics: &syn::Generics,
+) -> (proc_macro2::TokenStream, Option<&syn::WhereClause>) {
+    let params = &generics.params;
+    let trait_generics = if params.is_empty() {
+        quote! {}
+    } else {
+        quote! { <#params> }
+    };
+    (trait_generics, generics.where_clause.as_ref())
+}
+
 /// The three generated trait identifiers for a hook slot.
 pub struct HookSlotIdents {
     pub hook_trait: Ident,
@@ -145,14 +157,18 @@ pub fn generate_hook_trait_defs(
     output_ty: &Type,
     slot: &HookSlotIdents,
     trait_args: &[proc_macro2::TokenStream],
+    generics: &syn::Generics,
 ) -> proc_macro2::TokenStream {
     let hook_trait_ident = &slot.hook_trait;
     let stateful_hook_trait_ident = &slot.stateful;
     let dyn_hook_trait_ident = &slot.dyn_trait;
+    let (trait_generics, where_clause) = trait_generics_tokens(generics);
     let hook_trait_def = quote_spanned! { def_span =>
         #[allow(dead_code)]
         #[::async_trait::async_trait]
-        #vis trait #hook_trait_ident: Send + Sync {
+        #vis trait #hook_trait_ident #trait_generics: Send + Sync
+        #where_clause
+        {
             async fn call(
                 &self,
                 #(#trait_args,)*
@@ -162,7 +178,9 @@ pub fn generate_hook_trait_defs(
     let stateful_hook_trait_def = quote_spanned! { def_span =>
         #[allow(dead_code)]
         #[::async_trait::async_trait]
-        #vis trait #stateful_hook_trait_ident: Send {
+        #vis trait #stateful_hook_trait_ident #trait_generics: Send
+        #where_clause
+        {
             fn on_reentrancy(err: ::lutum_protocol::hooks::HookReentrancyError) -> #output_ty {
                 panic!("stateful hook reentered: {err}");
             }
@@ -176,7 +194,9 @@ pub fn generate_hook_trait_defs(
     let dyn_hook_trait_def = quote_spanned! { def_span =>
         #[allow(dead_code)]
         #[::async_trait::async_trait]
-        pub(crate) trait #dyn_hook_trait_ident: Send + Sync {
+        pub(crate) trait #dyn_hook_trait_ident #trait_generics: Send + Sync
+        #where_clause
+        {
             async fn call_dyn(
                 &self,
                 #(#trait_args,)*
@@ -194,8 +214,9 @@ pub fn generate_fn_blanket_impl(
     flags: &HookSlotFlags,
     output_ty: &Type,
     arg_tokens: &HookArgTokens,
+    generics: &syn::Generics,
 ) -> proc_macro2::TokenStream {
-    if !flags.has_explicit_args || flags.has_ref_arg {
+    if !flags.has_explicit_args || flags.has_ref_arg || !generics.params.is_empty() {
         return quote! {};
     }
 
@@ -243,6 +264,7 @@ pub fn generate_blanket_impls(
     slot: &HookSlotIdents,
     output_ty: &Type,
     arg_tokens: &HookArgTokens,
+    generics: &syn::Generics,
     hook_name: &str,
 ) -> proc_macro2::TokenStream {
     let hook_trait_ident = &slot.hook_trait;
@@ -253,23 +275,49 @@ pub fn generate_blanket_impls(
         trait_call_arg_names,
         ..
     } = arg_tokens;
+    let (_, slot_ty_generics, _) = generics.split_for_impl();
 
     let dyn_hook_impl_call = quote! {
-        <T as #hook_trait_ident>::call(self, #(#trait_call_arg_names,)*).await
+        <__Hook as #hook_trait_ident #slot_ty_generics>::call(self, #(#trait_call_arg_names,)*)
+            .await
     };
     let stateful_hook_impl_call = quote! {
-        <T as #stateful_hook_trait_ident>::call_mut(
+        <__StatefulHook as #stateful_hook_trait_ident #slot_ty_generics>::call_mut(
             &mut *hook,
             #(#trait_call_arg_names,)*
         )
         .await
     };
 
+    let mut dyn_impl_generics = generics.clone();
+    dyn_impl_generics
+        .params
+        .insert(0, syn::parse_quote!(__Hook));
+    dyn_impl_generics
+        .make_where_clause()
+        .predicates
+        .push(syn::parse_quote!(__Hook: #hook_trait_ident #slot_ty_generics));
+    let (dyn_impl_generics, _, dyn_where_clause) = dyn_impl_generics.split_for_impl();
+
+    let mut stateful_impl_generics = generics.clone();
+    stateful_impl_generics
+        .params
+        .insert(0, syn::parse_quote!(__StatefulHook));
+    stateful_impl_generics
+        .make_where_clause()
+        .predicates
+        .push(
+            syn::parse_quote!(
+                __StatefulHook: #stateful_hook_trait_ident #slot_ty_generics + 'static
+            ),
+        );
+    let (stateful_impl_generics, _, stateful_where_clause) =
+        stateful_impl_generics.split_for_impl();
+
     quote! {
         #[::async_trait::async_trait]
-        impl<T> #dyn_hook_trait_ident for T
-        where
-            T: #hook_trait_ident,
+        impl #dyn_impl_generics #dyn_hook_trait_ident #slot_ty_generics for __Hook
+        #dyn_where_clause
         {
             async fn call_dyn(
                 &self,
@@ -281,19 +329,19 @@ pub fn generate_blanket_impls(
 
         #[allow(dead_code)]
         #[::async_trait::async_trait]
-        impl<T> #hook_trait_ident for ::lutum_protocol::hooks::Stateful<T>
-        where
-            T: #stateful_hook_trait_ident + 'static,
+        impl #stateful_impl_generics #hook_trait_ident #slot_ty_generics
+            for ::lutum_protocol::hooks::Stateful<__StatefulHook>
+        #stateful_where_clause
         {
             async fn call(
                 &self,
                 #(#trait_args,)*
             ) -> #output_ty {
                 let Some(mut hook) = self.try_lock() else {
-                    return <T as #stateful_hook_trait_ident>::on_reentrancy(
+                    return <__StatefulHook as #stateful_hook_trait_ident #slot_ty_generics>::on_reentrancy(
                         ::lutum_protocol::hooks::HookReentrancyError {
                             slot: #hook_name,
-                            hook_type: ::std::any::type_name::<T>(),
+                            hook_type: ::std::any::type_name::<__StatefulHook>(),
                         },
                     );
                 };

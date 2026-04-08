@@ -3,11 +3,41 @@ use heck::ToUpperCamelCase;
 use quote::{format_ident, quote};
 use syn::{ItemFn, Lifetime, Type};
 
+fn fn_generics_tokens(
+    generics: &syn::Generics,
+) -> (proc_macro2::TokenStream, Option<&syn::WhereClause>) {
+    let params = &generics.params;
+    let fn_generics = if params.is_empty() {
+        quote! {}
+    } else {
+        quote! { <#params> }
+    };
+    (fn_generics, generics.where_clause.as_ref())
+}
+
+fn merged_where_clause_tokens(
+    leading_predicates: &[proc_macro2::TokenStream],
+    where_clause: Option<&syn::WhereClause>,
+) -> proc_macro2::TokenStream {
+    let mut predicates = leading_predicates.to_vec();
+    if let Some(where_clause) = where_clause {
+        predicates.extend(where_clause.predicates.iter().map(|predicate| quote! { #predicate }));
+    }
+    if predicates.is_empty() {
+        quote! {}
+    } else {
+        quote! { where #(#predicates,)* }
+    }
+}
+
 fn hook_ext_arg_type(ty: &Type) -> Type {
     match ty {
         Type::Reference(reference) => {
             let mut reference = reference.clone();
-            reference.lifetime = Some(Lifetime::new("'a", proc_macro2::Span::call_site()));
+            reference.lifetime = Some(Lifetime::new(
+                "'__lutum_a",
+                proc_macro2::Span::call_site(),
+            ));
             Type::Reference(reference)
         }
         _ => ty.clone(),
@@ -15,16 +45,19 @@ fn hook_ext_arg_type(ty: &Type) -> Type {
 }
 
 pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream {
+    let allow_generics = matches!(&kind, HookKind::Singleton);
     let HookSignature {
         explicit_args,
         output_ty,
         has_last: _,
         last_span: _,
+        generics,
     } = match analyze_hook_signature(
         &item_fn,
         kind.default_last_requirement(),
         "#[def_global_hook(singleton)] does not accept a `last: Option<Return>` argument",
         HookLastRecognition::LastNamedCompatibleOption,
+        allow_generics,
     ) {
         Ok(signature) => signature,
         Err(err) => return err.to_compile_error(),
@@ -76,6 +109,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
 
     let has_explicit_args = !explicit_args.is_empty();
     let has_ref_arg = explicit_args.iter().any(|(_, ty)| is_non_str_ref(ty));
+    let (_, slot_ty_generics, _) = generics.split_for_impl();
 
     let arg_tokens = compute_hook_arg_tokens(
         &explicit_args,
@@ -85,7 +119,11 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
     );
     let cloned_field_idents = &arg_tokens.cloned;
     let args_pre_conversion = &arg_tokens.pre_conversion;
-    let clone_where = &arg_tokens.clone_where;
+    let clone_where_bounds: Vec<proc_macro2::TokenStream> = explicit_args
+        .iter()
+        .filter(|(_, ty)| !matches!(ty, Type::Reference(_)))
+        .map(|(_, ty)| quote! { #ty: ::std::clone::Clone })
+        .collect();
 
     let slot = HookSlotIdents {
         hook_trait: hook_trait_ident.clone(),
@@ -104,11 +142,13 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         &output_ty,
         &slot,
         &arg_tokens.trait_args,
+        &generics,
     );
 
-    let fn_impl = generate_fn_blanket_impl(&slot, &flags, &output_ty, &arg_tokens);
+    let fn_impl = generate_fn_blanket_impl(&slot, &flags, &output_ty, &arg_tokens, &generics);
 
-    let blanket_impls = generate_blanket_impls(&slot, &output_ty, &arg_tokens, &hook_name);
+    let blanket_impls =
+        generate_blanket_impls(&slot, &output_ty, &arg_tokens, &generics, &hook_name);
 
     let default_call = quote! {
         #default_fn_ident(
@@ -126,21 +166,34 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         HookKind::Always(..) | HookKind::Fallback(..) => quote! {
             let slot = self
                 .slots_mut()
-                .entry(::std::any::TypeId::of::<::std::boxed::Box<dyn #slot_ident>>())
+                .entry(
+                    ::std::any::TypeId::of::<
+                        ::std::boxed::Box<dyn #slot_ident #slot_ty_generics>,
+                    >(),
+                )
                 .or_insert_with(|| {
                     ::std::boxed::Box::new(
-                        ::std::vec::Vec::<::std::sync::Arc<dyn #dyn_hook_trait_ident>>::new(),
+                        ::std::vec::Vec::<
+                            ::std::sync::Arc<dyn #dyn_hook_trait_ident #slot_ty_generics>,
+                        >::new(),
                     ) as ::std::boxed::Box<dyn ::std::any::Any + Send + Sync>
                 });
-            slot.downcast_mut::<::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident>>>()
-                .expect("hook slot type mismatch")
-                .push(::std::sync::Arc::new(hook));
+            slot.downcast_mut::<
+                ::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident #slot_ty_generics>>,
+            >()
+            .expect("hook slot type mismatch")
+            .push(::std::sync::Arc::new(hook));
         },
         HookKind::Singleton => quote! {
-            let hook = ::std::sync::Arc::new(hook) as ::std::sync::Arc<dyn #dyn_hook_trait_ident>;
+            let hook = ::std::sync::Arc::new(hook)
+                as ::std::sync::Arc<dyn #dyn_hook_trait_ident #slot_ty_generics>;
             match self
                 .slots_mut()
-                .entry(::std::any::TypeId::of::<::std::boxed::Box<dyn #slot_ident>>())
+                .entry(
+                    ::std::any::TypeId::of::<
+                        ::std::boxed::Box<dyn #slot_ident #slot_ty_generics>,
+                    >(),
+                )
             {
                 ::std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(
@@ -151,7 +204,9 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                 ::std::collections::hash_map::Entry::Occupied(mut entry) => {
                     let slot = entry
                         .get_mut()
-                        .downcast_mut::<::std::sync::Arc<dyn #dyn_hook_trait_ident>>()
+                        .downcast_mut::<
+                            ::std::sync::Arc<dyn #dyn_hook_trait_ident #slot_ty_generics>,
+                        >()
                         .expect("hook slot type mismatch");
                     ::tracing::warn!(
                         slot = #hook_name,
@@ -166,20 +221,30 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         HookKind::Always(..) | HookKind::Fallback(..) => quote! {
             let chain = self
                 .slots()
-                .get(&::std::any::TypeId::of::<::std::boxed::Box<dyn #slot_ident>>())
+                .get(
+                    &::std::any::TypeId::of::<
+                        ::std::boxed::Box<dyn #slot_ident #slot_ty_generics>,
+                    >(),
+                )
                 .and_then(|slot| {
                     slot.downcast_ref::<
-                        ::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident>>,
+                        ::std::vec::Vec<
+                            ::std::sync::Arc<dyn #dyn_hook_trait_ident #slot_ty_generics>,
+                        >,
                     >()
                 });
         },
         HookKind::Singleton => quote! {
             let hook = self
                 .slots()
-                .get(&::std::any::TypeId::of::<::std::boxed::Box<dyn #slot_ident>>())
+                .get(
+                    &::std::any::TypeId::of::<
+                        ::std::boxed::Box<dyn #slot_ident #slot_ty_generics>,
+                    >(),
+                )
                 .and_then(|slot| {
                     slot.downcast_ref::<
-                        ::std::sync::Arc<dyn #dyn_hook_trait_ident>,
+                        ::std::sync::Arc<dyn #dyn_hook_trait_ident #slot_ty_generics>,
                     >()
                 });
         },
@@ -190,7 +255,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             {
                 use ::lutum::Chain as _;
                 let __d: #chain_default_ty = ::std::default::Default::default();
-                __d.call(&__next).is_break()
+                __d.call(&__next).await.is_break()
             }
         }
     };
@@ -376,23 +441,46 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         },
         None => inner_dispatch,
     };
+    let mut register_method_generics = generics.clone();
+    register_method_generics
+        .params
+        .push(syn::parse_quote!(H));
+    register_method_generics
+        .make_where_clause()
+        .predicates
+        .push(syn::parse_quote!(H: #hook_trait_ident #slot_ty_generics + 'static));
+    let (register_method_generics, register_method_where_clause) =
+        fn_generics_tokens(&register_method_generics);
+
+    let mut dispatch_method_generics = generics.clone();
+    dispatch_method_generics
+        .params
+        .insert(0, syn::parse_quote!('__lutum_a));
+    let (dispatch_method_generics, dispatch_method_where_clause) =
+        fn_generics_tokens(&dispatch_method_generics);
+    let dispatch_method_where_clause =
+        merged_where_clause_tokens(&clone_where_bounds, dispatch_method_where_clause);
+    let register_method_where_clause = merged_where_clause_tokens(
+        &[quote! { Self: Sized }],
+        register_method_where_clause,
+    );
 
     let lutum_ext = quote! {
         #[allow(dead_code)]
         #vis trait #lutum_ext_ident {
-            fn #fn_ident<'a>(
-                &'a self,
+            fn #fn_ident #dispatch_method_generics(
+                &'__lutum_a self,
                 #(#context_args,)*
-            ) -> impl ::std::future::Future<Output = #output_ty> + 'a
-            #clone_where;
+            ) -> impl ::std::future::Future<Output = #output_ty> + '__lutum_a
+            #dispatch_method_where_clause;
         }
 
         impl #lutum_ext_ident for ::lutum::Lutum {
-            fn #fn_ident<'a>(
-                &'a self,
+            fn #fn_ident #dispatch_method_generics(
+                &'__lutum_a self,
                 #(#context_args,)*
-            ) -> impl ::std::future::Future<Output = #output_ty> + 'a
-            #clone_where {
+            ) -> impl ::std::future::Future<Output = #output_ty> + '__lutum_a
+            #dispatch_method_where_clause {
                 <::lutum_protocol::HookRegistry as #registry_ext_ident>::#fn_ident(
                     self.hooks(),
                     #(#hook_call_arg_names,)*
@@ -435,33 +523,29 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
 
         #[allow(dead_code)]
         #vis trait #registry_ext_ident {
-            fn #register_fn_ident<H>(self, hook: H) -> Self
-            where
-                H: #hook_trait_ident + 'static,
-                Self: Sized;
+            fn #register_fn_ident #register_method_generics(self, hook: H) -> Self
+            #register_method_where_clause;
 
-            fn #fn_ident<'a>(
-                &'a self,
+            fn #fn_ident #dispatch_method_generics(
+                &'__lutum_a self,
                 #(#registry_args,)*
-            ) -> impl ::std::future::Future<Output = #output_ty> + 'a
-            #clone_where;
+            ) -> impl ::std::future::Future<Output = #output_ty> + '__lutum_a
+            #dispatch_method_where_clause;
         }
 
         impl #registry_ext_ident for ::lutum_protocol::HookRegistry {
-            fn #register_fn_ident<H>(mut self, hook: H) -> Self
-            where
-                H: #hook_trait_ident + 'static,
-                Self: Sized,
+            fn #register_fn_ident #register_method_generics(mut self, hook: H) -> Self
+            #register_method_where_clause
             {
                 #register_impl
                 self
             }
 
-            fn #fn_ident<'a>(
-                &'a self,
+            fn #fn_ident #dispatch_method_generics(
+                &'__lutum_a self,
                 #(#registry_args,)*
-            ) -> impl ::std::future::Future<Output = #output_ty> + 'a
-            #clone_where {
+            ) -> impl ::std::future::Future<Output = #output_ty> + '__lutum_a
+            #dispatch_method_where_clause {
                 async move {
                     use ::tracing::Instrument as _;
 

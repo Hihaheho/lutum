@@ -17,8 +17,9 @@ mod custom {
         }
     }
 
+    #[async_trait::async_trait]
     impl lutum::Chain<Option<String>> for PreferFirstSome {
-        fn call(&self, value: &Option<String>) -> std::ops::ControlFlow<()> {
+        async fn call(&self, value: &Option<String>) -> std::ops::ControlFlow<()> {
             match value {
                 Some(_) => std::ops::ControlFlow::Break(()),
                 None => std::ops::ControlFlow::Continue(()),

@@ -198,8 +198,9 @@ impl Default for IsShortCircuitString {
     }
 }
 
+#[async_trait]
 impl lutum::Chain<String> for IsShortCircuitString {
-    fn call(&self, s: &String) -> std::ops::ControlFlow<()> {
+    async fn call(&self, s: &String) -> std::ops::ControlFlow<()> {
         if s.starts_with("stop:") {
             std::ops::ControlFlow::Break(())
         } else {

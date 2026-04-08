@@ -4,16 +4,19 @@ use quote::{format_ident, quote};
 use syn::ItemFn;
 
 pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream {
+    let allow_generics = matches!(&kind, HookKind::Singleton);
     let HookSignature {
         explicit_args,
         output_ty,
         has_last: _,
         last_span: _,
+        generics,
     } = match analyze_hook_signature(
         &item_fn,
         kind.default_last_requirement(),
         "#[def_hook(singleton)] does not accept a `last: Option<Return>` argument",
         HookLastRecognition::LastNamedCompatibleOption,
+        allow_generics,
     ) {
         Ok(signature) => signature,
         Err(err) => return err.to_compile_error(),
@@ -89,12 +92,19 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         has_ref_arg,
     };
 
-    let hook_trait_defs =
-        generate_hook_trait_defs(def_span, &vis, &output_ty, &slot, &arg_tokens.trait_args);
+    let hook_trait_defs = generate_hook_trait_defs(
+        def_span,
+        &vis,
+        &output_ty,
+        &slot,
+        &arg_tokens.trait_args,
+        &generics,
+    );
 
-    let fn_impl = generate_fn_blanket_impl(&slot, &flags, &output_ty, &arg_tokens);
+    let fn_impl = generate_fn_blanket_impl(&slot, &flags, &output_ty, &arg_tokens, &generics);
 
-    let blanket_impls = generate_blanket_impls(&slot, &output_ty, &arg_tokens, &hook_name);
+    let blanket_impls =
+        generate_blanket_impls(&slot, &output_ty, &arg_tokens, &generics, &hook_name);
 
     let default_impl_call = quote! {
         #default_impl_fn_ident(
@@ -132,10 +142,10 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     if {
                         use ::lutum::Chain as _;
                         let __cf = match &self.#chain_field_ident {
-                            ::std::option::Option::Some(__h) => (**__h).call(&__next),
+                            ::std::option::Option::Some(__h) => (**__h).call(&__next).await,
                             ::std::option::Option::None => {
                                 let __d: #chain_default_ty = ::std::default::Default::default();
-                                __d.call(&__next)
+                                __d.call(&__next).await
                             }
                         };
                         __cf.is_break()

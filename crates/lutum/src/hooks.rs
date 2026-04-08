@@ -166,49 +166,37 @@ pub use lutum_protocol::hooks::{HookReentrancyError, HookRegistry, Stateful};
 /// `#[def_hook(always, chain = ...)]` or `#[def_hook(fallback, chain = ...)]`.
 /// The `chain = ...` value specifies the default implementation used when no custom
 /// `Chain<Output>` is registered on the hooks struct.
-pub trait Chain<Output: Send + Sync + 'static>: Send + Sync {
-    fn call(&self, output: &Output) -> std::ops::ControlFlow<()>;
+#[lutum_macros::def_hook(singleton)]
+pub async fn chain<Output: Send + Sync + 'static>(
+    output: &Output,
+) -> ::std::ops::ControlFlow<()> {
+    let _ = output;
+    ::std::ops::ControlFlow::Continue(())
 }
 
 /// Default chain implementation for `Result<T, E>` hooks — stops dispatch on the first `Err`.
 ///
 /// Use as `chain = ShortCircuit<T, E>`.
-pub struct ShortCircuit<T, E>(std::marker::PhantomData<fn(T, E)>);
-
-impl<T, E> Default for ShortCircuit<T, E> {
-    fn default() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-impl<T: Send + Sync + 'static, E: Send + Sync + 'static> Chain<Result<T, E>>
-    for ShortCircuit<T, E>
-{
-    fn call(&self, output: &Result<T, E>) -> std::ops::ControlFlow<()> {
-        match output {
-            Ok(_) => std::ops::ControlFlow::Continue(()),
-            Err(_) => std::ops::ControlFlow::Break(()),
-        }
+#[lutum_macros::hook(Chain<Result<T, E>>)]
+pub async fn short_circuit<T: Send + Sync + 'static, E: Send + Sync + 'static>(
+    output: &Result<T, E>,
+) -> ::std::ops::ControlFlow<()> {
+    match output {
+        Ok(_) => ::std::ops::ControlFlow::Continue(()),
+        Err(_) => ::std::ops::ControlFlow::Break(()),
     }
 }
 
 /// Default chain implementation for `Option<T>` hooks — stops dispatch on the first `Some`.
 ///
 /// Use as `chain = FirstSuccess<T>`.
-pub struct FirstSuccess<T>(std::marker::PhantomData<fn(T)>);
-
-impl<T> Default for FirstSuccess<T> {
-    fn default() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-impl<T: Send + Sync + 'static> Chain<Option<T>> for FirstSuccess<T> {
-    fn call(&self, output: &Option<T>) -> std::ops::ControlFlow<()> {
-        match output {
-            Some(_) => std::ops::ControlFlow::Break(()),
-            None => std::ops::ControlFlow::Continue(()),
-        }
+#[lutum_macros::hook(Chain<Option<T>>)]
+pub async fn first_success<T: Send + Sync + 'static>(
+    output: &Option<T>,
+) -> ::std::ops::ControlFlow<()> {
+    match output {
+        Some(_) => ::std::ops::ControlFlow::Break(()),
+        None => ::std::ops::ControlFlow::Continue(()),
     }
 }
 

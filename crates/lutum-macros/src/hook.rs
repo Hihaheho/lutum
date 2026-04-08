@@ -25,6 +25,7 @@ pub struct HookSignature {
     output_ty: Type,
     has_last: bool,
     last_span: Option<proc_macro2::Span>,
+    generics: syn::Generics,
 }
 
 pub struct HookOptions {
@@ -75,6 +76,7 @@ fn analyze_hook_signature(
     last_requirement: HookLastRequirement,
     forbidden_last_message: &str,
     last_recognition: HookLastRecognition,
+    allow_generics: bool,
 ) -> syn::Result<HookSignature> {
     if item_fn.sig.receiver().is_some() {
         return Err(syn::Error::new_spanned(
@@ -88,7 +90,9 @@ fn analyze_hook_signature(
             "hook attributes require an async fn",
         ));
     }
-    if !item_fn.sig.generics.params.is_empty() || item_fn.sig.generics.where_clause.is_some() {
+    if !allow_generics
+        && (!item_fn.sig.generics.params.is_empty() || item_fn.sig.generics.where_clause.is_some())
+    {
         return Err(syn::Error::new_spanned(
             &item_fn.sig.generics,
             "hook attributes do not support generics or where clauses",
@@ -152,6 +156,11 @@ fn analyze_hook_signature(
         output_ty,
         has_last,
         last_span,
+        generics: if allow_generics {
+            item_fn.sig.generics.clone()
+        } else {
+            syn::Generics::default()
+        },
     })
 }
 
