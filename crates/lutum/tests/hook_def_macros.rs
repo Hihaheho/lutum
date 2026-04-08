@@ -45,3 +45,9 @@ fn hooks_path_slot_compiles() {
     let cases = trybuild::TestCases::new();
     cases.pass("tests/ui/hooks_path_slot.rs");
 }
+
+#[test]
+fn hook_cross_module_path_compiles() {
+    let cases = trybuild::TestCases::new();
+    cases.pass("tests/ui/hook_cross_module_paths.rs");
+}
