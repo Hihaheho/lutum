@@ -507,18 +507,17 @@ want hook calls to route back into the same mutable state machine.
 As with `lutum_trace::capture(...)`, live probe events require the active subscriber stack to
 include `lutum_trace::layer()`.
 
-A probe that intercepts a hook receives each call through `StatefulXxxHook::call_mut`. The hook
-system generates an `XxxArgs` named struct whose fields hold owned copies of the hook arguments,
-so borrowed values like `&str` are already converted before they reach the probe.
-Use `register_probe_hook!(cx, Slot)` inside `register_hooks` to wire each slot — no per-slot
-boilerplate impl needed.
+A probe that intercepts a hook receives each call through `StatefulXxxHook::call_mut`.
+Wire each slot by implementing the hook trait on a proxy struct that forwards calls through
+the dispatcher, then register it inside `register_hooks`.
 
 ```rust
 use async_trait::async_trait;
 use core::convert::Infallible;
 use lutum::Lutum;
-use lutum_eval::{Probe, ProbeContext, ProbeDecision, ProbeDispatcher, TraceEvent, TraceSnapshot};
-use lutum_eval::register_probe_hook;
+use lutum_eval::{
+    Probe, ProbeContext, ProbeDecision, ProbeDispatcher, ProbeHandle, TraceEvent, TraceSnapshot,
+};
 
 // -- Define a hook slot (once per slot, e.g. in a shared library) ----------------
 
@@ -540,7 +539,8 @@ impl Probe for ResponseQuality {
     type Error = Infallible;
 
     fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        register_probe_hook!(cx, ValidateResponse);
+        let dispatcher = cx.dispatcher();
+        cx.update_hooks(|h| h.register_validate_response(ValidateResponseHook(dispatcher)));
     }
 
     async fn on_trace_event(

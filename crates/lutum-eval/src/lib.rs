@@ -3,15 +3,10 @@ use thiserror::Error;
 
 mod combinators;
 mod judge;
-mod macros;
 mod objective;
 mod probe;
 mod score;
 
-/// Re-exported so `register_probe_hook!` can use `$crate::paste::paste!` without
-/// requiring users to add `paste` to their own `Cargo.toml`.
-#[doc(hidden)]
-pub use paste;
 
 pub use crate::probe::{
     Probe, ProbeContext, ProbeDecision, ProbeDispatchError, ProbeDispatchFuture, ProbeDispatchHook,
