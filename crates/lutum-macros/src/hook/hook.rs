@@ -1,5 +1,5 @@
 use super::*;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use syn::{ItemFn, Path, PathArguments, Type};
 
 pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenStream {
@@ -37,43 +37,31 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
     let vis = item_fn.vis.clone();
     let struct_ident = format_ident!("{}", fn_ident.to_string().to_upper_camel_case());
     let hook_trait_path = slot_path.clone();
-    let args_struct_path = args_struct_path_for_slot_path(&slot_path);
-    let has_explicit_args = !explicit_args.is_empty();
-    let has_ref_arg = explicit_args.iter().any(|(_, ty)| is_non_str_ref(ty));
-    let args_struct_type: proc_macro2::TokenStream = if has_ref_arg {
-        quote! { #args_struct_path<'_> }
-    } else {
-        quote! { #args_struct_path }
-    };
 
-    // Trait method signature: uses XxxArgs when there are explicit args.
-    let mut hook_trait_args: Vec<proc_macro2::TokenStream> = if has_explicit_args {
-        vec![quote! { args: #args_struct_type }]
-    } else {
-        vec![]
-    };
+    // Field idents: original param names with leading `_` stripped where unambiguous.
+    let args_field_idents = normalized_hook_arg_field_idents(&explicit_args);
+
+    // Trait method params: individual field_ident: hook_param_type (no *Args struct).
+    let mut hook_trait_args: Vec<proc_macro2::TokenStream> = explicit_args
+        .iter()
+        .zip(args_field_idents.iter())
+        .map(|((_, ty), fi)| {
+            let param_ty = hook_param_type(ty);
+            quote! { #fi: #param_ty }
+        })
+        .collect();
     if has_last {
         hook_trait_args.push(quote! { last: ::std::option::Option<#output_ty> });
     }
 
-    // When calling the original function, unpack args back to original types through
-    // `into_parts()`. This keeps #[hook] impls decoupled from the public field names.
-    let args_unpack_bindings = explicit_args
-        .iter()
-        .map(|(ident, _)| quote! { #ident })
-        .collect::<Vec<_>>();
-    let args_unpack = if has_explicit_args {
-        quote! {
-            let (#(#args_unpack_bindings,)*) = args.into_parts();
-        }
-    } else {
-        quote! {}
-    };
+    // fn_call_args: expressions to forward to the original function.
+    // Uses field_idents (from the trait method params), re-adding `&` for &str args.
     let mut fn_call_args: Vec<proc_macro2::TokenStream> = explicit_args
         .iter()
-        .map(|(ident, ty)| match ty {
-            Type::Reference(r) if is_str_type(&r.elem) => quote! { &#ident },
-            _ => quote! { #ident },
+        .zip(args_field_idents.iter())
+        .map(|((_, ty), fi)| match ty {
+            Type::Reference(r) if is_str_type(&r.elem) => quote! { &#fi },
+            _ => quote! { #fi },
         })
         .collect();
     if has_last {
@@ -91,7 +79,6 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
                 #ctx_ident: #ctx_ty,
                 #(#hook_trait_args,)*
             ) -> #output_ty {
-                #args_unpack
                 #fn_ident(#ctx_ident, #(#fn_call_args,)*).await
             }
         }
@@ -112,20 +99,11 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
     };
 
     quote! {
+        #[allow(dead_code)]
         #item_fn
 
         #with_last_dispatch
     }
-}
-
-fn args_struct_path_for_slot_path(slot_path: &Path) -> Path {
-    let mut args_path = slot_path.clone();
-    let last = args_path
-        .segments
-        .last_mut()
-        .expect("hook slot paths must have at least one segment");
-    last.ident = format_ident!("{}Args", last.ident);
-    args_path
 }
 
 fn hook_named_impl_helper_macro_path(slot_path: &Path) -> Path {

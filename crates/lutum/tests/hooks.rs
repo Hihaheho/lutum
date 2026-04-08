@@ -8,7 +8,7 @@ use lutum::{
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
     ErasedTextTurnEventStream, HookReentrancyError, HookRegistry, InputMessageRole, Lutum,
     MockLlmAdapter, ModelInput, ModelInputItem, OperationKind, RequestExtensions,
-    ResolveUsageEstimate, ResolveUsageEstimateArgs, ResolveUsageEstimateRegistryExt,
+    ResolveUsageEstimate, ResolveUsageEstimateRegistryExt,
     SharedPoolBudgetManager, SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage,
     UsageRecoveryAdapter, budget::UsageEstimate, first_success,
     hooks::ResolveUsageEstimateLutumExt, short_circuit,
@@ -142,8 +142,8 @@ impl StatefulNextCounter for CountingHook {
         Err(CounterError::Reentered(err))
     }
 
-    async fn call_mut(&mut self, _ctx: &Lutum, args: NextCounterArgs) -> CounterResult {
-        let current = self.next.max(args.seed);
+    async fn call_mut(&mut self, _ctx: &Lutum, seed: usize) -> CounterResult {
+        let current = self.next.max(seed);
         self.next = current + 1;
         Ok(current)
     }
@@ -159,14 +159,14 @@ impl StatefulNextCounter for ReentrantCounter {
         Err(CounterError::Reentered(err))
     }
 
-    async fn call_mut(&mut self, ctx: &Lutum, args: NextCounterArgs) -> CounterResult {
-        if args.seed == 0 {
+    async fn call_mut(&mut self, ctx: &Lutum, seed: usize) -> CounterResult {
+        if seed == 0 {
             Ok(0)
         } else {
             self.hooks
                 .get()
                 .expect("reentrant hook container must be initialized")
-                .next_counter(ctx, args.seed - 1)
+                .next_counter(ctx, seed - 1)
                 .await
         }
     }
@@ -197,8 +197,8 @@ struct NestedLabelHook {
 
 #[async_trait]
 impl StatefulDescribeLabel for NestedLabelHook {
-    async fn call_mut(&mut self, ctx: &Lutum, args: DescribeLabelArgs) -> String {
-        self.hooks.select_label(ctx, args.label).await
+    async fn call_mut(&mut self, ctx: &Lutum, label: String) -> String {
+        self.hooks.select_label(ctx, label).await
     }
 }
 
@@ -291,7 +291,12 @@ struct FixedEstimate {
 
 #[async_trait]
 impl ResolveUsageEstimate for FixedEstimate {
-    async fn call(&self, _ctx: &Lutum, _args: ResolveUsageEstimateArgs<'_>) -> UsageEstimate {
+    async fn call(
+        &self,
+        _ctx: &Lutum,
+        _extensions: &RequestExtensions,
+        _kind: OperationKind,
+    ) -> UsageEstimate {
         self.estimate
     }
 }
@@ -302,8 +307,13 @@ struct RecordOperationKinds {
 
 #[async_trait]
 impl ResolveUsageEstimate for RecordOperationKinds {
-    async fn call(&self, _ctx: &Lutum, args: ResolveUsageEstimateArgs<'_>) -> UsageEstimate {
-        self.seen.lock().unwrap().push(args.kind);
+    async fn call(
+        &self,
+        _ctx: &Lutum,
+        _extensions: &RequestExtensions,
+        kind: OperationKind,
+    ) -> UsageEstimate {
+        self.seen.lock().unwrap().push(kind);
         UsageEstimate::zero()
     }
 }

@@ -96,17 +96,17 @@ impl Probe for TimelineProbe {
 
 #[async_trait]
 impl StatefulRewriteNumber for TimelineProbe {
-    async fn call_mut(&mut self, _llm: &Lutum, args: RewriteNumberArgs) -> usize {
-        self.timeline.push(format!("hook:number:{}", args.value));
-        args.value + 1
+    async fn call_mut(&mut self, _llm: &Lutum, value: usize) -> usize {
+        self.timeline.push(format!("hook:number:{value}"));
+        value + 1
     }
 }
 
 #[async_trait]
 impl StatefulDecorateLabel for TimelineProbe {
-    async fn call_mut(&mut self, _llm: &Lutum, args: DecorateLabelArgs) -> String {
-        self.timeline.push(format!("hook:label:{}", args.label));
-        format!("probe:{}", args.label)
+    async fn call_mut(&mut self, _llm: &Lutum, label: String) -> String {
+        self.timeline.push(format!("hook:label:{label}"));
+        format!("probe:{label}")
     }
 }
 
@@ -260,9 +260,9 @@ impl Probe for HookErrorProbe {
 
 #[async_trait]
 impl StatefulValidateStep for HookErrorProbe {
-    async fn call_mut(&mut self, _llm: &Lutum, args: ValidateStepArgs) -> Validation {
+    async fn call_mut(&mut self, _llm: &Lutum, step: String) -> Validation {
         self.hook_calls += 1;
-        if args.step == "blocked" {
+        if step == "blocked" {
             Err("blocked")
         } else {
             Ok(())
@@ -274,14 +274,14 @@ fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooks {
     ProbeHooks::new()
         .with_rewrite_number((std::marker::PhantomData::<fn() -> Lutum>, {
             let dispatcher = dispatcher.clone();
-            move |ctx: Lutum, args: RewriteNumberArgs| {
+            move |ctx: Lutum, value: usize| {
                 let dispatcher = dispatcher.clone();
                 async move {
                     dispatcher
                         .dispatch(move |probe| {
                             Box::pin(async move {
                                 <TimelineProbe as StatefulRewriteNumber>::call_mut(
-                                    probe, &ctx, args,
+                                    probe, &ctx, value,
                                 )
                                 .await
                             })
@@ -293,14 +293,14 @@ fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooks {
         }))
         .with_decorate_label((std::marker::PhantomData::<fn() -> Lutum>, {
             let dispatcher = dispatcher.clone();
-            move |ctx: Lutum, args: DecorateLabelArgs| {
+            move |ctx: Lutum, label: String| {
                 let dispatcher = dispatcher.clone();
                 async move {
                     dispatcher
                         .dispatch(move |probe| {
                             Box::pin(async move {
                                 <TimelineProbe as StatefulDecorateLabel>::call_mut(
-                                    probe, &ctx, args,
+                                    probe, &ctx, label,
                                 )
                                 .await
                             })
@@ -315,13 +315,13 @@ fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooks {
 fn hook_error_hooks(dispatcher: ProbeHandle<HookErrorProbe>) -> ProbeHooks {
     ProbeHooks::new().with_validate_step((
         std::marker::PhantomData::<fn() -> Lutum>,
-        move |ctx: Lutum, args: ValidateStepArgs| {
+        move |ctx: Lutum, step: String| {
             let dispatcher = dispatcher.clone();
             async move {
                 dispatcher
                     .dispatch(move |probe| {
                         Box::pin(async move {
-                            <HookErrorProbe as StatefulValidateStep>::call_mut(probe, &ctx, args)
+                            <HookErrorProbe as StatefulValidateStep>::call_mut(probe, &ctx, step)
                                 .await
                         })
                     })

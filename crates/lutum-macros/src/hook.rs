@@ -1,5 +1,6 @@
 mod def_global;
 mod def_local;
+#[allow(clippy::module_inception)]
 mod hook;
 mod hooks;
 
@@ -11,7 +12,7 @@ pub use hook::*;
 pub use hooks::*;
 
 use heck::{ToSnakeCase, ToUpperCamelCase};
-use quote::{format_ident, quote, quote_spanned};
+use quote::{format_ident, quote};
 use syn::{
     FnArg, GenericArgument, Ident, ItemFn, Pat, PatIdent, PathArguments, ReturnType, Type,
     spanned::Spanned,
@@ -68,6 +69,7 @@ impl HookKind {
             }
         )
     }
+
 }
 
 enum HookLastRequirement {
@@ -277,39 +279,24 @@ fn is_hook_last_ident(ident: &Ident) -> bool {
     ident == "last" || ident.starts_with("_last")
 }
 
-/// Returns the type to use for a field in the `XxxArgs` struct.
-/// - `&str` → `String` (owned, no lifetime needed)
-/// - `&T`   → `&'__lutum_args T` (keep reference, struct gets lifetime)
-/// - `T`    → `T` (owned, unchanged)
-fn args_field_type(ty: &Type) -> proc_macro2::TokenStream {
+/// Returns the type to use in hook trait method parameters and `Fn()` closure bounds.
+/// - `&str` → `String`  (owned, no lifetime needed)
+/// - `&T`   → `&T`      (keep reference, no explicit lifetime — anonymous in trait methods)
+/// - `T`    → `T`
+pub fn hook_param_type(ty: &Type) -> proc_macro2::TokenStream {
     match ty {
-        Type::Reference(r) if is_str_type(&r.elem) => {
-            quote! { ::std::string::String }
-        }
-        Type::Reference(r) => {
-            let inner = &r.elem;
-            quote! { &'__lutum_args #inner }
-        }
+        Type::Reference(r) if is_str_type(&r.elem) => quote! { ::std::string::String },
         other => quote! { #other },
     }
 }
 
-/// Returns the conversion suffix to turn a function argument into an Args field value.
-/// - `&str` → `.to_owned()` (creates `String`)
-/// - `&T`   → (empty, copy the reference)
-/// - owned  → `.clone()` so the original value is still available for `default_call`
-pub fn args_field_conversion(ty: &Type) -> proc_macro2::TokenStream {
-    match ty {
-        Type::Reference(r) if is_str_type(&r.elem) => quote! { .to_owned() },
-        Type::Reference(_) => quote! {},
-        _ => quote! { .clone() },
-    }
-}
-
-/// Returns true if the type is `&T` for some non-`str` T (i.e. a reference that keeps its
-/// lifetime in the generated Args struct).
+/// Returns true if the type is `&T` for some non-`str` T.
 pub fn is_non_str_ref(ty: &Type) -> bool {
     matches!(ty, Type::Reference(r) if !is_str_type(&r.elem))
+}
+
+fn is_str_ref(ty: &Type) -> bool {
+    matches!(ty, Type::Reference(r) if is_str_type(&r.elem))
 }
 
 fn is_str_type(ty: &Type) -> bool {

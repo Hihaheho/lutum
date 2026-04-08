@@ -25,20 +25,20 @@ impl ValidateCommand for CommandPolicy {
     async fn call(
         &self,
         _ctx: &Lutum,
-        args: ValidateCommandArgs,
+        cmd: String,
         last: Option<Validation>,
     ) -> Validation {
         if let Some(Err(reasons)) = last {
             return Err(reasons);
         }
         let mut failures = Vec::new();
-        let tokens = args.cmd.split_whitespace().collect::<Vec<_>>();
+        let tokens = cmd.split_whitespace().collect::<Vec<_>>();
         for &tok in self.forbidden_tokens {
             if tokens.contains(&tok) {
                 failures.push(format!("forbidden token: `{tok}`"));
             }
         }
-        let pipe_count = args.cmd.chars().filter(|&ch| ch == '|').count();
+        let pipe_count = cmd.chars().filter(|&ch| ch == '|').count();
         if pipe_count > self.max_pipes {
             failures.push(format!("too many pipes: {pipe_count} > {}", self.max_pipes));
         }

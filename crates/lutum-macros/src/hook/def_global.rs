@@ -53,11 +53,10 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
     let dyn_hook_trait_ident = format_ident!("__LutumDyn{slot_ident}");
     let registry_ext_ident = format_ident!("{slot_ident}RegistryExt");
     let lutum_ext_ident = format_ident!("{slot_ident}LutumExt");
-    let args_struct_ident = format_ident!("{slot_ident}Args");
     let default_fn_ident = format_ident!("__lutum_hook_default_{}", fn_ident);
     let register_fn_ident = format_ident!("register_{}", fn_ident);
     let is_lutum_hook = is_lutum_ref(&ctx_ty);
-    // For the registry ext method, the first-arg type needs a lifetime annotation if it's a reference
+    // For the registry ext method, ref-type args need an explicit `'a` lifetime.
     let ctx_ty_with_lifetime: Type = match &ctx_ty {
         Type::Reference(r) => {
             let mut r2 = r.clone();
@@ -66,7 +65,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         }
         other => other.clone(),
     };
-    // The owned inner type for Fn(CtxInner, XxxArgs) blanket (strips the leading `&`).
+    // The owned inner type for Fn(CtxInner, ...) blanket (strips the leading `&`).
     let ctx_inner_ty: Type = match &ctx_ty {
         Type::Reference(r) => *r.elem.clone(),
         other => other.clone(),
@@ -75,11 +74,10 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
     item_fn.vis = syn::Visibility::Inherited;
     item_fn.sig.ident = default_fn_ident.clone();
 
-    // Individual arg signatures (for the default fn call and registry method signature).
-    let _hook_call_args = explicit_args
-        .iter()
-        .map(|(ident, ty)| quote! { #ident: #ty })
-        .collect::<Vec<_>>();
+    // Field idents: original param names with leading `_` stripped where unambiguous.
+    let args_field_idents = normalized_hook_arg_field_idents(&explicit_args);
+
+    // Individual arg signatures for default fn call and registry method.
     let hook_call_arg_names = explicit_args
         .iter()
         .map(|(ident, _)| quote! { #ident })
@@ -94,6 +92,8 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             }
         })
         .collect::<Vec<_>>();
+
+    // registry_args: parameters in the registry/lutum ext method (with 'a lifetime on refs).
     let registry_args = explicit_args
         .iter()
         .map(|(ident, ty)| {
@@ -102,6 +102,8 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         })
         .collect::<Vec<_>>();
     let context_args = registry_args.clone();
+
+    // clone_bounds: `T: Clone` for owned arg types in Clone where clauses.
     let clone_bounds = explicit_args
         .iter()
         .filter(|(_, ty)| !matches!(ty, Type::Reference(_)))
@@ -111,83 +113,71 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         })
         .collect::<Vec<_>>();
 
-    // XxxArgs struct fields and construction.
     let has_explicit_args = !explicit_args.is_empty();
-    // Whether any arg is a non-str reference: those become &'__lutum_args T fields,
-    // so the generated struct needs a lifetime parameter.
     let has_ref_arg = explicit_args.iter().any(|(_, ty)| is_non_str_ref(ty));
-    let args_struct_lifetime = if has_ref_arg {
-        quote! { <'__lutum_args> }
-    } else {
-        quote! {}
-    };
-    // Type to use in trait method signatures: `XxxArgs<'_>` when struct has lifetime.
-    let args_struct_type = if has_ref_arg {
-        quote! { #args_struct_ident<'_> }
-    } else {
-        quote! { #args_struct_ident }
-    };
-    let args_field_idents = normalized_hook_arg_field_idents(&explicit_args);
-    // Named XxxArgs fields preserve the slot-definition argument names (after trimming a
-    // leading `_` when it does not cause conflicts), while the generated constructor and
-    // `into_parts()` keep #[hook] impls working even if their parameter names differ.
-    let args_struct_fields =
-        explicit_args
-            .iter()
-            .zip(args_field_idents.iter())
-            .map(|((_, ty), field_ident)| {
-                let field_ty = args_field_type(ty);
-                quote! { pub #field_ident: #field_ty }
-            });
-    let args_struct_constructor_args = explicit_args
+
+    // Hook trait method params: individual field_ident: hook_param_type (no args struct).
+    let hook_trait_args_no_last: Vec<proc_macro2::TokenStream> = explicit_args
         .iter()
         .zip(args_field_idents.iter())
-        .map(|((_, ty), field_ident)| {
-            let field_ty = args_field_type(ty);
-            quote! { #field_ident: #field_ty }
+        .map(|((_, ty), fi)| {
+            let param_ty = hook_param_type(ty);
+            quote! { #fi: #param_ty }
         })
-        .collect::<Vec<_>>();
-    let args_struct_field_names = args_field_idents
-        .iter()
-        .map(|field_ident| quote! { #field_ident })
-        .collect::<Vec<_>>();
-    let args_struct_into_parts_types = explicit_args
-        .iter()
-        .map(|(_, ty)| {
-            let field_ty = args_field_type(ty);
-            quote! { #field_ty }
-        })
-        .collect::<Vec<_>>();
-    // Construct XxxArgs from individual registry method parameters.
-    // &str → .to_owned(), &T → copy ref (no conversion), owned T → .clone() so
-    // the original is still available for default_call.
-    let args_construction_fields = explicit_args.iter().map(|(ident, ty)| {
-        let conv = args_field_conversion(ty);
-        quote! { #ident #conv }
-    });
-    let args_construction = if has_explicit_args {
-        quote! { let args = #args_struct_ident::new(#(#args_construction_fields,)*); }
-    } else {
-        quote! {}
-    };
+        .collect();
 
-    // Trait method signatures: XxxHook and StatefulXxxHook take `args: XxxArgs` instead
-    // of individual parameters.
-    let hook_trait_args_no_last: Vec<proc_macro2::TokenStream> = if has_explicit_args {
-        vec![quote! { args: #args_struct_type }]
-    } else {
-        vec![]
-    };
     let mut hook_trait_args = hook_trait_args_no_last.clone();
-    let mut hook_trait_call_arg_names: Vec<proc_macro2::TokenStream> = if has_explicit_args {
-        vec![quote! { args }]
-    } else {
-        vec![]
-    };
+    let mut hook_trait_call_arg_names: Vec<proc_macro2::TokenStream> =
+        args_field_idents.iter().map(|fi| quote! { #fi }).collect();
     if trait_has_last {
         hook_trait_args.push(quote! { last: ::std::option::Option<#output_ty> });
         hook_trait_call_arg_names.push(quote! { last });
     }
+
+    // dispatch_vars: variable names used inside the dispatch body for each arg.
+    // For &str args: use __lutum_<fi> to avoid shadowing the original &str before default_call.
+    let dispatch_vars: Vec<proc_macro2::Ident> = explicit_args
+        .iter()
+        .zip(args_field_idents.iter())
+        .map(|((_, ty), fi)| {
+            if is_str_ref(ty) {
+                format_ident!("__lutum_{}", fi)
+            } else {
+                fi.clone()
+            }
+        })
+        .collect();
+
+    // cloned_field_idents: pass to each hook in multi-dispatch loops (uses dispatch_vars).
+    // Only non-str refs stay as references; &str (→ String) and owned types need .clone().
+    let cloned_field_idents: Vec<proc_macro2::TokenStream> = explicit_args
+        .iter()
+        .zip(dispatch_vars.iter())
+        .map(|((_, ty), var)| {
+            if is_non_str_ref(ty) {
+                quote! { #var }
+            } else {
+                quote! { #var.clone() }
+            }
+        })
+        .collect();
+
+    // pre_conversion: converts registry-method args to hook-trait types, placed AFTER default_call.
+    let pre_conversion: Vec<proc_macro2::TokenStream> = explicit_args
+        .iter()
+        .zip(args_field_idents.iter())
+        .zip(dispatch_vars.iter())
+        .map(|(((orig_ident, ty), fi), var)| {
+            if is_str_ref(ty) {
+                quote! { let #var = #orig_ident.to_owned(); }
+            } else if orig_ident != fi {
+                quote! { let #fi = #orig_ident; }
+            } else {
+                quote! {}
+            }
+        })
+        .collect();
+    let args_pre_conversion = quote! { #(#pre_conversion)* };
 
     let hook_trait_method_sig = quote_spanned! { item_fn.sig.ident.span() =>
         async fn call(
@@ -255,27 +245,12 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         }
     };
     let dyn_hook_dispatch_call = if trait_has_last {
-        if has_explicit_args {
-            quote! { hook.call_dyn(#ctx_ident, args.clone(), last).await }
-        } else {
-            quote! { hook.call_dyn(#ctx_ident, last).await }
-        }
-    } else if has_explicit_args {
-        quote! { hook.call_dyn(#ctx_ident, args.clone()).await }
+        quote! { hook.call_dyn(#ctx_ident, #(#cloned_field_idents,)* last).await }
     } else {
-        quote! { hook.call_dyn(#ctx_ident).await }
+        quote! { hook.call_dyn(#ctx_ident, #(#cloned_field_idents,)*).await }
     };
-    let dyn_hook_impl_call = if trait_has_last {
-        if has_explicit_args {
-            quote! { <T as #hook_trait_ident>::call(self, #ctx_ident, args, last).await }
-        } else {
-            quote! { <T as #hook_trait_ident>::call(self, #ctx_ident, last).await }
-        }
-    } else if has_explicit_args {
-        quote! { <T as #hook_trait_ident>::call(self, #ctx_ident, args).await }
-    } else {
-        quote! { <T as #hook_trait_ident>::call(self, #ctx_ident).await }
-    };
+    let dyn_hook_impl_call =
+        quote! { <T as #hook_trait_ident>::call(self, #ctx_ident, #(#hook_trait_call_arg_names,)*).await };
     let stateful_hook_impl_call = quote! {
         <T as #stateful_hook_trait_ident>::call_mut(
             &mut *hook,
@@ -427,14 +402,10 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             }
         },
         HookKind::Singleton => {
-            let some_call = if has_explicit_args {
-                quote! {
-                    hook.call_dyn(#ctx_ident, args).await
-                }
-            } else {
-                quote! {
-                    hook.call_dyn(#ctx_ident).await
-                }
+            let singleton_args: Vec<proc_macro2::TokenStream> =
+                dispatch_vars.iter().map(|v| quote! { #v }).collect();
+            let some_call = quote! {
+                hook.call_dyn(#ctx_ident, #(#singleton_args,)*).await
             };
             quote! {
                 match hook {
@@ -474,103 +445,76 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         quote! {}
     };
 
-    // Generate XxxArgs struct and (when no reference args) a Fn blanket impl.
-    let args_struct_and_fn_impl = if has_explicit_args {
-        let struct_def = quote! {
-            #[allow(dead_code)]
-            #[derive(::std::clone::Clone)]
-            #vis struct #args_struct_ident #args_struct_lifetime {
-                #(#args_struct_fields,)*
-            }
+    // Closure blanket impl (only when no non-str ref args, to avoid HRTB complexity).
+    let fn_impl = if has_explicit_args && !has_ref_arg {
+        let field_ident_names: Vec<proc_macro2::TokenStream> =
+            args_field_idents.iter().map(|fi| quote! { #fi }).collect();
+        let fn_bound_types: Vec<proc_macro2::TokenStream> =
+            explicit_args.iter().map(|(_, ty)| hook_param_type(ty)).collect();
 
-            impl #args_struct_lifetime #args_struct_ident #args_struct_lifetime {
-                pub fn new(#(#args_struct_constructor_args),*) -> Self {
-                    Self {
-                        #(#args_struct_field_names,)*
-                    }
-                }
-
-                pub fn into_parts(self) -> (#(#args_struct_into_parts_types,)*) {
-                    (
-                        #(self.#args_struct_field_names,)*
-                    )
-                }
-            }
-        };
-        // Fn blanket impl only for structs without lifetime (fully owned args).
-        // Structs with reference lifetimes require HRTB which is too complex to generate,
-        // and those hooks are unlikely to be registered via closures anyway.
-        let fn_impl = if has_ref_arg {
-            quote! {}
+        let fn_impl_call = if trait_has_last {
+            quote! { (self)(#(#field_ident_names,)* last).await }
         } else {
-            let fn_impl_call = if trait_has_last {
-                quote! { (self)(args, last).await }
+            quote! { (self)(#(#field_ident_names,)*).await }
+        };
+        let fn_bound = if trait_has_last {
+            quote! { F: Fn(#(#fn_bound_types,)* ::std::option::Option<#output_ty>) -> __Fut + Send + Sync }
+        } else {
+            quote! { F: Fn(#(#fn_bound_types,)*) -> __Fut + Send + Sync }
+        };
+
+        // Second blanket: Fn(CtxInner, ...) — lets callers receive an owned clone of ctx.
+        let ctx_fn_blanket = if is_lutum_hook {
+            let ctx_fn_bound = if trait_has_last {
+                quote! { F: Fn(#ctx_inner_ty, #(#fn_bound_types,)* ::std::option::Option<#output_ty>) -> __Fut + Send + Sync }
             } else {
-                quote! { (self)(args).await }
+                quote! { F: Fn(#ctx_inner_ty, #(#fn_bound_types,)*) -> __Fut + Send + Sync }
             };
-            let fn_bound = if trait_has_last {
-                quote! { F: Fn(#args_struct_ident, ::std::option::Option<#output_ty>) -> __Fut + Send + Sync }
+            let ctx_fn_call = if trait_has_last {
+                quote! { (self.1)(#ctx_ident.clone(), #(#field_ident_names,)* last).await }
             } else {
-                quote! { F: Fn(#args_struct_ident) -> __Fut + Send + Sync }
-            };
-            // Second blanket: Fn(CtxInner, XxxArgs) -> Fut — lets callers receive an owned
-            // clone of the context alongside args (useful for probe dispatch closures).
-            // Uses a (PhantomData<fn() -> CtxInner>, F) newtype to avoid conflicting with
-            // the F: Fn(XxxArgs) blanket above (different Self types, no overlap).
-            // Only generated for Lutum-ctx hooks because ctx.clone() requires CtxInner: Clone,
-            // and RequestExtensions does not implement Clone.
-            let ctx_fn_blanket = if is_lutum_hook {
-                let ctx_fn_bound = if trait_has_last {
-                    quote! { F: Fn(#ctx_inner_ty, #args_struct_ident, ::std::option::Option<#output_ty>) -> __Fut + Send + Sync }
-                } else {
-                    quote! { F: Fn(#ctx_inner_ty, #args_struct_ident) -> __Fut + Send + Sync }
-                };
-                let ctx_fn_call = if trait_has_last {
-                    quote! { (self.1)(#ctx_ident.clone(), args, last).await }
-                } else {
-                    quote! { (self.1)(#ctx_ident.clone(), args).await }
-                };
-                quote! {
-                    #[allow(dead_code)]
-                    #[::async_trait::async_trait]
-                    impl<F, __Fut> #hook_trait_ident for (::std::marker::PhantomData<fn() -> #ctx_inner_ty>, F)
-                    where
-                        #ctx_fn_bound,
-                        __Fut: ::std::future::Future<Output = #output_ty> + Send + 'static,
-                    {
-                        async fn call(
-                            &self,
-                            #ctx_ident: #ctx_ty,
-                            #(#hook_trait_args,)*
-                        ) -> #output_ty {
-                            #ctx_fn_call
-                        }
-                    }
-                }
-            } else {
-                quote! {}
+                quote! { (self.1)(#ctx_ident.clone(), #(#field_ident_names,)*).await }
             };
             quote! {
                 #[allow(dead_code)]
                 #[::async_trait::async_trait]
-                impl<F, __Fut> #hook_trait_ident for F
+                impl<F, __Fut> #hook_trait_ident for (::std::marker::PhantomData<fn() -> #ctx_inner_ty>, F)
                 where
-                    #fn_bound,
+                    #ctx_fn_bound,
                     __Fut: ::std::future::Future<Output = #output_ty> + Send + 'static,
                 {
                     async fn call(
                         &self,
-                        _: #ctx_ty,
+                        #ctx_ident: #ctx_ty,
                         #(#hook_trait_args,)*
                     ) -> #output_ty {
-                        #fn_impl_call
+                        #ctx_fn_call
                     }
                 }
-
-                #ctx_fn_blanket
             }
+        } else {
+            quote! {}
         };
-        quote! { #struct_def #fn_impl }
+
+        quote! {
+            #[allow(dead_code)]
+            #[::async_trait::async_trait]
+            impl<F, __Fut> #hook_trait_ident for F
+            where
+                #fn_bound,
+                __Fut: ::std::future::Future<Output = #output_ty> + Send + 'static,
+            {
+                async fn call(
+                    &self,
+                    _: #ctx_ty,
+                    #(#hook_trait_args,)*
+                ) -> #output_ty {
+                    #fn_impl_call
+                }
+            }
+
+            #ctx_fn_blanket
+        }
     } else {
         quote! {}
     };
@@ -578,7 +522,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
     quote! {
         #item_fn
 
-        #args_struct_and_fn_impl
+        #fn_impl
 
         #hook_trait_def
 
@@ -661,7 +605,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                     let span = ::tracing::info_span!("lutum_hook", name = #hook_name);
                     async move {
                         #slot_lookup
-                        #args_construction
+                        #args_pre_conversion
                         #dispatch
                     }
                     .instrument(span)

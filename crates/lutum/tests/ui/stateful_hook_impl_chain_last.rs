@@ -10,11 +10,11 @@ impl StatefulValidateOutput for StatefulAppender {
     async fn call_mut(
         &mut self,
         _ctx: &lutum::Lutum,
-        args: ValidateOutputArgs,
+        output: String,
         last: Option<Result<String, String>>,
     ) -> Result<String, String> {
         let _ = last;
-        Ok(format!("{}:hook", args.output))
+        Ok(format!("{output}:hook"))
     }
 }
 

@@ -8,6 +8,6 @@ error[E0050]: method `call_mut` has 4 parameters but the declaration in trait `S
 ...
 11 | /         &mut self,
 12 | |         _ctx: &lutum::Lutum,
-13 | |         args: ValidateOutputArgs,
+13 | |         output: String,
 14 | |         last: Option<Result<String, String>>,
    | |____________________________________________^ expected 3 parameters, found 4

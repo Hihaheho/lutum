@@ -34,10 +34,10 @@ impl StatefulValidateCommand for RetryMemory {
     async fn call_mut(
         &mut self,
         _ctx: &Lutum,
-        args: ValidateCommandArgs,
+        cmd: String,
         last: Option<Validation>,
     ) -> Validation {
-        let command = args.cmd.trim().to_string();
+        let command = cmd.trim().to_string();
         let mut failures = match last {
             Some(Ok(())) | None => Vec::new(),
             Some(Err(reasons)) => reasons,

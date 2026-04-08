@@ -59,12 +59,6 @@ fn hook_impl_singleton_rejects_last_argument() {
 }
 
 #[test]
-fn hook_impl_imported_slot_without_companion_items_fails() {
-    let cases = trybuild::TestCases::new();
-    cases.compile_fail("tests/ui/hook_impl_imported_slot_without_companion_items.rs");
-}
-
-#[test]
 fn stateful_hook_impl_chain_last_stays_understandable() {
     let cases = trybuild::TestCases::new();
     cases.compile_fail("tests/ui/stateful_hook_impl_chain_last.rs");
