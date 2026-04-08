@@ -1,5 +1,6 @@
 mod def_global;
 mod def_local;
+mod def_shared;
 #[allow(clippy::module_inception)]
 mod hook;
 mod hooks;
@@ -8,6 +9,7 @@ use std::collections::HashSet;
 
 pub use def_global::*;
 pub use def_local::*;
+pub use def_shared::*;
 pub use hook::*;
 pub use hooks::*;
 
