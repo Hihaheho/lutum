@@ -321,10 +321,8 @@ fn hook_error_hooks(dispatcher: ProbeHandle<HookErrorProbe>) -> ProbeHooks {
                 dispatcher
                     .dispatch(move |probe| {
                         Box::pin(async move {
-                            <HookErrorProbe as StatefulValidateStep>::call_mut(
-                                probe, &ctx, args,
-                            )
-                            .await
+                            <HookErrorProbe as StatefulValidateStep>::call_mut(probe, &ctx, args)
+                                .await
                         })
                     })
                     .await

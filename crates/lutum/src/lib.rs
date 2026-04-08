@@ -59,8 +59,7 @@ pub use context::{
 };
 pub use hooks::{
     HookReentrancyError, HookRegistry, ResolveUsageEstimate, ResolveUsageEstimateArgs,
-    ResolveUsageEstimateRegistryExt, Stateful, first_success,
-    short_circuit,
+    ResolveUsageEstimateRegistryExt, Stateful, first_success, short_circuit,
 };
 
 #[cfg(feature = "claude")]

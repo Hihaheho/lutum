@@ -68,7 +68,6 @@ impl HookKind {
             }
         )
     }
-
 }
 
 enum HookLastRequirement {

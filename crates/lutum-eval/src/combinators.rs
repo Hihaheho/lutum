@@ -186,10 +186,7 @@ where
         Ok(Scored { report, score })
     }
 
-    pub async fn run_future<F>(
-        &self,
-        future: F,
-    ) -> ScoredResult<E::Report, E::Error, O::Error>
+    pub async fn run_future<F>(&self, future: F) -> ScoredResult<E::Report, E::Error, O::Error>
     where
         F: Future<Output = E::Artifact>,
     {

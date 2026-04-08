@@ -81,7 +81,8 @@ async fn main() -> anyhow::Result<()> {
         HookRegistry::new(),
     );
 
-    hooks.validate_prompt(&llm, prompt)
+    hooks
+        .validate_prompt(&llm, prompt)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     let output = ask(
@@ -90,7 +91,8 @@ async fn main() -> anyhow::Result<()> {
         prompt,
     )
     .await?;
-    hooks.validate_output(&llm, &output)
+    hooks
+        .validate_output(&llm, &output)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     println!("{output}");
