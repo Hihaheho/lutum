@@ -4,7 +4,9 @@ use thiserror::Error;
 
 use crate::{
     budget::Usage,
-    conversation::{AssistantTurn, AssistantTurnItem, RawJson, ToolCallId, UncommittedAssistantTurn},
+    conversation::{
+        AssistantTurn, AssistantTurnItem, RawJson, ToolCallId, UncommittedAssistantTurn,
+    },
     llm::{
         CompletionEvent, FinishReason, StructuredCompletionEvent, StructuredTurnEvent,
         StructuredTurnEventWithTools, TextTurnEvent, TextTurnEventWithTools,

@@ -16,8 +16,8 @@ pub use budget::{
 pub use conversation::{
     AssistantInputItem, AssistantTurn, AssistantTurnInputError, AssistantTurnItem,
     EmptyNonEmptyError, InputMessageRole, MessageContent, ModelInput, ModelInputItem,
-    ModelInputValidationError, NonEmpty, RawJson, ToolCallId, ToolMetadata, ToolName,
-    UncommittedAssistantTurn, ToolUse,
+    ModelInputValidationError, NonEmpty, RawJson, ToolCallId, ToolMetadata, ToolName, ToolUse,
+    UncommittedAssistantTurn,
 };
 pub use error::{AgentError, BoxError, NoToolsContractViolation};
 pub use extensions::RequestExtensions;
@@ -39,11 +39,11 @@ pub use llm::{
 pub use reducer::{
     CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
     StagedStructuredTurnResult, StagedStructuredTurnResultWithTools, StagedTextTurnResult,
-    StagedTextTurnResultWithTools, StructuredCompletionReducer,
-    StructuredCompletionReductionError, StructuredCompletionResult, StructuredCompletionState,
-    StructuredTurnOutcome, StructuredTurnReducer, StructuredTurnReducerWithTools,
-    StructuredTurnReductionError, StructuredTurnResult, StructuredTurnResultWithTools,
-    StructuredTurnState, StructuredTurnStateWithTools, TextTurnReducer, TextTurnReducerWithTools,
+    StagedTextTurnResultWithTools, StructuredCompletionReducer, StructuredCompletionReductionError,
+    StructuredCompletionResult, StructuredCompletionState, StructuredTurnOutcome,
+    StructuredTurnReducer, StructuredTurnReducerWithTools, StructuredTurnReductionError,
+    StructuredTurnResult, StructuredTurnResultWithTools, StructuredTurnState,
+    StructuredTurnStateWithTools, TextTurnReducer, TextTurnReducerWithTools,
     TextTurnReductionError, TextTurnResult, TextTurnResultWithTools, TextTurnState,
     TextTurnStateWithTools, assistant_json, find_tool_call_arguments,
 };

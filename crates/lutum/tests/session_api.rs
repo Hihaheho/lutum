@@ -82,8 +82,8 @@ fn collect_staged_does_not_commit_until_explicit() {
     session.push_user("Hi.");
     let before_len = session.input().items().len();
 
-    let staged = futures::executor::block_on(async { session.text_turn().collect_staged().await })
-        .unwrap();
+    let staged =
+        futures::executor::block_on(async { session.text_turn().collect_staged().await }).unwrap();
 
     // Not committed yet
     assert_eq!(session.input().items().len(), before_len);

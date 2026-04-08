@@ -46,7 +46,6 @@ pub use builders::{
     Completion, StructuredCompletion, StructuredTurn, StructuredTurnWithTools, TextTurn,
     TextTurnWithTools,
 };
-pub use session::{CommitTurn, UncommittedToolRound};
 pub use context::{
     CollectError, EventHandler, HandlerContext, HandlerDirective, Lutum, LutumError,
     PendingCompletion, PendingStructuredCompletion, PendingStructuredTurn,
@@ -57,6 +56,7 @@ pub use hooks::{
     Chain, FirstSuccess, HookReentrancyError, HookRegistry, ResolveUsageEstimate,
     ResolveUsageEstimateRegistryExt, ShortCircuit, Stateful,
 };
+pub use session::{CommitTurn, UncommittedToolRound};
 
 pub use lutum_macros::{Toolset, def_global_hook, def_hook, hook, hooks, tool_fn, tool_input};
 pub use lutum_protocol::{

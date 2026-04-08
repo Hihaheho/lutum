@@ -13,11 +13,10 @@ use lutum_protocol::{
     },
     reducer::{
         CompletionReductionError, CompletionTurnResult, CompletionTurnState,
-        StagedStructuredTurnResult, StagedTextTurnResult,
-        StructuredCompletionReductionError, StructuredCompletionResult, StructuredCompletionState,
-        StructuredTurnReductionError, StructuredTurnState as StructuredTurnCollectedState,
-        StructuredTurnStateWithTools, TextTurnReductionError,
-        TextTurnState as TextTurnCollectedState, TextTurnStateWithTools,
+        StagedStructuredTurnResult, StagedTextTurnResult, StructuredCompletionReductionError,
+        StructuredCompletionResult, StructuredCompletionState, StructuredTurnReductionError,
+        StructuredTurnState as StructuredTurnCollectedState, StructuredTurnStateWithTools,
+        TextTurnReductionError, TextTurnState as TextTurnCollectedState, TextTurnStateWithTools,
     },
     structured::StructuredOutput,
     toolset::{ToolPolicy, Toolset},
@@ -250,7 +249,7 @@ impl<'a> TextTurn<'a> {
                 return Err(CollectError::Execution {
                     source,
                     partial: TextTurnCollectedState::default(),
-                })
+                });
             }
         };
         let assistant_turn = staged.turn.assistant_turn().clone();
@@ -345,7 +344,9 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
-        lutum.run_text_turn_with_tools(extensions, input, turn).await
+        lutum
+            .run_text_turn_with_tools(extensions, input, turn)
+            .await
     }
 
     pub async fn stream(
@@ -372,7 +373,10 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
-        let staged = match lutum.run_text_turn_with_tools(extensions, input, turn).await {
+        let staged = match lutum
+            .run_text_turn_with_tools(extensions, input, turn)
+            .await
+        {
             Ok(pending) => match pending.collect_with(handler).await {
                 Ok(s) => s,
                 Err(e) => return Err(e),
@@ -381,7 +385,7 @@ where
                 return Err(CollectError::Execution {
                     source,
                     partial: TextTurnStateWithTools::default(),
-                })
+                });
             }
         };
         let outcome = match target {
@@ -407,7 +411,10 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
-        let staged = match lutum.run_text_turn_with_tools(extensions, input, turn).await {
+        let staged = match lutum
+            .run_text_turn_with_tools(extensions, input, turn)
+            .await
+        {
             Ok(pending) => match pending.collect().await {
                 Ok(s) => s,
                 Err(e) => return Err(e),
@@ -416,7 +423,7 @@ where
                 return Err(CollectError::Execution {
                     source,
                     partial: TextTurnStateWithTools::default(),
-                })
+                });
             }
         };
         let outcome = match target {
@@ -617,8 +624,10 @@ where
             Err(source) => {
                 return Err(CollectError::Execution {
                     source,
-                    partial: StructuredTurnPartial::from_state(StructuredTurnCollectedState::default()),
-                })
+                    partial: StructuredTurnPartial::from_state(
+                        StructuredTurnCollectedState::default(),
+                    ),
+                });
             }
         };
         let assistant_turn = staged.turn.assistant_turn().clone();
@@ -716,7 +725,8 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
-        lutum.run_structured_turn_with_tools(extensions, input, turn)
+        lutum
+            .run_structured_turn_with_tools(extensions, input, turn)
             .await
     }
 
@@ -747,7 +757,10 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
-        let pending = match lutum.run_structured_turn_with_tools(extensions, input, turn).await {
+        let pending = match lutum
+            .run_structured_turn_with_tools(extensions, input, turn)
+            .await
+        {
             Ok(p) => p,
             Err(source) => {
                 return Err(CollectError::Execution {
@@ -755,15 +768,16 @@ where
                     partial: StructuredTurnPartialWithTools::from_state(
                         StructuredTurnStateWithTools::default(),
                     ),
-                })
+                });
             }
         };
         match pending.collect_with(handler).await {
             Ok(staged) => {
                 let outcome = match target {
-                    TurnTarget::Session { session } => {
-                        StructuredStepOutcomeWithTools::from_staged(staged, Some(session.input_mut()))
-                    }
+                    TurnTarget::Session { session } => StructuredStepOutcomeWithTools::from_staged(
+                        staged,
+                        Some(session.input_mut()),
+                    ),
                     TurnTarget::Lutum { .. } => {
                         StructuredStepOutcomeWithTools::from_staged(staged, None)
                     }
@@ -776,7 +790,12 @@ where
             }) => {
                 // The model used tool calls without structured output — recover as NeedsTools.
                 if !partial.state.tool_calls.is_empty()
-                    && let (Some(committed_turn), Some(finish_reason), Some(usage), Ok(assistant_turn)) = (
+                    && let (
+                        Some(committed_turn),
+                        Some(finish_reason),
+                        Some(usage),
+                        Ok(assistant_turn),
+                    ) = (
                         partial.committed_turn.clone(),
                         partial.state.finish_reason.clone(),
                         partial.state.usage,
@@ -822,7 +841,10 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
-        let pending = match lutum.run_structured_turn_with_tools(extensions, input, turn).await {
+        let pending = match lutum
+            .run_structured_turn_with_tools(extensions, input, turn)
+            .await
+        {
             Ok(p) => p,
             Err(source) => {
                 return Err(CollectError::Execution {
@@ -830,15 +852,16 @@ where
                     partial: StructuredTurnPartialWithTools::from_state(
                         StructuredTurnStateWithTools::default(),
                     ),
-                })
+                });
             }
         };
         match pending.collect().await {
             Ok(staged) => {
                 let outcome = match target {
-                    TurnTarget::Session { session } => {
-                        StructuredStepOutcomeWithTools::from_staged(staged, Some(session.input_mut()))
-                    }
+                    TurnTarget::Session { session } => StructuredStepOutcomeWithTools::from_staged(
+                        staged,
+                        Some(session.input_mut()),
+                    ),
                     TurnTarget::Lutum { .. } => {
                         StructuredStepOutcomeWithTools::from_staged(staged, None)
                     }
@@ -851,7 +874,12 @@ where
             }) => {
                 // The model used tool calls without structured output — recover as NeedsTools.
                 if !partial.state.tool_calls.is_empty()
-                    && let (Some(committed_turn), Some(finish_reason), Some(usage), Ok(assistant_turn)) = (
+                    && let (
+                        Some(committed_turn),
+                        Some(finish_reason),
+                        Some(usage),
+                        Ok(assistant_turn),
+                    ) = (
                         partial.committed_turn.clone(),
                         partial.state.finish_reason.clone(),
                         partial.state.usage,

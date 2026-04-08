@@ -230,7 +230,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                 }
                 last.unwrap()
             }
-        },
+        }
         HookKind::Always(HookOptions {
             chain: None,
             accumulate: Some(accumulate_fn),
@@ -271,7 +271,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                 }
                 #accumulate_fn(__outputs)
             }
-        },
+        }
         HookKind::Fallback(HookOptions {
             chain: None,
             accumulate: None,
@@ -308,7 +308,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                     _ => #default_call,
                 }
             }
-        },
+        }
         HookKind::Fallback(HookOptions {
             chain: None,
             accumulate: Some(accumulate_fn),
@@ -348,7 +348,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                     _ => #default_call,
                 }
             }
-        },
+        }
         HookKind::Singleton => {
             let singleton_args: Vec<proc_macro2::TokenStream> = arg_tokens
                 .dispatch_vars

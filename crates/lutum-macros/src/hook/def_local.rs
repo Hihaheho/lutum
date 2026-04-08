@@ -118,30 +118,31 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
     let chain_field_ident = format_ident!("{}_chain", fn_ident);
     let chain_reg_fn_ident = format_ident!("{}_chain", fn_ident);
     let chain_set_fn_ident = format_ident!("set_{}_chain", fn_ident);
-    let chain_companion_tokens = kind.opts().and_then(|o| o.chain.as_ref()).map(
-        |chain_default_ty| {
-            let chain_field_ty = quote! {
-                ::std::option::Option<
-                    ::std::sync::Arc<dyn ::lutum::Chain<#output_ty> + Send + Sync>
-                >
-            };
-            let chain_field_init = quote! { ::std::option::Option::None };
-            let check = quote! {
-                if {
-                    use ::lutum::Chain as _;
-                    let __cf = match &self.#chain_field_ident {
-                        ::std::option::Option::Some(__h) => (**__h).call(&__next),
-                        ::std::option::Option::None => {
-                            let __d: #chain_default_ty = ::std::default::Default::default();
-                            __d.call(&__next)
-                        }
-                    };
-                    __cf.is_break()
-                }
-            };
-            (chain_field_ty, chain_field_init, check)
-        },
-    );
+    let chain_companion_tokens =
+        kind.opts()
+            .and_then(|o| o.chain.as_ref())
+            .map(|chain_default_ty| {
+                let chain_field_ty = quote! {
+                    ::std::option::Option<
+                        ::std::sync::Arc<dyn ::lutum::Chain<#output_ty> + Send + Sync>
+                    >
+                };
+                let chain_field_init = quote! { ::std::option::Option::None };
+                let check = quote! {
+                    if {
+                        use ::lutum::Chain as _;
+                        let __cf = match &self.#chain_field_ident {
+                            ::std::option::Option::Some(__h) => (**__h).call(&__next),
+                            ::std::option::Option::None => {
+                                let __d: #chain_default_ty = ::std::default::Default::default();
+                                __d.call(&__next)
+                            }
+                        };
+                        __cf.is_break()
+                    }
+                };
+                (chain_field_ty, chain_field_init, check)
+            });
 
     let (field_ty, field_init, register_impl) = match &kind {
         HookKind::Always { .. } | HookKind::Fallback { .. } => (
@@ -171,8 +172,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         ),
     };
     // Flatten companion tokens into Vec for use in @accumulate arm (empty = no chain option).
-    let (chain_companion_field_tokens, chain_companion_field_init_tokens, chain_companion_register_tokens):
-        (Vec<_>, Vec<_>, Vec<_>) = match &chain_companion_tokens {
+    let (
+        chain_companion_field_tokens,
+        chain_companion_field_init_tokens,
+        chain_companion_register_tokens,
+    ): (Vec<_>, Vec<_>, Vec<_>) = match &chain_companion_tokens {
         Some((chain_field_ty, chain_field_init, _)) => (
             vec![quote! { #chain_field_ident: #chain_field_ty, }],
             vec![quote! { #chain_field_ident: #chain_field_init, }],
