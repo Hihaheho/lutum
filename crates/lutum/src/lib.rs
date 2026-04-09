@@ -85,7 +85,7 @@ pub use lutum_protocol::{
     TextTurnReducer, TextTurnReducerWithTools, TextTurnReductionError, TextTurnResult,
     TextTurnResultWithTools, TextTurnState, TextTurnStateWithTools, ToolCallError, ToolCallId,
     ToolCallItemView, ToolCallWrapper, ToolDef, ToolExecutionError, ToolInput, ToolMetadata,
-    ToolName, ToolPolicy, ToolResultItemView, ToolSelector, ToolUse, ToolUseError, Toolset,
+    ToolName, ToolPolicy, ToolResult, ToolResultError, ToolResultItemView, ToolSelector, Toolset,
     TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView, UncommittedAssistantTurn, Usage,
     UsageEstimate, UsageRecoveryAdapter, assistant_json, find_tool_call_arguments,
 };

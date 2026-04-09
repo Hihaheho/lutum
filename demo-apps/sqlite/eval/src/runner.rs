@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::Context;
 use async_trait::async_trait;
-use lutum::{Lutum, ModelInputItem, Session, ToolUse, TurnItemIter};
+use lutum::{Lutum, ModelInputItem, Session, ToolResult, TurnItemIter};
 use sqlite_agent::{
     AgentConfig, AgentHooks, DbRegistry, QueryResult, SqliteDb, TransactionMode, WriteDecision,
     WritePreview, run_turn,
@@ -157,13 +157,13 @@ fn last_assistant_text(session: &Session) -> Option<String> {
     result
 }
 
-fn executed_tool_uses(session: &Session) -> Vec<ToolUse> {
+fn executed_tool_results(session: &Session) -> Vec<ToolResult> {
     session
         .input()
         .items()
         .iter()
         .filter_map(|item| match item {
-            ModelInputItem::ToolUse(tool_use) => Some(tool_use.clone()),
+            ModelInputItem::ToolResult(tool_result) => Some(tool_result.clone()),
             _ => None,
         })
         .collect()
@@ -172,13 +172,13 @@ fn executed_tool_uses(session: &Session) -> Vec<ToolUse> {
 fn apply_case_expectations(
     score: &mut CaseScore,
     case: &TestCase,
-    tool_uses: &[ToolUse],
+    tool_results: &[ToolResult],
     last_result: Option<&QueryResult>,
 ) {
     score.expected_tool_ok = case.expect_tool.as_ref().map(|expected| {
-        tool_uses
+        tool_results
             .iter()
-            .any(|tool_use| tool_use.name.as_str() == expected)
+            .any(|tool_result| tool_result.name.as_str() == expected)
     });
     score.expected_row_count_ok = case.expect_rows.map(|expected| {
         last_result
@@ -191,22 +191,22 @@ fn query_result_matches(left: &QueryResult, right: &QueryResult) -> bool {
     left.columns == right.columns && left.rows == right.rows
 }
 
-fn tool_use_sql(tool_use: &ToolUse) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(tool_use.arguments.get())
+fn tool_result_sql(tool_result: &ToolResult) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(tool_result.arguments.get())
         .ok()?
         .get("sql")?
         .as_str()
         .map(ToOwned::to_owned)
 }
 
-fn find_last_select_sql(tool_uses: &[ToolUse], last_result: &QueryResult) -> Option<String> {
-    tool_uses.iter().rev().find_map(|tool_use| {
-        if tool_use.name.as_str() != "select" {
+fn find_last_select_sql(tool_results: &[ToolResult], last_result: &QueryResult) -> Option<String> {
+    tool_results.iter().rev().find_map(|tool_result| {
+        if tool_result.name.as_str() != "select" {
             return None;
         }
-        let result = serde_json::from_str::<QueryResult>(tool_use.result.get()).ok()?;
+        let result = serde_json::from_str::<QueryResult>(tool_result.result.get()).ok()?;
         if query_result_matches(&result, last_result) {
-            tool_use_sql(tool_use)
+            tool_result_sql(tool_result)
         } else {
             None
         }
@@ -216,13 +216,13 @@ fn find_last_select_sql(tool_uses: &[ToolUse], last_result: &QueryResult) -> Opt
 fn apply_select_checks(
     score: &mut CaseScore,
     db: &SqliteDb,
-    tool_uses: &[ToolUse],
+    tool_results: &[ToolResult],
     last_result: Option<&QueryResult>,
 ) {
     let Some(last_result) = last_result else {
         return;
     };
-    let Some(sql) = find_last_select_sql(tool_uses, last_result) else {
+    let Some(sql) = find_last_select_sql(tool_results, last_result) else {
         score.sql_syntax_ok = Some(false);
         score.no_large_scan = Some(false);
         return;
@@ -279,13 +279,13 @@ pub async fn run_case(
         .await
         .with_context(|| format!("case '{}' failed during execution", case.name))?;
 
-    let tool_uses = executed_tool_uses(&session);
+    let tool_results = executed_tool_results(&session);
     let mut score = CaseScore::default();
-    apply_case_expectations(&mut score, case, &tool_uses, output.last_result.as_ref());
+    apply_case_expectations(&mut score, case, &tool_results, output.last_result.as_ref());
     apply_select_checks(
         &mut score,
         db.as_ref(),
-        &tool_uses,
+        &tool_results,
         output.last_result.as_ref(),
     );
 
@@ -360,8 +360,8 @@ mod tests {
         ])
     }
 
-    fn make_tool_use(name: &str, arguments: &str, result: &str) -> ToolUse {
-        ToolUse::new(
+    fn make_tool_result(name: &str, arguments: &str, result: &str) -> ToolResult {
+        ToolResult::new(
             "call_1",
             name,
             RawJson::parse(arguments).expect("valid tool arguments"),
@@ -395,14 +395,14 @@ mod tests {
     fn expectations_match_tool_name_and_row_count() {
         let case = test_case(Some("select"), Some(2));
         let query_result = make_query_result(&[&["1", "alice"], &["2", "bob"]]);
-        let tool_uses = vec![make_tool_use(
+        let tool_results = vec![make_tool_result(
             "select",
             r#"{"db_id":"main","sql":"SELECT id, name FROM users"}"#,
             r#"{"columns":["id","name"],"rows":[["1","alice"],["2","bob"]]}"#,
         )];
         let mut score = CaseScore::default();
 
-        apply_case_expectations(&mut score, &case, &tool_uses, Some(&query_result));
+        apply_case_expectations(&mut score, &case, &tool_results, Some(&query_result));
 
         assert_eq!(score.expected_tool_ok, Some(true));
         assert_eq!(score.expected_row_count_ok, Some(true));
@@ -412,14 +412,14 @@ mod tests {
     fn expectations_fail_when_tool_or_row_count_do_not_match() {
         let case = test_case(Some("delete"), Some(3));
         let query_result = make_query_result(&[&["1", "alice"]]);
-        let tool_uses = vec![make_tool_use(
+        let tool_results = vec![make_tool_result(
             "select",
             r#"{"db_id":"main","sql":"SELECT id, name FROM users"}"#,
             r#"{"columns":["id","name"],"rows":[["1","alice"]]}"#,
         )];
         let mut score = CaseScore::default();
 
-        apply_case_expectations(&mut score, &case, &tool_uses, Some(&query_result));
+        apply_case_expectations(&mut score, &case, &tool_results, Some(&query_result));
 
         assert_eq!(score.expected_tool_ok, Some(false));
         assert_eq!(score.expected_row_count_ok, Some(false));

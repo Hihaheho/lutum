@@ -147,19 +147,19 @@ fn tool_round_is_only_applied_on_explicit_commit() {
                 Some(ToolsCall::Weather(_))
             ));
             assert!(matches!(round.expect_one().unwrap(), ToolsCall::Weather(_)));
-            let tool_uses = round
+            let tool_results = round
                 .tool_calls
                 .iter()
                 .cloned()
                 .map(|tool_call| match tool_call {
                     ToolsCall::Weather(call) => call
-                        .tool_use(WeatherResult {
+                        .complete(WeatherResult {
                             forecast: "sunny".into(),
                         })
                         .unwrap(),
                 })
                 .collect::<Vec<_>>();
-            round.commit(&mut session, tool_uses).unwrap();
+            round.commit(&mut session, tool_results).unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => unreachable!(),
     }
@@ -277,19 +277,19 @@ fn structured_tool_round_stays_explicit_until_commit() {
 
     match outcome {
         StructuredStepOutcomeWithTools::NeedsTools(round) => {
-            let tool_uses = round
+            let tool_results = round
                 .tool_calls
                 .iter()
                 .cloned()
                 .map(|tool_call| match tool_call {
                     ToolsCall::Weather(call) => call
-                        .tool_use(WeatherResult {
+                        .complete(WeatherResult {
                             forecast: "windy".into(),
                         })
                         .unwrap(),
                 })
                 .collect::<Vec<_>>();
-            round.commit(&mut session, tool_uses).unwrap();
+            round.commit(&mut session, tool_results).unwrap();
         }
         StructuredStepOutcomeWithTools::Finished(_) => unreachable!(),
     }

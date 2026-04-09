@@ -16,7 +16,7 @@ pub use budget::{
 pub use conversation::{
     AssistantInputItem, AssistantTurn, AssistantTurnInputError, AssistantTurnItem,
     EmptyNonEmptyError, InputMessageRole, MessageContent, ModelInput, ModelInputItem,
-    ModelInputValidationError, NonEmpty, RawJson, ToolCallId, ToolMetadata, ToolName, ToolUse,
+    ModelInputValidationError, NonEmpty, RawJson, ToolCallId, ToolMetadata, ToolName, ToolResult,
     UncommittedAssistantTurn,
 };
 pub use error::{AgentError, BoxError, NoToolsContractViolation};
@@ -50,7 +50,7 @@ pub use reducer::{
 pub use structured::StructuredOutput;
 pub use toolset::{
     NoToolSelector, NoTools, ToolCallError, ToolCallWrapper, ToolDef, ToolExecutionError,
-    ToolInput, ToolPolicy, ToolSelector, ToolUseError, Toolset,
+    ToolInput, ToolPolicy, ToolResultError, ToolSelector, Toolset,
 };
 pub use transcript::{
     AssistantTurnView, CommittedTurn, ItemView, ToolCallItemView, ToolResultItemView, TurnItemIter,

@@ -50,13 +50,13 @@ Request input is represented by:
 
 - `ModelInput`
 - `ModelInputItem`
-- `ToolUse`
+- `ToolResult`
 
 `ModelInputItem` is a flat ordered enum:
 
 - `Message { role, content }` — user/system/developer messages
 - `Assistant(AssistantInputItem)` — assistant message items for manual construction
-- `ToolUse(ToolUse)` — tool results following a tool-call turn
+- `ToolResult(ToolResult)` — tool results following a tool-call turn
 - `Turn(CommittedTurn)` — an exact adapter-owned committed turn at its natural position
 
 The `Turn` variant is what makes context engineering work: committed turns live in the same
@@ -123,7 +123,7 @@ These are two distinct concepts.
 
 - exact, adapter-owned, view-backed
 - replayable without canonicalization loss
-- stored via `commit_text` / `commit_structured` / `commit_tool_round`
+- stored via `commit_text` / `commit_structured` / `round.commit(...)`
 
 `AssistantTurn` and `AssistantTurnItem` remain useful completed result types for execution and
 tool-round validation. They are not the session storage model.
@@ -200,8 +200,8 @@ It deliberately does not own:
 
 `commit_text_with_tools` and `commit_structured_with_tools` commit completed tool-enabled turns.
 
-`commit_tool_round` validates tool use ordering against the committed turn's `AssistantTurn`
-and returns `Result<(), AssistantTurnInputError>`.
+`round.commit(...)` validates tool result ordering against the committed turn's
+`AssistantTurn` and returns `Result<(), AssistantTurnInputError>`.
 
 This keeps it safe for branch evaluation, approval gates, speculative execution, and
 planner/worker handoff.

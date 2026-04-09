@@ -68,7 +68,7 @@ lutum-eval = "0.1.0"
   via `.tools::<T>()`.
 - `Session`: transcript helper. Nothing is committed until you call `commit_text`,
   `commit_structured`, `commit_text_with_tools`, `commit_structured_with_tools`, or
-  `commit_tool_round`.
+  `round.commit(...)`.
 - `ModelInput`: low-level request surface if you want to skip `Session` and drive turns directly.
 - `RequestExtensions`: opaque per-request metadata for routing, identity, and custom adapter
   logic, attached inline with `.ext(...)` or `.extensions(...)`.
@@ -250,21 +250,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
 
         match outcome {
-            TextStepOutcomeWithTools::NeedsToolResults(round) => {
-                let tool_uses = round
+            TextStepOutcomeWithTools::NeedsTools(round) => {
+                let tool_results = round
                     .tool_calls
                     .iter()
                     .cloned()
                     .map(|tool_call| match tool_call {
                         ToolsCall::Weather(call) => call
-                            .tool_use(WeatherResult {
+                            .complete(WeatherResult {
                                 forecast: "sunny, 24C".into(),
                             })
                             .unwrap(),
                     })
                     .collect::<Vec<_>>();
 
-                session.commit_tool_round(round, tool_uses)?;
+                round.commit(&mut session, tool_results)?;
             }
             TextStepOutcomeWithTools::Finished(result) => {
                 println!("{}", result.assistant_text());
@@ -616,7 +616,7 @@ cargo run -p lutum --example <name> --features openai
 | Example | What it shows | Run | Copy this when... |
 |---|---|---|---|
 | [`streaming_turn_ui`](crates/lutum/examples/streaming_turn_ui.rs) | Stream `TextTurnEvent` deltas directly to a UI or terminal | `cargo run -p lutum --example streaming_turn_ui --features openai` | You want the smallest streaming example without tools or transcript branching |
-| [`react_loop`](crates/lutum/examples/react_loop.rs) | Explicit tool loop with `.tools::<T>()`, `NeedsToolResults`, and `commit_tool_round` | `cargo run -p lutum --example react_loop --features openai` | You want a ReAct-style loop but still keep tool execution in Rust |
+| [`react_loop`](crates/lutum/examples/react_loop.rs) | Explicit tool loop with `.tools::<T>()`, `NeedsTools`, and `round.commit(...)` | `cargo run -p lutum --example react_loop --features openai` | You want a ReAct-style loop but still keep tool execution in Rust |
 | [`verification_gates`](crates/lutum/examples/verification_gates.rs) | Structured output checked by deterministic Rust gates and retried | `cargo run -p lutum --example verification_gates --features openai` | You want model output to pass strict post-validation before acceptance |
 | [`deterministic_hooks`](crates/lutum/examples/deterministic_hooks.rs) | Prompt and output validation through typed hooks | `cargo run -p lutum --example deterministic_hooks --features openai` | You want reusable policy checks without baking them into every call site |
 | [`policy_hook`](crates/lutum/examples/policy_hook.rs) | A configured Rust policy object plugged into a typed hook | `cargo run -p lutum --example policy_hook --features openai` | You want hook behavior to come from app-owned configuration instead of hard-coded closures |

@@ -4,7 +4,7 @@ use schemars::{JsonSchema, Schema, schema_for};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-use crate::conversation::{ToolMetadata, ToolUse};
+use crate::conversation::{ToolMetadata, ToolResult};
 
 #[derive(Clone, Copy)]
 pub struct ToolDef {
@@ -60,7 +60,7 @@ pub enum ToolCallError {
 }
 
 #[derive(Debug, Error)]
-pub enum ToolUseError {
+pub enum ToolResultError {
     #[error("tool metadata for `{actual}` does not match expected tool `{expected}`")]
     MismatchedToolName {
         expected: &'static str,
@@ -74,8 +74,8 @@ pub enum ToolUseError {
 pub enum ToolExecutionError<E> {
     #[error("tool execution failed: {0}")]
     Execute(E),
-    #[error("failed to build tool use: {0}")]
-    ToolUse(#[from] ToolUseError),
+    #[error("failed to build tool result: {0}")]
+    ToolResult(#[from] ToolResultError),
 }
 
 pub trait ToolInput:
@@ -86,15 +86,18 @@ pub trait ToolInput:
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
 
-    fn tool_use(metadata: ToolMetadata, output: Self::Output) -> Result<ToolUse, ToolUseError> {
+    fn tool_result(
+        metadata: ToolMetadata,
+        output: Self::Output,
+    ) -> Result<ToolResult, ToolResultError> {
         if metadata.name.as_str() != Self::NAME {
-            return Err(ToolUseError::MismatchedToolName {
+            return Err(ToolResultError::MismatchedToolName {
                 expected: Self::NAME,
                 actual: metadata.name.as_str().to_string(),
             });
         }
         let result = crate::conversation::RawJson::from_serializable(&output)?;
-        Ok(metadata.into_tool_use(result))
+        Ok(metadata.into_tool_result(result))
     }
 }
 

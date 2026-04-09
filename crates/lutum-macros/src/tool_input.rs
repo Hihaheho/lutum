@@ -25,11 +25,11 @@ pub fn expand_tool_input_struct(item: ItemStruct, args: ToolInputArgs) -> proc_m
         }
 
         impl #ident {
-            pub fn tool_use(
+            pub fn tool_result(
                 metadata: ::lutum::ToolMetadata,
                 output: #output,
-            ) -> Result<::lutum::ToolUse, ::lutum::ToolUseError> {
-                <Self as ::lutum::ToolInput>::tool_use(metadata, output)
+            ) -> Result<::lutum::ToolResult, ::lutum::ToolResultError> {
+                <Self as ::lutum::ToolInput>::tool_result(metadata, output)
             }
         }
 
@@ -62,11 +62,11 @@ pub fn expand_tool_input_struct(item: ItemStruct, args: ToolInputArgs) -> proc_m
                 (self.metadata, self.input)
             }
 
-            pub fn tool_use(
+            pub fn complete(
                 self,
                 output: #output,
-            ) -> Result<::lutum::ToolUse, ::lutum::ToolUseError> {
-                #ident::tool_use(self.metadata, output)
+            ) -> Result<::lutum::ToolResult, ::lutum::ToolResultError> {
+                #ident::tool_result(self.metadata, output)
             }
         }
 
@@ -99,11 +99,11 @@ pub fn expand_tool_input_enum(item: ItemEnum, args: ToolInputArgs) -> proc_macro
         }
 
         impl #ident {
-            pub fn tool_use(
+            pub fn tool_result(
                 metadata: ::lutum::ToolMetadata,
                 output: #output,
-            ) -> Result<::lutum::ToolUse, ::lutum::ToolUseError> {
-                <Self as ::lutum::ToolInput>::tool_use(metadata, output)
+            ) -> Result<::lutum::ToolResult, ::lutum::ToolResultError> {
+                <Self as ::lutum::ToolInput>::tool_result(metadata, output)
             }
         }
 
@@ -136,11 +136,11 @@ pub fn expand_tool_input_enum(item: ItemEnum, args: ToolInputArgs) -> proc_macro
                 (self.metadata, self.input)
             }
 
-            pub fn tool_use(
+            pub fn complete(
                 self,
                 output: #output,
-            ) -> Result<::lutum::ToolUse, ::lutum::ToolUseError> {
-                #ident::tool_use(self.metadata, output)
+            ) -> Result<::lutum::ToolResult, ::lutum::ToolResultError> {
+                #ident::tool_result(self.metadata, output)
             }
         }
 

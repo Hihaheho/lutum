@@ -173,13 +173,13 @@ fn render_conversation(f: &mut Frame, area: Rect, app: &TuiApp) {
                     lines.push(Line::default());
                 }
             }
-            ModelInputItem::ToolUse(tool_use) => {
+            ModelInputItem::ToolResult(tool_result) => {
                 // Tool result following a committed tool-call turn.
-                let summary = summarize_result(tool_use.result.get());
+                let summary = summarize_result(tool_result.result.get());
                 lines.push(Line::from(vec![
                     Span::styled(" ✓ ", Style::default().fg(Color::Green)),
                     Span::styled(
-                        format!("{}: ", tool_use.name),
+                        format!("{}: ", tool_result.name),
                         Style::default().fg(Color::Green),
                     ),
                     Span::styled(summary, Style::default().fg(Color::DarkGray)),

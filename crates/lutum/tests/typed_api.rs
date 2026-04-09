@@ -7,7 +7,7 @@ use lutum::{
     ErasedTextTurnEventStream, HookRegistry, InputMessageRole, Lutum, LutumError, MessageContent,
     ModelInput, ModelInputItem, ModelName, ModelNameError, NonEmpty, OperationKind, RawJson,
     RequestBudget, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-    Temperature, TextTurnReducer, TextTurnReducerWithTools, ToolMetadata, ToolPolicy, ToolUse,
+    Temperature, TextTurnReducer, TextTurnReducerWithTools, ToolMetadata, ToolPolicy, ToolResult,
     TurnAdapter, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
@@ -128,7 +128,7 @@ fn typed_public_api_compiles_and_constructs_requests() {
             content: NonEmpty::one(MessageContent::Text("hi".into())),
         },
         ModelInputItem::Assistant(AssistantInputItem::Reasoning("thinking".into())),
-        ModelInputItem::ToolUse(ToolUse::new(
+        ModelInputItem::ToolResult(ToolResult::new(
             "call-1",
             "weather",
             RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
@@ -268,13 +268,13 @@ fn context_rejects_invalid_model_input_before_adapter_call() {
     let ctx = Lutum::new(Arc::new(NullAdapter), budget);
     let input = ModelInput::from_items(vec![
         ModelInputItem::text(InputMessageRole::User, "hello"),
-        ModelInputItem::tool_use_parts(
+        ModelInputItem::tool_result_parts(
             "dup",
             "weather",
             RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
             RawJson::parse("\"sunny\"").unwrap(),
         ),
-        ModelInputItem::tool_use_parts(
+        ModelInputItem::tool_result_parts(
             "dup",
             "weather",
             RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
@@ -288,7 +288,7 @@ fn context_rejects_invalid_model_input_before_adapter_call() {
     assert!(matches!(
         err,
         Err(LutumError::InvalidModelInput(
-            lutum::ModelInputValidationError::DuplicateToolUseId { .. }
+            lutum::ModelInputValidationError::DuplicateToolResultId { .. }
         ))
     ));
 }

@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
 
         match outcome {
             TextStepOutcomeWithTools::NeedsTools(round) => {
-                let mut tool_uses = Vec::with_capacity(round.tool_calls.len());
+                let mut tool_results = Vec::with_capacity(round.tool_calls.len());
 
                 for tool_call in round.tool_calls.iter().cloned() {
                     match tool_call {
@@ -174,19 +174,19 @@ async fn main() -> anyhow::Result<()> {
                             println!("[tool call] list_users()");
                             let result = list_users().await.unwrap();
                             println!("[tool result] {}", result.text.replace('\n', "\\n"));
-                            tool_uses.push(call.tool_use(result).unwrap());
+                            tool_results.push(call.complete(result).unwrap());
                         }
                         DbToolsCall::GetOrders(call) => {
                             let user_id = call.input().user_id;
                             println!("[tool call] get_orders(user_id={user_id})");
                             let result = lookup_orders(user_id);
                             println!("[tool result] {}", result.text.replace('\n', "\\n"));
-                            tool_uses.push(call.tool_use(result).unwrap());
+                            tool_results.push(call.complete(result).unwrap());
                         }
                     }
                 }
 
-                round.commit(&mut session, tool_uses).unwrap();
+                round.commit(&mut session, tool_results).unwrap();
             }
             TextStepOutcomeWithTools::Finished(result) => {
                 println!("Answer: {}", result.assistant_text().trim());

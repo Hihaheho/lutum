@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use lutum_protocol::conversation::{
     AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, NonEmpty,
-    RawJson, ToolCallId, ToolName, ToolUse,
+    RawJson, ToolCallId, ToolName, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -57,37 +57,38 @@ pub enum ClaudeModelInputItem {
         content: NonEmpty<MessageContent>,
     },
     Assistant(AssistantInputItem),
-    ToolUse(PersistedToolUse),
+    ToolResult(PersistedToolResult),
     Turn(ClaudeCommittedTurn),
 }
 
-/// Serializable form of [`ToolUse`].
+/// Serializable form of [`ToolResult`].
 ///
-/// [`ToolUse`] carries its `arguments` and `result` fields as [`RawJson`] (`Box<RawValue>`
+/// [`ToolResult`] carries its `arguments` and `result` fields as [`RawJson`] (`Box<RawValue>`
 /// under the hood).  Serde's internally-tagged enum machinery routes deserialization through
 /// a `Content` intermediary that is incompatible with `RawValue`.  This type sidesteps the
 /// issue by storing both fields as `serde_json::Value`, which converts losslessly to/from
 /// `RawJson`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PersistedToolUse {
+pub struct PersistedToolResult {
     pub id: ToolCallId,
     pub name: ToolName,
     pub arguments: serde_json::Value,
     pub result: serde_json::Value,
 }
 
-impl PersistedToolUse {
-    fn from_tool_use(tu: &ToolUse) -> Self {
+impl PersistedToolResult {
+    fn from_tool_result(tool_result: &ToolResult) -> Self {
         Self {
-            id: tu.id.clone(),
-            name: tu.name.clone(),
-            arguments: serde_json::from_str(tu.arguments.get()).expect("RawJson is valid JSON"),
-            result: serde_json::from_str(tu.result.get()).expect("RawJson is valid JSON"),
+            id: tool_result.id.clone(),
+            name: tool_result.name.clone(),
+            arguments: serde_json::from_str(tool_result.arguments.get())
+                .expect("RawJson is valid JSON"),
+            result: serde_json::from_str(tool_result.result.get()).expect("RawJson is valid JSON"),
         }
     }
 
-    fn into_tool_use(self) -> ToolUse {
-        ToolUse {
+    fn into_tool_result(self) -> ToolResult {
+        ToolResult {
             id: self.id,
             name: self.name,
             arguments: RawJson::from_serializable(&self.arguments)
@@ -133,8 +134,8 @@ pub fn snapshot(input: &ModelInput) -> Result<Vec<ClaudeModelInputItem>, Snapsho
                 content: content.clone(),
             }),
             ModelInputItem::Assistant(item) => Ok(ClaudeModelInputItem::Assistant(item.clone())),
-            ModelInputItem::ToolUse(tool_use) => Ok(ClaudeModelInputItem::ToolUse(
-                PersistedToolUse::from_tool_use(tool_use),
+            ModelInputItem::ToolResult(tool_result) => Ok(ClaudeModelInputItem::ToolResult(
+                PersistedToolResult::from_tool_result(tool_result),
             )),
             ModelInputItem::Turn(committed_turn) => committed_turn
                 .as_ref()
@@ -159,7 +160,9 @@ pub fn restore(items: Vec<ClaudeModelInputItem>) -> ModelInput {
                     ModelInputItem::Message { role, content }
                 }
                 ClaudeModelInputItem::Assistant(item) => ModelInputItem::Assistant(item),
-                ClaudeModelInputItem::ToolUse(p) => ModelInputItem::ToolUse(p.into_tool_use()),
+                ClaudeModelInputItem::ToolResult(p) => {
+                    ModelInputItem::ToolResult(p.into_tool_result())
+                }
                 ClaudeModelInputItem::Turn(turn) => ModelInputItem::Turn(Arc::new(turn)),
             })
             .collect(),
@@ -249,10 +252,10 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_with_tool_use_round_trip() {
+    fn snapshot_with_tool_result_round_trip() {
         let mut input = ModelInput::new();
         input.push(ModelInputItem::text(InputMessageRole::User, "search"));
-        input.push(ModelInputItem::tool_use_parts(
+        input.push(ModelInputItem::tool_result_parts(
             "call_1",
             "search",
             RawJson::parse(r#"{"q":"rust"}"#).unwrap(),
@@ -265,9 +268,9 @@ mod tests {
         let restored = restore(items);
 
         assert_eq!(input.items().len(), restored.items().len());
-        let ModelInputItem::ToolUse(tu) = &restored.items()[1] else {
-            panic!("expected ToolUse");
+        let ModelInputItem::ToolResult(tr) = &restored.items()[1] else {
+            panic!("expected ToolResult");
         };
-        assert_eq!(tu.name.as_str(), "search");
+        assert_eq!(tr.name.as_str(), "search");
     }
 }

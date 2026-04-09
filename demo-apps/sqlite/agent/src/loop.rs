@@ -115,17 +115,17 @@ pub async fn run_turn(
             TextStepOutcomeWithTools::NeedsTools(round) => {
                 usage.input_tokens += round.usage.input_tokens;
                 usage.output_tokens += round.usage.output_tokens;
-                let mut tool_uses = Vec::with_capacity(round.tool_calls.len());
+                let mut tool_results = Vec::with_capacity(round.tool_calls.len());
 
                 for tool_call in round.tool_calls.iter().cloned() {
-                    let tool_use =
+                    let tool_result =
                         dispatch_tool(tool_call, registry, hooks, config, &mut last_result).await?;
-                    tool_uses.push(tool_use);
+                    tool_results.push(tool_result);
                 }
 
                 round
-                    .commit(session, tool_uses)
-                    .expect("tool use ordering should be valid");
+                    .commit(session, tool_results)
+                    .expect("tool result ordering should be valid");
             }
         }
     }
@@ -140,14 +140,14 @@ async fn dispatch_tool(
     hooks: &AgentHooks,
     config: &AgentConfig,
     last_result: &mut Option<QueryResult>,
-) -> Result<lutum::ToolUse, AgentError> {
+) -> Result<lutum::ToolResult, AgentError> {
     match call {
         // ── Mode request ───────────────────────────────────────────────────
         SqlToolsCall::RequestWritableMode(c) => {
             let reason = c.input().reason.clone();
             tracing::debug!(%reason, "tool: request_writable_mode");
             let granted = hooks.approve_mode_request(&reason).await;
-            Ok(c.tool_use(ModeRequestResult {
+            Ok(c.complete(ModeRequestResult {
                 granted,
                 message: if granted {
                     "Write mode granted. You may now execute write operations.".to_string()
@@ -161,16 +161,16 @@ async fn dispatch_tool(
         // ── Registry operations ────────────────────────────────────────────
         SqlToolsCall::ListDatabases(c) => {
             tracing::debug!("tool: list_databases");
-            Ok(c.tool_use(registry.list()).unwrap())
+            Ok(c.complete(registry.list()).unwrap())
         }
 
         SqlToolsCall::CreateDatabase(c) => {
             let args = c.input();
             tracing::debug!(db_id = %args.db_id, path = %args.path, "tool: create_database");
             match registry.create(&args.db_id, &args.path) {
-                Ok(result) => Ok(c.tool_use(result).unwrap()),
+                Ok(result) => Ok(c.complete(result).unwrap()),
                 Err(e) => Ok(c
-                    .tool_use(CreateDatabaseResult::error(e.to_string()))
+                    .complete(CreateDatabaseResult::error(e.to_string()))
                     .unwrap()),
             }
         }
@@ -181,11 +181,11 @@ async fn dispatch_tool(
             tracing::debug!(%db_id, "tool: get_schema");
             let Some(db) = registry.get(&db_id) else {
                 return Ok(c
-                    .tool_use(SchemaInfo::error(format!("unknown db_id: '{db_id}'")))
+                    .complete(SchemaInfo::error(format!("unknown db_id: '{db_id}'")))
                     .unwrap());
             };
             let result = db.get_schema()?;
-            Ok(c.tool_use(result).unwrap())
+            Ok(c.complete(result).unwrap())
         }
 
         // ── SELECT ─────────────────────────────────────────────────────────
@@ -195,19 +195,19 @@ async fn dispatch_tool(
             tracing::debug!(%db_id, %sql, "tool: select");
             let Some(db) = registry.get(&db_id) else {
                 return Ok(c
-                    .tool_use(error_query(&format!("unknown db_id: '{db_id}'")))
+                    .complete(error_query(&format!("unknown db_id: '{db_id}'")))
                     .unwrap());
             };
 
             if let Err(e) = validate_sql_safety(&sql) {
-                return Ok(c.tool_use(error_query(&e.to_string())).unwrap());
+                return Ok(c.complete(error_query(&e.to_string())).unwrap());
             }
             match db.execute_read(&sql) {
                 Ok(qr) => {
                     *last_result = Some(qr.clone());
-                    Ok(c.tool_use(qr).unwrap())
+                    Ok(c.complete(qr).unwrap())
                 }
-                Err(e) => Ok(c.tool_use(error_query(&e.to_string())).unwrap()),
+                Err(e) => Ok(c.complete(error_query(&e.to_string())).unwrap()),
             }
         }
 
@@ -219,11 +219,11 @@ async fn dispatch_tool(
             tracing::debug!(%db_id, %sql, "tool: insert");
             let Some(db) = registry.get(&db_id) else {
                 return Ok(c
-                    .tool_use(error_modify(&format!("unknown db_id: '{db_id}'")))
+                    .complete(error_modify(&format!("unknown db_id: '{db_id}'")))
                     .unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
-            Ok(c.tool_use(result).unwrap())
+            Ok(c.complete(result).unwrap())
         }
 
         SqlToolsCall::Update(c) => {
@@ -233,11 +233,11 @@ async fn dispatch_tool(
             tracing::debug!(%db_id, %sql, "tool: update");
             let Some(db) = registry.get(&db_id) else {
                 return Ok(c
-                    .tool_use(error_modify(&format!("unknown db_id: '{db_id}'")))
+                    .complete(error_modify(&format!("unknown db_id: '{db_id}'")))
                     .unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
-            Ok(c.tool_use(result).unwrap())
+            Ok(c.complete(result).unwrap())
         }
 
         SqlToolsCall::Delete(c) => {
@@ -247,11 +247,11 @@ async fn dispatch_tool(
             tracing::debug!(%db_id, %sql, "tool: delete");
             let Some(db) = registry.get(&db_id) else {
                 return Ok(c
-                    .tool_use(error_modify(&format!("unknown db_id: '{db_id}'")))
+                    .complete(error_modify(&format!("unknown db_id: '{db_id}'")))
                     .unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
-            Ok(c.tool_use(result).unwrap())
+            Ok(c.complete(result).unwrap())
         }
 
         // ── DDL ────────────────────────────────────────────────────────────
@@ -262,11 +262,11 @@ async fn dispatch_tool(
             tracing::debug!(%db_id, %sql, "tool: create_table");
             let Some(db) = registry.get(&db_id) else {
                 return Ok(c
-                    .tool_use(error_ddl(&format!("unknown db_id: '{db_id}'")))
+                    .complete(error_ddl(&format!("unknown db_id: '{db_id}'")))
                     .unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
-            Ok(c.tool_use(result).unwrap())
+            Ok(c.complete(result).unwrap())
         }
 
         SqlToolsCall::AlterTable(c) => {
@@ -276,11 +276,11 @@ async fn dispatch_tool(
             tracing::debug!(%db_id, %sql, "tool: alter_table");
             let Some(db) = registry.get(&db_id) else {
                 return Ok(c
-                    .tool_use(error_ddl(&format!("unknown db_id: '{db_id}'")))
+                    .complete(error_ddl(&format!("unknown db_id: '{db_id}'")))
                     .unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
-            Ok(c.tool_use(result).unwrap())
+            Ok(c.complete(result).unwrap())
         }
 
         SqlToolsCall::CreateIndex(c) => {
@@ -290,11 +290,11 @@ async fn dispatch_tool(
             tracing::debug!(%db_id, %sql, "tool: create_index");
             let Some(db) = registry.get(&db_id) else {
                 return Ok(c
-                    .tool_use(error_ddl(&format!("unknown db_id: '{db_id}'")))
+                    .complete(error_ddl(&format!("unknown db_id: '{db_id}'")))
                     .unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
-            Ok(c.tool_use(result).unwrap())
+            Ok(c.complete(result).unwrap())
         }
     }
 }

@@ -13,7 +13,7 @@ use lutum_protocol::{
     budget::Usage,
     conversation::{
         AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, RawJson,
-        ToolCallId, ToolMetadata, ToolName, ToolUse,
+        ToolCallId, ToolMetadata, ToolName, ToolResult,
     },
     extensions::RequestExtensions,
     hooks::HookRegistry,
@@ -538,11 +538,11 @@ fn convert_model_input(input: &ModelInput) -> Result<Vec<InputItem>, OpenAiError
             ModelInputItem::Assistant(assistant) => {
                 lower_assistant_input_item(assistant, &mut assistant_message_content, &mut items)?;
             }
-            ModelInputItem::ToolUse(tool_use) => {
+            ModelInputItem::ToolResult(tool_result) => {
                 flush_assistant_message(&mut assistant_message_content, &mut items);
-                lower_tool_use(
-                    tool_use,
-                    !replayed_tool_call_ids.contains(&tool_use.id),
+                lower_tool_result(
+                    tool_result,
+                    !replayed_tool_call_ids.contains(&tool_result.id),
                     &mut items,
                 )?;
             }
@@ -592,21 +592,21 @@ fn lower_assistant_input_item(
     Ok(())
 }
 
-fn lower_tool_use(
-    tool_use: &ToolUse,
+fn lower_tool_result(
+    tool_result: &ToolResult,
     emit_call: bool,
     out: &mut Vec<InputItem>,
 ) -> Result<(), OpenAiError> {
     if emit_call {
         out.push(InputItem::FunctionCall(FunctionCallItem::new(
-            tool_use.id.as_str(),
-            tool_use.name.as_str(),
-            tool_use.arguments.get(),
+            tool_result.id.as_str(),
+            tool_result.name.as_str(),
+            tool_result.arguments.get(),
         )));
     }
     out.push(InputItem::FunctionCallOutput(FunctionCallOutputItem::new(
-        tool_use.id.as_str(),
-        Value::String(tool_use.result.get().to_string()),
+        tool_result.id.as_str(),
+        Value::String(tool_result.result.get().to_string()),
     )));
     Ok(())
 }
@@ -1787,7 +1787,7 @@ mod tests {
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
         AssistantTurnItem, AssistantTurnView, ErasedStructuredTurnEvent, ErasedTextTurnEvent,
         GenerationParams, HookRegistry, InputMessageRole, ModelInput, ModelInputItem, ModelName,
-        RequestExtensions, ToolUse,
+        RequestExtensions, ToolResult,
     };
 
     use super::*;
@@ -1937,7 +1937,7 @@ mod tests {
             ModelInputItem::text(InputMessageRole::User, "hello"),
             ModelInputItem::Assistant(AssistantInputItem::Reasoning("think".into())),
             ModelInputItem::Assistant(AssistantInputItem::Text("hi".into())),
-            ModelInputItem::ToolUse(ToolUse::new(
+            ModelInputItem::ToolResult(ToolResult::new(
                 "call-1",
                 "weather",
                 RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
@@ -1999,7 +1999,7 @@ mod tests {
                 finish_reason: FinishReason::ToolCall,
                 usage: Usage::zero(),
             })),
-            ModelInputItem::ToolUse(ToolUse::new(
+            ModelInputItem::ToolResult(ToolResult::new(
                 "call-1",
                 "weather",
                 RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),

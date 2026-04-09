@@ -13,7 +13,7 @@ use lutum_protocol::{
     budget::Usage,
     conversation::{
         AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, RawJson,
-        ToolCallId, ToolMetadata, ToolName, ToolUse,
+        ToolCallId, ToolMetadata, ToolName, ToolResult,
     },
     extensions::RequestExtensions,
     hooks::HookRegistry,
@@ -504,7 +504,7 @@ fn build_tool_choice(config: &AdapterTurnConfig) -> Option<ClaudeToolChoice> {
 fn compile_model_input(input: &ModelInput) -> Result<CompiledClaudeConversation, ClaudeError> {
     let mut compiled = CompiledClaudeConversation::default();
     // Track whether the immediately preceding item was a committed Turn that contained
-    // tool calls. When true, a following ToolUse item must only emit the user-side
+    // tool calls. When true, a following ToolResult item must only emit the user-side
     // tool_result — the assistant-side tool_use blocks are already in the Turn.
     let mut prev_was_tool_turn = false;
 
@@ -518,15 +518,15 @@ fn compile_model_input(input: &ModelInput) -> Result<CompiledClaudeConversation,
                 compiled.push_block(ClaudeRole::Assistant, assistant_replay_block(item));
                 prev_was_tool_turn = false;
             }
-            ModelInputItem::ToolUse(tool_use) => {
+            ModelInputItem::ToolResult(tool_result) => {
                 if prev_was_tool_turn {
                     // The assistant's tool_use block was already emitted by the preceding
                     // committed Turn. Only emit the user-side tool_result.
-                    emit_tool_result(tool_use, &mut compiled)?;
+                    emit_tool_result(tool_result, &mut compiled)?;
                 } else {
-                    emit_tool_use(tool_use, &mut compiled)?;
+                    emit_tool_use(tool_result, &mut compiled)?;
                 }
-                // ToolUse items form a contiguous group after a Turn; keep the flag set.
+                // ToolResult items form a contiguous group after a Turn; keep the flag set.
             }
             ModelInputItem::Turn(turn) => {
                 let has_tool_calls;
@@ -576,24 +576,24 @@ fn emit_message<'a>(
 
 /// Emit a standalone tool call+result pair (no preceding committed Turn).
 fn emit_tool_use(
-    tool_use: &ToolUse,
+    tool_result: &ToolResult,
     compiled: &mut CompiledClaudeConversation,
 ) -> Result<(), ClaudeError> {
     compiled.push_block(
         ClaudeRole::Assistant,
-        tool_use_block(&tool_use.id, &tool_use.name, &tool_use.arguments)?,
+        tool_use_block(&tool_result.id, &tool_result.name, &tool_result.arguments)?,
     );
-    compiled.push_block(ClaudeRole::User, tool_result_block(tool_use)?);
+    compiled.push_block(ClaudeRole::User, tool_result_block(tool_result)?);
     Ok(())
 }
 
-/// Emit only the user-side tool_result for a ToolUse that follows a committed Turn.
+/// Emit only the user-side tool_result for a ToolResult that follows a committed Turn.
 /// The assistant-side tool_use block is already present from the Turn replay.
 fn emit_tool_result(
-    tool_use: &ToolUse,
+    tool_result: &ToolResult,
     compiled: &mut CompiledClaudeConversation,
 ) -> Result<(), ClaudeError> {
-    compiled.push_block(ClaudeRole::User, tool_result_block(tool_use)?);
+    compiled.push_block(ClaudeRole::User, tool_result_block(tool_result)?);
     Ok(())
 }
 
@@ -752,10 +752,10 @@ fn tool_use_block(
     }))
 }
 
-fn tool_result_block(tool_use: &ToolUse) -> Result<ClaudeContentBlock, ClaudeError> {
+fn tool_result_block(tool_result: &ToolResult) -> Result<ClaudeContentBlock, ClaudeError> {
     Ok(ClaudeContentBlock::ToolResult(ToolResultBlock {
-        tool_use_id: tool_use.id.clone(),
-        content: tool_result_content(&tool_use.result)?,
+        tool_use_id: tool_result.id.clone(),
+        content: tool_result_content(&tool_result.result)?,
         cache_control: None,
     }))
 }

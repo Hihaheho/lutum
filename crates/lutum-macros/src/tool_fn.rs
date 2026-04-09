@@ -72,11 +72,11 @@ pub fn expand_tool_fn(item_fn: ItemFn, args: ToolFnArgs) -> proc_macro2::TokenSt
         }
 
         impl #input_ident {
-            pub fn tool_use(
+            pub fn tool_result(
                 metadata: ::lutum::ToolMetadata,
                 output: #output_ty,
-            ) -> Result<::lutum::ToolUse, ::lutum::ToolUseError> {
-                <Self as ::lutum::ToolInput>::tool_use(metadata, output)
+            ) -> Result<::lutum::ToolResult, ::lutum::ToolResultError> {
+                <Self as ::lutum::ToolInput>::tool_result(metadata, output)
             }
         }
 
@@ -109,22 +109,22 @@ pub fn expand_tool_fn(item_fn: ItemFn, args: ToolFnArgs) -> proc_macro2::TokenSt
                 (self.metadata, self.input)
             }
 
-            pub fn tool_use(
+            pub fn complete(
                 self,
                 output: #output_ty,
-            ) -> Result<::lutum::ToolUse, ::lutum::ToolUseError> {
-                #input_ident::tool_use(self.metadata, output)
+            ) -> Result<::lutum::ToolResult, ::lutum::ToolResultError> {
+                #input_ident::tool_result(self.metadata, output)
             }
 
             pub async fn call(
                 self,
                 #(#call_method_args),*
-            ) -> Result<::lutum::ToolUse, ::lutum::ToolExecutionError<#error_ty>> {
+            ) -> Result<::lutum::ToolResult, ::lutum::ToolExecutionError<#error_ty>> {
                 let output = #fn_ident(#(#fn_call_args),*)
                     .await
                     .map_err(::lutum::ToolExecutionError::Execute)?;
-                #input_ident::tool_use(self.metadata, output)
-                    .map_err(::lutum::ToolExecutionError::ToolUse)
+                #input_ident::tool_result(self.metadata, output)
+                    .map_err(::lutum::ToolExecutionError::ToolResult)
             }
         }
 

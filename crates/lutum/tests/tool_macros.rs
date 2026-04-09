@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 
 use futures::executor::block_on;
-use lutum::{RawJson, ToolMetadata, ToolUse, Toolset};
+use lutum::{RawJson, ToolMetadata, ToolResult, Toolset};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +44,7 @@ enum FnTools {
 }
 
 #[test]
-fn tool_input_wrapper_builds_tool_use() {
+fn tool_input_wrapper_builds_tool_result() {
     assert_eq!(RawToolsSelector::CurrentWeather.name(), "weather");
     assert_eq!(
         RawToolsSelector::CurrentWeather.definition().name,
@@ -85,12 +85,12 @@ fn tool_input_wrapper_builds_tool_use() {
         RawTools::CurrentWeather(WeatherArgs { ref city }) if city == "Tokyo"
     ));
 
-    let tool_use = match tool_call {
+    let tool_result = match tool_call {
         RawToolsCall::CurrentWeather(call) => {
             assert_eq!(call.input().city, "Tokyo");
             let input: WeatherArgs = call.clone().into();
             assert_eq!(input.city, "Tokyo");
-            call.tool_use(WeatherResult {
+            call.complete(WeatherResult {
                 forecast: "sunny".into(),
             })
             .unwrap()
@@ -98,8 +98,8 @@ fn tool_input_wrapper_builds_tool_use() {
     };
 
     assert_eq!(
-        tool_use,
-        ToolUse::new(
+        tool_result,
+        ToolResult::new(
             "call-1",
             "weather",
             RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
@@ -117,7 +117,7 @@ fn tool_fn_wrapper_executes_with_skipped_args() {
     ))
     .unwrap();
 
-    let tool_use = match tool_call {
+    let tool_result = match tool_call {
         FnToolsCall::GetWeather(call) => {
             assert_eq!(call.input().city, "Osaka");
             block_on(call.call(
@@ -130,5 +130,5 @@ fn tool_fn_wrapper_executes_with_skipped_args() {
         }
     };
 
-    assert_eq!(tool_use.result.get(), "{\"forecast\":\"wx:7:Osaka\"}");
+    assert_eq!(tool_result.result.get(), "{\"forecast\":\"wx:7:Osaka\"}");
 }

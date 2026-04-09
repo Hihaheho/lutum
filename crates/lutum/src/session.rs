@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
-    GenerationParams, InputMessageRole, ModelInput, ModelInputItem, RequestBudget, ToolUse,
+    GenerationParams, InputMessageRole, ModelInput, ModelInputItem, RequestBudget, ToolResult,
     Toolset, TurnConfig, TurnView, UncommittedAssistantTurn,
     budget::Usage,
     reducer::{
@@ -200,22 +200,22 @@ where
         }
     }
 
-    /// Validate `tool_uses`, then commit the assistant turn and all tool results to the session.
+    /// Validate `tool_results`, then commit the assistant turn and all tool results to the session.
     ///
-    /// Returns an error if the tool uses don't match the assistant turn's tool calls (missing,
+    /// Returns an error if the tool results don't match the assistant turn's tool calls (missing,
     /// extra, or mismatched id/name/arguments).
     pub fn commit(
         self,
         session: &mut Session,
-        tool_uses: impl IntoIterator<Item = ToolUse>,
+        tool_results: impl IntoIterator<Item = ToolResult>,
     ) -> Result<(), AssistantTurnInputError>
     where
         T: Toolset,
     {
-        let ordered_tool_uses = validate_and_order_tool_uses(&self.turn, tool_uses)?;
+        let ordered_tool_results = validate_and_order_tool_results(&self.turn, tool_results)?;
         self.turn.commit_into(session.input_mut());
-        for tool_use in ordered_tool_uses {
-            session.input.push(ModelInputItem::ToolUse(tool_use));
+        for tool_result in ordered_tool_results {
+            session.input.push(ModelInputItem::ToolResult(tool_result));
         }
         Ok(())
     }
@@ -224,18 +224,18 @@ where
     pub fn discard(self) {}
 }
 
-fn validate_and_order_tool_uses(
+fn validate_and_order_tool_results(
     assistant_turn: &AssistantTurn,
-    tool_uses: impl IntoIterator<Item = ToolUse>,
-) -> Result<Vec<ToolUse>, AssistantTurnInputError> {
-    let mut tool_use_map = BTreeMap::new();
-    for tool_use in tool_uses {
-        let duplicate_id = tool_use.id.clone();
-        if tool_use_map
-            .insert(duplicate_id.clone(), tool_use)
+    tool_results: impl IntoIterator<Item = ToolResult>,
+) -> Result<Vec<ToolResult>, AssistantTurnInputError> {
+    let mut tool_result_map = BTreeMap::new();
+    for tool_result in tool_results {
+        let duplicate_id = tool_result.id.clone();
+        if tool_result_map
+            .insert(duplicate_id.clone(), tool_result)
             .is_some()
         {
-            return Err(AssistantTurnInputError::DuplicateToolUse { id: duplicate_id });
+            return Err(AssistantTurnInputError::DuplicateToolResult { id: duplicate_id });
         }
     }
 
@@ -250,28 +250,28 @@ fn validate_and_order_tool_uses(
             continue;
         };
 
-        let Some(tool_use) = tool_use_map.remove(id) else {
-            return Err(AssistantTurnInputError::MissingToolUse { id: id.clone() });
+        let Some(tool_result) = tool_result_map.remove(id) else {
+            return Err(AssistantTurnInputError::MissingToolResult { id: id.clone() });
         };
-        if tool_use.name != *name {
+        if tool_result.name != *name {
             return Err(AssistantTurnInputError::MismatchedToolName {
                 id: id.clone(),
                 expected: name.clone(),
-                actual: tool_use.name,
+                actual: tool_result.name,
             });
         }
-        if tool_use.arguments != *arguments {
+        if tool_result.arguments != *arguments {
             return Err(AssistantTurnInputError::MismatchedToolArguments {
                 id: id.clone(),
                 expected: arguments.clone(),
-                actual: tool_use.arguments,
+                actual: tool_result.arguments,
             });
         }
-        ordered.push(tool_use);
+        ordered.push(tool_result);
     }
 
-    if let Some((id, _)) = tool_use_map.into_iter().next() {
-        return Err(AssistantTurnInputError::ExtraToolUse { id });
+    if let Some((id, _)) = tool_result_map.into_iter().next() {
+        return Err(AssistantTurnInputError::ExtraToolResult { id });
     }
 
     Ok(ordered)

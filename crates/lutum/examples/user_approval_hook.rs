@@ -250,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
 
         match outcome {
             TextStepOutcomeWithTools::NeedsTools(round) => {
-                let mut tool_uses = Vec::with_capacity(round.tool_calls.len());
+                let mut tool_results = Vec::with_capacity(round.tool_calls.len());
 
                 for tool_call in round.tool_calls.iter().cloned() {
                     let (name, raw_args) = extract_name_and_args(&tool_call);
@@ -259,19 +259,19 @@ async fn main() -> anyhow::Result<()> {
                     match tool_call {
                         FsToolsCall::ListFiles(call) => match approval {
                             Approval::Reject { reason } => {
-                                tool_uses
-                                    .push(call.tool_use(format!("rejected: {reason}")).unwrap());
+                                tool_results
+                                    .push(call.complete(format!("rejected: {reason}")).unwrap());
                             }
                             Approval::Accept | Approval::Edit(_) => {
                                 let result = list_files().await.unwrap();
-                                tool_uses.push(call.tool_use(result).unwrap());
+                                tool_results.push(call.complete(result).unwrap());
                             }
                         },
 
                         FsToolsCall::ReadFile(mut call) => match approval {
                             Approval::Reject { reason } => {
-                                tool_uses
-                                    .push(call.tool_use(format!("rejected: {reason}")).unwrap());
+                                tool_results
+                                    .push(call.complete(format!("rejected: {reason}")).unwrap());
                             }
                             Approval::Edit(new_args) => {
                                 match serde_json::from_value::<ReadFile>(new_args) {
@@ -279,11 +279,11 @@ async fn main() -> anyhow::Result<()> {
                                         call.input = new_input;
                                         let result =
                                             read_file(call.input.path.clone()).await.unwrap();
-                                        tool_uses.push(call.tool_use(result).unwrap());
+                                        tool_results.push(call.complete(result).unwrap());
                                     }
                                     Err(e) => {
-                                        tool_uses.push(
-                                            call.tool_use(format!(
+                                        tool_results.push(
+                                            call.complete(format!(
                                                 "rejected: edit did not match tool schema: {e}"
                                             ))
                                             .unwrap(),
@@ -293,14 +293,14 @@ async fn main() -> anyhow::Result<()> {
                             }
                             Approval::Accept => {
                                 let result = read_file(call.input.path.clone()).await.unwrap();
-                                tool_uses.push(call.tool_use(result).unwrap());
+                                tool_results.push(call.complete(result).unwrap());
                             }
                         },
 
                         FsToolsCall::WriteFile(mut call) => match approval {
                             Approval::Reject { reason } => {
-                                tool_uses
-                                    .push(call.tool_use(format!("rejected: {reason}")).unwrap());
+                                tool_results
+                                    .push(call.complete(format!("rejected: {reason}")).unwrap());
                             }
                             Approval::Edit(new_args) => {
                                 match serde_json::from_value::<WriteFile>(new_args) {
@@ -312,11 +312,11 @@ async fn main() -> anyhow::Result<()> {
                                         )
                                         .await
                                         .unwrap();
-                                        tool_uses.push(call.tool_use(result).unwrap());
+                                        tool_results.push(call.complete(result).unwrap());
                                     }
                                     Err(e) => {
-                                        tool_uses.push(
-                                            call.tool_use(format!(
+                                        tool_results.push(
+                                            call.complete(format!(
                                                 "rejected: edit did not match tool schema: {e}"
                                             ))
                                             .unwrap(),
@@ -329,14 +329,14 @@ async fn main() -> anyhow::Result<()> {
                                     write_file(call.input.path.clone(), call.input.content.clone())
                                         .await
                                         .unwrap();
-                                tool_uses.push(call.tool_use(result).unwrap());
+                                tool_results.push(call.complete(result).unwrap());
                             }
                         },
 
                         FsToolsCall::DeleteFile(mut call) => match approval {
                             Approval::Reject { reason } => {
-                                tool_uses
-                                    .push(call.tool_use(format!("rejected: {reason}")).unwrap());
+                                tool_results
+                                    .push(call.complete(format!("rejected: {reason}")).unwrap());
                             }
                             Approval::Edit(new_args) => {
                                 match serde_json::from_value::<DeleteFile>(new_args) {
@@ -344,11 +344,11 @@ async fn main() -> anyhow::Result<()> {
                                         call.input = new_input;
                                         let result =
                                             delete_file(call.input.path.clone()).await.unwrap();
-                                        tool_uses.push(call.tool_use(result).unwrap());
+                                        tool_results.push(call.complete(result).unwrap());
                                     }
                                     Err(e) => {
-                                        tool_uses.push(
-                                            call.tool_use(format!(
+                                        tool_results.push(
+                                            call.complete(format!(
                                                 "rejected: edit did not match tool schema: {e}"
                                             ))
                                             .unwrap(),
@@ -358,13 +358,13 @@ async fn main() -> anyhow::Result<()> {
                             }
                             Approval::Accept => {
                                 let result = delete_file(call.input.path.clone()).await.unwrap();
-                                tool_uses.push(call.tool_use(result).unwrap());
+                                tool_results.push(call.complete(result).unwrap());
                             }
                         },
                     }
                 }
 
-                round.commit(&mut session, tool_uses).unwrap();
+                round.commit(&mut session, tool_results).unwrap();
             }
             TextStepOutcomeWithTools::Finished(result) => {
                 println!("\n{}", result.assistant_text().trim());

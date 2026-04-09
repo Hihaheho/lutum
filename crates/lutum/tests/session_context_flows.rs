@@ -176,24 +176,24 @@ fn session_commits_parallel_tool_results_in_order() {
                 ToolsCall::Search(call) if call.input.query.as_str() == "best ramen"
             ));
 
-            let tool_uses = round
+            let tool_results = round
                 .tool_calls
                 .iter()
                 .cloned()
                 .map(|tool_call| match tool_call {
                     ToolsCall::Weather(call) => call
-                        .tool_use(WeatherResult {
+                        .complete(WeatherResult {
                             forecast: "sunny".into(),
                         })
                         .unwrap(),
                     ToolsCall::Search(call) => call
-                        .tool_use(SearchResult {
+                        .complete(SearchResult {
                             answer: "Try a shop near the station.".into(),
                         })
                         .unwrap(),
                 })
                 .collect::<Vec<_>>();
-            round.commit(&mut session, tool_uses).unwrap();
+            round.commit(&mut session, tool_results).unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => unreachable!(),
     }

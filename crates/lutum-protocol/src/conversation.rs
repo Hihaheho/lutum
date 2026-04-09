@@ -62,8 +62,8 @@ impl ModelInput {
         self
     }
 
-    pub fn tool_use(mut self, tool_use: ToolUse) -> Self {
-        self.push(ModelInputItem::tool_use(tool_use));
+    pub fn tool_result(mut self, tool_result: ToolResult) -> Self {
+        self.push(ModelInputItem::tool_result(tool_result));
         self
     }
 
@@ -72,13 +72,13 @@ impl ModelInput {
             return Err(ModelInputValidationError::Empty);
         }
 
-        let mut tool_uses = std::collections::BTreeSet::new();
+        let mut tool_results = std::collections::BTreeSet::new();
         for item in &self.items {
-            if let ModelInputItem::ToolUse(tool_use) = item
-                && !tool_uses.insert(tool_use.id.clone())
+            if let ModelInputItem::ToolResult(tool_result) = item
+                && !tool_results.insert(tool_result.id.clone())
             {
-                return Err(ModelInputValidationError::DuplicateToolUseId {
-                    id: tool_use.id.clone(),
+                return Err(ModelInputValidationError::DuplicateToolResultId {
+                    id: tool_result.id.clone(),
                 });
             }
         }
@@ -100,7 +100,7 @@ pub enum ModelInputItem {
         content: NonEmpty<MessageContent>,
     },
     Assistant(AssistantInputItem),
-    ToolUse(ToolUse),
+    ToolResult(ToolResult),
     Turn(CommittedTurn),
 }
 
@@ -132,21 +132,21 @@ impl ModelInputItem {
         Self::Assistant(AssistantInputItem::Refusal(text.into()))
     }
 
-    pub fn tool_use(tool_use: ToolUse) -> Self {
-        Self::ToolUse(tool_use)
+    pub fn tool_result(tool_result: ToolResult) -> Self {
+        Self::ToolResult(tool_result)
     }
 
     pub fn turn(committed_turn: CommittedTurn) -> Self {
         Self::Turn(committed_turn)
     }
 
-    pub fn tool_use_parts(
+    pub fn tool_result_parts(
         id: impl Into<ToolCallId>,
         name: impl Into<ToolName>,
         arguments: RawJson,
         result: RawJson,
     ) -> Self {
-        Self::ToolUse(ToolUse::new(id, name, arguments, result))
+        Self::ToolResult(ToolResult::new(id, name, arguments, result))
     }
 }
 
@@ -166,7 +166,7 @@ pub enum MessageContent {
 /// Assistant-authored request items that can be replayed into a future model input.
 ///
 /// This is intentionally narrower than [`AssistantTurnItem`]: tool calls are represented
-/// as [`ToolUse`] at the surrounding [`ModelInputItem`] level so call/result pairs stay bundled.
+/// as [`ToolResult`] at the surrounding [`ModelInputItem`] level so call/result pairs stay bundled.
 pub enum AssistantInputItem {
     Text(String),
     Reasoning(String),
@@ -174,14 +174,14 @@ pub enum AssistantInputItem {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ToolUse {
+pub struct ToolResult {
     pub id: ToolCallId,
     pub name: ToolName,
     pub arguments: RawJson,
     pub result: RawJson,
 }
 
-impl ToolUse {
+impl ToolResult {
     pub fn new(
         id: impl Into<ToolCallId>,
         name: impl Into<ToolName>,
@@ -213,8 +213,8 @@ impl ToolMetadata {
         }
     }
 
-    pub fn into_tool_use(self, result: RawJson) -> ToolUse {
-        ToolUse::new(self.id, self.name, self.arguments, result)
+    pub fn into_tool_result(self, result: RawJson) -> ToolResult {
+        ToolResult::new(self.id, self.name, self.arguments, result)
     }
 }
 
@@ -340,7 +340,7 @@ impl Deref for UncommittedAssistantTurn {
 /// Canonical assistant output items for a completed turn.
 ///
 /// Tool calls exist only on the response side. Once a call has been paired with a tool result for
-/// replay, it is represented as [`ModelInputItem::ToolUse`] instead.
+/// replay, it is represented as [`ModelInputItem::ToolResult`] instead.
 pub enum AssistantTurnItem {
     Text(String),
     Reasoning(String),
@@ -434,18 +434,18 @@ pub struct EmptyNonEmptyError;
 pub enum ModelInputValidationError {
     #[error("model input must contain at least one item")]
     Empty,
-    #[error("duplicate tool use id `{id}` in model input")]
-    DuplicateToolUseId { id: ToolCallId },
+    #[error("duplicate tool result id `{id}` in model input")]
+    DuplicateToolResultId { id: ToolCallId },
 }
 
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum AssistantTurnInputError {
-    #[error("assistant turn references missing tool use `{id}`")]
-    MissingToolUse { id: ToolCallId },
-    #[error("assistant turn received duplicate tool use `{id}`")]
-    DuplicateToolUse { id: ToolCallId },
-    #[error("assistant turn received extra tool use `{id}`")]
-    ExtraToolUse { id: ToolCallId },
+    #[error("assistant turn references missing tool result `{id}`")]
+    MissingToolResult { id: ToolCallId },
+    #[error("assistant turn received duplicate tool result `{id}`")]
+    DuplicateToolResult { id: ToolCallId },
+    #[error("assistant turn received extra tool result `{id}`")]
+    ExtraToolResult { id: ToolCallId },
     #[error("assistant turn tool call `{id}` expected tool name `{expected}`, got `{actual}`")]
     MismatchedToolName {
         id: ToolCallId,
@@ -642,16 +642,16 @@ mod tests {
     }
 
     #[test]
-    fn model_input_validation_rejects_duplicate_tool_use_ids() {
+    fn model_input_validation_rejects_duplicate_tool_result_ids() {
         let input = ModelInput::from_items(vec![
             ModelInputItem::text(InputMessageRole::User, "hello"),
-            ModelInputItem::tool_use_parts(
+            ModelInputItem::tool_result_parts(
                 "call-1",
                 "weather",
                 RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
                 RawJson::parse("\"sunny\"").unwrap(),
             ),
-            ModelInputItem::tool_use_parts(
+            ModelInputItem::tool_result_parts(
                 "call-1",
                 "weather",
                 RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
@@ -661,7 +661,7 @@ mod tests {
 
         assert_eq!(
             input.validate().unwrap_err(),
-            ModelInputValidationError::DuplicateToolUseId {
+            ModelInputValidationError::DuplicateToolResultId {
                 id: ToolCallId::from("call-1"),
             }
         );
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn tool_input_serializes_result() {
-        let tool_use = WeatherArgs::tool_use(
+        let tool_result = WeatherArgs::tool_result(
             ToolMetadata::new(
                 "call-1",
                 "weather",
@@ -681,6 +681,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(tool_use.result.get(), "{\"forecast\":\"sunny\"}");
+        assert_eq!(tool_result.result.get(), "{\"forecast\":\"sunny\"}");
     }
 }
