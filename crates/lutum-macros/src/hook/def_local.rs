@@ -128,6 +128,12 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
     let chain_field_ident = format_ident!("{}_chain", fn_ident);
     let chain_reg_fn_ident = format_ident!("{}_chain", fn_ident);
     let chain_set_fn_ident = format_ident!("set_{}_chain", fn_ident);
+    let aggregate_field_ident = format_ident!("{}_aggregate", fn_ident);
+    let aggregate_reg_fn_ident = format_ident!("with_{}_aggregate", fn_ident);
+    let aggregate_set_fn_ident = format_ident!("set_{}_aggregate", fn_ident);
+    let finalize_field_ident = format_ident!("{}_finalize", fn_ident);
+    let finalize_reg_fn_ident = format_ident!("with_{}_finalize", fn_ident);
+    let finalize_set_fn_ident = format_ident!("set_{}_finalize", fn_ident);
     let chain_companion_tokens =
         kind.opts()
             .and_then(|o| o.chain.as_ref())
@@ -152,6 +158,60 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     }
                 };
                 (chain_field_ty, chain_field_init, check)
+            });
+    let aggregate_companion_tokens =
+        kind.opts()
+            .and_then(|o| o.aggregate.as_ref())
+            .map(|aggregate_default_ty| {
+                let aggregate_field_ty = quote! {
+                    ::std::option::Option<
+                        ::std::sync::Arc<dyn ::lutum::Aggregate<#output_ty> + Send + Sync>
+                    >
+                };
+                let aggregate_field_init = quote! {
+                    ::std::option::Option::Some(::std::sync::Arc::new(
+                        <#aggregate_default_ty as ::std::default::Default>::default(),
+                    ))
+                };
+                let aggregate_call = quote! {
+                    {
+                        let __agg = &self.#aggregate_field_ident;
+                        match __agg {
+                            ::std::option::Option::Some(__h) => __h.call(__outputs).await,
+                            ::std::option::Option::None => unreachable!(
+                                "aggregate field is always Some when aggregate option is set"
+                            ),
+                        }
+                    }
+                };
+                (aggregate_field_ty, aggregate_field_init, aggregate_call)
+            });
+    let finalize_companion_tokens =
+        kind.opts()
+            .and_then(|o| o.finalize.as_ref())
+            .map(|finalize_default_ty| {
+                let finalize_field_ty = quote! {
+                    ::std::option::Option<
+                        ::std::sync::Arc<dyn ::lutum::Finalize<#output_ty> + Send + Sync>
+                    >
+                };
+                let finalize_field_init = quote! {
+                    ::std::option::Option::Some(::std::sync::Arc::new(
+                        <#finalize_default_ty as ::std::default::Default>::default(),
+                    ))
+                };
+                let finalize_call = quote! {
+                    {
+                        let __fin = &self.#finalize_field_ident;
+                        match __fin {
+                            ::std::option::Option::Some(__h) => __h.call(__result).await,
+                            ::std::option::Option::None => unreachable!(
+                                "finalize field is always Some when finalize option is set"
+                            ),
+                        }
+                    }
+                };
+                (finalize_field_ty, finalize_field_init, finalize_call)
             });
 
     let (field_ty, field_init, register_impl) = match &kind {
@@ -181,7 +241,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             },
         ),
     };
-    // Flatten companion tokens into Vec for use in @accumulate arm (empty = no chain option).
+    // Flatten companion tokens into Vec for use in @accumulate arm.
     let (
         chain_companion_field_tokens,
         chain_companion_field_init_tokens,
@@ -213,14 +273,77 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         ),
         None => (vec![], vec![], vec![]),
     };
+    let (
+        aggregate_companion_field_tokens,
+        aggregate_companion_field_init_tokens,
+        aggregate_companion_register_tokens,
+    ): (Vec<_>, Vec<_>, Vec<_>) = match &aggregate_companion_tokens {
+        Some((aggregate_field_ty, aggregate_field_init, _)) => (
+            vec![quote! { #aggregate_field_ident: #aggregate_field_ty, }],
+            vec![quote! { #aggregate_field_ident: #aggregate_field_init, }],
+            vec![quote! {
+                #[allow(dead_code)]
+                pub fn #aggregate_reg_fn_ident(
+                    mut self,
+                    h: impl ::lutum::Aggregate<#output_ty> + 'static,
+                ) -> Self {
+                    self.#aggregate_field_ident =
+                        ::std::option::Option::Some(::std::sync::Arc::new(h));
+                    self
+                }
 
-    let inner_dispatch = match (&kind, &chain_companion_tokens) {
+                #[allow(dead_code)]
+                pub fn #aggregate_set_fn_ident(
+                    &mut self,
+                    h: impl ::lutum::Aggregate<#output_ty> + 'static,
+                ) {
+                    self.#aggregate_field_ident =
+                        ::std::option::Option::Some(::std::sync::Arc::new(h));
+                }
+            }],
+        ),
+        None => (vec![], vec![], vec![]),
+    };
+    let (
+        finalize_companion_field_tokens,
+        finalize_companion_field_init_tokens,
+        finalize_companion_register_tokens,
+    ): (Vec<_>, Vec<_>, Vec<_>) = match &finalize_companion_tokens {
+        Some((finalize_field_ty, finalize_field_init, _)) => (
+            vec![quote! { #finalize_field_ident: #finalize_field_ty, }],
+            vec![quote! { #finalize_field_ident: #finalize_field_init, }],
+            vec![quote! {
+                #[allow(dead_code)]
+                pub fn #finalize_reg_fn_ident(
+                    mut self,
+                    h: impl ::lutum::Finalize<#output_ty> + 'static,
+                ) -> Self {
+                    self.#finalize_field_ident =
+                        ::std::option::Option::Some(::std::sync::Arc::new(h));
+                    self
+                }
+
+                #[allow(dead_code)]
+                pub fn #finalize_set_fn_ident(
+                    &mut self,
+                    h: impl ::lutum::Finalize<#output_ty> + 'static,
+                ) {
+                    self.#finalize_field_ident =
+                        ::std::option::Option::Some(::std::sync::Arc::new(h));
+                }
+            }],
+        ),
+        None => (vec![], vec![], vec![]),
+    };
+
+    let inner_dispatch = match (&kind, &chain_companion_tokens, &aggregate_companion_tokens) {
         (
             HookKind::Always(HookOptions {
                 chain: None,
-                accumulate: None,
+                aggregate: None,
                 ..
             }),
+            _,
             _,
         ) => quote! {
             let mut last = ::std::option::Option::Some(#default_call);
@@ -232,10 +355,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         (
             HookKind::Always(HookOptions {
                 chain: Some(_),
-                accumulate: None,
+                aggregate: None,
                 ..
             }),
             Some((_, _, chain_check)),
+            _,
         ) => quote! {
             let mut last = ::std::option::Option::Some(#default_call);
             {
@@ -252,49 +376,52 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         (
             HookKind::Always(HookOptions {
                 chain: None,
-                accumulate: Some(accumulate_fn),
+                aggregate: Some(_),
                 ..
             }),
             _,
+            Some((_, _, aggregate_call)),
         ) => quote! {
             let mut __outputs = ::std::vec::Vec::new();
             __outputs.push(#default_call);
             for hook in &self.#field_ident {
                 __outputs.push(#dyn_hook_dispatch_call);
             }
-            #accumulate_fn(__outputs)
+            #aggregate_call
         },
         (
             HookKind::Always(HookOptions {
                 chain: Some(_),
-                accumulate: Some(accumulate_fn),
+                aggregate: Some(_),
                 ..
             }),
             Some((_, _, chain_check)),
+            Some((_, _, aggregate_call)),
         ) => quote! {
             let mut __outputs = ::std::vec::Vec::new();
             let __next = #default_call;
             #chain_check {
                 __outputs.push(__next);
-                return #accumulate_fn(__outputs);
+                return #aggregate_call;
             }
             __outputs.push(__next);
             for hook in &self.#field_ident {
                 let __next = #dyn_hook_dispatch_call;
                 #chain_check {
                     __outputs.push(__next);
-                    return #accumulate_fn(__outputs);
+                    return #aggregate_call;
                 }
                 __outputs.push(__next);
             }
-            #accumulate_fn(__outputs)
+            #aggregate_call
         },
         (
             HookKind::Fallback(HookOptions {
                 chain: None,
-                accumulate: None,
+                aggregate: None,
                 ..
             }),
+            _,
             _,
         ) => quote! {
             if self.#field_ident.is_empty() {
@@ -310,10 +437,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         (
             HookKind::Fallback(HookOptions {
                 chain: Some(_),
-                accumulate: None,
+                aggregate: None,
                 ..
             }),
             Some((_, _, chain_check)),
+            _,
         ) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
@@ -330,10 +458,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         (
             HookKind::Fallback(HookOptions {
                 chain: None,
-                accumulate: Some(accumulate_fn),
+                aggregate: Some(_),
                 ..
             }),
             _,
+            Some((_, _, aggregate_call)),
         ) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
@@ -342,16 +471,17 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 for hook in &self.#field_ident {
                     __outputs.push(#dyn_hook_dispatch_call);
                 }
-                #accumulate_fn(__outputs)
+                #aggregate_call
             }
         },
         (
             HookKind::Fallback(HookOptions {
                 chain: Some(_),
-                accumulate: Some(accumulate_fn),
+                aggregate: Some(_),
                 ..
             }),
             Some((_, _, chain_check)),
+            Some((_, _, aggregate_call)),
         ) => quote! {
             if self.#field_ident.is_empty() {
                 #default_call
@@ -361,14 +491,14 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     let __next = #dyn_hook_dispatch_call;
                     #chain_check {
                         __outputs.push(__next);
-                        return #accumulate_fn(__outputs);
+                        return #aggregate_call;
                     }
                     __outputs.push(__next);
                 }
-                #accumulate_fn(__outputs)
+                #aggregate_call
             }
         },
-        (HookKind::Singleton, _) => {
+        (HookKind::Singleton, _, _) => {
             let singleton_args: Vec<proc_macro2::TokenStream> =
                 dispatch_vars.iter().map(|v| quote! { #v }).collect();
             let some_call = quote! {
@@ -381,15 +511,17 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 }
             }
         }
-        _ => unreachable!("chain_companion_tokens is Some iff HookOptions.chain is Some"),
+        _ => unreachable!(
+            "chain/aggregate companion tokens are Some iff the corresponding hook options are set"
+        ),
     };
 
     // Wrap with finalize if specified. Chain dispatch uses early `return`s, so we wrap
     // in an async block to capture all exit paths through the same finalize call.
-    let dispatch = match kind.opts().and_then(|o| o.finalize.as_ref()) {
-        Some(finalize_fn) => quote! {
+    let dispatch = match &finalize_companion_tokens {
+        Some((_, _, finalize_call)) => quote! {
             let __result = async move { #inner_dispatch }.await;
-            #finalize_fn(__result)
+            #finalize_call
         },
         None => inner_dispatch,
     };
@@ -491,10 +623,14 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     [$($fields)*
                         #field_ident: #field_ty,
                         #(#chain_companion_field_tokens)*
+                        #(#aggregate_companion_field_tokens)*
+                        #(#finalize_companion_field_tokens)*
                     ]
                     [$($field_inits)*
                         #field_ident: #field_init,
                         #(#chain_companion_field_init_tokens)*
+                        #(#aggregate_companion_field_init_tokens)*
+                        #(#finalize_companion_field_init_tokens)*
                     ]
                     [$($register_methods)*
                         #[allow(dead_code)]
@@ -516,6 +652,8 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                         }
 
                         #(#chain_companion_register_tokens)*
+                        #(#aggregate_companion_register_tokens)*
+                        #(#finalize_companion_register_tokens)*
                     ]
                     [$($dispatch_methods)*
                         #[allow(dead_code)]

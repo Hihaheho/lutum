@@ -30,7 +30,7 @@ pub struct HookSignature {
 
 pub struct HookOptions {
     pub chain: Option<syn::Path>,
-    pub accumulate: Option<syn::Path>,
+    pub aggregate: Option<syn::Path>,
     pub finalize: Option<syn::Path>,
 }
 
@@ -47,7 +47,7 @@ impl HookKind {
 
     fn trait_has_last(&self) -> bool {
         match self {
-            Self::Always(opts) | Self::Fallback(opts) => opts.accumulate.is_none(),
+            Self::Always(opts) | Self::Fallback(opts) => opts.aggregate.is_none(),
             Self::Singleton => false,
         }
     }

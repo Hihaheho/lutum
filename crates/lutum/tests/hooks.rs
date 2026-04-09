@@ -169,12 +169,18 @@ async fn global_chain_override(label: &str) -> Result<String, String> {
     Ok(format!("global-hook:{label}"))
 }
 
-// accumulate: each hook contributes independently (no `last`), outputs collected and reduced.
-fn join_strings(outputs: Vec<String>) -> String {
-    outputs.join("|")
+// aggregate: each hook contributes independently (no `last`), outputs collected and reduced.
+#[derive(Default)]
+struct JoinStrings;
+
+#[async_trait]
+impl lutum::Aggregate<String> for JoinStrings {
+    async fn call(&self, outputs: Vec<String>) -> String {
+        outputs.join(", ")
+    }
 }
 
-#[lutum::def_hook(always, accumulate = join_strings)]
+#[lutum::def_hook(always, aggregate = JoinStrings)]
 async fn accumulate_label(label: &str) -> String {
     format!("default:{label}")
 }
@@ -189,7 +195,7 @@ async fn accumulate_hook_b(label: &str) -> String {
     format!("hook-b:{label}")
 }
 
-// accumulate + chain: early exit during accumulate.
+// aggregate + chain: early exit during aggregation.
 struct IsShortCircuitString;
 
 impl Default for IsShortCircuitString {
@@ -209,7 +215,7 @@ impl lutum::Chain<String> for IsShortCircuitString {
     }
 }
 
-#[lutum::def_hook(always, chain = IsShortCircuitString, accumulate = join_strings)]
+#[lutum::def_hook(always, chain = IsShortCircuitString, aggregate = JoinStrings)]
 async fn accumulate_chain_label(label: &str) -> String {
     format!("default:{label}")
 }
@@ -225,11 +231,17 @@ async fn accumulate_chain_hook_unreachable(_label: &str) -> String {
 }
 
 // finalize: fold runs first, then finalize wraps the result.
-fn wrap_result(s: String) -> String {
-    format!("[{s}]")
+#[derive(Default)]
+struct WrapResult;
+
+#[async_trait]
+impl lutum::Finalize<String> for WrapResult {
+    async fn call(&self, output: String) -> String {
+        format!("[{output}]")
+    }
 }
 
-#[lutum::def_hook(always, finalize = wrap_result)]
+#[lutum::def_hook(always, finalize = WrapResult)]
 async fn finalized_label(label: &str) -> String {
     format!("default:{label}")
 }
@@ -240,7 +252,7 @@ async fn finalized_append(label: &str, last: Option<String>) -> String {
 }
 
 // chain + finalize: finalize captures early exits from chain dispatch.
-#[lutum::def_hook(always, chain = IsShortCircuitString, finalize = wrap_result)]
+#[lutum::def_hook(always, chain = IsShortCircuitString, finalize = WrapResult)]
 async fn chain_finalized_label(label: &str) -> String {
     format!("default:{label}")
 }
@@ -794,7 +806,7 @@ fn accumulate_with_hooks_collects_all_independently() {
         .with_accumulate_label(AccumulateHookA)
         .with_accumulate_label(AccumulateHookB);
     let result = block_on(hooks.accumulate_label("x"));
-    assert_eq!(result, "default:x|hook-a:x|hook-b:x");
+    assert_eq!(result, "default:x, hook-a:x, hook-b:x");
 }
 
 #[test]
@@ -804,8 +816,8 @@ fn accumulate_chain_stops_early_on_break() {
         .with_accumulate_chain_label(AccumulateChainHookStop)
         .with_accumulate_chain_label(AccumulateChainHookUnreachable);
     let result = block_on(hooks.accumulate_chain_label("x"));
-    // default → Continue, stop → Break; accumulate collects [default:x, stop:early].
-    assert_eq!(result, "default:x|stop:early");
+    // default → Continue, stop → Break; aggregate collects [default:x, stop:early].
+    assert_eq!(result, "default:x, stop:early");
 }
 
 #[test]

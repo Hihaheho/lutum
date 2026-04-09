@@ -21,7 +21,12 @@ fn merged_where_clause_tokens(
 ) -> proc_macro2::TokenStream {
     let mut predicates = leading_predicates.to_vec();
     if let Some(where_clause) = where_clause {
-        predicates.extend(where_clause.predicates.iter().map(|predicate| quote! { #predicate }));
+        predicates.extend(
+            where_clause
+                .predicates
+                .iter()
+                .map(|predicate| quote! { #predicate }),
+        );
     }
     if predicates.is_empty() {
         quote! {}
@@ -34,10 +39,7 @@ fn hook_ext_arg_type(ty: &Type) -> Type {
     match ty {
         Type::Reference(reference) => {
             let mut reference = reference.clone();
-            reference.lifetime = Some(Lifetime::new(
-                "'__lutum_a",
-                proc_macro2::Span::call_site(),
-            ));
+            reference.lifetime = Some(Lifetime::new("'__lutum_a", proc_macro2::Span::call_site()));
             Type::Reference(reference)
         }
         _ => ty.clone(),
@@ -259,11 +261,20 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             }
         }
     };
+    let make_aggregate_call = |aggregate_default_ty: &syn::Path| {
+        quote! {
+            {
+                use ::lutum::Aggregate as _;
+                let __a: #aggregate_default_ty = ::std::default::Default::default();
+                __a.call(__outputs).await
+            }
+        }
+    };
 
     let inner_dispatch = match &kind {
         HookKind::Always(HookOptions {
             chain: None,
-            accumulate: None,
+            aggregate: None,
             ..
         }) => quote! {
             let mut last = ::std::option::Option::Some(#default_call);
@@ -276,7 +287,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         },
         HookKind::Always(HookOptions {
             chain: Some(chain_default_ty),
-            accumulate: None,
+            aggregate: None,
             ..
         }) => {
             let chain_check = make_chain_check(chain_default_ty);
@@ -298,30 +309,34 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         }
         HookKind::Always(HookOptions {
             chain: None,
-            accumulate: Some(accumulate_fn),
+            aggregate: Some(aggregate_default_ty),
             ..
-        }) => quote! {
-            let mut __outputs = ::std::vec::Vec::new();
-            __outputs.push(#default_call);
-            if let Some(hooks) = chain {
-                for hook in hooks {
-                    __outputs.push(#dyn_hook_dispatch_call);
+        }) => {
+            let aggregate_call = make_aggregate_call(aggregate_default_ty);
+            quote! {
+                let mut __outputs = ::std::vec::Vec::new();
+                __outputs.push(#default_call);
+                if let Some(hooks) = chain {
+                    for hook in hooks {
+                        __outputs.push(#dyn_hook_dispatch_call);
+                    }
                 }
+                #aggregate_call
             }
-            #accumulate_fn(__outputs)
-        },
+        }
         HookKind::Always(HookOptions {
             chain: Some(chain_default_ty),
-            accumulate: Some(accumulate_fn),
+            aggregate: Some(aggregate_default_ty),
             ..
         }) => {
             let chain_check = make_chain_check(chain_default_ty);
+            let aggregate_call = make_aggregate_call(aggregate_default_ty);
             quote! {
                 let mut __outputs = ::std::vec::Vec::new();
                 let __next = #default_call;
                 if #chain_check {
                     __outputs.push(__next);
-                    return #accumulate_fn(__outputs);
+                    return #aggregate_call;
                 }
                 __outputs.push(__next);
                 if let Some(hooks) = chain {
@@ -329,17 +344,17 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                         let __next = #dyn_hook_dispatch_call;
                         if #chain_check {
                             __outputs.push(__next);
-                            return #accumulate_fn(__outputs);
+                            return #aggregate_call;
                         }
                         __outputs.push(__next);
                     }
                 }
-                #accumulate_fn(__outputs)
+                #aggregate_call
             }
         }
         HookKind::Fallback(HookOptions {
             chain: None,
-            accumulate: None,
+            aggregate: None,
             ..
         }) => quote! {
             match chain {
@@ -355,7 +370,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         },
         HookKind::Fallback(HookOptions {
             chain: Some(chain_default_ty),
-            accumulate: None,
+            aggregate: None,
             ..
         }) => {
             let chain_check = make_chain_check(chain_default_ty);
@@ -376,26 +391,30 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         }
         HookKind::Fallback(HookOptions {
             chain: None,
-            accumulate: Some(accumulate_fn),
+            aggregate: Some(aggregate_default_ty),
             ..
-        }) => quote! {
-            match chain {
-                Some(hooks) if !hooks.is_empty() => {
-                    let mut __outputs = ::std::vec::Vec::new();
-                    for hook in hooks {
-                        __outputs.push(#dyn_hook_dispatch_call);
+        }) => {
+            let aggregate_call = make_aggregate_call(aggregate_default_ty);
+            quote! {
+                match chain {
+                    Some(hooks) if !hooks.is_empty() => {
+                        let mut __outputs = ::std::vec::Vec::new();
+                        for hook in hooks {
+                            __outputs.push(#dyn_hook_dispatch_call);
+                        }
+                        #aggregate_call
                     }
-                    #accumulate_fn(__outputs)
+                    _ => #default_call,
                 }
-                _ => #default_call,
             }
-        },
+        }
         HookKind::Fallback(HookOptions {
             chain: Some(chain_default_ty),
-            accumulate: Some(accumulate_fn),
+            aggregate: Some(aggregate_default_ty),
             ..
         }) => {
             let chain_check = make_chain_check(chain_default_ty);
+            let aggregate_call = make_aggregate_call(aggregate_default_ty);
             quote! {
                 match chain {
                     Some(hooks) if !hooks.is_empty() => {
@@ -404,11 +423,11 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                             let __next = #dyn_hook_dispatch_call;
                             if #chain_check {
                                 __outputs.push(__next);
-                                return #accumulate_fn(__outputs);
+                                return #aggregate_call;
                             }
                             __outputs.push(__next);
                         }
-                        #accumulate_fn(__outputs)
+                        #aggregate_call
                     }
                     _ => #default_call,
                 }
@@ -435,16 +454,18 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
     // Wrap with finalize if specified. Chain dispatch uses early `return`s, so we wrap
     // in an async block to capture all exit paths through the same finalize call.
     let dispatch = match kind.opts().and_then(|o| o.finalize.as_ref()) {
-        Some(finalize_fn) => quote! {
+        Some(finalize_default_ty) => quote! {
             let __result = async move { #inner_dispatch }.await;
-            #finalize_fn(__result)
+            {
+                use ::lutum::Finalize as _;
+                let __f: #finalize_default_ty = ::std::default::Default::default();
+                __f.call(__result).await
+            }
         },
         None => inner_dispatch,
     };
     let mut register_method_generics = generics.clone();
-    register_method_generics
-        .params
-        .push(syn::parse_quote!(H));
+    register_method_generics.params.push(syn::parse_quote!(H));
     register_method_generics
         .make_where_clause()
         .predicates
@@ -460,10 +481,8 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         fn_generics_tokens(&dispatch_method_generics);
     let dispatch_method_where_clause =
         merged_where_clause_tokens(&clone_where_bounds, dispatch_method_where_clause);
-    let register_method_where_clause = merged_where_clause_tokens(
-        &[quote! { Self: Sized }],
-        register_method_where_clause,
-    );
+    let register_method_where_clause =
+        merged_where_clause_tokens(&[quote! { Self: Sized }], register_method_where_clause);
 
     let lutum_ext = quote! {
         #[allow(dead_code)]

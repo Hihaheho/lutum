@@ -306,11 +306,9 @@ pub fn generate_blanket_impls(
     stateful_impl_generics
         .make_where_clause()
         .predicates
-        .push(
-            syn::parse_quote!(
-                __StatefulHook: #stateful_hook_trait_ident #slot_ty_generics + 'static
-            ),
-        );
+        .push(syn::parse_quote!(
+            __StatefulHook: #stateful_hook_trait_ident #slot_ty_generics + 'static
+        ));
     let (stateful_impl_generics, _, stateful_where_clause) =
         stateful_impl_generics.split_for_impl();
 

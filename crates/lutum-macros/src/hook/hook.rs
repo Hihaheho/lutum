@@ -8,20 +8,11 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
             PathArguments::None => (seg.ident.clone(), None),
             PathArguments::AngleBracketed(args) => (seg.ident.clone(), Some(args.clone())),
             _ => {
-                return syn::Error::new_spanned(
-                    slot_path,
-                    "unsupported slot path arguments",
-                )
-                .to_compile_error();
+                return syn::Error::new_spanned(slot_path, "unsupported slot path arguments")
+                    .to_compile_error();
             }
         },
-        None => {
-            return syn::Error::new_spanned(
-                slot_path,
-                "empty slot path",
-            )
-            .to_compile_error()
-        }
+        None => return syn::Error::new_spanned(slot_path, "empty slot path").to_compile_error(),
     };
 
     let helper_macro_path = hook_named_impl_helper_macro_path(&slot_path);
@@ -270,11 +261,8 @@ fn generic_marker_types(
             GenericParam::Const(const_param) => {
                 let const_ty = &const_param.ty;
                 let const_ident = &const_param.ident;
-                let marker_ident = format_ident!(
-                    "__LutumHookConstParamMarker_{}_{}",
-                    fn_ident,
-                    const_ident
-                );
+                let marker_ident =
+                    format_ident!("__LutumHookConstParamMarker_{}_{}", fn_ident, const_ident);
                 helper_defs.push(quote! {
                     #[allow(dead_code)]
                     struct #marker_ident<const __VALUE: #const_ty>;

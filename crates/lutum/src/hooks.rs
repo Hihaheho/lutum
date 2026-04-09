@@ -167,11 +167,28 @@ pub use lutum_protocol::hooks::{HookReentrancyError, HookRegistry, Stateful};
 /// The `chain = ...` value specifies the default implementation used when no custom
 /// `Chain<Output>` is registered on the hooks struct.
 #[lutum_macros::def_hook(singleton)]
-pub async fn chain<Output: Send + Sync + 'static>(
-    output: &Output,
-) -> ::std::ops::ControlFlow<()> {
+pub async fn chain<Output: Send + Sync + 'static>(output: &Output) -> ::std::ops::ControlFlow<()> {
     let _ = output;
     ::std::ops::ControlFlow::Continue(())
+}
+
+/// Companion aggregate hook — reduces collected hook outputs into one value.
+///
+/// Use as `aggregate = Type` in `#[def_hook(always, aggregate = ...)]`.
+#[lutum_macros::def_hook(singleton)]
+pub async fn aggregate<Output: Send + Sync + 'static>(outputs: Vec<Output>) -> Output {
+    outputs
+        .into_iter()
+        .last()
+        .unwrap_or_else(|| unreachable!("aggregate called with no outputs"))
+}
+
+/// Companion finalize hook — post-processes the final dispatch result.
+///
+/// Use as `finalize = Type` in `#[def_hook(always, finalize = ...)]`.
+#[lutum_macros::def_hook(singleton)]
+pub async fn finalize<Output: Send + Sync + 'static>(output: Output) -> Output {
+    output
 }
 
 /// Default chain implementation for `Result<T, E>` hooks — stops dispatch on the first `Err`.

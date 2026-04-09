@@ -83,7 +83,7 @@ impl Parse for ToolFnArgs {
 pub struct HookDefAttrs {
     pub mode: syn::Ident,
     pub chain: Option<syn::Path>,
-    pub accumulate: Option<syn::Path>,
+    pub aggregate: Option<syn::Path>,
     pub finalize: Option<syn::Path>,
 }
 
@@ -91,7 +91,7 @@ impl syn::parse::Parse for HookDefAttrs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mode: syn::Ident = input.parse()?;
         let mut chain = None;
-        let mut accumulate = None;
+        let mut aggregate = None;
         let mut finalize = None;
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
@@ -101,9 +101,9 @@ impl syn::parse::Parse for HookDefAttrs {
                     input.parse::<Token![=]>()?;
                     chain = Some(input.parse::<syn::Path>()?);
                 }
-                "accumulate" => {
+                "aggregate" => {
                     input.parse::<Token![=]>()?;
-                    accumulate = Some(input.parse::<syn::Path>()?);
+                    aggregate = Some(input.parse::<syn::Path>()?);
                 }
                 "finalize" => {
                     input.parse::<Token![=]>()?;
@@ -113,7 +113,7 @@ impl syn::parse::Parse for HookDefAttrs {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown #[def_hook] option '{other}'; expected 'chain', 'accumulate', or 'finalize'"
+                            "unknown #[def_hook] option '{other}'; expected 'chain', 'aggregate', or 'finalize'"
                         ),
                     ));
                 }
@@ -122,7 +122,7 @@ impl syn::parse::Parse for HookDefAttrs {
         Ok(Self {
             mode,
             chain,
-            accumulate,
+            aggregate,
             finalize,
         })
     }

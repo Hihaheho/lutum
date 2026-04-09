@@ -1,4 +1,4 @@
-error: #[def_hook(singleton)] does not support 'chain', 'accumulate', or 'finalize'
+error: #[def_hook(singleton)] does not support 'chain', 'aggregate', or 'finalize'
  --> tests/ui/hook_def_singleton_chain.rs:1:19
   |
 1 | #[lutum::def_hook(singleton, chain = lutum::ShortCircuit<String, String>)]

@@ -63,19 +63,19 @@ pub fn def_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     let kind = match mode_str.as_str() {
         "always" => HookKind::Always(HookOptions {
             chain: attrs.chain,
-            accumulate: attrs.accumulate,
+            aggregate: attrs.aggregate,
             finalize: attrs.finalize,
         }),
         "fallback" => HookKind::Fallback(HookOptions {
             chain: attrs.chain,
-            accumulate: attrs.accumulate,
+            aggregate: attrs.aggregate,
             finalize: attrs.finalize,
         }),
         "singleton" => {
-            if attrs.chain.is_some() || attrs.accumulate.is_some() || attrs.finalize.is_some() {
+            if attrs.chain.is_some() || attrs.aggregate.is_some() || attrs.finalize.is_some() {
                 return syn::Error::new_spanned(
                     attrs.mode,
-                    "#[def_hook(singleton)] does not support 'chain', 'accumulate', or 'finalize'",
+                    "#[def_hook(singleton)] does not support 'chain', 'aggregate', or 'finalize'",
                 )
                 .to_compile_error()
                 .into();
@@ -108,19 +108,19 @@ pub fn def_global_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     let kind = match mode_str.as_str() {
         "always" => HookKind::Always(HookOptions {
             chain: attrs.chain,
-            accumulate: attrs.accumulate,
+            aggregate: attrs.aggregate,
             finalize: attrs.finalize,
         }),
         "fallback" => HookKind::Fallback(HookOptions {
             chain: attrs.chain,
-            accumulate: attrs.accumulate,
+            aggregate: attrs.aggregate,
             finalize: attrs.finalize,
         }),
         "singleton" => {
-            if attrs.chain.is_some() || attrs.accumulate.is_some() || attrs.finalize.is_some() {
+            if attrs.chain.is_some() || attrs.aggregate.is_some() || attrs.finalize.is_some() {
                 return syn::Error::new_spanned(
                     attrs.mode,
-                    "#[def_global_hook(singleton)] does not support 'chain', 'accumulate', or 'finalize'",
+                    "#[def_global_hook(singleton)] does not support 'chain', 'aggregate', or 'finalize'",
                 )
                 .to_compile_error()
                 .into();
