@@ -5,8 +5,7 @@ pub mod persistence;
 pub mod sse;
 
 pub use adapter::{
-    ClaudeAdapter, FallbackSerializer, ResolveBudgetTokens, ResolveBudgetTokensRegistryExt,
-    SelectClaudeModel, SelectClaudeModelRegistryExt,
+    ClaudeAdapter, ClaudeHooks, FallbackSerializer, ResolveBudgetTokens, SelectClaudeModel,
 };
 pub use error::ClaudeError;
 pub use messages::{

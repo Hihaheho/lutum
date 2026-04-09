@@ -8,9 +8,8 @@ mod probe;
 mod score;
 
 pub use crate::probe::{
-    Probe, ProbeContext, ProbeDecision, ProbeDispatchError, ProbeDispatchFuture, ProbeDispatchHook,
-    ProbeDispatcher, ProbeHandle, ProbeHookSlot, ProbeRunError, ProbeRuntime, ProbeScoreError,
-    ProbeScoredBy,
+    Probe, ProbeDecision, ProbeDispatchError, ProbeDispatchFuture, ProbeHandle, ProbeRunError,
+    ProbeRuntime, ProbeScoreError, ProbeScoredBy,
 };
 pub use combinators::{
     Combine, CombineError, ContramapArtifact, EvalExt, LiftPure, MapEvalError, MapReport,

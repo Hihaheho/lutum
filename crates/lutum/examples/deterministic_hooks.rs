@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_default_model(model),
         ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        HookRegistry::new(),
+        LutumHooks::new(),
     );
 
     hooks

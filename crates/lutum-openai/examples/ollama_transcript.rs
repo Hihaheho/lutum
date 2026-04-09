@@ -14,7 +14,6 @@ use lutum_protocol::{
     budget::Usage,
     conversation::{ModelInput, ModelInputItem},
     extensions::RequestExtensions,
-    hooks::HookRegistry,
     llm::{
         AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig, ErasedTextTurnEvent,
         GenerationParams, ModelName, TurnAdapter,
@@ -71,8 +70,7 @@ async fn main() -> anyhow::Result<()> {
             extensions: Arc::new(RequestExtensions::default()),
         };
 
-        let hooks = HookRegistry::new();
-        let mut stream = adapter.text_turn(input.clone(), turn, &hooks).await?;
+        let mut stream = adapter.text_turn(input.clone(), turn).await?;
         let mut assistant_text = String::new();
         let mut turn_usage = None;
 

@@ -228,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let llm = Lutum::with_hooks(Arc::new(adapter), budget, HookRegistry::new());
+    let llm = Lutum::with_hooks(Arc::new(adapter), budget, LutumHooks::new());
     let mut session = Session::new(llm.clone());
 
     session.push_system(

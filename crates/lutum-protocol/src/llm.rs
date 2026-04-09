@@ -7,7 +7,6 @@ use crate::{
     AgentError,
     budget::{RequestBudget, Usage},
     conversation::{ModelInput, RawJson, ToolMetadata},
-    hooks::HookRegistry,
     structured::StructuredOutput,
     toolset::{NoTools, ToolPolicy, Toolset},
     transcript::CommittedTurn,
@@ -981,14 +980,12 @@ pub trait TurnAdapter: Send + Sync + 'static {
         &self,
         input: ModelInput,
         turn: AdapterTextTurn,
-        hooks: &HookRegistry,
     ) -> Result<ErasedTextTurnEventStream, AgentError>;
 
     async fn structured_turn(
         &self,
         input: ModelInput,
         turn: AdapterStructuredTurn,
-        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError>;
 }
 
@@ -998,14 +995,12 @@ pub trait CompletionAdapter: Send + Sync + 'static {
         &self,
         request: CompletionRequest,
         extensions: &crate::extensions::RequestExtensions,
-        hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError>;
 
     async fn structured_completion(
         &self,
         request: AdapterStructuredCompletionRequest,
         extensions: &crate::extensions::RequestExtensions,
-        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError>;
 }
 
@@ -1027,18 +1022,16 @@ where
         &self,
         input: ModelInput,
         turn: AdapterTextTurn,
-        hooks: &HookRegistry,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
-        (**self).text_turn(input, turn, hooks).await
+        (**self).text_turn(input, turn).await
     }
 
     async fn structured_turn(
         &self,
         input: ModelInput,
         turn: AdapterStructuredTurn,
-        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
-        (**self).structured_turn(input, turn, hooks).await
+        (**self).structured_turn(input, turn).await
     }
 }
 
@@ -1051,20 +1044,16 @@ where
         &self,
         request: CompletionRequest,
         extensions: &crate::extensions::RequestExtensions,
-        hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError> {
-        (**self).completion(request, extensions, hooks).await
+        (**self).completion(request, extensions).await
     }
 
     async fn structured_completion(
         &self,
         request: AdapterStructuredCompletionRequest,
         extensions: &crate::extensions::RequestExtensions,
-        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
-        (**self)
-            .structured_completion(request, extensions, hooks)
-            .await
+        (**self).structured_completion(request, extensions).await
     }
 }
 

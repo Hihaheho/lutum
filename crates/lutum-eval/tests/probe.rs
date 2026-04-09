@@ -7,11 +7,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use lutum::{
-    HookRegistry, Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-};
+use lutum::{Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions};
 use lutum_eval::{
-    Eval, ObjectiveExt, Probe, ProbeDecision, ProbeDispatcher, ProbeHandle, ProbeRunError,
+    Eval, ObjectiveExt, Probe, ProbeDecision, ProbeHandle, ProbeRunError, ProbeRuntime,
     ProbeScoreError, Score, maximize,
 };
 use tracing::instrument::WithSubscriber as _;
@@ -324,11 +322,10 @@ fn hook_error_hooks(dispatcher: ProbeHandle<HookErrorProbe>) -> ProbeHooks {
     })
 }
 
-fn make_lutum(hooks: HookRegistry) -> Lutum {
-    Lutum::with_hooks(
+fn make_lutum() -> Lutum {
+    Lutum::new(
         Arc::new(MockLlmAdapter::new()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        hooks,
     )
 }
 
@@ -356,8 +353,8 @@ impl Eval for FinalArtifactEval {
 
 #[tokio::test]
 async fn probe_without_hooks_can_finalize() {
-    let llm = make_lutum(HookRegistry::new());
-    let (_, runtime) = ProbeDispatcher::new(NoHooksProbe).into_parts();
+    let llm = make_lutum();
+    let runtime = ProbeRuntime::new(NoHooksProbe);
 
     let report = runtime
         .run_future(
@@ -376,9 +373,9 @@ async fn probe_without_hooks_can_finalize() {
 
 #[tokio::test]
 async fn probe_dispatcher_serializes_trace_events_and_hook_rpcs() {
-    let (_, runtime) = ProbeDispatcher::new(TimelineProbe::default()).into_parts();
+    let runtime = ProbeRuntime::new(TimelineProbe::default());
     let probe_hooks = timeline_hooks(runtime.dispatcher());
-    let llm = make_lutum(HookRegistry::new());
+    let llm = make_lutum();
 
     let report = runtime
         .run_future(
@@ -410,12 +407,11 @@ async fn probe_dispatcher_serializes_trace_events_and_hook_rpcs() {
 
 #[tokio::test]
 async fn complete_short_circuits_finalize() {
-    let llm = make_lutum(HookRegistry::new());
+    let llm = make_lutum();
     let finalized = Arc::new(AtomicBool::new(false));
-    let (_, runtime) = ProbeDispatcher::new(EarlyCompleteProbe {
+    let runtime = ProbeRuntime::new(EarlyCompleteProbe {
         finalized: finalized.clone(),
-    })
-    .into_parts();
+    });
 
     let report = runtime
         .run_future(
@@ -435,9 +431,9 @@ async fn complete_short_circuits_finalize() {
 
 #[tokio::test]
 async fn hook_proxy_can_return_probe_defined_errors() {
-    let (_, runtime) = ProbeDispatcher::new(HookErrorProbe::default()).into_parts();
+    let runtime = ProbeRuntime::new(HookErrorProbe::default());
     let probe_hooks = hook_error_hooks(runtime.dispatcher());
-    let llm = make_lutum(HookRegistry::new());
+    let llm = make_lutum();
 
     let report = runtime
         .run_future(
@@ -456,8 +452,8 @@ async fn hook_proxy_can_return_probe_defined_errors() {
 
 #[tokio::test]
 async fn trace_errors_are_returned_from_runtime() {
-    let llm = make_lutum(HookRegistry::new());
-    let (_, runtime) = ProbeDispatcher::new(TraceErrorProbe).into_parts();
+    let llm = make_lutum();
+    let runtime = ProbeRuntime::new(TraceErrorProbe);
 
     let err = runtime
         .run_future(
@@ -479,8 +475,8 @@ async fn trace_errors_are_returned_from_runtime() {
 
 #[tokio::test]
 async fn finalize_errors_are_returned_from_runtime() {
-    let llm = make_lutum(HookRegistry::new());
-    let (_, runtime) = ProbeDispatcher::new(FinalizeErrorProbe).into_parts();
+    let llm = make_lutum();
+    let runtime = ProbeRuntime::new(FinalizeErrorProbe);
 
     let err = runtime
         .run_future(&llm, async { 1usize }.with_subscriber(subscriber()))
@@ -495,8 +491,8 @@ async fn finalize_errors_are_returned_from_runtime() {
 
 #[tokio::test]
 async fn eval_can_run_through_probe_runtime() {
-    let llm = make_lutum(HookRegistry::new());
-    let (_, runtime) = ProbeDispatcher::new(FinalArtifactEval).into_parts();
+    let llm = make_lutum();
+    let runtime = ProbeRuntime::new(FinalArtifactEval);
 
     let report = runtime
         .run_future(
@@ -515,8 +511,8 @@ async fn eval_can_run_through_probe_runtime() {
 
 #[tokio::test]
 async fn probe_runtime_can_score_reports_with_an_objective() {
-    let llm = make_lutum(HookRegistry::new());
-    let (_, runtime) = ProbeDispatcher::new(FinalArtifactEval).into_parts();
+    let llm = make_lutum();
+    let runtime = ProbeRuntime::new(FinalArtifactEval);
     let objective = maximize(|report: &usize| Score::new_clamped(*report as f32 / 10.0));
 
     let scored = runtime
@@ -538,8 +534,8 @@ async fn probe_runtime_can_score_reports_with_an_objective() {
 
 #[tokio::test]
 async fn objective_failures_are_returned_from_probe_scoring() {
-    let llm = make_lutum(HookRegistry::new());
-    let (_, runtime) = ProbeDispatcher::new(FinalArtifactEval).into_parts();
+    let llm = make_lutum();
+    let runtime = ProbeRuntime::new(FinalArtifactEval);
     let objective = maximize(|_report: &usize| Score::new_clamped(1.0)).map_error(|_| "never");
 
     let scored = runtime
@@ -558,7 +554,7 @@ async fn objective_failures_are_returned_from_probe_scoring() {
     assert_eq!(scored.score, Score::pass());
     assert_eq!(scored.report, 8);
 
-    let (_, runtime) = ProbeDispatcher::new(FinalArtifactEval).into_parts();
+    let runtime = ProbeRuntime::new(FinalArtifactEval);
     struct FailingObjective;
     impl lutum_eval::Objective<usize> for FailingObjective {
         type Error = &'static str;

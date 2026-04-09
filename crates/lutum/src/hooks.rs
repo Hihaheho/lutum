@@ -1,7 +1,7 @@
 //! # Hooks
 //!
-//! Hooks are named, typed, pluggable async function slots. Each hook has a default
-//! implementation and can be overridden at runtime via [`HookRegistry`].
+//! Hooks are named, typed, pluggable async function slots. Each slot lives inside an
+//! app-owned `#[hooks]` container that decides which implementations are active.
 //!
 //! ## Defining a hook slot
 //!
@@ -106,8 +106,7 @@
 //! This generates:
 //! - `ValidateOutputArgs` - named args struct for manual/stateful hook implementations
 //! - `ValidateOutput` - hook trait to implement
-//! - `ValidateOutputRegistryExt` - `register_validate_output` and `validate_output` on `HookRegistry`
-//! - `ValidateOutputLutumExt` - `validate_output` on `Lutum`
+//! - `ValidateOutput` methods on any `#[hooks]` struct that includes the slot
 //!
 //! ## Defining a named implementation
 //!
@@ -123,34 +122,36 @@
 //! ## Registration and usage
 //!
 //! ```rust,ignore
-//! let hooks = HookRegistry::new()
-//!     .register_validate_output(BlockDangerousOutput);
+//! #[hooks]
+//! struct AppHooks {
+//!     output_validators: ValidateOutput,
+//! }
+//!
+//! let hooks = AppHooks::new()
+//!     .with_validate_output(BlockDangerousOutput);
 //!     // or with a closure in fold mode:
-//!     // .register_validate_output(|args: ValidateOutputArgs<'_>, last| async move { Ok(()) });
+//!     // .with_validate_output(|args: ValidateOutputArgs<'_>, last| async move { Ok(()) });
 //!     // or with a closure in chain/singleton mode:
-//!     // .register_validate_output(|args: ValidateOutputArgs<'_>| async move { Ok(()) });
+//!     // .with_validate_output(|args: ValidateOutputArgs<'_>| async move { Ok(()) });
 //!     // or for mutable state:
-//!     // .register_validate_output(Stateful::new(MyMutableHook::default()));
+//!     // .with_validate_output(Stateful::new(MyMutableHook::default()));
 //!
-//! let llm = Lutum::with_hooks(adapter, budget, hooks);
-//!
-//! // Explicit call via Lutum extension method:
-//! llm.validate_output(&output).await?;
+//! hooks.validate_output(&output).await?;
 //! ```
 //!
 //! ## Hook kinds
 //!
 //! - **Core hooks**: called by `Lutum` — provider-agnostic decisions
-//! - **Adapter-local hooks**: called by adapters using the `&HookRegistry` passed from `Lutum`
-//!   — provider-specific request shaping
+//! - **Adapter-local hooks**: called by adapters through hook sets they own directly
 //!
 //! If a hook needs `&Lutum` or any other context, either store it in the implementing struct or
 //! add it as a normal explicit argument.
 //!
-//! ## Builtin adapter hooks
+//! ## Builtin owner hooks
 //!
-//! Each adapter (`ClaudeAdapter`, `OpenAiAdapter`) defines its own model-selection and
-//! resolver hooks. Register them to override the adapter's default behaviour.
+//! `Lutum`, `OpenAiAdapter`, and `ClaudeAdapter` each expose a local hook set for their own
+//! built-in hooks. Pass `LutumHooks` to `Lutum::with_hooks(...)`, or configure adapter hooks
+//! via `OpenAiAdapter::with_hooks(...)` / `ClaudeAdapter::with_hooks(...)`.
 //!
 //! `lutum` itself also defines `resolve_usage_estimate(&RequestExtensions,
 //! OperationKind) -> UsageEstimate`. The default implementation reads a typed estimate from
@@ -158,7 +159,7 @@
 
 use crate::{OperationKind, RequestExtensions, budget::UsageEstimate};
 
-pub use lutum_protocol::hooks::{HookReentrancyError, HookRegistry, Stateful};
+pub use lutum_protocol::hooks::{HookReentrancyError, Stateful};
 
 /// Companion chain trait — decides whether dispatch should stop after each result.
 ///
@@ -241,7 +242,7 @@ pub async fn first_success<T: Send + Sync + 'static>(
     }
 }
 
-#[lutum_macros::def_global_hook(singleton)]
+#[lutum_macros::def_hook(singleton)]
 pub async fn resolve_usage_estimate(
     extensions: &RequestExtensions,
     _kind: OperationKind,
@@ -250,4 +251,9 @@ pub async fn resolve_usage_estimate(
         .get::<UsageEstimate>()
         .copied()
         .unwrap_or_else(UsageEstimate::zero)
+}
+
+#[lutum_macros::hooks]
+pub struct LutumHooks {
+    usage_estimate_resolvers: ResolveUsageEstimate,
 }

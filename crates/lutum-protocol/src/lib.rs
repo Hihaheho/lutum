@@ -21,7 +21,7 @@ pub use conversation::{
 };
 pub use error::{AgentError, BoxError, NoToolsContractViolation};
 pub use extensions::RequestExtensions;
-pub use hooks::{HookReentrancyError, HookRegistry, Stateful};
+pub use hooks::{HookReentrancyError, Stateful};
 pub use llm::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
     AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig,

@@ -4,11 +4,11 @@ use lutum::{
     AssistantInputItem, AssistantTurnItem, AssistantTurnView, BudgetLease, BudgetManager,
     CompletionAdapter, CompletionEventStream, CompletionRequest,
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
-    ErasedTextTurnEventStream, HookRegistry, InputMessageRole, Lutum, LutumError, MessageContent,
-    ModelInput, ModelInputItem, ModelName, ModelNameError, NonEmpty, OperationKind, RawJson,
-    RequestBudget, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-    Temperature, TextTurnReducer, TextTurnReducerWithTools, ToolMetadata, ToolPolicy, ToolResult,
-    TurnAdapter, Usage, UsageEstimate, UsageRecoveryAdapter,
+    ErasedTextTurnEventStream, InputMessageRole, Lutum, LutumError, MessageContent, ModelInput,
+    ModelInputItem, ModelName, ModelNameError, NonEmpty, OperationKind, RawJson, RequestBudget,
+    RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions, Temperature,
+    TextTurnReducer, TextTurnReducerWithTools, ToolMetadata, ToolPolicy, ToolResult, TurnAdapter,
+    Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,6 @@ impl TurnAdapter for NullAdapter {
         &self,
         _input: ModelInput,
         _turn: AdapterTextTurn,
-        _hooks: &HookRegistry,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedTextTurnEventStream)
     }
@@ -31,7 +30,6 @@ impl TurnAdapter for NullAdapter {
         &self,
         _input: ModelInput,
         _turn: AdapterStructuredTurn,
-        _hooks: &HookRegistry,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedStructuredTurnEventStream)
     }
@@ -43,7 +41,6 @@ impl CompletionAdapter for NullAdapter {
         &self,
         _request: CompletionRequest,
         _extensions: &RequestExtensions,
-        _hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as CompletionEventStream)
     }
@@ -52,7 +49,6 @@ impl CompletionAdapter for NullAdapter {
         &self,
         _request: AdapterStructuredCompletionRequest,
         _extensions: &RequestExtensions,
-        _hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedStructuredCompletionEventStream)
     }

@@ -36,9 +36,7 @@ use lutum_protocol::{
     toolset::{ToolSelector, Toolset},
 };
 
-use lutum_protocol::hooks::HookRegistry;
-
-use crate::hooks::ResolveUsageEstimateLutumExt;
+use crate::hooks::LutumHooks;
 
 pub type LutumError = AgentError;
 
@@ -55,7 +53,6 @@ impl CompletionAdapter for UnsupportedCompletionAdapter {
         &self,
         _request: CompletionRequest,
         _extensions: &RequestExtensions,
-        _hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError> {
         Err(AgentError::other(MissingCompletionAdapter))
     }
@@ -64,7 +61,6 @@ impl CompletionAdapter for UnsupportedCompletionAdapter {
         &self,
         _request: AdapterStructuredCompletionRequest,
         _extensions: &RequestExtensions,
-        _hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
         Err(AgentError::other(MissingCompletionAdapter))
     }
@@ -76,7 +72,7 @@ pub struct Lutum {
     turns: Arc<dyn TurnAdapter>,
     completion: Arc<dyn CompletionAdapter>,
     recovery: Arc<dyn UsageRecoveryAdapter>,
-    hooks: Arc<HookRegistry>,
+    hooks: Arc<LutumHooks>,
 }
 
 impl Lutum {
@@ -84,13 +80,13 @@ impl Lutum {
     where
         T: TurnAdapter + UsageRecoveryAdapter + 'static,
     {
-        Self::with_hooks(adapter, budget, HookRegistry::new())
+        Self::with_hooks(adapter, budget, LutumHooks::new())
     }
 
     pub fn with_hooks<T>(
         adapter: Arc<T>,
         budget: impl BudgetManager + 'static,
-        hooks: HookRegistry,
+        hooks: LutumHooks,
     ) -> Self
     where
         T: TurnAdapter + UsageRecoveryAdapter + 'static,
@@ -110,7 +106,7 @@ impl Lutum {
         recovery: Arc<dyn UsageRecoveryAdapter>,
         budget: impl BudgetManager + 'static,
     ) -> Self {
-        Self::from_parts_with_hooks(turns, completion, recovery, budget, HookRegistry::new())
+        Self::from_parts_with_hooks(turns, completion, recovery, budget, LutumHooks::new())
     }
 
     pub fn from_parts_with_hooks(
@@ -118,7 +114,7 @@ impl Lutum {
         completion: Arc<dyn CompletionAdapter>,
         recovery: Arc<dyn UsageRecoveryAdapter>,
         budget: impl BudgetManager + 'static,
-        hooks: HookRegistry,
+        hooks: LutumHooks,
     ) -> Self {
         Self {
             budget: Arc::new(budget),
@@ -131,10 +127,6 @@ impl Lutum {
 
     pub fn budget(&self) -> &dyn BudgetManager {
         self.budget.as_ref()
-    }
-
-    pub fn hooks(&self) -> &HookRegistry {
-        self.hooks.as_ref()
     }
 
     pub fn text_turn(&self, input: ModelInput) -> crate::builders::TextTurn<'_> {
@@ -160,6 +152,14 @@ impl Lutum {
         O: StructuredOutput,
     {
         crate::builders::StructuredCompletion::new(self, prompt)
+    }
+
+    pub async fn resolve_usage_estimate(
+        &self,
+        extensions: &RequestExtensions,
+        kind: OperationKind,
+    ) -> UsageEstimate {
+        self.hooks.resolve_usage_estimate(extensions, kind).await
     }
 }
 
@@ -426,11 +426,7 @@ impl Lutum {
         let span = turn_span("text_turn", estimate);
         let stream = match self
             .turns
-            .text_turn(
-                input,
-                erase_text_turn(turn, Arc::clone(&extensions))?,
-                self.hooks(),
-            )
+            .text_turn(input, erase_text_turn(turn, Arc::clone(&extensions))?)
             .await
         {
             Ok(stream) => stream,
@@ -472,11 +468,7 @@ impl Lutum {
         let span = turn_span("text_turn", estimate);
         let stream = match self
             .turns
-            .text_turn(
-                input,
-                erase_text_turn(turn, Arc::clone(&extensions))?,
-                self.hooks(),
-            )
+            .text_turn(input, erase_text_turn(turn, Arc::clone(&extensions))?)
             .await
         {
             Ok(stream) => stream,
@@ -518,11 +510,7 @@ impl Lutum {
         let span = turn_span("structured_turn", estimate);
         let stream = match self
             .turns
-            .structured_turn(
-                input,
-                erase_structured_turn(turn, Arc::clone(&extensions))?,
-                self.hooks(),
-            )
+            .structured_turn(input, erase_structured_turn(turn, Arc::clone(&extensions))?)
             .await
         {
             Ok(stream) => stream,
@@ -565,11 +553,7 @@ impl Lutum {
         let span = turn_span("structured_turn", estimate);
         let stream = match self
             .turns
-            .structured_turn(
-                input,
-                erase_structured_turn(turn, Arc::clone(&extensions))?,
-                self.hooks(),
-            )
+            .structured_turn(input, erase_structured_turn(turn, Arc::clone(&extensions))?)
             .await
         {
             Ok(stream) => stream,
@@ -603,11 +587,7 @@ impl Lutum {
             .budget
             .reserve(&extensions, &estimate, request.budget)?;
         let span = turn_span("completion", estimate);
-        let stream = match self
-            .completion
-            .completion(request, &extensions, self.hooks())
-            .await
-        {
+        let stream = match self.completion.completion(request, &extensions).await {
             Ok(stream) => stream,
             Err(source) => {
                 self.budget.record_used(lease, Usage::zero())?;
@@ -644,11 +624,7 @@ impl Lutum {
         let span = turn_span("structured_completion", estimate);
         let stream = match self
             .completion
-            .structured_completion(
-                erase_structured_completion_request(request)?,
-                &extensions,
-                self.hooks(),
-            )
+            .structured_completion(erase_structured_completion_request(request)?, &extensions)
             .await
         {
             Ok(stream) => stream,

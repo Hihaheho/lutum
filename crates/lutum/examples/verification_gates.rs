@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let hooks = VerificationHooks::new();
-    let llm = Lutum::with_hooks(Arc::new(adapter), budget, HookRegistry::new());
+    let llm = Lutum::with_hooks(Arc::new(adapter), budget, LutumHooks::new());
     let source = "Call John Smith at john@example.com or +1-555-0100";
     let mut prior_failure = None;
 

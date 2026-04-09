@@ -1,7 +1,7 @@
 use std::{future::Future, pin::Pin};
 
 use async_trait::async_trait;
-use lutum::{HookRegistry, Lutum};
+use lutum::Lutum;
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -15,20 +15,14 @@ use crate::{Collected, Eval, Objective, Scored};
 /// A mutable, live-only evaluator over a stream of trace events plus a final
 /// trace/artifact pair.
 ///
-/// Probes do not own their dispatcher. An external [`ProbeDispatcher`] builds
-/// the hook registry, forwards trace events, and calls [`Probe::finalize`]
-/// after the traced future completes.
+/// Probes do not own their dispatcher. [`ProbeRuntime`] forwards trace events,
+/// exposes a [`ProbeHandle`] for local hook composition, and calls
+/// [`Probe::finalize`] after the traced future completes.
 #[async_trait]
 pub trait Probe: Send + 'static {
     type Report;
     type Artifact;
     type Error;
-
-    fn register_hooks(&self, _cx: &mut ProbeContext<'_, Self>)
-    where
-        Self: Sized,
-    {
-    }
 
     async fn on_trace_event(
         &mut self,
@@ -72,48 +66,6 @@ pub enum ProbeDecision<R> {
     Complete(R),
 }
 
-pub struct ProbeContext<'a, P: Probe> {
-    hooks: &'a mut HookRegistry,
-    dispatcher: ProbeHandle<P>,
-}
-
-impl<'a, P: Probe> ProbeContext<'a, P> {
-    pub fn dispatcher(&self) -> ProbeHandle<P> {
-        self.dispatcher.clone()
-    }
-
-    pub fn hooks_mut(&mut self) -> &mut HookRegistry {
-        self.hooks
-    }
-
-    pub fn update_hooks(&mut self, f: impl FnOnce(HookRegistry) -> HookRegistry) {
-        let hooks = std::mem::take(self.hooks);
-        *self.hooks = f(hooks);
-    }
-
-    pub fn register_hook<Slot: ProbeHookSlot<P>>(&mut self) {
-        Slot::register(self);
-    }
-}
-
-pub trait ProbeHookSlot<P: Probe>: Sized {
-    fn register(cx: &mut ProbeContext<'_, P>);
-}
-
-pub struct ProbeDispatchHook<P: Probe, Slot> {
-    pub dispatcher: ProbeHandle<P>,
-    _slot: std::marker::PhantomData<fn() -> Slot>,
-}
-
-impl<P: Probe, Slot> ProbeDispatchHook<P, Slot> {
-    pub fn new(dispatcher: ProbeHandle<P>) -> Self {
-        Self {
-            dispatcher,
-            _slot: std::marker::PhantomData,
-        }
-    }
-}
-
 type ProbeTaskFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 type ProbeTask<P> = Box<dyn for<'a> FnOnce(&'a mut P) -> ProbeTaskFuture<'a> + Send>;
 pub type ProbeDispatchFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -132,44 +84,6 @@ enum ProbeMessage<P: Probe> {
     },
 }
 
-pub struct ProbeDispatcher<P: Probe> {
-    hooks: HookRegistry,
-    runtime: ProbeRuntime<P>,
-}
-
-impl<P> ProbeDispatcher<P>
-where
-    P: Probe,
-    P::Artifact: Send + 'static,
-    P::Error: Send + 'static,
-    P::Report: Send + 'static,
-{
-    pub fn new(probe: P) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let dispatcher = ProbeHandle { tx };
-        let mut hooks = HookRegistry::new();
-
-        {
-            let mut cx = ProbeContext {
-                hooks: &mut hooks,
-                dispatcher: dispatcher.clone(),
-            };
-            probe.register_hooks(&mut cx);
-        }
-
-        let task = tokio::spawn(run_probe(probe, rx));
-
-        Self {
-            hooks,
-            runtime: ProbeRuntime { dispatcher, task },
-        }
-    }
-
-    pub fn into_parts(self) -> (HookRegistry, ProbeRuntime<P>) {
-        (self.hooks, self.runtime)
-    }
-}
-
 pub struct ProbeRuntime<P: Probe> {
     dispatcher: ProbeHandle<P>,
     task: JoinHandle<()>,
@@ -182,6 +96,14 @@ where
     P::Error: Send + 'static,
     P::Report: Send + 'static,
 {
+    pub fn new(probe: P) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let dispatcher = ProbeHandle { tx };
+        let task = tokio::spawn(run_probe(probe, rx));
+
+        Self { dispatcher, task }
+    }
+
     pub fn dispatcher(&self) -> ProbeHandle<P> {
         self.dispatcher.clone()
     }

@@ -97,7 +97,7 @@ pub fn hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     if attr.is_empty() {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "use #[def_hook(always)], #[def_hook(fallback)], #[def_hook(singleton)], #[def_global_hook(always)], #[def_global_hook(fallback)], or #[def_global_hook(singleton)] to declare a hook slot, or #[hook(SlotType)] / #[hook(path::to::SlotType)] to implement one",
+            "use #[def_hook(always)], #[def_hook(fallback)], or #[def_hook(singleton)] to declare a hook slot, or #[hook(SlotType)] / #[hook(path::to::SlotType)] to implement one",
         )
         .to_compile_error()
         .into();
@@ -122,23 +122,6 @@ pub fn def_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(err) => return err.to_compile_error().into(),
     };
     expand_local_hook(item_fn, kind).into()
-}
-
-#[proc_macro_attribute]
-pub fn def_global_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let attrs: HookDefAttrs = match syn::parse(attr) {
-        Ok(a) => a,
-        Err(e) => return e.to_compile_error().into(),
-    };
-    let item_fn = match syn::parse(item) {
-        Ok(f) => f,
-        Err(e) => return e.to_compile_error().into(),
-    };
-    let kind = match build_hook_kind(attrs, "def_global_hook") {
-        Ok(kind) => kind,
-        Err(err) => return err.to_compile_error().into(),
-    };
-    expand_global_hook(item_fn, kind).into()
 }
 
 #[proc_macro_attribute]

@@ -6,11 +6,10 @@ use lutum::{
     AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn, AgentError,
     CompletionAdapter, CompletionEventStream, CompletionRequest,
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
-    ErasedTextTurnEventStream, HookReentrancyError, HookRegistry, InputMessageRole, Lutum,
+    ErasedTextTurnEventStream, HookReentrancyError, InputMessageRole, Lutum, LutumHooks,
     MockLlmAdapter, ModelInput, ModelInputItem, OperationKind, RequestExtensions,
-    ResolveUsageEstimate, ResolveUsageEstimateRegistryExt, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, Stateful, TurnAdapter, Usage, UsageRecoveryAdapter,
-    budget::UsageEstimate, hooks::ResolveUsageEstimateLutumExt,
+    ResolveUsageEstimate, SharedPoolBudgetManager, SharedPoolBudgetOptions, Stateful, TurnAdapter,
+    Usage, UsageRecoveryAdapter, budget::UsageEstimate,
 };
 use lutum_trace::FieldValue;
 use schemars::JsonSchema;
@@ -157,16 +156,6 @@ async fn fold_chain_pick_pass(_label: &str, last: Option<Option<String>>) -> Opt
 async fn fold_chain_pick_decide(label: &str, last: Option<Option<String>>) -> Option<String> {
     assert!(last.unwrap().is_none(), "previous hook passed None through");
     Some(format!("hook:{label}"))
-}
-
-#[lutum::def_global_hook(always, chain = lutum::ShortCircuit<String, String>)]
-async fn global_chain_label(label: &str) -> Result<String, String> {
-    Ok(format!("global-default:{label}"))
-}
-
-#[lutum::hook(GlobalChainLabel)]
-async fn global_chain_override(label: &str) -> Result<String, String> {
-    Ok(format!("global-hook:{label}"))
 }
 
 // aggregate: each hook contributes independently (no `last`), outputs collected and reduced.
@@ -338,16 +327,6 @@ async fn finalized_into_append(label: &str, last: Option<String>) -> String {
     format!("{}+{label}", last.unwrap())
 }
 
-#[lutum::def_global_hook(always, aggregate = CollectIntoLabels, output = CollectedLabels)]
-async fn global_accumulate_label_into(label: &str) -> String {
-    format!("global-default:{label}")
-}
-
-#[lutum::hook(GlobalAccumulateLabelInto)]
-async fn global_accumulate_into_override(label: &str) -> String {
-    format!("global-hook:{label}")
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CounterError {
     Reentered(HookReentrancyError),
@@ -430,7 +409,7 @@ impl StatefulDescribeLabel for NestedLabelHook {
     }
 }
 
-fn test_context(hooks: HookRegistry) -> Lutum {
+fn test_context(hooks: LutumHooks) -> Lutum {
     Lutum::with_hooks(
         Arc::new(MockLlmAdapter::new()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
@@ -438,7 +417,7 @@ fn test_context(hooks: HookRegistry) -> Lutum {
     )
 }
 
-fn full_context(hooks: HookRegistry) -> Lutum {
+fn full_context(hooks: LutumHooks) -> Lutum {
     let adapter = Arc::new(NullAdapter);
     Lutum::from_parts_with_hooks(
         adapter.clone(),
@@ -466,7 +445,6 @@ impl TurnAdapter for NullAdapter {
         &self,
         _input: ModelInput,
         _turn: AdapterTextTurn,
-        _hooks: &HookRegistry,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedTextTurnEventStream)
     }
@@ -475,7 +453,6 @@ impl TurnAdapter for NullAdapter {
         &self,
         _input: ModelInput,
         _turn: AdapterStructuredTurn,
-        _hooks: &HookRegistry,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedStructuredTurnEventStream)
     }
@@ -487,7 +464,6 @@ impl CompletionAdapter for NullAdapter {
         &self,
         _request: CompletionRequest,
         _extensions: &RequestExtensions,
-        _hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as CompletionEventStream)
     }
@@ -496,7 +472,6 @@ impl CompletionAdapter for NullAdapter {
         &self,
         _request: AdapterStructuredCompletionRequest,
         _extensions: &RequestExtensions,
-        _hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedStructuredCompletionEventStream)
     }
@@ -712,19 +687,8 @@ fn stateful_hook_can_call_other_hooks_without_registry_deadlock() {
 }
 
 #[test]
-fn global_chain_hook_dispatches_through_registry_extension() {
-    let ctx = test_context(HookRegistry::new().register_global_chain_label(GlobalChainOverride));
-
-    let result = block_on(
-        <HookRegistry as GlobalChainLabelRegistryExt>::global_chain_label(ctx.hooks(), "base"),
-    );
-
-    assert_eq!(result, Ok("global-hook:base".into()));
-}
-
-#[test]
 fn resolve_usage_estimate_defaults_to_zero() {
-    let ctx = test_context(HookRegistry::new());
+    let ctx = test_context(LutumHooks::new());
 
     let estimate =
         block_on(ctx.resolve_usage_estimate(&RequestExtensions::new(), OperationKind::TextTurn));
@@ -734,7 +698,7 @@ fn resolve_usage_estimate_defaults_to_zero() {
 
 #[test]
 fn resolve_usage_estimate_reads_request_extensions_by_default() {
-    let ctx = test_context(HookRegistry::new());
+    let ctx = test_context(LutumHooks::new());
     let mut extensions = RequestExtensions::new();
     extensions.insert(UsageEstimate {
         total_tokens: 42,
@@ -755,7 +719,7 @@ fn resolve_usage_estimate_reads_request_extensions_by_default() {
 #[test]
 fn resolve_usage_estimate_registered_override_wins_over_default_extensions_lookup() {
     let ctx = test_context(
-        HookRegistry::new().register_resolve_usage_estimate(FixedEstimate {
+        LutumHooks::new().with_resolve_usage_estimate(FixedEstimate {
             estimate: UsageEstimate {
                 total_tokens: 7,
                 ..UsageEstimate::zero()
@@ -841,11 +805,11 @@ fn fold_and_chain_are_orthogonal_fallback() {
 #[test]
 fn context_entrypoints_pass_operation_kind_to_resolve_usage_estimate() {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let ctx = full_context(HookRegistry::new().register_resolve_usage_estimate(
-        RecordOperationKinds {
+    let ctx = full_context(
+        LutumHooks::new().with_resolve_usage_estimate(RecordOperationKinds {
             seen: Arc::clone(&seen),
-        },
-    ));
+        }),
+    );
 
     let _text = block_on(ctx.text_turn(input()).start()).unwrap();
     let _structured = block_on(ctx.structured_turn::<Summary>(input()).start()).unwrap();
@@ -977,27 +941,5 @@ fn aggregate_output_override_preserves_chain_early_exit() {
     assert_eq!(
         result,
         CollectedLabels(vec!["default:x".to_owned(), "stop:early".to_owned()])
-    );
-}
-
-#[test]
-fn global_aggregate_output_override_dispatches_through_registry_extension() {
-    let ctx = test_context(
-        HookRegistry::new().register_global_accumulate_label_into(GlobalAccumulateIntoOverride),
-    );
-
-    let result = block_on(
-        <HookRegistry as GlobalAccumulateLabelIntoRegistryExt>::global_accumulate_label_into(
-            ctx.hooks(),
-            "base",
-        ),
-    );
-
-    assert_eq!(
-        result,
-        CollectedLabels(vec![
-            "global-default:base".to_owned(),
-            "global-hook:base".to_owned(),
-        ])
     );
 }

@@ -29,8 +29,9 @@ Two constraints remained non-negotiable:
 
 1. The library must never own a loop. Hooks are call points in user code, not
    lifecycle interceptors wired into an internal agent runtime.
-2. Hook storage must not live on `Lutum` as a global registry. It lives in a
-   separate `HookRegistry` passed to `Lutum::with_hooks`.
+2. Hook storage must remain owner-local. User-defined slots live in app-owned
+   `#[hooks]` structs, while framework-owned slots live in `LutumHooks`,
+   `OpenAiHooks`, or `ClaudeHooks`.
 ```
 
 decision = ```markdown
@@ -38,7 +39,7 @@ Adopt `#[def_hook(always)]`, `#[def_hook(fallback)]`, and `#[def_hook(singleton)
 the canonical slot-definition syntax.
 
 `#[def_hook(...)]` is applied to an async function and generates the slot marker type,
-hook trait, `HookRegistry` extension methods, and `Lutum` forwarding method. The
+hook trait, and the methods that any `#[hooks]` struct containing that slot will expose. The
 argument selects how the default body participates in execution:
 
 - `#[def_hook(always)]`: the default body always runs first, regardless of registration.
@@ -96,23 +97,23 @@ For `#[def_hook(singleton)]` slots:
 - one registered hook replaces the default and receives no `last` argument
 - more than one registered hook means the last registration wins and emits a warning
 
-**Registry model**
+**Ownership model**
 
-`HookRegistry` is a `HashMap<TypeId, Box<dyn Any + Send + Sync>>` where each slot stores
-either `Vec<Arc<dyn SlotHook>>` for chaining slots or `Arc<dyn SlotHook>` for singleton
-slots. It is built via generated `register_*` methods and passed to `Lutum::with_hooks`.
-`Lutum` stores it as `Arc<HookRegistry>` and exposes `hooks()` for direct registry access.
+Every hook slot is hosted by an explicit local owner:
+
+- user orchestration code defines app-owned `#[hooks]` structs and calls them directly
+- `Lutum` owns `LutumHooks` for built-in runtime hooks such as `resolve_usage_estimate`
+- adapters own provider-specific hook sets such as `OpenAiHooks` and `ClaudeHooks`
 
 **Builtin hook**
 
-`select_model` is declared with `#[def_hook(singleton)]`. `Lutum` calls it before every
-`text_turn` and `structured_turn`. The default implementation returns the configured
-model unchanged; registering a hook allows runtime model selection without modifying the
-adapter.
+`resolve_usage_estimate` is declared with `#[def_hook(singleton)]` inside `LutumHooks`.
+Its default implementation reads a typed estimate from `RequestExtensions` and falls back
+to zero.
 
 **Tracing**
 
-Each generated registry call method wraps execution in
+Each generated local hook dispatch method wraps execution in
 `tracing::info_span!("lutum_hook", name = "hook_name")`, so hook invocations appear in
 `lutum-trace` captures without extra user instrumentation.
 ```
@@ -121,9 +122,9 @@ consequences = ```markdown
 - Slot definitions now read as definitions, and implementations still read as implementations:
   `#[def_hook(...)]` defines the slot, `#[hook(SlotType)]` implements it
 - Cross-cutting concerns such as validation, policy, and model selection can be defined
-  once and attached to any `Lutum` at construction time
+  once and attached to explicit owners instead of a shared registry
 - User code remains the explicit call site. The library invokes only the documented
-  builtin `select_model` hook automatically
+  builtin owner hooks automatically
 - Default participation remains explicit at the definition site through the
   `always` / `fallback` / `singleton` mode argument
 - Hooks still compose via the `last` chain parameter in registration order where
@@ -131,7 +132,6 @@ consequences = ```markdown
   last-registration-wins semantics
 - Stateful hooks remain first-class: any type implementing the generated hook trait can
   be registered, not just closures
-- `Lutum::new` continues to work with an empty registry
-- The adapter-level `ModelSelector` trait remains for adapter-internal routing; the
-  `select_model` hook still operates at the `Lutum` level before dispatch
+- `Lutum::new` continues to work with an empty `LutumHooks`
+- Adapter-local request shaping remains available without routing through `Lutum`
 ```

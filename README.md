@@ -284,14 +284,13 @@ than manually inspecting the vector.
 ## Hooks
 
 Hooks are named, typed async slots. Define a slot with `#[def_hook(...)]`, implement handlers with
-`#[hook(...)]`, register them in a `HookRegistry`, then build the `Lutum` with
-`Lutum::with_hooks(...)`.
+`#[hook(...)]`, include the slot in a local `#[hooks]` container, and call it from your own code.
 
 ```rust
 use std::sync::Arc;
 
 use lutum::{
-    Lutum, HookRegistry, ModelName, OpenAiAdapter, SharedPoolBudgetManager,
+    Lutum, LutumHooks, ModelName, OpenAiAdapter, SharedPoolBudgetManager,
     SharedPoolBudgetOptions,
 };
 
@@ -320,10 +319,13 @@ async fn reject_secrets(
     }
 }
 
+#[lutum::hooks]
+struct AppHooks {
+    prompt_validators: ValidatePrompt,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let hooks = HookRegistry::new().register_validate_prompt(RejectSecrets);
-
     let llm = Lutum::with_hooks(
         Arc::new(
             OpenAiAdapter::new(std::env::var("TOKEN")?)
@@ -331,10 +333,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_default_model(ModelName::new(&std::env::var("MODEL")?)?),
         ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        hooks,
+        LutumHooks::new(),
     );
+    let hooks = AppHooks::new().with_validate_prompt(RejectSecrets);
 
-    llm.validate_prompt("Explain borrow checking in one paragraph.")
+    hooks
+        .validate_prompt(&llm, "Explain borrow checking in one paragraph.")
         .await?;
 
     Ok(())
@@ -346,9 +350,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `fallback`: use registered hooks if present, otherwise run the default
 - `singleton`: pick one override or use the default; the last registration wins and emits a warning
 
-Core hooks take `&Lutum` as their first argument and are provider-agnostic. Adapter-local hooks
-take `&RequestExtensions` as their first argument and let adapters expose provider-specific
-selection or request-shaping behavior.
+Core hooks often take `&Lutum` as their first argument and are provider-agnostic.
+Provider-specific hooks live in owner-local hook sets:
+
+- `LutumHooks` configures built-in runtime hooks such as `resolve_usage_estimate`
+- `OpenAiHooks` configures OpenAI request-shaping hooks and is passed to `OpenAiAdapter::with_hooks(...)`
+- `ClaudeHooks` configures Claude request-shaping hooks and is passed to `ClaudeAdapter::with_hooks(...)`
 
 Attach request-scoped metadata inline on builders with `.ext(...)` or `.extensions(...)`:
 
@@ -500,30 +507,33 @@ that can execute through `Lutum`. `Objective` is where scalar scoring lives.
 `Probe` is the live-only counterpart when you want incremental decisions from trace events or
 want hook calls to route back into the same mutable state machine.
 
-- `ProbeDispatcher` owns the runtime and builds the hook registry
-- `Probe::register_hooks` installs hook routing through `ProbeContext`
+- `ProbeRuntime::new(probe)` owns the runtime task and exposes a `ProbeHandle`
+- build any local hook sets you need explicitly from `runtime.dispatcher()`
 - `ProbeRuntime::run_future(&llm, ...)` forwards live `TraceEvent`s, then calls `finalize(&llm, trace, artifact)`
 
 As with `lutum_trace::capture(...)`, live probe events require the active subscriber stack to
 include `lutum_trace::layer()`.
 
-A probe that intercepts a hook receives each call through `StatefulXxxHook::call_mut`.
-Wire each slot by implementing the hook trait on a proxy struct that forwards calls through
-the dispatcher, then register it inside `register_hooks`.
+A probe that intercepts a hook usually receives each call through `ProbeHandle::dispatch(...)`
+via a local hook set you build alongside the runtime.
 
 ```rust
-use async_trait::async_trait;
 use core::convert::Infallible;
 use lutum::Lutum;
 use lutum_eval::{
-    Probe, ProbeContext, ProbeDecision, ProbeDispatcher, ProbeHandle, TraceEvent, TraceSnapshot,
+    Probe, ProbeDecision, ProbeHandle, ProbeRuntime, Score, TraceEvent, TraceSnapshot, maximize,
 };
 
 // -- Define a hook slot (once per slot, e.g. in a shared library) ----------------
 
 #[lutum::def_hook(singleton)]
-async fn validate_response(_llm: &Lutum, response: &str) -> Result<(), String> {
+async fn validate_response(response: &str) -> Result<(), String> {
     Ok(())
+}
+
+#[lutum::hooks]
+struct ResponseQualityHooks {
+    response_validators: ValidateResponse,
 }
 
 // -- Implement the probe ---------------------------------------------------------
@@ -537,11 +547,6 @@ impl Probe for ResponseQuality {
     type Artifact = String;
     type Report = Vec<String>;
     type Error = Infallible;
-
-    fn register_hooks(&self, cx: &mut ProbeContext<'_, Self>) {
-        let dispatcher = cx.dispatcher();
-        cx.update_hooks(|h| h.register_validate_response(ValidateResponseHook(dispatcher)));
-    }
 
     async fn on_trace_event(
         &mut self,
@@ -561,28 +566,32 @@ impl Probe for ResponseQuality {
     }
 }
 
-#[async_trait]
-impl StatefulValidateResponseHook for ResponseQuality {
-    async fn call_mut(
-        &mut self,
-        _llm: &Lutum,
-        args: ValidateResponseArgs,
-    ) -> Result<(), String> {
-        // args.response is already an owned String; no &str lifetime issues
-        if args.response.contains("sorry") {
-            self.violations.push(args.response.clone());
-            Err("response contains an apology".into())
-        } else {
-            Ok(())
+fn response_quality_hooks(dispatcher: ProbeHandle<ResponseQuality>) -> ResponseQualityHooks {
+    ResponseQualityHooks::new().with_validate_response(move |response: String| {
+        let dispatcher = dispatcher.clone();
+        async move {
+            dispatcher
+                .dispatch(move |probe| {
+                    Box::pin(async move {
+                        if response.contains("sorry") {
+                            probe.violations.push(response.clone());
+                            Err("response contains an apology".into())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                })
+                .await
+                .expect("probe dispatcher alive")
         }
-    }
+    })
 }
 
 // -- Run -------------------------------------------------------------------------
 
-let (hooks, runtime) = ProbeDispatcher::new(ResponseQuality::default()).into_parts();
-// Pass `hooks` to `Lutum::with_hooks(...)` so the probe intercepts validate_response calls.
-let llm = Lutum::with_hooks(/* adapter */, /* budget */, hooks);
+let runtime = ProbeRuntime::new(ResponseQuality::default());
+let hooks = response_quality_hooks(runtime.dispatcher());
+let llm = Lutum::new(/* adapter */, /* budget */);
 
 let scored = runtime
     .scored_by(&maximize(|violations: &Vec<String>| {

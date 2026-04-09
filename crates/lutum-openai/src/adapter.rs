@@ -16,7 +16,6 @@ use lutum_protocol::{
         ToolCallId, ToolMetadata, ToolName, ToolResult,
     },
     extensions::RequestExtensions,
-    hooks::HookRegistry,
     llm::{
         AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn,
         AdapterToolChoice, AdapterTurnConfig, CompletionAdapter, CompletionEvent,
@@ -52,16 +51,22 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply_to_completion(&self, request: &mut CompletionRequest);
 }
 
-#[lutum_macros::def_global_hook(singleton)]
+#[lutum_macros::def_hook(singleton)]
 pub async fn select_openai_model(_extensions: &RequestExtensions, default: ModelName) -> ModelName {
     default
 }
 
-#[lutum_macros::def_global_hook(singleton)]
+#[lutum_macros::def_hook(singleton)]
 pub async fn resolve_reasoning_effort(
     _extensions: &RequestExtensions,
 ) -> Option<OpenAiReasoningEffort> {
     None
+}
+
+#[lutum_macros::hooks]
+pub struct OpenAiHooks {
+    model_selectors: SelectOpenaiModel,
+    reasoning_effort_resolvers: ResolveReasoningEffort,
 }
 
 /// A snapshot of tool name information available at the time an SSE decode error occurred.
@@ -97,6 +102,7 @@ pub struct OpenAiAdapter {
     api_key: Arc<str>,
     base_url: Arc<str>,
     default_model: ModelName,
+    hooks: OpenAiHooks,
     fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
     sse_event_recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
 }
@@ -116,6 +122,7 @@ impl OpenAiAdapter {
             api_key: Arc::from(api_key.into()),
             base_url: Arc::from("https://api.openai.com/v1"),
             default_model: ModelName::new("gpt-4.1").unwrap(),
+            hooks: OpenAiHooks::new(),
             fallback_serializer: None,
             sse_event_recovery_hook: None,
         }
@@ -129,6 +136,36 @@ impl OpenAiAdapter {
     pub fn with_default_model(mut self, model: ModelName) -> Self {
         self.default_model = model;
         self
+    }
+
+    pub fn with_hooks(mut self, hooks: OpenAiHooks) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    pub fn set_hooks(&mut self, hooks: OpenAiHooks) {
+        self.hooks = hooks;
+    }
+
+    pub fn with_select_openai_model(mut self, hook: impl SelectOpenaiModel + 'static) -> Self {
+        self.hooks = self.hooks.with_select_openai_model(hook);
+        self
+    }
+
+    pub fn set_select_openai_model(&mut self, hook: impl SelectOpenaiModel + 'static) {
+        self.hooks.register_select_openai_model(hook);
+    }
+
+    pub fn with_resolve_reasoning_effort(
+        mut self,
+        hook: impl ResolveReasoningEffort + 'static,
+    ) -> Self {
+        self.hooks = self.hooks.with_resolve_reasoning_effort(hook);
+        self
+    }
+
+    pub fn set_resolve_reasoning_effort(&mut self, hook: impl ResolveReasoningEffort + 'static) {
+        self.hooks.register_resolve_reasoning_effort(hook);
     }
 
     pub fn set_fallback_serializer(&mut self, serializer: Box<dyn FallbackSerializer>) {
@@ -234,12 +271,13 @@ impl TurnAdapter for OpenAiAdapter {
         &self,
         input: ModelInput,
         turn: AdapterTextTurn,
-        hooks: &HookRegistry,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
-        let model = hooks
+        let model = self
+            .hooks
             .select_openai_model(turn.extensions.as_ref(), self.default_model.clone())
             .await;
-        let reasoning_effort = hooks
+        let reasoning_effort = self
+            .hooks
             .resolve_reasoning_effort(turn.extensions.as_ref())
             .await;
         let body = self
@@ -259,12 +297,13 @@ impl TurnAdapter for OpenAiAdapter {
         &self,
         input: ModelInput,
         turn: AdapterStructuredTurn,
-        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
-        let model = hooks
+        let model = self
+            .hooks
             .select_openai_model(turn.extensions.as_ref(), self.default_model.clone())
             .await;
-        let reasoning_effort = hooks
+        let reasoning_effort = self
+            .hooks
             .resolve_reasoning_effort(turn.extensions.as_ref())
             .await;
         let text_format = Some(TextFormat::JsonSchema {
@@ -299,9 +338,9 @@ impl CompletionAdapter for OpenAiAdapter {
         &self,
         request: ProtocolCompletionRequest,
         extensions: &RequestExtensions,
-        hooks: &HookRegistry,
     ) -> Result<CompletionEventStream, AgentError> {
-        let model = hooks
+        let model = self
+            .hooks
             .select_openai_model(extensions, self.default_model.clone())
             .await;
         let body = self.prepare_completion_request(&request, model.as_ref());
@@ -319,9 +358,9 @@ impl CompletionAdapter for OpenAiAdapter {
         &self,
         request: AdapterStructuredCompletionRequest,
         extensions: &RequestExtensions,
-        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
-        let model = hooks
+        let model = self
+            .hooks
             .select_openai_model(extensions, self.default_model.clone())
             .await;
         let body = self.prepare_structured_completion_request(&request, model.as_ref());
@@ -1786,7 +1825,7 @@ mod tests {
     use lutum_protocol::{
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
         AssistantTurnItem, AssistantTurnView, ErasedStructuredTurnEvent, ErasedTextTurnEvent,
-        GenerationParams, HookRegistry, InputMessageRole, ModelInput, ModelInputItem, ModelName,
+        GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName,
         RequestExtensions, ToolResult,
     };
 
@@ -1895,9 +1934,9 @@ mod tests {
 
     #[test]
     fn select_openai_model_uses_last_registered_singleton_override() {
-        let hooks = HookRegistry::new()
-            .register_select_openai_model(PreferGpt41)
-            .register_select_openai_model(PreferGpt41Mini);
+        let hooks = OpenAiHooks::new()
+            .with_select_openai_model(PreferGpt41)
+            .with_select_openai_model(PreferGpt41Mini);
 
         let selected = block_on(hooks.select_openai_model(
             &RequestExtensions::new(),

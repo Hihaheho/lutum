@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use lutum::{
-    HookRegistry, Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    Lutum, LutumHooks, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
 };
 
 #[lutum::def_hook(fallback)]
@@ -34,7 +34,7 @@ fn main() {
     let llm = Lutum::with_hooks(
         Arc::new(MockLlmAdapter::new()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        HookRegistry::new(),
+        LutumHooks::new(),
     );
     let mut hooks = ShellHooks::new().with_validate_command(RejectSecrets);
     hooks.register_validate_command(RejectSecrets);

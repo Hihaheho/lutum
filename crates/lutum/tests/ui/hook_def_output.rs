@@ -41,16 +41,6 @@ async fn finalize_more(_ctx: &lutum::Lutum, label: &str, last: Option<String>) -
     format!("{}:{label}", last.unwrap())
 }
 
-#[lutum::def_global_hook(always, aggregate = CountOutputs, output = Count)]
-async fn global_aggregate_label(_ctx: &lutum::Lutum, label: &str) -> String {
-    format!("default:{label}")
-}
-
-#[lutum::hook(GlobalAggregateLabel)]
-async fn global_aggregate_more(_ctx: &lutum::Lutum, label: &str) -> String {
-    format!("hook:{label}")
-}
-
 #[lutum::hooks]
 struct HookSet {
     aggregate_labels: AggregateLabel,
@@ -67,15 +57,6 @@ fn assert_types() {
     let ctx: &lutum::Lutum = unimplemented!();
     expect_count_future(hooks.aggregate_label(ctx, "x"));
     expect_count_future(hooks.finalize_label(ctx, "x"));
-
-    let registry = lutum::HookRegistry::new().register_global_aggregate_label(GlobalAggregateMore);
-    expect_count_future(
-        <lutum::HookRegistry as GlobalAggregateLabelRegistryExt>::global_aggregate_label(
-            &registry,
-            ctx,
-            "x",
-        ),
-    );
 }
 
 fn main() {}

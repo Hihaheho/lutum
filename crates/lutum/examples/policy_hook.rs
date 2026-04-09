@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_default_model(model),
         ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        HookRegistry::new(),
+        LutumHooks::new(),
     );
     let system = "You are a shell expert for log triage on a read-only system.\nOutput only the shell command, nothing else.";
     let request = "List the 5 most recent error lines from /var/log/syslog.";

@@ -16,7 +16,6 @@ use lutum_protocol::{
         ToolCallId, ToolMetadata, ToolName, ToolResult,
     },
     extensions::RequestExtensions,
-    hooks::HookRegistry,
     llm::{
         AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
@@ -60,17 +59,23 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply(&self, request: &mut MessagesRequest);
 }
 
-#[lutum_macros::def_global_hook(singleton)]
+#[lutum_macros::def_hook(singleton)]
 pub async fn select_claude_model(_extensions: &RequestExtensions, default: ModelName) -> ModelName {
     default
 }
 
-#[lutum_macros::def_global_hook(singleton)]
+#[lutum_macros::def_hook(singleton)]
 pub async fn resolve_budget_tokens(
     _extensions: &RequestExtensions,
     default: Option<u32>,
 ) -> Option<u32> {
     default
+}
+
+#[lutum_macros::hooks]
+pub struct ClaudeHooks {
+    model_selectors: SelectClaudeModel,
+    budget_token_resolvers: ResolveBudgetTokens,
 }
 
 #[derive(Clone)]
@@ -80,6 +85,7 @@ pub struct ClaudeAdapter {
     base_url: Arc<str>,
     default_model: ModelName,
     default_thinking_budget: Option<u32>,
+    hooks: ClaudeHooks,
     fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
     usage_cache: UsageCache,
 }
@@ -122,6 +128,7 @@ impl ClaudeAdapter {
             base_url: normalize_base_url(DEFAULT_BASE_URL),
             default_model: ModelName::new("claude-opus-4-5").unwrap(),
             default_thinking_budget: None,
+            hooks: ClaudeHooks::new(),
             fallback_serializer: None,
             usage_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -140,6 +147,33 @@ impl ClaudeAdapter {
     pub fn with_default_thinking_budget(mut self, budget_tokens: u32) -> Self {
         self.default_thinking_budget = Some(budget_tokens);
         self
+    }
+
+    pub fn with_hooks(mut self, hooks: ClaudeHooks) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    pub fn set_hooks(&mut self, hooks: ClaudeHooks) {
+        self.hooks = hooks;
+    }
+
+    pub fn with_select_claude_model(mut self, hook: impl SelectClaudeModel + 'static) -> Self {
+        self.hooks = self.hooks.with_select_claude_model(hook);
+        self
+    }
+
+    pub fn set_select_claude_model(&mut self, hook: impl SelectClaudeModel + 'static) {
+        self.hooks.register_select_claude_model(hook);
+    }
+
+    pub fn with_resolve_budget_tokens(mut self, hook: impl ResolveBudgetTokens + 'static) -> Self {
+        self.hooks = self.hooks.with_resolve_budget_tokens(hook);
+        self
+    }
+
+    pub fn set_resolve_budget_tokens(&mut self, hook: impl ResolveBudgetTokens + 'static) {
+        self.hooks.register_resolve_budget_tokens(hook);
     }
 
     pub fn set_fallback_serializer(&mut self, s: Box<dyn FallbackSerializer>) {
@@ -217,12 +251,13 @@ impl TurnAdapter for ClaudeAdapter {
         &self,
         input: ModelInput,
         turn: AdapterTextTurn,
-        hooks: &HookRegistry,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
-        let model = hooks
+        let model = self
+            .hooks
             .select_claude_model(turn.extensions.as_ref(), self.default_model.clone())
             .await;
-        let thinking_budget = hooks
+        let thinking_budget = self
+            .hooks
             .resolve_budget_tokens(turn.extensions.as_ref(), self.default_thinking_budget)
             .await
             .map(|budget| budget.max(MIN_THINKING_BUDGET_TOKENS));
@@ -250,12 +285,13 @@ impl TurnAdapter for ClaudeAdapter {
         &self,
         input: ModelInput,
         turn: AdapterStructuredTurn,
-        hooks: &HookRegistry,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
-        let model = hooks
+        let model = self
+            .hooks
             .select_claude_model(turn.extensions.as_ref(), self.default_model.clone())
             .await;
-        let thinking_budget = hooks
+        let thinking_budget = self
+            .hooks
             .resolve_budget_tokens(turn.extensions.as_ref(), self.default_thinking_budget)
             .await
             .map(|budget| budget.max(MIN_THINKING_BUDGET_TOKENS));
@@ -1253,10 +1289,27 @@ mod tests {
 
     use lutum_protocol::{
         AdapterToolChoice, AdapterTurnConfig, ErasedTextTurnEvent, GenerationParams, ModelInput,
-        ModelInputItem, OperationKind, UsageRecoveryAdapter, budget::Usage,
+        ModelInputItem, ModelName, OperationKind, RequestExtensions, UsageRecoveryAdapter,
+        budget::Usage,
     };
 
     use super::*;
+
+    #[lutum_macros::hook(SelectClaudeModel)]
+    async fn prefer_claude_sonnet(
+        _extensions: &RequestExtensions,
+        _default: ModelName,
+    ) -> ModelName {
+        ModelName::new("claude-sonnet-4-5").unwrap()
+    }
+
+    #[lutum_macros::hook(SelectClaudeModel)]
+    async fn prefer_claude_haiku(
+        _extensions: &RequestExtensions,
+        _default: ModelName,
+    ) -> ModelName {
+        ModelName::new("claude-haiku-4-5").unwrap()
+    }
 
     #[test]
     fn prepare_messages_request_uses_explicit_model() {
@@ -1328,6 +1381,20 @@ mod tests {
 
         assert_eq!(request.model, "claude-sonnet");
         assert_eq!(request.models, Some(vec!["fallback-model".to_string()]));
+    }
+
+    #[test]
+    fn select_claude_model_uses_last_registered_singleton_override() {
+        let hooks = ClaudeHooks::new()
+            .with_select_claude_model(PreferClaudeSonnet)
+            .with_select_claude_model(PreferClaudeHaiku);
+
+        let selected = block_on(hooks.select_claude_model(
+            &RequestExtensions::new(),
+            ModelName::new("claude-opus-4-5").unwrap(),
+        ));
+
+        assert_eq!(selected.as_str(), "claude-haiku-4-5");
     }
 
     #[test]
