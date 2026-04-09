@@ -174,6 +174,24 @@ impl ClaudeAdapter {
         if let Some(serializer) = self.fallback_serializer.as_ref() {
             serializer.apply(&mut request);
         }
+        tracing::debug!(
+            system_blocks = request.system.as_ref().map(|s| s.len()).unwrap_or(0),
+            last_block_has_cache_control = request
+                .system
+                .as_ref()
+                .and_then(|s| s.last())
+                .and_then(|b| b.cache_control.as_ref())
+                .is_some(),
+            tools = request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+            last_tool_has_cache_control = request
+                .tools
+                .as_ref()
+                .and_then(|t| t.last())
+                .and_then(|t| t.cache_control.as_ref())
+                .is_some(),
+            messages = request.messages.len(),
+            "prepared MessagesRequest",
+        );
         Ok(request)
     }
 
@@ -295,9 +313,7 @@ impl CompiledClaudeConversation {
         if text.is_empty() {
             return;
         }
-        self.system.push(SystemBlock {
-            text: text.to_string(),
-        });
+        self.system.push(SystemBlock::new(text));
     }
 
     fn push_block(&mut self, role: ClaudeRole, block: ClaudeContentBlock) {
@@ -455,6 +471,7 @@ fn build_tool_definitions(config: &AdapterTurnConfig) -> Vec<ClaudeTool> {
             name: tool.name.clone(),
             description: Some(tool.description.clone()),
             input_schema: tool.input_schema.clone(),
+            cache_control: None,
         })
         .collect()
 }
@@ -486,24 +503,48 @@ fn build_tool_choice(config: &AdapterTurnConfig) -> Option<ClaudeToolChoice> {
 
 fn compile_model_input(input: &ModelInput) -> Result<CompiledClaudeConversation, ClaudeError> {
     let mut compiled = CompiledClaudeConversation::default();
+    // Track whether the immediately preceding item was a committed Turn that contained
+    // tool calls. When true, a following ToolUse item must only emit the user-side
+    // tool_result — the assistant-side tool_use blocks are already in the Turn.
+    let mut prev_was_tool_turn = false;
 
     for item in input.items() {
         match item {
             ModelInputItem::Message { role, content } => {
                 emit_message(role, content.iter(), &mut compiled)?;
+                prev_was_tool_turn = false;
             }
             ModelInputItem::Assistant(item) => {
                 compiled.push_block(ClaudeRole::Assistant, assistant_replay_block(item));
+                prev_was_tool_turn = false;
             }
-            ModelInputItem::ToolUse(tool_use) => emit_tool_use(tool_use, &mut compiled)?,
+            ModelInputItem::ToolUse(tool_use) => {
+                if prev_was_tool_turn {
+                    // The assistant's tool_use block was already emitted by the preceding
+                    // committed Turn. Only emit the user-side tool_result.
+                    emit_tool_result(tool_use, &mut compiled)?;
+                } else {
+                    emit_tool_use(tool_use, &mut compiled)?;
+                }
+                // ToolUse items form a contiguous group after a Turn; keep the flag set.
+            }
             ModelInputItem::Turn(turn) => {
+                let has_tool_calls;
                 if let Some(claude_turn) =
                     turn.as_ref().as_any().downcast_ref::<ClaudeCommittedTurn>()
                 {
+                    has_tool_calls = claude_turn
+                        .items
+                        .iter()
+                        .any(|i| matches!(i, ClaudeTurnItem::ToolCall { .. }));
                     emit_claude_turn_exact(claude_turn, &mut compiled)?;
                 } else {
+                    has_tool_calls = (0..turn.item_count())
+                        .filter_map(|i| turn.item_at(i))
+                        .any(|v| v.as_tool_call().is_some());
                     emit_turn_from_view(turn.as_ref(), &mut compiled)?;
                 }
+                prev_was_tool_turn = has_tool_calls;
             }
         }
     }
@@ -533,6 +574,7 @@ fn emit_message<'a>(
     Ok(())
 }
 
+/// Emit a standalone tool call+result pair (no preceding committed Turn).
 fn emit_tool_use(
     tool_use: &ToolUse,
     compiled: &mut CompiledClaudeConversation,
@@ -541,6 +583,16 @@ fn emit_tool_use(
         ClaudeRole::Assistant,
         tool_use_block(&tool_use.id, &tool_use.name, &tool_use.arguments)?,
     );
+    compiled.push_block(ClaudeRole::User, tool_result_block(tool_use)?);
+    Ok(())
+}
+
+/// Emit only the user-side tool_result for a ToolUse that follows a committed Turn.
+/// The assistant-side tool_use block is already present from the Turn replay.
+fn emit_tool_result(
+    tool_use: &ToolUse,
+    compiled: &mut CompiledClaudeConversation,
+) -> Result<(), ClaudeError> {
     compiled.push_block(ClaudeRole::User, tool_result_block(tool_use)?);
     Ok(())
 }
@@ -684,6 +736,7 @@ fn assistant_replay_block(item: &AssistantInputItem) -> ClaudeContentBlock {
 fn text_block(text: &str) -> ClaudeContentBlock {
     ClaudeContentBlock::Text(TextBlock {
         text: text.to_string(),
+        cache_control: None,
     })
 }
 
@@ -703,6 +756,7 @@ fn tool_result_block(tool_use: &ToolUse) -> Result<ClaudeContentBlock, ClaudeErr
     Ok(ClaudeContentBlock::ToolResult(ToolResultBlock {
         tool_use_id: tool_use.id.clone(),
         content: tool_result_content(&tool_use.result)?,
+        cache_control: None,
     }))
 }
 
@@ -712,6 +766,7 @@ fn tool_result_block_from_view(
     Ok(ClaudeContentBlock::ToolResult(ToolResultBlock {
         tool_use_id: tool_result.id.clone(),
         content: tool_result_content(tool_result.result)?,
+        cache_control: None,
     }))
 }
 
@@ -748,6 +803,8 @@ where
         let mut request_id = None::<String>;
         let mut model = fallback_model;
         let mut usage = Usage::zero();
+        let mut cache_creation_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
         let mut stop_reason = None::<String>;
         let mut blocks = BTreeMap::<usize, ContentBlockState>::new();
         futures::pin_mut!(stream);
@@ -765,6 +822,14 @@ where
                 if let SseEvent::MessageStart(MessageStartEvent { message }) = &event {
                     request_id = Some(message.id.clone());
                     model = message.model.clone();
+                    cache_creation_tokens += message.usage.cache_creation_input_tokens.unwrap_or(0);
+                    cache_read_tokens += message.usage.cache_read_input_tokens.unwrap_or(0);
+                    tracing::debug!(
+                        input_tokens = message.usage.input_tokens,
+                        cache_creation = message.usage.cache_creation_input_tokens,
+                        cache_read = message.usage.cache_read_input_tokens,
+                        "message_start usage",
+                    );
                     usage = message.usage.clone().into_protocol_usage();
                     cache_usage(&usage_cache, &message.id, usage);
                     if !started {
@@ -836,6 +901,8 @@ where
                     }
                     SseEvent::MessageDelta(MessageDeltaEvent { delta, usage: next_usage }) => {
                         stop_reason = delta.stop_reason;
+                        cache_creation_tokens += next_usage.cache_creation_input_tokens.unwrap_or(0);
+                        cache_read_tokens += next_usage.cache_read_input_tokens.unwrap_or(0);
                         usage = next_usage.into_protocol_usage();
                         if let Some(request_id) = request_id.as_deref() {
                             cache_usage(&usage_cache, request_id, usage);
@@ -849,6 +916,8 @@ where
                             items: finalize_committed_items(&mut blocks, &finish_reason)?,
                             finish_reason: finish_reason.clone(),
                             usage,
+                            cache_creation_input_tokens: cache_creation_tokens,
+                            cache_read_input_tokens: cache_read_tokens,
                         });
                         if let Some(request_id) = request_id.as_deref() {
                             remove_cached_usage(&usage_cache, request_id);
@@ -882,6 +951,8 @@ where
         let mut request_id = None::<String>;
         let mut model = fallback_model;
         let mut usage = Usage::zero();
+        let mut cache_creation_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
         let mut stop_reason = None::<String>;
         let mut blocks = BTreeMap::<usize, ContentBlockState>::new();
         let mut structured_buffer = String::new();
@@ -901,6 +972,14 @@ where
                 if let SseEvent::MessageStart(MessageStartEvent { message }) = &event {
                     request_id = Some(message.id.clone());
                     model = message.model.clone();
+                    cache_creation_tokens += message.usage.cache_creation_input_tokens.unwrap_or(0);
+                    cache_read_tokens += message.usage.cache_read_input_tokens.unwrap_or(0);
+                    tracing::debug!(
+                        input_tokens = message.usage.input_tokens,
+                        cache_creation = message.usage.cache_creation_input_tokens,
+                        cache_read = message.usage.cache_read_input_tokens,
+                        "message_start usage",
+                    );
                     usage = message.usage.clone().into_protocol_usage();
                     cache_usage(&usage_cache, &message.id, usage);
                     if !started {
@@ -975,6 +1054,8 @@ where
                     }
                     SseEvent::MessageDelta(MessageDeltaEvent { delta, usage: next_usage }) => {
                         stop_reason = delta.stop_reason;
+                        cache_creation_tokens += next_usage.cache_creation_input_tokens.unwrap_or(0);
+                        cache_read_tokens += next_usage.cache_read_input_tokens.unwrap_or(0);
                         usage = next_usage.into_protocol_usage();
                         if let Some(request_id) = request_id.as_deref() {
                             cache_usage(&usage_cache, request_id, usage);
@@ -995,6 +1076,8 @@ where
                             items: finalize_committed_items(&mut blocks, &finish_reason)?,
                             finish_reason: finish_reason.clone(),
                             usage,
+                            cache_creation_input_tokens: cache_creation_tokens,
+                            cache_read_input_tokens: cache_read_tokens,
                         });
                         if let Some(request_id) = request_id.as_deref() {
                             remove_cached_usage(&usage_cache, request_id);

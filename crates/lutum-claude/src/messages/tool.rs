@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::messages::request::CacheControl;
+
 /// Claude tool definition.
 ///
 /// ```
@@ -36,6 +38,7 @@ use serde::{Deserialize, Serialize};
 ///             "required": ["ticker"]
 ///         }"#,
 ///     ).unwrap(),
+///     cache_control: None,
 /// };
 ///
 /// assert_eq!(serde_json::to_value(&value).unwrap(), json);
@@ -47,6 +50,8 @@ pub struct ClaudeTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// Claude tool choice.

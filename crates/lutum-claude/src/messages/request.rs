@@ -37,12 +37,11 @@ use crate::messages::{ClaudeMessage, ClaudeTool};
 ///         role: ClaudeRole::User,
 ///         content: vec![ClaudeContentBlock::Text(TextBlock {
 ///             text: "Hello, world".to_string(),
+///             cache_control: None,
 ///         })],
 ///     }],
 ///     stream: None,
-///     system: Some(vec![SystemBlock {
-///         text: "Today's date is 2023-01-01.".to_string(),
-///     }]),
+///     system: Some(vec![SystemBlock::new("Today's date is 2023-01-01.")]),
 ///     temperature: None,
 ///     tools: None,
 ///     tool_choice: None,
@@ -95,16 +94,51 @@ pub struct MessagesRequest {
 /// let json = serde_json::from_str::<serde_json::Value>(
 ///     r#"{"type":"text","text":"Today's date is 2023-01-01."}"#,
 /// ).unwrap();
-/// let value = SystemBlock {
-///     text: "Today's date is 2023-01-01.".to_string(),
-/// };
+/// let value = SystemBlock::new("Today's date is 2023-01-01.");
 ///
 /// assert_eq!(serde_json::to_value(&value).unwrap(), json);
 /// assert_eq!(serde_json::from_value::<SystemBlock>(json).unwrap(), value);
 /// ```
+/// Cache control configuration for a system block.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+impl CacheControl {
+    /// Ephemeral cache control — cache this block for the current session.
+    pub fn ephemeral() -> Self {
+        Self {
+            kind: "ephemeral".to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SystemBlock {
     pub text: String,
+    pub cache_control: Option<CacheControl>,
+}
+
+impl SystemBlock {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache_control: None,
+        }
+    }
+
+    pub fn with_cache_control(mut self, cc: CacheControl) -> Self {
+        self.cache_control = Some(cc);
+        self
+    }
+}
+
+impl From<String> for SystemBlock {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
 }
 
 impl Serialize for SystemBlock {
@@ -115,6 +149,7 @@ impl Serialize for SystemBlock {
         SystemBlockRepr {
             kind: "text",
             text: &self.text,
+            cache_control: self.cache_control.as_ref(),
         }
         .serialize(serializer)
     }
@@ -131,7 +166,10 @@ impl<'de> Deserialize<'de> for SystemBlock {
                 "Claude system blocks must use type `text`",
             ));
         }
-        Ok(Self { text: repr.text })
+        Ok(Self {
+            text: repr.text,
+            cache_control: repr.cache_control,
+        })
     }
 }
 
@@ -231,6 +269,8 @@ struct SystemBlockRepr<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<&'a CacheControl>,
 }
 
 #[derive(Deserialize)]
@@ -238,4 +278,6 @@ struct SystemBlockOwnedRepr {
     #[serde(rename = "type")]
     kind: String,
     text: String,
+    #[serde(default)]
+    cache_control: Option<CacheControl>,
 }

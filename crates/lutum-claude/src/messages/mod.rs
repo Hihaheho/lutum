@@ -9,7 +9,8 @@ pub use content::{
     ToolUseBlock,
 };
 pub use request::{
-    MessagesRequest, OutputConfig, OutputFormat, SystemBlock, ThinkingConfig, ThinkingKind,
+    CacheControl, MessagesRequest, OutputConfig, OutputFormat, SystemBlock, ThinkingConfig,
+    ThinkingKind,
 };
 pub use response::{
     ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent, ErrorEvent,

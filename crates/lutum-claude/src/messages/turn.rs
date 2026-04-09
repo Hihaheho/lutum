@@ -35,7 +35,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///             "output_tokens": 15,
 ///             "total_tokens": 40,
 ///             "cost_micros_usd": 0
-///         }
+///         },
+///         "cache_creation_input_tokens": 0,
+///         "cache_read_input_tokens": 0
 ///     }"#,
 /// ).unwrap();
 /// let value = ClaudeCommittedTurn {
@@ -58,6 +60,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///         total_tokens: 40,
 ///         cost_micros_usd: 0,
 ///     },
+///     cache_creation_input_tokens: 0,
+///     cache_read_input_tokens: 0,
 /// };
 ///
 /// assert_eq!(serde_json::to_value(&value).unwrap(), json);
@@ -70,6 +74,12 @@ pub struct ClaudeCommittedTurn {
     pub items: Vec<ClaudeTurnItem>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    /// Tokens written to the prompt cache in this turn.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    /// Tokens read from the prompt cache in this turn.
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
 }
 
 impl PartialEq for ClaudeCommittedTurn {

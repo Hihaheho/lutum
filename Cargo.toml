@@ -7,6 +7,16 @@ members = [
     "crates/lutum-openrouter",
     "crates/lutum-protocol",
     "crates/lutum-trace",
+    "demo-apps/sqlite/*",
+]
+default-members = [
+    "crates/lutum", "crates/lutum-claude",
+    "crates/lutum-eval",
+    "crates/lutum-macros",
+    "crates/lutum-openai",
+    "crates/lutum-openrouter",
+    "crates/lutum-protocol",
+    "crates/lutum-trace",
 ]
 resolver = "2"
 

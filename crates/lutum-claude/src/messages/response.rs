@@ -119,6 +119,7 @@ pub struct MessageStartEvent {
 ///     role: ClaudeRole::Assistant,
 ///     content: vec![SseContentBlock::Text(TextBlock {
 ///         text: "Hi, I'm Claude.".to_string(),
+///         cache_control: None,
 ///     })],
 ///     model: "claude-opus-4-6".to_string(),
 ///     stop_reason: Some("end_turn".to_string()),
@@ -163,6 +164,7 @@ pub struct SseMessage {
 ///     index: 0,
 ///     content_block: SseContentBlock::Text(TextBlock {
 ///         text: "Hi, I'm Claude.".to_string(),
+///         cache_control: None,
 ///     }),
 /// };
 ///

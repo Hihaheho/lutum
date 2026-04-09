@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod error;
 pub mod messages;
+pub mod persistence;
 pub mod sse;
 
 pub use adapter::{
@@ -9,7 +10,7 @@ pub use adapter::{
 };
 pub use error::ClaudeError;
 pub use messages::{
-    ClaudeCommittedTurn, ClaudeContentBlock, ClaudeMessage, ClaudeRole, ClaudeTool,
+    CacheControl, ClaudeCommittedTurn, ClaudeContentBlock, ClaudeMessage, ClaudeRole, ClaudeTool,
     ClaudeToolChoice, ClaudeTurnItem, ContentBlockDeltaEvent, ContentBlockStartEvent,
     ContentBlockStopEvent, ErrorEvent, MessageDelta, MessageDeltaEvent, MessageDeltaUsage,
     MessageStartEvent, MessageStopEvent, MessagesRequest, OutputConfig, OutputFormat, PingEvent,

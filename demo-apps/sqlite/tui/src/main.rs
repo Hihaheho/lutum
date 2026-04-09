@@ -1,0 +1,276 @@
+mod app;
+mod hooks;
+mod registry_persistence;
+mod ui;
+
+use std::{path::PathBuf, sync::Arc, time::Duration};
+
+use clap::Parser;
+use crossterm::{
+    event::{self, Event, KeyCode, KeyModifiers},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use lutum::{Lutum, ModelName, SharedPoolBudgetManager, SharedPoolBudgetOptions};
+use lutum_claude::messages::{ClaudeContentBlock, MessagesRequest};
+use lutum_claude::{CacheControl, ClaudeAdapter, FallbackSerializer};
+use ratatui::{Terminal, backend::CrosstermBackend};
+use sqlite_agent::{AgentConfig, DbRegistry, SqliteDb, WriteDecision};
+
+use app::{AppState, TuiApp};
+use registry_persistence::{DEFAULT_REGISTRY_PATH, load_registry_snapshot, save_registry_snapshot};
+
+// ---------------------------------------------------------------------------
+// CLI args (clap)
+// ---------------------------------------------------------------------------
+
+#[derive(Parser, Debug)]
+#[command(name = "sqlite-agent-tui", about = "Interactive SQLite agent TUI")]
+struct Args {
+    /// Path to the SQLite database file (created if it does not exist)
+    #[arg(long, default_value = "agent.db")]
+    db: PathBuf,
+
+    /// Claude model to use
+    #[arg(long, default_value = "claude-haiku-4-5-20251001")]
+    model: String,
+
+    /// Maximum rows a single write operation may affect
+    #[arg(long, default_value_t = 100)]
+    max_rows: u64,
+
+    /// Path to persist the session across runs. Omit to disable persistence.
+    #[arg(long, default_value = "agent-session.json")]
+    session: Option<PathBuf>,
+
+    /// Path to persist the global database registry across runs.
+    #[arg(long, default_value = DEFAULT_REGISTRY_PATH, conflicts_with = "no_registry")]
+    registry: PathBuf,
+
+    /// Disable global registry persistence and restore.
+    #[arg(long)]
+    no_registry: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Prompt-cache FallbackSerializer
+// ---------------------------------------------------------------------------
+
+/// Applies `cache_control: { type: "ephemeral" }` at three cache breakpoints:
+///   1. Last system block  — covers the system prompt prefix
+///   2. Last tool          — covers system + all tool definitions (static across turns)
+///   3. Last content block of the second-to-last message — covers conversation history
+///
+/// Registered only in the TUI (which always wants prompt caching).
+struct CacheControlSerializer;
+
+impl FallbackSerializer for CacheControlSerializer {
+    fn apply(&self, request: &mut MessagesRequest) {
+        // 1. Last system block
+        if let Some(blocks) = request.system.as_mut() {
+            if let Some(last) = blocks.last_mut() {
+                last.cache_control = Some(CacheControl::ephemeral());
+            }
+        }
+
+        // 2. Last tool definition
+        if let Some(tools) = request.tools.as_mut() {
+            if let Some(last) = tools.last_mut() {
+                last.cache_control = Some(CacheControl::ephemeral());
+            }
+        }
+
+        // 3. Last content block of the second-to-last message (penultimate turn)
+        let n = request.messages.len();
+        if n >= 2 {
+            let msg = &mut request.messages[n - 2];
+            if let Some(block) = msg.content.last_mut() {
+                match block {
+                    ClaudeContentBlock::Text(b) => {
+                        b.cache_control = Some(CacheControl::ephemeral())
+                    }
+                    ClaudeContentBlock::ToolResult(b) => {
+                        b.cache_control = Some(CacheControl::ephemeral())
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+
+    let args = Args::parse();
+
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY env var is not set"))?;
+
+    let db = Arc::new(SqliteDb::open(&args.db)?);
+    let registry = Arc::new(DbRegistry::new());
+    registry.register("main", db, args.db.to_string_lossy().as_ref());
+    let registry_path = if args.no_registry {
+        None
+    } else {
+        Some(args.registry.clone())
+    };
+    let startup_warnings = load_registry_snapshot(&registry, registry_path.as_deref());
+
+    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
+    let model = ModelName::new(&args.model)?;
+    let mut adapter = ClaudeAdapter::new(api_key).with_default_model(model);
+    adapter.set_fallback_serializer(Box::new(CacheControlSerializer));
+    let llm = Lutum::new(Arc::new(adapter), budget);
+    let config = AgentConfig {
+        max_rows: args.max_rows,
+        ..Default::default()
+    };
+
+    let mut app = TuiApp::new(
+        registry,
+        llm,
+        config,
+        args.session,
+        registry_path,
+        startup_warnings,
+    );
+    app.load_persisted_session();
+    if let Err(message) = save_registry_snapshot(&app.registry, app.registry_path()) {
+        tracing::warn!("{message}");
+    }
+
+    // Enter alternate screen
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = run_event_loop(&mut terminal, &mut app).await;
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    result
+}
+
+async fn run_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut TuiApp,
+) -> anyhow::Result<()> {
+    loop {
+        terminal.draw(|f| ui::render(f, app))?;
+
+        // Poll agent channels
+        app.poll();
+
+        // Poll keyboard with 50ms timeout so the TUI stays responsive
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                match &app.state {
+                    AppState::Approval(_) => {
+                        handle_approval_key(app, key.code);
+                    }
+                    AppState::ModeRequest(_) => {
+                        handle_mode_request_key(app, key.code);
+                    }
+                    AppState::Running => {
+                        // Ignore input while agent is running (Ctrl-C still exits)
+                        if key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            break;
+                        }
+                    }
+                    AppState::Idle | AppState::Done => {
+                        if handle_idle_key(app, key.code, key.modifiers) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_idle_key(app: &mut TuiApp, code: KeyCode, mods: KeyModifiers) -> bool {
+    match code {
+        // Quit
+        KeyCode::Char('q') if app.input_buf.is_empty() => return true,
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return true,
+
+        // New chat
+        KeyCode::Char('n') if mods.contains(KeyModifiers::CONTROL) => app.reset_session(),
+
+        // Toggle mode
+        KeyCode::Tab => app.toggle_mode(),
+
+        // Submit input
+        KeyCode::Enter => app.submit_input(),
+
+        // Edit input buffer
+        KeyCode::Char(c) => app.input_buf.push(c),
+        KeyCode::Backspace => {
+            app.input_buf.pop();
+        }
+
+        // Scroll conversation
+        KeyCode::Up => app.scroll.set(app.scroll.get().saturating_sub(1)),
+        KeyCode::Down => app.scroll.set(app.scroll.get().saturating_add(1)),
+        KeyCode::PageUp => app.scroll.set(app.scroll.get().saturating_sub(10)),
+        KeyCode::PageDown => app.scroll.set(app.scroll.get().saturating_add(10)),
+
+        _ => {}
+    }
+    false
+}
+
+fn handle_mode_request_key(app: &mut TuiApp, code: KeyCode) {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            app.send_mode_decision(true);
+            app.state = AppState::Running;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.send_mode_decision(false);
+            app.state = AppState::Running;
+        }
+        _ => {}
+    }
+}
+
+fn handle_approval_key(app: &mut TuiApp, code: KeyCode) {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            app.send_decision(WriteDecision::Accept);
+            app.state = AppState::Running;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.send_decision(WriteDecision::Reject("user declined".to_string()));
+            app.state = AppState::Running;
+        }
+        // 'e' for edit: simple implementation — user types new SQL in the input buffer
+        KeyCode::Char('e') | KeyCode::Char('E') => {
+            if let AppState::Approval(ref preview) = app.state {
+                app.input_buf = preview.sql.clone();
+            }
+            app.send_decision(WriteDecision::Reject(
+                "user chose to edit — re-submit corrected request".to_string(),
+            ));
+            app.state = AppState::Running;
+        }
+        _ => {}
+    }
+}

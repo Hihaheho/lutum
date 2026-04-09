@@ -1,6 +1,8 @@
 use lutum_protocol::conversation::{ToolCallId, ToolName};
 use serde::{Deserialize, Serialize};
 
+use crate::messages::request::CacheControl;
+
 /// Claude message role.
 ///
 /// ```
@@ -36,6 +38,7 @@ pub enum ClaudeRole {
 ///     role: ClaudeRole::User,
 ///     content: vec![ClaudeContentBlock::Text(TextBlock {
 ///         text: "Hello, Claude".to_string(),
+///         cache_control: None,
 ///     })],
 /// };
 ///
@@ -88,6 +91,7 @@ pub enum ClaudeContentBlock {
 /// let json = serde_json::from_str::<serde_json::Value>(r#"{"text":"Hello, Claude"}"#).unwrap();
 /// let value = TextBlock {
 ///     text: "Hello, Claude".to_string(),
+///     cache_control: None,
 /// };
 ///
 /// assert_eq!(serde_json::to_value(&value).unwrap(), json);
@@ -96,6 +100,8 @@ pub enum ClaudeContentBlock {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TextBlock {
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// Tool use block.
@@ -142,6 +148,7 @@ pub struct ToolUseBlock {
 /// let value = ToolResultBlock {
 ///     tool_use_id: ToolCallId::from("toolu_01D7FLrfh4GYq7yT1ULFeyMV"),
 ///     content: serde_json::from_str(r#""259.75 USD""#).unwrap(),
+///     cache_control: None,
 /// };
 ///
 /// assert_eq!(serde_json::to_value(&value).unwrap(), json);
@@ -151,6 +158,8 @@ pub struct ToolUseBlock {
 pub struct ToolResultBlock {
     pub tool_use_id: ToolCallId,
     pub content: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// Thinking block.
