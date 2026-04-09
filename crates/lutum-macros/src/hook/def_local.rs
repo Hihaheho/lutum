@@ -168,19 +168,17 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                         ::std::sync::Arc<dyn ::lutum::Aggregate<#output_ty> + Send + Sync>
                     >
                 };
-                let aggregate_field_init = quote! {
-                    ::std::option::Option::Some(::std::sync::Arc::new(
-                        <#aggregate_default_ty as ::std::default::Default>::default(),
-                    ))
-                };
+                let aggregate_field_init = quote! { ::std::option::Option::None };
                 let aggregate_call = quote! {
                     {
-                        let __agg = &self.#aggregate_field_ident;
-                        match __agg {
+                        use ::lutum::Aggregate as _;
+                        match &self.#aggregate_field_ident {
                             ::std::option::Option::Some(__h) => __h.call(__outputs).await,
-                            ::std::option::Option::None => unreachable!(
-                                "aggregate field is always Some when aggregate option is set"
-                            ),
+                            ::std::option::Option::None => {
+                                let __a: #aggregate_default_ty =
+                                    ::std::default::Default::default();
+                                __a.call(__outputs).await
+                            }
                         }
                     }
                 };
@@ -195,19 +193,17 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                         ::std::sync::Arc<dyn ::lutum::Finalize<#output_ty> + Send + Sync>
                     >
                 };
-                let finalize_field_init = quote! {
-                    ::std::option::Option::Some(::std::sync::Arc::new(
-                        <#finalize_default_ty as ::std::default::Default>::default(),
-                    ))
-                };
+                let finalize_field_init = quote! { ::std::option::Option::None };
                 let finalize_call = quote! {
                     {
-                        let __fin = &self.#finalize_field_ident;
-                        match __fin {
+                        use ::lutum::Finalize as _;
+                        match &self.#finalize_field_ident {
                             ::std::option::Option::Some(__h) => __h.call(__result).await,
-                            ::std::option::Option::None => unreachable!(
-                                "finalize field is always Some when finalize option is set"
-                            ),
+                            ::std::option::Option::None => {
+                                let __f: #finalize_default_ty =
+                                    ::std::default::Default::default();
+                                __f.call(__result).await
+                            }
                         }
                     }
                 };
@@ -256,8 +252,15 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     mut self,
                     h: impl ::lutum::Chain<#output_ty> + 'static,
                 ) -> Self {
-                    self.#chain_field_ident =
-                        ::std::option::Option::Some(::std::sync::Arc::new(h));
+                    if self.#chain_field_ident
+                        .replace(::std::sync::Arc::new(h))
+                        .is_some()
+                    {
+                        ::tracing::warn!(
+                            slot = ::std::concat!(#hook_name, ".chain"),
+                            "companion chain overwritten; last registered wins"
+                        );
+                    }
                     self
                 }
 
@@ -287,8 +290,15 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     mut self,
                     h: impl ::lutum::Aggregate<#output_ty> + 'static,
                 ) -> Self {
-                    self.#aggregate_field_ident =
-                        ::std::option::Option::Some(::std::sync::Arc::new(h));
+                    if self.#aggregate_field_ident
+                        .replace(::std::sync::Arc::new(h))
+                        .is_some()
+                    {
+                        ::tracing::warn!(
+                            slot = ::std::concat!(#hook_name, ".aggregate"),
+                            "companion aggregate overwritten; last registered wins"
+                        );
+                    }
                     self
                 }
 
@@ -318,8 +328,15 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     mut self,
                     h: impl ::lutum::Finalize<#output_ty> + 'static,
                 ) -> Self {
-                    self.#finalize_field_ident =
-                        ::std::option::Option::Some(::std::sync::Arc::new(h));
+                    if self.#finalize_field_ident
+                        .replace(::std::sync::Arc::new(h))
+                        .is_some()
+                    {
+                        ::tracing::warn!(
+                            slot = ::std::concat!(#hook_name, ".finalize"),
+                            "companion finalize overwritten; last registered wins"
+                        );
+                    }
                     self
                 }
 
