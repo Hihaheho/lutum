@@ -1,0 +1,5 @@
+error: #[def_hook(...)] does not support using 'aggregate' and 'finalize' together
+  --> tests/ui/hook_def_aggregate_finalize.rs:21:52
+   |
+21 | #[lutum::def_hook(always, aggregate = JoinStrings, finalize = WrapResult)]
+   |                                                    ^^^^^^^^

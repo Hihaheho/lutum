@@ -268,6 +268,87 @@ async fn chain_finalized_unreachable(_label: &str) -> String {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct CollectedLabels(Vec<String>);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WrappedLabel(String);
+
+#[derive(Default)]
+struct CollectIntoLabels;
+
+#[async_trait]
+impl lutum::AggregateInto<String, CollectedLabels> for CollectIntoLabels {
+    async fn call(&self, outputs: Vec<String>) -> CollectedLabels {
+        CollectedLabels(outputs)
+    }
+}
+
+#[derive(Default)]
+struct WrapLabelInto;
+
+#[async_trait]
+impl lutum::FinalizeInto<String, WrappedLabel> for WrapLabelInto {
+    async fn call(&self, output: String) -> WrappedLabel {
+        WrappedLabel(format!("[{output}]"))
+    }
+}
+
+#[lutum::def_hook(always, aggregate = CollectIntoLabels, output = CollectedLabels)]
+async fn accumulate_label_into(label: &str) -> String {
+    format!("default:{label}")
+}
+
+#[lutum::hook(AccumulateLabelInto)]
+async fn accumulate_into_hook_a(label: &str) -> String {
+    format!("hook-a:{label}")
+}
+
+#[lutum::def_hook(fallback, aggregate = CollectIntoLabels, output = CollectedLabels)]
+async fn fallback_accumulate_label_into(label: &str) -> String {
+    format!("fallback:{label}")
+}
+
+#[lutum::hook(FallbackAccumulateLabelInto)]
+async fn fallback_accumulate_into_hook(label: &str) -> String {
+    format!("hook:{label}")
+}
+
+#[lutum::def_hook(always, chain = IsShortCircuitString, aggregate = CollectIntoLabels, output = CollectedLabels)]
+async fn accumulate_chain_label_into(label: &str) -> String {
+    format!("default:{label}")
+}
+
+#[lutum::hook(AccumulateChainLabelInto)]
+async fn accumulate_chain_into_hook_stop(_label: &str) -> String {
+    "stop:early".to_owned()
+}
+
+#[lutum::hook(AccumulateChainLabelInto)]
+async fn accumulate_chain_into_hook_unreachable(_label: &str) -> String {
+    panic!("must not be called after stop")
+}
+
+#[lutum::def_hook(always, finalize = WrapLabelInto, output = WrappedLabel)]
+async fn finalized_label_into(label: &str) -> String {
+    format!("default:{label}")
+}
+
+#[lutum::hook(FinalizedLabelInto)]
+async fn finalized_into_append(label: &str, last: Option<String>) -> String {
+    format!("{}+{label}", last.unwrap())
+}
+
+#[lutum::def_global_hook(always, aggregate = CollectIntoLabels, output = CollectedLabels)]
+async fn global_accumulate_label_into(label: &str) -> String {
+    format!("global-default:{label}")
+}
+
+#[lutum::hook(GlobalAccumulateLabelInto)]
+async fn global_accumulate_into_override(label: &str) -> String {
+    format!("global-hook:{label}")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum CounterError {
     Reentered(HookReentrancyError),
 }
@@ -791,6 +872,14 @@ struct AccumulateHooks {
     chain_finalized: ChainFinalizedLabel,
 }
 
+#[lutum::hooks]
+struct OutputIntoHooks {
+    accumulator_into: AccumulateLabelInto,
+    fallback_accumulator_into: FallbackAccumulateLabelInto,
+    accumulate_chain_into: AccumulateChainLabelInto,
+    finalized_into: FinalizedLabelInto,
+}
+
 #[test]
 fn accumulate_no_hooks_returns_default_only() {
     let hooks = AccumulateHooks::new();
@@ -849,4 +938,66 @@ fn chain_finalize_captures_early_exit() {
     // default → Continue, stop → "stop:chain" → Break (early return)
     // finalize wraps: "[stop:chain]"
     assert_eq!(result, "[stop:chain]");
+}
+
+#[test]
+fn aggregate_output_override_returns_companion_output_type() {
+    let hooks = OutputIntoHooks::new().with_accumulate_label_into(AccumulateIntoHookA);
+    let result = block_on(hooks.accumulate_label_into("x"));
+
+    assert_eq!(
+        result,
+        CollectedLabels(vec!["default:x".to_owned(), "hook-a:x".to_owned()])
+    );
+}
+
+#[test]
+fn fallback_aggregate_output_override_runs_companion_without_hooks() {
+    let hooks = OutputIntoHooks::new();
+    let result = block_on(hooks.fallback_accumulate_label_into("x"));
+
+    assert_eq!(result, CollectedLabels(vec!["fallback:x".to_owned()]));
+}
+
+#[test]
+fn finalize_output_override_returns_companion_output_type() {
+    let hooks = OutputIntoHooks::new().with_finalized_label_into(FinalizedIntoAppend);
+    let result = block_on(hooks.finalized_label_into("x"));
+
+    assert_eq!(result, WrappedLabel("[default:x+x]".to_owned()));
+}
+
+#[test]
+fn aggregate_output_override_preserves_chain_early_exit() {
+    let hooks = OutputIntoHooks::new()
+        .with_accumulate_chain_label_into(AccumulateChainIntoHookStop)
+        .with_accumulate_chain_label_into(AccumulateChainIntoHookUnreachable);
+    let result = block_on(hooks.accumulate_chain_label_into("x"));
+
+    assert_eq!(
+        result,
+        CollectedLabels(vec!["default:x".to_owned(), "stop:early".to_owned()])
+    );
+}
+
+#[test]
+fn global_aggregate_output_override_dispatches_through_registry_extension() {
+    let ctx = test_context(
+        HookRegistry::new().register_global_accumulate_label_into(GlobalAccumulateIntoOverride),
+    );
+
+    let result = block_on(
+        <HookRegistry as GlobalAccumulateLabelIntoRegistryExt>::global_accumulate_label_into(
+            ctx.hooks(),
+            "base",
+        ),
+    );
+
+    assert_eq!(
+        result,
+        CollectedLabels(vec![
+            "global-default:base".to_owned(),
+            "global-hook:base".to_owned(),
+        ])
+    );
 }

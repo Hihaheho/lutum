@@ -17,6 +17,12 @@ fn hook_def_chain_compiles() {
 }
 
 #[test]
+fn hook_def_output_override_compiles() {
+    let cases = trybuild::TestCases::new();
+    cases.pass("tests/ui/hook_def_output.rs");
+}
+
+#[test]
 fn hook_impl_path_chain_compiles() {
     let cases = trybuild::TestCases::new();
     cases.pass("tests/ui/hook_impl_path_chain.rs");
@@ -35,6 +41,30 @@ fn hook_def_singleton_rejects_chain_argument() {
 }
 
 #[test]
+fn hook_def_singleton_rejects_output_argument() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/hook_def_singleton_output.rs");
+}
+
+#[test]
+fn hook_def_output_without_companion_fails() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/hook_def_output_without_companion.rs");
+}
+
+#[test]
+fn hook_def_rejects_aggregate_and_finalize_together() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/hook_def_aggregate_finalize.rs");
+}
+
+#[test]
+fn hook_def_output_requires_into_companion_trait() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/hook_def_output_wrong_trait.rs");
+}
+
+#[test]
 fn hook_impl_singleton_rejects_last_argument() {
     let cases = trybuild::TestCases::new();
     cases.compile_fail("tests/ui/hook_impl_singleton_last.rs");
@@ -50,4 +80,10 @@ fn hooks_path_slot_compiles() {
 fn hook_cross_module_path_compiles() {
     let cases = trybuild::TestCases::new();
     cases.pass("tests/ui/hook_cross_module_paths.rs");
+}
+
+#[test]
+fn hook_cross_module_output_path_compiles() {
+    let cases = trybuild::TestCases::new();
+    cases.pass("tests/ui/hook_cross_module_output_paths.rs");
 }

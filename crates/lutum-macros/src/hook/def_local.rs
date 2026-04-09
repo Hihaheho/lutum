@@ -7,7 +7,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
     let allow_generics = matches!(&kind, HookKind::Singleton);
     let HookSignature {
         explicit_args,
-        output_ty,
+        output_ty: hook_output_ty,
         has_last: _,
         last_span: _,
         generics,
@@ -68,12 +68,14 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
 
     let has_explicit_args = !explicit_args.is_empty();
     let has_ref_arg = explicit_args.iter().any(|(_, ty)| is_non_str_ref(ty));
+    let dispatch_output_ty = dispatch_output_type(&kind, &hook_output_ty);
+    let has_output_override = kind.opts().and_then(|opts| opts.output.as_ref()).is_some();
 
     let def_span = item_fn.sig.ident.span();
     let arg_tokens = compute_hook_arg_tokens(
         &explicit_args,
         &args_field_idents,
-        &output_ty,
+        &hook_output_ty,
         trait_has_last,
     );
     let dispatch_vars = &arg_tokens.dispatch_vars;
@@ -95,16 +97,16 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
     let hook_trait_defs = generate_hook_trait_defs(
         def_span,
         &vis,
-        &output_ty,
+        &hook_output_ty,
         &slot,
         &arg_tokens.trait_args,
         &generics,
     );
 
-    let fn_impl = generate_fn_blanket_impl(&slot, &flags, &output_ty, &arg_tokens, &generics);
+    let fn_impl = generate_fn_blanket_impl(&slot, &flags, &hook_output_ty, &arg_tokens, &generics);
 
     let blanket_impls =
-        generate_blanket_impls(&slot, &output_ty, &arg_tokens, &generics, &hook_name);
+        generate_blanket_impls(&slot, &hook_output_ty, &arg_tokens, &generics, &hook_name);
 
     let default_impl_call = quote! {
         #default_impl_fn_ident(
@@ -123,6 +125,26 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
     } else {
         quote! { hook.call_dyn(#(#cloned_field_idents,)*).await }
     };
+    let aggregate_trait = if has_output_override {
+        quote! { ::lutum::AggregateInto<#hook_output_ty, #dispatch_output_ty> }
+    } else {
+        quote! { ::lutum::Aggregate<#hook_output_ty> }
+    };
+    let aggregate_trait_import = if has_output_override {
+        quote! { use ::lutum::AggregateInto as _; }
+    } else {
+        quote! { use ::lutum::Aggregate as _; }
+    };
+    let finalize_trait = if has_output_override {
+        quote! { ::lutum::FinalizeInto<#hook_output_ty, #dispatch_output_ty> }
+    } else {
+        quote! { ::lutum::Finalize<#hook_output_ty> }
+    };
+    let finalize_trait_import = if has_output_override {
+        quote! { use ::lutum::FinalizeInto as _; }
+    } else {
+        quote! { use ::lutum::Finalize as _; }
+    };
 
     // Companion chain field idents and tokens (only when chain option is set).
     let chain_field_ident = format_ident!("{}_chain", fn_ident);
@@ -140,7 +162,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             .map(|chain_default_ty| {
                 let chain_field_ty = quote! {
                     ::std::option::Option<
-                        ::std::sync::Arc<dyn ::lutum::Chain<#output_ty> + Send + Sync>
+                        ::std::sync::Arc<dyn ::lutum::Chain<#hook_output_ty> + Send + Sync>
                     >
                 };
                 let chain_field_init = quote! { ::std::option::Option::None };
@@ -165,13 +187,13 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             .map(|aggregate_default_ty| {
                 let aggregate_field_ty = quote! {
                     ::std::option::Option<
-                        ::std::sync::Arc<dyn ::lutum::Aggregate<#output_ty> + Send + Sync>
+                        ::std::sync::Arc<dyn #aggregate_trait + Send + Sync>
                     >
                 };
                 let aggregate_field_init = quote! { ::std::option::Option::None };
                 let aggregate_call = quote! {
                     {
-                        use ::lutum::Aggregate as _;
+                        #aggregate_trait_import
                         match &self.#aggregate_field_ident {
                             ::std::option::Option::Some(__h) => __h.call(__outputs).await,
                             ::std::option::Option::None => {
@@ -190,13 +212,13 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             .map(|finalize_default_ty| {
                 let finalize_field_ty = quote! {
                     ::std::option::Option<
-                        ::std::sync::Arc<dyn ::lutum::Finalize<#output_ty> + Send + Sync>
+                        ::std::sync::Arc<dyn #finalize_trait + Send + Sync>
                     >
                 };
                 let finalize_field_init = quote! { ::std::option::Option::None };
                 let finalize_call = quote! {
                     {
-                        use ::lutum::Finalize as _;
+                        #finalize_trait_import
                         match &self.#finalize_field_ident {
                             ::std::option::Option::Some(__h) => __h.call(__result).await,
                             ::std::option::Option::None => {
@@ -250,7 +272,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #[allow(dead_code)]
                 pub fn #chain_reg_fn_ident(
                     mut self,
-                    h: impl ::lutum::Chain<#output_ty> + 'static,
+                    h: impl ::lutum::Chain<#hook_output_ty> + 'static,
                 ) -> Self {
                     if self.#chain_field_ident
                         .replace(::std::sync::Arc::new(h))
@@ -267,7 +289,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #[allow(dead_code)]
                 pub fn #chain_set_fn_ident(
                     &mut self,
-                    h: impl ::lutum::Chain<#output_ty> + 'static,
+                    h: impl ::lutum::Chain<#hook_output_ty> + 'static,
                 ) {
                     self.#chain_field_ident =
                         ::std::option::Option::Some(::std::sync::Arc::new(h));
@@ -288,7 +310,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #[allow(dead_code)]
                 pub fn #aggregate_reg_fn_ident(
                     mut self,
-                    h: impl ::lutum::Aggregate<#output_ty> + 'static,
+                    h: impl #aggregate_trait + 'static,
                 ) -> Self {
                     if self.#aggregate_field_ident
                         .replace(::std::sync::Arc::new(h))
@@ -305,7 +327,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #[allow(dead_code)]
                 pub fn #aggregate_set_fn_ident(
                     &mut self,
-                    h: impl ::lutum::Aggregate<#output_ty> + 'static,
+                    h: impl #aggregate_trait + 'static,
                 ) {
                     self.#aggregate_field_ident =
                         ::std::option::Option::Some(::std::sync::Arc::new(h));
@@ -326,7 +348,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #[allow(dead_code)]
                 pub fn #finalize_reg_fn_ident(
                     mut self,
-                    h: impl ::lutum::Finalize<#output_ty> + 'static,
+                    h: impl #finalize_trait + 'static,
                 ) -> Self {
                     if self.#finalize_field_ident
                         .replace(::std::sync::Arc::new(h))
@@ -343,7 +365,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #[allow(dead_code)]
                 pub fn #finalize_set_fn_ident(
                     &mut self,
-                    h: impl ::lutum::Finalize<#output_ty> + 'static,
+                    h: impl #finalize_trait + 'static,
                 ) {
                     self.#finalize_field_ident =
                         ::std::option::Option::Some(::std::sync::Arc::new(h));
@@ -480,17 +502,28 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             }),
             _,
             Some((_, _, aggregate_call)),
-        ) => quote! {
-            if self.#field_ident.is_empty() {
-                #default_call
-            } else {
-                let mut __outputs = ::std::vec::Vec::new();
-                for hook in &self.#field_ident {
-                    __outputs.push(#dyn_hook_dispatch_call);
+        ) => {
+            let fallback_default = if has_output_override {
+                quote! {
+                    let mut __outputs = ::std::vec::Vec::new();
+                    __outputs.push(#default_call);
+                    #aggregate_call
                 }
-                #aggregate_call
+            } else {
+                quote! { #default_call }
+            };
+            quote! {
+                if self.#field_ident.is_empty() {
+                    #fallback_default
+                } else {
+                    let mut __outputs = ::std::vec::Vec::new();
+                    for hook in &self.#field_ident {
+                        __outputs.push(#dyn_hook_dispatch_call);
+                    }
+                    #aggregate_call
+                }
             }
-        },
+        }
         (
             HookKind::Fallback(HookOptions {
                 chain: Some(_),
@@ -499,22 +532,33 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             }),
             Some((_, _, chain_check)),
             Some((_, _, aggregate_call)),
-        ) => quote! {
-            if self.#field_ident.is_empty() {
-                #default_call
-            } else {
-                let mut __outputs = ::std::vec::Vec::new();
-                for hook in &self.#field_ident {
-                    let __next = #dyn_hook_dispatch_call;
-                    #chain_check {
-                        __outputs.push(__next);
-                        return #aggregate_call;
-                    }
-                    __outputs.push(__next);
+        ) => {
+            let fallback_default = if has_output_override {
+                quote! {
+                    let mut __outputs = ::std::vec::Vec::new();
+                    __outputs.push(#default_call);
+                    #aggregate_call
                 }
-                #aggregate_call
+            } else {
+                quote! { #default_call }
+            };
+            quote! {
+                if self.#field_ident.is_empty() {
+                    #fallback_default
+                } else {
+                    let mut __outputs = ::std::vec::Vec::new();
+                    for hook in &self.#field_ident {
+                        let __next = #dyn_hook_dispatch_call;
+                        #chain_check {
+                            __outputs.push(__next);
+                            return #aggregate_call;
+                        }
+                        __outputs.push(__next);
+                    }
+                    #aggregate_call
+                }
             }
-        },
+        }
         (HookKind::Singleton, _, _) => {
             let singleton_args: Vec<proc_macro2::TokenStream> =
                 dispatch_vars.iter().map(|v| quote! { #v }).collect();
@@ -604,7 +648,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 pub async fn #fn_ident(
                     &self,
                     #(#dispatch_args,)*
-                ) -> #output_ty
+                ) -> #dispatch_output_ty
                 #clone_where {
                     use ::tracing::Instrument as _;
 
@@ -621,7 +665,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 #[allow(dead_code)]
                 async fn #default_method_ident(
                     #(#dispatch_args,)*
-                ) -> #output_ty {
+                ) -> #hook_output_ty {
                     #default_impl_call
                 }
             };
@@ -677,7 +721,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                         pub async fn #fn_ident(
                             &self,
                             #(#dispatch_args,)*
-                        ) -> #output_ty
+                        ) -> #dispatch_output_ty
                         #clone_where {
                             use ::tracing::Instrument as _;
 
@@ -694,7 +738,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                         #[allow(dead_code)]
                         async fn #default_method_ident(
                             #(#dispatch_args,)*
-                        ) -> #output_ty {
+                        ) -> #hook_output_ty {
                             #default_impl_call
                         }
                     ]

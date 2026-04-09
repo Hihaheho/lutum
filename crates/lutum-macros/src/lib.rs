@@ -14,6 +14,64 @@ use toolset::*;
 use proc_macro::TokenStream;
 use syn::{DeriveInput, ItemFn, ItemStruct, Path, parse_macro_input};
 
+fn build_hook_kind(attrs: HookDefAttrs, macro_name: &str) -> syn::Result<HookKind> {
+    let mode_str = attrs.mode.to_string();
+    match mode_str.as_str() {
+        "always" | "fallback" => {
+            if let (Some(_), Some(finalize)) = (&attrs.aggregate, &attrs.finalize) {
+                return Err(syn::Error::new(
+                    finalize.span,
+                    format!(
+                        "#[{macro_name}(...)] does not support using 'aggregate' and 'finalize' together"
+                    ),
+                ));
+            }
+
+            if let Some(output) = &attrs.output {
+                if attrs.aggregate.is_none() && attrs.finalize.is_none() {
+                    return Err(syn::Error::new(
+                        output.span,
+                        format!("#[{macro_name}(...)] 'output' requires 'aggregate' or 'finalize'"),
+                    ));
+                }
+            }
+
+            let opts = HookOptions {
+                chain: attrs.chain.map(|chain| chain.value),
+                aggregate: attrs.aggregate.map(|aggregate| aggregate.value),
+                finalize: attrs.finalize.map(|finalize| finalize.value),
+                output: attrs.output.map(|output| syn::Type::Path(output.value)),
+            };
+            Ok(if mode_str == "always" {
+                HookKind::Always(opts)
+            } else {
+                HookKind::Fallback(opts)
+            })
+        }
+        "singleton" => {
+            if attrs.chain.is_some()
+                || attrs.aggregate.is_some()
+                || attrs.finalize.is_some()
+                || attrs.output.is_some()
+            {
+                return Err(syn::Error::new_spanned(
+                    attrs.mode,
+                    format!(
+                        "#[{macro_name}(singleton)] does not support 'chain', 'aggregate', 'finalize', or 'output'"
+                    ),
+                ));
+            }
+            Ok(HookKind::Singleton)
+        }
+        _ => Err(syn::Error::new_spanned(
+            attrs.mode,
+            format!(
+                "#[{macro_name}(...)] expects `always`, `fallback`, or `singleton` as first argument"
+            ),
+        )),
+    }
+}
+
 #[proc_macro_attribute]
 pub fn tool_input(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as ToolInputArgs);
@@ -59,37 +117,9 @@ pub fn def_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(f) => f,
         Err(e) => return e.to_compile_error().into(),
     };
-    let mode_str = attrs.mode.to_string();
-    let kind = match mode_str.as_str() {
-        "always" => HookKind::Always(HookOptions {
-            chain: attrs.chain,
-            aggregate: attrs.aggregate,
-            finalize: attrs.finalize,
-        }),
-        "fallback" => HookKind::Fallback(HookOptions {
-            chain: attrs.chain,
-            aggregate: attrs.aggregate,
-            finalize: attrs.finalize,
-        }),
-        "singleton" => {
-            if attrs.chain.is_some() || attrs.aggregate.is_some() || attrs.finalize.is_some() {
-                return syn::Error::new_spanned(
-                    attrs.mode,
-                    "#[def_hook(singleton)] does not support 'chain', 'aggregate', or 'finalize'",
-                )
-                .to_compile_error()
-                .into();
-            }
-            HookKind::Singleton
-        }
-        _ => {
-            return syn::Error::new_spanned(
-                attrs.mode,
-                "#[def_hook(...)] expects `always`, `fallback`, or `singleton` as first argument",
-            )
-            .to_compile_error()
-            .into();
-        }
+    let kind = match build_hook_kind(attrs, "def_hook") {
+        Ok(kind) => kind,
+        Err(err) => return err.to_compile_error().into(),
     };
     expand_local_hook(item_fn, kind).into()
 }
@@ -104,37 +134,9 @@ pub fn def_global_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(f) => f,
         Err(e) => return e.to_compile_error().into(),
     };
-    let mode_str = attrs.mode.to_string();
-    let kind = match mode_str.as_str() {
-        "always" => HookKind::Always(HookOptions {
-            chain: attrs.chain,
-            aggregate: attrs.aggregate,
-            finalize: attrs.finalize,
-        }),
-        "fallback" => HookKind::Fallback(HookOptions {
-            chain: attrs.chain,
-            aggregate: attrs.aggregate,
-            finalize: attrs.finalize,
-        }),
-        "singleton" => {
-            if attrs.chain.is_some() || attrs.aggregate.is_some() || attrs.finalize.is_some() {
-                return syn::Error::new_spanned(
-                    attrs.mode,
-                    "#[def_global_hook(singleton)] does not support 'chain', 'aggregate', or 'finalize'",
-                )
-                .to_compile_error()
-                .into();
-            }
-            HookKind::Singleton
-        }
-        _ => {
-            return syn::Error::new_spanned(
-                attrs.mode,
-                "#[def_global_hook(...)] expects `always`, `fallback`, or `singleton` as first argument",
-            )
-            .to_compile_error()
-            .into();
-        }
+    let kind = match build_hook_kind(attrs, "def_global_hook") {
+        Ok(kind) => kind,
+        Err(err) => return err.to_compile_error().into(),
     };
     expand_global_hook(item_fn, kind).into()
 }

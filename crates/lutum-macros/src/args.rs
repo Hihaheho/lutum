@@ -3,6 +3,12 @@ use syn::{
     punctuated::Punctuated,
 };
 
+#[derive(Clone)]
+pub struct HookAttrValue<T> {
+    pub value: T,
+    pub span: proc_macro2::Span,
+}
+
 pub struct ToolInputArgs {
     pub output: Type,
     pub name: Option<String>,
@@ -82,9 +88,10 @@ impl Parse for ToolFnArgs {
 #[derive(Clone)]
 pub struct HookDefAttrs {
     pub mode: syn::Ident,
-    pub chain: Option<syn::Path>,
-    pub aggregate: Option<syn::Path>,
-    pub finalize: Option<syn::Path>,
+    pub chain: Option<HookAttrValue<syn::Path>>,
+    pub aggregate: Option<HookAttrValue<syn::Path>>,
+    pub finalize: Option<HookAttrValue<syn::Path>>,
+    pub output: Option<HookAttrValue<syn::TypePath>>,
 }
 
 impl syn::parse::Parse for HookDefAttrs {
@@ -93,27 +100,45 @@ impl syn::parse::Parse for HookDefAttrs {
         let mut chain = None;
         let mut aggregate = None;
         let mut finalize = None;
+        let mut output = None;
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
             let key: syn::Ident = input.parse()?;
+            let key_span = key.span();
             match key.to_string().as_str() {
                 "chain" => {
                     input.parse::<Token![=]>()?;
-                    chain = Some(input.parse::<syn::Path>()?);
+                    chain = Some(HookAttrValue {
+                        value: input.parse::<syn::Path>()?,
+                        span: key_span,
+                    });
                 }
                 "aggregate" => {
                     input.parse::<Token![=]>()?;
-                    aggregate = Some(input.parse::<syn::Path>()?);
+                    aggregate = Some(HookAttrValue {
+                        value: input.parse::<syn::Path>()?,
+                        span: key_span,
+                    });
                 }
                 "finalize" => {
                     input.parse::<Token![=]>()?;
-                    finalize = Some(input.parse::<syn::Path>()?);
+                    finalize = Some(HookAttrValue {
+                        value: input.parse::<syn::Path>()?,
+                        span: key_span,
+                    });
+                }
+                "output" => {
+                    input.parse::<Token![=]>()?;
+                    output = Some(HookAttrValue {
+                        value: input.parse::<syn::TypePath>()?,
+                        span: key_span,
+                    });
                 }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown #[def_hook] option '{other}'; expected 'chain', 'aggregate', or 'finalize'"
+                            "unknown #[def_hook] option '{other}'; expected 'chain', 'aggregate', 'finalize', or 'output'"
                         ),
                     ));
                 }
@@ -124,6 +149,7 @@ impl syn::parse::Parse for HookDefAttrs {
             chain,
             aggregate,
             finalize,
+            output,
         })
     }
 }

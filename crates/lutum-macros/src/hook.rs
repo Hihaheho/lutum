@@ -32,12 +32,20 @@ pub struct HookOptions {
     pub chain: Option<syn::Path>,
     pub aggregate: Option<syn::Path>,
     pub finalize: Option<syn::Path>,
+    pub output: Option<Type>,
 }
 
 pub enum HookKind {
     Always(HookOptions),
     Fallback(HookOptions),
     Singleton,
+}
+
+pub fn dispatch_output_type(kind: &HookKind, hook_output_ty: &Type) -> Type {
+    kind.opts()
+        .and_then(|opts| opts.output.as_ref())
+        .cloned()
+        .unwrap_or_else(|| hook_output_ty.clone())
 }
 
 impl HookKind {

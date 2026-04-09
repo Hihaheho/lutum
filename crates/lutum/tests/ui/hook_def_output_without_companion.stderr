@@ -1,0 +1,5 @@
+error: #[def_hook(...)] 'output' requires 'aggregate' or 'finalize'
+ --> tests/ui/hook_def_output_without_companion.rs:1:27
+  |
+1 | #[lutum::def_hook(always, output = usize)]
+  |                           ^^^^^^

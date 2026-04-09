@@ -183,12 +183,36 @@ pub async fn aggregate<Output: Send + Sync + 'static>(outputs: Vec<Output>) -> O
         .unwrap_or_else(|| unreachable!("aggregate called with no outputs"))
 }
 
+/// Companion aggregate hook for output overrides.
+///
+/// Use as `aggregate = Type, output = OutputType` in
+/// `#[def_hook(always, aggregate = ...)]` or `#[def_hook(fallback, aggregate = ...)]`.
+#[lutum_macros::def_hook(singleton)]
+pub async fn aggregate_into<Input: Send + Sync + 'static, Output: Send + Sync + 'static>(
+    outputs: Vec<Input>,
+) -> Output {
+    let _ = outputs;
+    panic!("aggregate_into requires a registered implementation")
+}
+
 /// Companion finalize hook — post-processes the final dispatch result.
 ///
 /// Use as `finalize = Type` in `#[def_hook(always, finalize = ...)]`.
 #[lutum_macros::def_hook(singleton)]
 pub async fn finalize<Output: Send + Sync + 'static>(output: Output) -> Output {
     output
+}
+
+/// Companion finalize hook for output overrides.
+///
+/// Use as `finalize = Type, output = OutputType` in
+/// `#[def_hook(always, finalize = ...)]` or `#[def_hook(fallback, finalize = ...)]`.
+#[lutum_macros::def_hook(singleton)]
+pub async fn finalize_into<Input: Send + Sync + 'static, Output: Send + Sync + 'static>(
+    output: Input,
+) -> Output {
+    let _ = output;
+    panic!("finalize_into requires a registered implementation")
 }
 
 /// Default chain implementation for `Result<T, E>` hooks — stops dispatch on the first `Err`.

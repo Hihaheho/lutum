@@ -50,7 +50,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
     let allow_generics = matches!(&kind, HookKind::Singleton);
     let HookSignature {
         explicit_args,
-        output_ty,
+        output_ty: hook_output_ty,
         has_last: _,
         last_span: _,
         generics,
@@ -112,11 +112,13 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
     let has_explicit_args = !explicit_args.is_empty();
     let has_ref_arg = explicit_args.iter().any(|(_, ty)| is_non_str_ref(ty));
     let (_, slot_ty_generics, _) = generics.split_for_impl();
+    let dispatch_output_ty = dispatch_output_type(&kind, &hook_output_ty);
+    let has_output_override = kind.opts().and_then(|opts| opts.output.as_ref()).is_some();
 
     let arg_tokens = compute_hook_arg_tokens(
         &explicit_args,
         &args_field_idents,
-        &output_ty,
+        &hook_output_ty,
         trait_has_last,
     );
     let cloned_field_idents = &arg_tokens.cloned;
@@ -141,16 +143,16 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
     let hook_trait_defs = generate_hook_trait_defs(
         item_fn.sig.ident.span(),
         &vis,
-        &output_ty,
+        &hook_output_ty,
         &slot,
         &arg_tokens.trait_args,
         &generics,
     );
 
-    let fn_impl = generate_fn_blanket_impl(&slot, &flags, &output_ty, &arg_tokens, &generics);
+    let fn_impl = generate_fn_blanket_impl(&slot, &flags, &hook_output_ty, &arg_tokens, &generics);
 
     let blanket_impls =
-        generate_blanket_impls(&slot, &output_ty, &arg_tokens, &generics, &hook_name);
+        generate_blanket_impls(&slot, &hook_output_ty, &arg_tokens, &generics, &hook_name);
 
     let default_call = quote! {
         #default_fn_ident(
@@ -162,6 +164,16 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         quote! { hook.call_dyn(#(#cloned_field_idents,)* last).await }
     } else {
         quote! { hook.call_dyn(#(#cloned_field_idents,)*).await }
+    };
+    let aggregate_trait_import = if has_output_override {
+        quote! { use ::lutum::AggregateInto as _; }
+    } else {
+        quote! { use ::lutum::Aggregate as _; }
+    };
+    let finalize_trait_import = if has_output_override {
+        quote! { use ::lutum::FinalizeInto as _; }
+    } else {
+        quote! { use ::lutum::Finalize as _; }
     };
 
     let register_impl = match &kind {
@@ -264,7 +276,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
     let make_aggregate_call = |aggregate_default_ty: &syn::Path| {
         quote! {
             {
-                use ::lutum::Aggregate as _;
+                #aggregate_trait_import
                 let __a: #aggregate_default_ty = ::std::default::Default::default();
                 __a.call(__outputs).await
             }
@@ -395,6 +407,15 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             ..
         }) => {
             let aggregate_call = make_aggregate_call(aggregate_default_ty);
+            let fallback_default = if has_output_override {
+                quote! {
+                    let mut __outputs = ::std::vec::Vec::new();
+                    __outputs.push(#default_call);
+                    #aggregate_call
+                }
+            } else {
+                quote! { #default_call }
+            };
             quote! {
                 match chain {
                     Some(hooks) if !hooks.is_empty() => {
@@ -404,7 +425,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                         }
                         #aggregate_call
                     }
-                    _ => #default_call,
+                    _ => #fallback_default,
                 }
             }
         }
@@ -415,6 +436,15 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         }) => {
             let chain_check = make_chain_check(chain_default_ty);
             let aggregate_call = make_aggregate_call(aggregate_default_ty);
+            let fallback_default = if has_output_override {
+                quote! {
+                    let mut __outputs = ::std::vec::Vec::new();
+                    __outputs.push(#default_call);
+                    #aggregate_call
+                }
+            } else {
+                quote! { #default_call }
+            };
             quote! {
                 match chain {
                     Some(hooks) if !hooks.is_empty() => {
@@ -429,7 +459,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
                         }
                         #aggregate_call
                     }
-                    _ => #default_call,
+                    _ => #fallback_default,
                 }
             }
         }
@@ -457,7 +487,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
         Some(finalize_default_ty) => quote! {
             let __result = async move { #inner_dispatch }.await;
             {
-                use ::lutum::Finalize as _;
+                #finalize_trait_import
                 let __f: #finalize_default_ty = ::std::default::Default::default();
                 __f.call(__result).await
             }
@@ -490,7 +520,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             fn #fn_ident #dispatch_method_generics(
                 &'__lutum_a self,
                 #(#context_args,)*
-            ) -> impl ::std::future::Future<Output = #output_ty> + '__lutum_a
+            ) -> impl ::std::future::Future<Output = #dispatch_output_ty> + '__lutum_a
             #dispatch_method_where_clause;
         }
 
@@ -498,7 +528,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             fn #fn_ident #dispatch_method_generics(
                 &'__lutum_a self,
                 #(#context_args,)*
-            ) -> impl ::std::future::Future<Output = #output_ty> + '__lutum_a
+            ) -> impl ::std::future::Future<Output = #dispatch_output_ty> + '__lutum_a
             #dispatch_method_where_clause {
                 <::lutum_protocol::HookRegistry as #registry_ext_ident>::#fn_ident(
                     self.hooks(),
@@ -548,7 +578,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             fn #fn_ident #dispatch_method_generics(
                 &'__lutum_a self,
                 #(#registry_args,)*
-            ) -> impl ::std::future::Future<Output = #output_ty> + '__lutum_a
+            ) -> impl ::std::future::Future<Output = #dispatch_output_ty> + '__lutum_a
             #dispatch_method_where_clause;
         }
 
@@ -563,7 +593,7 @@ pub fn expand_global_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::T
             fn #fn_ident #dispatch_method_generics(
                 &'__lutum_a self,
                 #(#registry_args,)*
-            ) -> impl ::std::future::Future<Output = #output_ty> + '__lutum_a
+            ) -> impl ::std::future::Future<Output = #dispatch_output_ty> + '__lutum_a
             #dispatch_method_where_clause {
                 async move {
                     use ::tracing::Instrument as _;

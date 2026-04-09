@@ -53,8 +53,8 @@ pub use context::{
     StructuredTurnPartial, StructuredTurnPartialWithTools,
 };
 pub use hooks::{
-    Aggregate, Chain, Finalize, FirstSuccess, HookReentrancyError, HookRegistry,
-    ResolveUsageEstimate, ResolveUsageEstimateRegistryExt, ShortCircuit, Stateful,
+    Aggregate, AggregateInto, Chain, Finalize, FinalizeInto, FirstSuccess, HookReentrancyError,
+    HookRegistry, ResolveUsageEstimate, ResolveUsageEstimateRegistryExt, ShortCircuit, Stateful,
 };
 pub use session::{CommitTurn, UncommittedToolRound};
 
