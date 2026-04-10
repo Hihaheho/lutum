@@ -40,8 +40,11 @@ pub fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
                 .to_compile_error();
         };
         let Type::Path(type_path) = field.ty else {
-            return syn::Error::new_spanned(field_ident, "#[hooks] fields must use a hook slot type")
-                .to_compile_error();
+            return syn::Error::new_spanned(
+                field_ident,
+                "#[hooks] fields must use a hook slot type",
+            )
+            .to_compile_error();
         };
         if type_path.qself.is_some() {
             return syn::Error::new_spanned(
@@ -70,7 +73,8 @@ pub fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
         });
     }
 
-    let helper_macro_ident = format_ident!("__lutum_define_{}_hooks", ident.to_string().to_snake_case());
+    let helper_macro_ident =
+        format_ident!("__lutum_define_{}_hooks", ident.to_string().to_snake_case());
 
     let slot_arms = hook_fields
         .iter()
@@ -79,7 +83,11 @@ pub fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
             let field_ident = &hook_field.ident;
             let slot_path = &hook_field.slot_path;
             let hooks_macro_path = hooks_macro_path_for_slot(slot_path);
-            let alias_ident = format_ident!("__lutum_hook_head_{}_{}", ident.to_string().to_snake_case(), index);
+            let alias_ident = format_ident!(
+                "__lutum_hook_head_{}_{}",
+                ident.to_string().to_snake_case(),
+                index
+            );
             let use_imports = slot_use_imports(slot_path);
 
             let with_fn_ident = format_ident!("with_{}", field_ident);
@@ -173,7 +181,10 @@ pub fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
         })
         .collect::<Vec<_>>();
 
-    let slot_paths = hook_fields.iter().map(|field| &field.slot_path).collect::<Vec<_>>();
+    let slot_paths = hook_fields
+        .iter()
+        .map(|field| &field.slot_path)
+        .collect::<Vec<_>>();
 
     quote! {
         #[allow(unused_macros)]
@@ -263,8 +274,10 @@ fn slot_use_imports(slot_path: &Path) -> proc_macro2::TokenStream {
     let snake = last_ident.to_string().to_snake_case();
 
     let dyn_path = replace_last_segment(&bare_slot_path, format_ident!("__LutumDyn{}", last_ident));
-    let default_impl_path =
-        replace_last_segment(&bare_slot_path, format_ident!("__lutum_hook_default_impl_{}", snake));
+    let default_impl_path = replace_last_segment(
+        &bare_slot_path,
+        format_ident!("__lutum_hook_default_impl_{}", snake),
+    );
 
     quote! {
         #[allow(unused_imports)]

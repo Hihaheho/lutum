@@ -254,10 +254,7 @@ pub async fn resolve_usage_estimate(
 }
 
 #[lutum_macros::def_hook(singleton)]
-pub async fn tool_hook<I: ToolInput>(
-    metadata: &ToolMetadata,
-    input: &I,
-) -> Option<I::Output> {
+pub async fn tool_hook<I: ToolInput>(metadata: &ToolMetadata, input: &I) -> Option<I::Output> {
     let _ = metadata;
     let _ = input;
     None

@@ -2,9 +2,8 @@ use std::collections::BTreeMap;
 
 use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
-    GenerationParams, InputMessageRole, IntoToolResult, ModelInput, ModelInputItem,
-    RequestBudget, ToolResult, ToolResultError, Toolset, TurnConfig, TurnView,
-    UncommittedAssistantTurn,
+    GenerationParams, InputMessageRole, IntoToolResult, ModelInput, ModelInputItem, RequestBudget,
+    ToolResult, ToolResultError, Toolset, TurnConfig, TurnView, UncommittedAssistantTurn,
     budget::Usage,
     reducer::{
         StagedStructuredTurnResultWithTools, StagedTextTurnResultWithTools,

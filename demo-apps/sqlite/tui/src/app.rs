@@ -37,6 +37,7 @@ pub enum AppState {
     Running,
     Approval(WritePreview),
     ModeRequest(String),
+    #[allow(dead_code)]
     Done,
 }
 
@@ -373,21 +374,21 @@ fn new_session(llm: Lutum) -> Session {
 }
 
 fn load_or_new_session(llm: Lutum, path: Option<&Path>) -> (Session, Vec<String>) {
-    if let Some(path) = path {
-        if let Ok(json) = std::fs::read_to_string(path) {
-            if let Ok(items) = serde_json::from_str::<Vec<ClaudeModelInputItem>>(&json) {
-                let mut session = Session::new(llm);
-                *session.input_mut() = restore(items);
-                tracing::info!("session loaded from {}", path.display());
-                return (session, vec![]);
-            }
-            let message = format!(
-                "session file {} exists but could not be parsed; starting fresh",
-                path.display(),
-            );
-            tracing::warn!("{message}");
-            return (new_session(llm), vec![message]);
+    if let Some(path) = path
+        && let Ok(json) = std::fs::read_to_string(path)
+    {
+        if let Ok(items) = serde_json::from_str::<Vec<ClaudeModelInputItem>>(&json) {
+            let mut session = Session::new(llm);
+            *session.input_mut() = restore(items);
+            tracing::info!("session loaded from {}", path.display());
+            return (session, vec![]);
         }
+        let message = format!(
+            "session file {} exists but could not be parsed; starting fresh",
+            path.display(),
+        );
+        tracing::warn!("{message}");
+        return (new_session(llm), vec![message]);
     }
     (new_session(llm), vec![])
 }

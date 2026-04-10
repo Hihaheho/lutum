@@ -28,7 +28,8 @@ fn build_hook_kind(attrs: HookDefAttrs, macro_name: &str) -> syn::Result<HookKin
             }
 
             if let Some(output) = &attrs.output
-                && attrs.aggregate.is_none() && attrs.finalize.is_none()
+                && attrs.aggregate.is_none()
+                && attrs.finalize.is_none()
             {
                 return Err(syn::Error::new(
                     output.span,

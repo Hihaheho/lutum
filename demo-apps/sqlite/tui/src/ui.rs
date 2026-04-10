@@ -112,9 +112,9 @@ fn render_conversation(f: &mut Frame, area: Rect, app: &TuiApp) {
             } => {
                 let text = content
                     .iter()
-                    .filter_map(|c| {
+                    .map(|c| {
                         let MessageContent::Text(t) = c;
-                        Some(t.as_str())
+                        t.as_str()
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -217,7 +217,7 @@ fn render_conversation(f: &mut Frame, area: Rect, app: &TuiApp) {
             if wrap_width == 0 || w == 0 {
                 1
             } else {
-                (w + wrap_width - 1) / wrap_width
+                w.div_ceil(wrap_width)
             }
         })
         .sum();
@@ -304,24 +304,23 @@ fn summarize_result(json: &str) -> String {
             return format!("error: {e}");
         }
         // QueryResult: columns + rows
-        if let (Some(cols), Some(rows)) = (v.get("columns"), v.get("rows")) {
-            if let (Some(nc), Some(nr)) = (cols.as_array(), rows.as_array()) {
-                if nc.len() == 1 && nc[0].as_str() == Some("error") {
-                    if let Some(first_row) = nr.first().and_then(|r| r.as_array()) {
-                        if let Some(msg) = first_row.first().and_then(|m| m.as_str()) {
-                            return format!("error: {msg}");
-                        }
-                    }
-                }
-                return format!("{} rows, {} cols", nr.len(), nc.len());
+        if let (Some(cols), Some(rows)) = (v.get("columns"), v.get("rows"))
+            && let (Some(nc), Some(nr)) = (cols.as_array(), rows.as_array())
+        {
+            if nc.len() == 1 && nc[0].as_str() == Some("error")
+                && let Some(first_row) = nr.first().and_then(|r| r.as_array())
+                && let Some(msg) = first_row.first().and_then(|m| m.as_str())
+            {
+                return format!("error: {msg}");
             }
+            return format!("{} rows, {} cols", nr.len(), nc.len());
         }
         // ModifyResult
         if let Some(rows) = v.get("rows_affected").and_then(|n| n.as_u64()) {
-            if let Some(msg) = v.get("message").and_then(|s| s.as_str()) {
-                if msg.starts_with("rejected") || msg.starts_with("error") {
-                    return msg.to_string();
-                }
+            if let Some(msg) = v.get("message").and_then(|s| s.as_str())
+                && (msg.starts_with("rejected") || msg.starts_with("error"))
+            {
+                return msg.to_string();
             }
             return format!("{rows} row(s) affected");
         }

@@ -67,17 +67,17 @@ struct CacheControlSerializer;
 impl FallbackSerializer for CacheControlSerializer {
     fn apply(&self, request: &mut MessagesRequest) {
         // 1. Last system block
-        if let Some(blocks) = request.system.as_mut() {
-            if let Some(last) = blocks.last_mut() {
-                last.cache_control = Some(CacheControl::ephemeral());
-            }
+        if let Some(blocks) = request.system.as_mut()
+            && let Some(last) = blocks.last_mut()
+        {
+            last.cache_control = Some(CacheControl::ephemeral());
         }
 
         // 2. Last tool definition
-        if let Some(tools) = request.tools.as_mut() {
-            if let Some(last) = tools.last_mut() {
-                last.cache_control = Some(CacheControl::ephemeral());
-            }
+        if let Some(tools) = request.tools.as_mut()
+            && let Some(last) = tools.last_mut()
+        {
+            last.cache_control = Some(CacheControl::ephemeral());
         }
 
         // 3. Last content block of the second-to-last message (penultimate turn)
@@ -176,27 +176,27 @@ async fn run_event_loop(
         app.poll();
 
         // Poll keyboard with 50ms timeout so the TUI stays responsive
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                match &app.state {
-                    AppState::Approval(_) => {
-                        handle_approval_key(app, key.code);
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+        {
+            match &app.state {
+                AppState::Approval(_) => {
+                    handle_approval_key(app, key.code);
+                }
+                AppState::ModeRequest(_) => {
+                    handle_mode_request_key(app, key.code);
+                }
+                AppState::Running => {
+                    // Ignore input while agent is running (Ctrl-C still exits)
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        break;
                     }
-                    AppState::ModeRequest(_) => {
-                        handle_mode_request_key(app, key.code);
-                    }
-                    AppState::Running => {
-                        // Ignore input while agent is running (Ctrl-C still exits)
-                        if key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            break;
-                        }
-                    }
-                    AppState::Idle | AppState::Done => {
-                        if handle_idle_key(app, key.code, key.modifiers) {
-                            break;
-                        }
+                }
+                AppState::Idle | AppState::Done => {
+                    if handle_idle_key(app, key.code, key.modifiers) {
+                        break;
                     }
                 }
             }
