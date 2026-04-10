@@ -450,6 +450,16 @@ pub enum TextTurnEventWithTools<T: Toolset> {
         arguments_json_delta: String,
     },
     ToolCallReady(T::ToolCall),
+    /// A tool call chunk that was rejected because the tool name is not in the available set.
+    /// Emitted at stream-event level (Level 1 validation) before deserialization.
+    InvalidToolCallChunk {
+        id: crate::conversation::ToolCallId,
+        name: crate::conversation::ToolName,
+        arguments_json_delta: String,
+    },
+    /// A fully assembled tool call that was rejected because the tool name is not in the available
+    /// set. Emitted after assembly but before `parse_tool_call` (Level 2 validation).
+    InvalidToolCall(crate::conversation::ToolMetadata),
     Completed {
         request_id: Option<String>,
         finish_reason: FinishReason,
@@ -504,6 +514,16 @@ pub enum StructuredTurnEventWithTools<T: Toolset, O: StructuredOutput> {
         arguments_json_delta: String,
     },
     ToolCallReady(T::ToolCall),
+    /// A tool call chunk that was rejected because the tool name is not in the available set.
+    /// Emitted at stream-event level (Level 1 validation) before deserialization.
+    InvalidToolCallChunk {
+        id: crate::conversation::ToolCallId,
+        name: crate::conversation::ToolName,
+        arguments_json_delta: String,
+    },
+    /// A fully assembled tool call that was rejected because the tool name is not in the available
+    /// set. Emitted after assembly but before `parse_tool_call` (Level 2 validation).
+    InvalidToolCall(crate::conversation::ToolMetadata),
     Completed {
         request_id: Option<String>,
         finish_reason: FinishReason,

@@ -464,6 +464,8 @@ impl Lutum {
         let lease = self
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
+        // Extract availability before erase_text_turn consumes the turn config.
+        let availability = turn.config.tools.available.clone();
         let extensions = Arc::new(extensions);
         let span = turn_span("text_turn", estimate);
         let stream = match self
@@ -485,7 +487,7 @@ impl Lutum {
             },
             recovery: Arc::clone(&self.recovery),
             span,
-            stream: map_text_stream_with_tools::<T>(stream),
+            stream: map_text_stream_with_tools::<T>(stream, availability),
             reducer: TextTurnReducerWithTools::new(),
         })
     }
@@ -549,6 +551,8 @@ impl Lutum {
         let lease = self
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
+        // Extract availability before erase_structured_turn consumes the turn config.
+        let availability = turn.config.tools.available.clone();
         let extensions = Arc::new(extensions);
         let span = turn_span("structured_turn", estimate);
         let stream = match self
@@ -570,7 +574,7 @@ impl Lutum {
             },
             recovery: Arc::clone(&self.recovery),
             span,
-            stream: map_structured_stream_with_tools::<T, O>(stream),
+            stream: map_structured_stream_with_tools::<T, O>(stream, availability),
             reducer: StructuredTurnReducerWithTools::new(),
         })
     }
@@ -1797,11 +1801,14 @@ fn map_text_stream(stream: ErasedTextTurnEventStream) -> TextTurnEventStream {
 
 fn map_text_stream_with_tools<T>(
     stream: ErasedTextTurnEventStream,
+    availability: ToolAvailability<T::Selector>,
 ) -> TextTurnEventStreamWithTools<T>
 where
     T: Toolset,
 {
-    Box::pin(stream.map(|item| item.and_then(map_text_event_with_tools::<T>)))
+    Box::pin(
+        stream.map(move |item| item.and_then(|event| map_text_event_with_tools::<T>(event, &availability))),
+    )
 }
 
 fn map_structured_stream<O>(stream: ErasedStructuredTurnEventStream) -> StructuredTurnEventStream<O>
@@ -1813,12 +1820,15 @@ where
 
 fn map_structured_stream_with_tools<T, O>(
     stream: ErasedStructuredTurnEventStream,
+    availability: ToolAvailability<T::Selector>,
 ) -> StructuredTurnEventStreamWithTools<T, O>
 where
     T: Toolset,
     O: StructuredOutput,
 {
-    Box::pin(stream.map(|item| item.and_then(map_structured_event_with_tools::<T, O>)))
+    Box::pin(stream.map(move |item| {
+        item.and_then(|event| map_structured_event_with_tools::<T, O>(event, &availability))
+    }))
 }
 
 fn map_structured_completion_stream<O>(
@@ -1866,8 +1876,16 @@ fn map_text_event(event: ErasedTextTurnEvent) -> Result<TextTurnEvent, AgentErro
     }
 }
 
+fn is_tool_name_allowed<T: Toolset>(name: &str, availability: &ToolAvailability<T::Selector>) -> bool {
+    match availability {
+        ToolAvailability::All => true,
+        ToolAvailability::Only(selectors) => selectors.iter().any(|s| s.name() == name),
+    }
+}
+
 fn map_text_event_with_tools<T>(
     event: ErasedTextTurnEvent,
+    availability: &ToolAvailability<T::Selector>,
 ) -> Result<TextTurnEventWithTools<T>, AgentError>
 where
     T: Toolset,
@@ -1883,18 +1901,34 @@ where
         ErasedTextTurnEvent::RefusalDelta { delta } => {
             Ok(TextTurnEventWithTools::RefusalDelta { delta })
         }
+        // Level 1 validation: check tool name at stream-event level before deserialization.
         ErasedTextTurnEvent::ToolCallChunk {
             id,
             name,
             arguments_json_delta,
-        } => Ok(TextTurnEventWithTools::ToolCallChunk {
-            id,
-            name,
-            arguments_json_delta,
-        }),
+        } => {
+            if is_tool_name_allowed::<T>(name.as_str(), availability) {
+                Ok(TextTurnEventWithTools::ToolCallChunk {
+                    id,
+                    name,
+                    arguments_json_delta,
+                })
+            } else {
+                Ok(TextTurnEventWithTools::InvalidToolCallChunk {
+                    id,
+                    name,
+                    arguments_json_delta,
+                })
+            }
+        }
+        // Level 2 validation: check tool name after assembly, before parse_tool_call.
         ErasedTextTurnEvent::ToolCallReady(metadata) => {
-            let tool_call = T::parse_tool_call(metadata)?;
-            Ok(TextTurnEventWithTools::ToolCallReady(tool_call))
+            if is_tool_name_allowed::<T>(metadata.name.as_str(), availability) {
+                let tool_call = T::parse_tool_call(metadata)?;
+                Ok(TextTurnEventWithTools::ToolCallReady(tool_call))
+            } else {
+                Ok(TextTurnEventWithTools::InvalidToolCall(metadata))
+            }
         }
         ErasedTextTurnEvent::Completed {
             request_id,
@@ -1962,6 +1996,7 @@ where
 
 fn map_structured_event_with_tools<T, O>(
     event: ErasedStructuredTurnEvent,
+    availability: &ToolAvailability<T::Selector>,
 ) -> Result<StructuredTurnEventWithTools<T, O>, AgentError>
 where
     T: Toolset,
@@ -1985,18 +2020,34 @@ where
         ErasedStructuredTurnEvent::RefusalDelta { delta } => {
             Ok(StructuredTurnEventWithTools::RefusalDelta { delta })
         }
+        // Level 1 validation: check tool name at stream-event level before deserialization.
         ErasedStructuredTurnEvent::ToolCallChunk {
             id,
             name,
             arguments_json_delta,
-        } => Ok(StructuredTurnEventWithTools::ToolCallChunk {
-            id,
-            name,
-            arguments_json_delta,
-        }),
+        } => {
+            if is_tool_name_allowed::<T>(name.as_str(), availability) {
+                Ok(StructuredTurnEventWithTools::ToolCallChunk {
+                    id,
+                    name,
+                    arguments_json_delta,
+                })
+            } else {
+                Ok(StructuredTurnEventWithTools::InvalidToolCallChunk {
+                    id,
+                    name,
+                    arguments_json_delta,
+                })
+            }
+        }
+        // Level 2 validation: check tool name after assembly, before parse_tool_call.
         ErasedStructuredTurnEvent::ToolCallReady(metadata) => {
-            let tool_call = T::parse_tool_call(metadata)?;
-            Ok(StructuredTurnEventWithTools::ToolCallReady(tool_call))
+            if is_tool_name_allowed::<T>(metadata.name.as_str(), availability) {
+                let tool_call = T::parse_tool_call(metadata)?;
+                Ok(StructuredTurnEventWithTools::ToolCallReady(tool_call))
+            } else {
+                Ok(StructuredTurnEventWithTools::InvalidToolCall(metadata))
+            }
         }
         ErasedStructuredTurnEvent::Completed {
             request_id,

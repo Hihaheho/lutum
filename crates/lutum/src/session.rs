@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
     GenerationParams, InputMessageRole, IntoToolResult, ModelInput, ModelInputItem, RequestBudget,
-    ToolResult, ToolResultError, Toolset, TurnConfig, TurnView, UncommittedAssistantTurn,
+    ToolMetadata, ToolResult, ToolResultError, Toolset, TurnConfig, TurnView,
+    UncommittedAssistantTurn,
     budget::Usage,
     reducer::{
         StagedStructuredTurnResultWithTools, StagedTextTurnResultWithTools,
@@ -158,6 +159,10 @@ pub struct UncommittedToolRound<T: Toolset> {
     pub request_id: Option<String>,
     pub model: String,
     pub tool_calls: Vec<T::ToolCall>,
+    /// Tool calls that were rejected because the tool name was not in the availability set.
+    /// These are NOT executed. Inspect them to decide how to respond (e.g., return an error
+    /// to the model, retry with corrected constraints, or ignore).
+    pub invalid_tool_calls: Vec<ToolMetadata>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
     turn: UncommittedAssistantTurn,
@@ -308,12 +313,15 @@ where
         staged: StagedTextTurnResultWithTools<T>,
         session: Option<&mut ModelInput>,
     ) -> Self {
-        if staged.finish_reason == FinishReason::ToolCall && !staged.tool_calls.is_empty() {
+        if staged.finish_reason == FinishReason::ToolCall
+            && (!staged.tool_calls.is_empty() || !staged.invalid_tool_calls.is_empty())
+        {
             let StagedTextTurnResultWithTools {
                 request_id,
                 model,
                 turn,
                 tool_calls,
+                invalid_tool_calls,
                 finish_reason,
                 usage,
             } = staged;
@@ -322,6 +330,7 @@ where
                 model,
                 turn,
                 tool_calls,
+                invalid_tool_calls,
                 finish_reason,
                 usage,
             })
@@ -331,6 +340,7 @@ where
                 model,
                 turn,
                 tool_calls,
+                invalid_tool_calls,
                 finish_reason,
                 usage,
             } = staged;
@@ -345,6 +355,7 @@ where
                 model,
                 assistant_turn,
                 tool_calls,
+                invalid_tool_calls,
                 finish_reason,
                 usage,
             })
@@ -370,12 +381,15 @@ where
         staged: StagedStructuredTurnResultWithTools<T, O>,
         session: Option<&mut ModelInput>,
     ) -> Self {
-        if staged.finish_reason == FinishReason::ToolCall && !staged.tool_calls.is_empty() {
+        if staged.finish_reason == FinishReason::ToolCall
+            && (!staged.tool_calls.is_empty() || !staged.invalid_tool_calls.is_empty())
+        {
             let StagedStructuredTurnResultWithTools {
                 request_id,
                 model,
                 turn,
                 tool_calls,
+                invalid_tool_calls,
                 semantic: _,
                 finish_reason,
                 usage,
@@ -385,6 +399,7 @@ where
                 model,
                 turn,
                 tool_calls,
+                invalid_tool_calls,
                 finish_reason,
                 usage,
             })
@@ -394,6 +409,7 @@ where
                 model,
                 turn,
                 tool_calls,
+                invalid_tool_calls,
                 semantic,
                 finish_reason,
                 usage,
@@ -409,6 +425,7 @@ where
                 model,
                 assistant_turn,
                 tool_calls,
+                invalid_tool_calls,
                 semantic,
                 finish_reason,
                 usage,
@@ -430,6 +447,7 @@ where
             model,
             turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
             tool_calls,
+            invalid_tool_calls: Vec::new(),
             finish_reason,
             usage,
         })

@@ -1,10 +1,12 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use futures::executor::block_on;
+use async_trait::async_trait;
+use futures::{StreamExt, executor::block_on};
 use lutum::{
-    FinishReason, MockLlmAdapter, MockTextScenario, ModelInputItem, RawJson, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcomeWithTools, ToolHookOutcome,
-    ToolMetadata, ToolResult, Toolset, Usage,
+    EventHandler, FinishReason, HandlerContext, HandlerDirective, Lutum, MockLlmAdapter,
+    MockTextScenario, ModelInputItem, RawJson, RawTextTurnEvent, Session, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, TextStepOutcomeWithTools, TextTurnEventWithTools,
+    TextTurnStateWithTools, ToolHookOutcome, ToolMetadata, ToolResult, Toolset, Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -180,4 +182,180 @@ fn tool_round_commit_accepts_typed_handled_values() {
             RawJson::parse("{\"forecast\":\"hooked:Nagoya\"}").unwrap(),
         )
     );
+}
+
+/// Helper: make a mock adapter that emits a single disallowed (search) tool call.
+fn make_disallowed_tool_adapter() -> MockLlmAdapter {
+    MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(RawTextTurnEvent::Started {
+            request_id: Some("req-invalid".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(RawTextTurnEvent::ToolCallChunk {
+            id: "call-bad".into(),
+            name: "search".into(),
+            arguments_json_delta: "{\"query\":\"secret\"}".into(),
+        }),
+        Ok(RawTextTurnEvent::Completed {
+            request_id: Some("req-invalid".into()),
+            finish_reason: FinishReason::ToolCall,
+            usage: Usage::zero(),
+        }),
+    ]))
+}
+
+// Regression test for tool policy bypass:
+// LLM が availability 制限外のツールを返した場合、tool_calls には届かず
+// invalid_tool_calls に収集されることを確認する。
+#[test]
+fn invalid_tool_call_is_rejected_and_reported() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(RawTextTurnEvent::Started {
+            request_id: Some("req-bypass".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        // LLM が（ハルシネーション等で）許可されていない search を呼び出す
+        Ok(RawTextTurnEvent::ToolCallChunk {
+            id: "call-x".into(),
+            name: "search".into(),
+            arguments_json_delta: "{\"query\":\"secret data\"}".into(),
+        }),
+        Ok(RawTextTurnEvent::Completed {
+            request_id: Some("req-bypass".into()),
+            finish_reason: FinishReason::ToolCall,
+            usage: Usage::zero(),
+        }),
+    ]));
+
+    let ctx = Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("Search something.");
+
+    // Weather のみ available に制限（Search の定義は LLM に送られない）
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .collect(),
+    )
+    .unwrap();
+
+    match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            // 有効な tool call は届かない
+            assert!(
+                round.tool_calls.is_empty(),
+                "no valid tool calls should reach user code, got: {:?}",
+                round.tool_calls,
+            );
+            // 不正な tool call は invalid_tool_calls に収集される
+            assert_eq!(round.invalid_tool_calls.len(), 1);
+            assert_eq!(round.invalid_tool_calls[0].name.as_str(), "search");
+        }
+        TextStepOutcomeWithTools::Finished(_) => {
+            panic!("expected NeedsTools (with invalid_tool_calls) but got Finished");
+        }
+    }
+}
+
+// Handler that records the names of InvalidToolCallChunk and InvalidToolCall events it sees.
+struct RecordInvalidEvents(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
+    for RecordInvalidEvents
+{
+    type Error = std::convert::Infallible;
+
+    async fn on_event(
+        &mut self,
+        event: &TextTurnEventWithTools<Tools>,
+        _cx: &HandlerContext<TextTurnStateWithTools<Tools>>,
+    ) -> Result<HandlerDirective, Self::Error> {
+        match event {
+            TextTurnEventWithTools::InvalidToolCallChunk { name, .. } => {
+                self.0.lock().unwrap().push(format!("chunk:{}", name));
+            }
+            TextTurnEventWithTools::InvalidToolCall(metadata) => {
+                self.0.lock().unwrap().push(format!("call:{}", metadata.name));
+            }
+            _ => {}
+        }
+        Ok(HandlerDirective::Continue)
+    }
+}
+
+// Verify that InvalidToolCallChunk and InvalidToolCall events reach the collect_with handler.
+#[test]
+fn invalid_tool_events_are_visible_in_collect_with_handler() {
+    let ctx = Lutum::new(
+        Arc::new(make_disallowed_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let handler = RecordInvalidEvents(Arc::clone(&recorded));
+
+    let pending = block_on(
+        ctx.text_turn(vec![ModelInputItem::text(lutum::InputMessageRole::User, "go")].into())
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .start(),
+    )
+    .unwrap();
+
+    let staged = block_on(pending.collect_with(handler)).unwrap();
+    staged.turn.discard();
+
+    let seen = recorded.lock().unwrap();
+    // Level 1: InvalidToolCallChunk fired for the disallowed chunk
+    assert!(
+        seen.contains(&"chunk:search".to_string()),
+        "expected InvalidToolCallChunk for 'search', got: {seen:?}",
+    );
+    // Level 2: InvalidToolCall fired after full assembly
+    assert!(
+        seen.contains(&"call:search".to_string()),
+        "expected InvalidToolCall for 'search', got: {seen:?}",
+    );
+}
+
+// Verify that InvalidToolCallChunk and InvalidToolCall events appear in the raw event stream
+// when consuming via into_stream() without collect/collect_with.
+#[test]
+fn invalid_tool_events_are_visible_in_raw_stream() {
+    let ctx = Lutum::new(
+        Arc::new(make_disallowed_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+
+    let pending = block_on(
+        ctx.text_turn(vec![ModelInputItem::text(lutum::InputMessageRole::User, "go")].into())
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .start(),
+    )
+    .unwrap();
+
+    let stream = pending.into_stream();
+    let events: Vec<_> = block_on(stream.collect());
+
+    let has_invalid_chunk = events.iter().any(|r| {
+        matches!(
+            r,
+            Ok(TextTurnEventWithTools::InvalidToolCallChunk { name, .. }) if name.as_str() == "search"
+        )
+    });
+    let has_invalid_call = events.iter().any(|r| {
+        matches!(
+            r,
+            Ok(TextTurnEventWithTools::InvalidToolCall(meta)) if meta.name.as_str() == "search"
+        )
+    });
+
+    assert!(has_invalid_chunk, "expected InvalidToolCallChunk in stream, got: {events:?}");
+    assert!(has_invalid_call, "expected InvalidToolCall in stream, got: {events:?}");
 }
