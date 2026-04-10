@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use lutum::{Lutum, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions};
 use lutum_eval::{Eval, EvalExt, PureEval, PureEvalExt, Score, maximize};
+use tracing::instrument::WithSubscriber as _;
+use tracing_subscriber::layer::SubscriberExt as _;
 
 #[derive(Debug, Eq, PartialEq)]
 struct SampleArtifact {
@@ -151,7 +153,7 @@ fn make_context() -> Lutum {
 #[tokio::test]
 async fn evaluate_pure_collected_reads_user_defined_artifact() {
     let collected = lutum_trace::test::collect(async {
-        tracing::info!("artifact eval");
+        tracing::info!(target: "lutum", "artifact eval");
         SampleArtifact { score: 7 }
     })
     .await;
@@ -164,7 +166,7 @@ async fn evaluate_pure_collected_reads_user_defined_artifact() {
 #[tokio::test]
 async fn evaluate_pure_collected_can_read_trace_only_eval() {
     let collected = lutum_trace::test::collect(async {
-        tracing::info!("trace-only");
+        tracing::info!(target: "lutum", "trace-only");
         SampleArtifact { score: 0 }
     })
     .await;
@@ -177,7 +179,7 @@ async fn evaluate_pure_collected_can_read_trace_only_eval() {
 #[tokio::test]
 async fn pure_collected_results_can_be_reused_across_evals() {
     let collected = lutum_trace::test::collect(async {
-        tracing::info!("trace-only");
+        tracing::info!(target: "lutum", "trace-only");
         SampleArtifact { score: 11 }
     })
     .await;
@@ -194,7 +196,7 @@ async fn evaluate_pure_live_uses_future_output_as_artifact() {
     let collected = lutum_trace::test::collect(async {
         CombinedPureEval
             .run_future(async {
-                tracing::info!("inside pure live");
+                tracing::info!(target: "lutum", "inside pure live");
                 SampleArtifact { score: 5 }
             })
             .await
@@ -226,7 +228,7 @@ async fn result_artifacts_are_supported_for_pure_evals() {
 async fn evaluate_collected_reads_user_defined_artifact() {
     let ctx = make_context();
     let collected = lutum_trace::test::collect(async {
-        tracing::info!("artifact eval async");
+        tracing::info!(target: "lutum", "artifact eval async");
         SampleArtifact { score: 13 }
     })
     .await;
@@ -240,7 +242,7 @@ async fn evaluate_collected_reads_user_defined_artifact() {
 async fn evaluate_collected_can_read_trace_only_eval() {
     let ctx = make_context();
     let collected = lutum_trace::test::collect(async {
-        tracing::info!("metric-trace");
+        tracing::info!(target: "lutum", "metric-trace");
         SampleArtifact { score: 0 }
     })
     .await;
@@ -254,7 +256,7 @@ async fn evaluate_collected_can_read_trace_only_eval() {
 async fn collected_results_can_be_reused_across_evals() {
     let ctx = make_context();
     let collected = lutum_trace::test::collect(async {
-        tracing::info!("metric-trace");
+        tracing::info!(target: "lutum", "metric-trace");
         SampleArtifact { score: 17 }
     })
     .await;
@@ -272,7 +274,7 @@ async fn evaluate_live_uses_future_output_as_artifact() {
     let collected = lutum_trace::test::collect(async {
         CombinedEval
             .run_future(&ctx, async {
-                tracing::info!("inside eval live");
+                tracing::info!(target: "lutum", "inside eval live");
                 SampleArtifact { score: 8 }
             })
             .await
@@ -321,6 +323,7 @@ async fn score_helpers_can_return_report_and_score_together() {
     let scored = ArtifactPureEval
         .scored_by(&objective)
         .run_future(async { SampleArtifact { score: 5 } })
+        .with_subscriber(tracing_subscriber::registry().with(lutum_trace::layer()))
         .await
         .unwrap();
 

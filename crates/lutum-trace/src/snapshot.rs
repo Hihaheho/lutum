@@ -1,4 +1,6 @@
-use crate::store::{InnerStore, SpanKey};
+use std::collections::HashMap;
+
+use crate::store::CaptureRecord;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldValue {
@@ -119,7 +121,7 @@ impl SpanNode {
         &self.children
     }
 
-    fn has_event_message(&self, msg: &str) -> bool {
+    pub fn has_event_message(&self, msg: &str) -> bool {
         self.events
             .iter()
             .any(|event| event.message.as_deref() == Some(msg))
@@ -150,17 +152,6 @@ impl EventRecord {
     }
 }
 
-pub(crate) fn build_snapshot(store: &InnerStore) -> TraceSnapshot {
-    TraceSnapshot {
-        roots: store
-            .roots
-            .iter()
-            .filter_map(|&key| build_node(store, key))
-            .collect(),
-        root_events: store.root_events.clone(),
-    }
-}
-
 fn collect_nodes<'a>(node: &'a SpanNode, name: &str, matches: &mut Vec<&'a SpanNode>) {
     if node.name == name {
         matches.push(node);
@@ -171,10 +162,103 @@ fn collect_nodes<'a>(node: &'a SpanNode, name: &str, matches: &mut Vec<&'a SpanN
     }
 }
 
-fn build_node(store: &InnerStore, key: SpanKey) -> Option<SpanNode> {
-    let data = store.spans.get(&key)?;
+struct SpanData {
+    name: &'static str,
+    target: &'static str,
+    level: String,
+    fields: Vec<(String, FieldValue)>,
+    events: Vec<EventRecord>,
+    children: Vec<usize>,
+}
 
-    Some(SpanNode {
+impl SpanData {
+    fn upsert_field(&mut self, name: String, value: FieldValue) {
+        if let Some((_, existing)) = self.fields.iter_mut().find(|(key, _)| key == &name) {
+            *existing = value;
+            return;
+        }
+
+        self.fields.push((name, value));
+    }
+}
+
+pub(crate) fn build_snapshot(records: &[CaptureRecord]) -> TraceSnapshot {
+    let mut span_data: Vec<SpanData> = Vec::new();
+    let mut open_spans: HashMap<u64, usize> = HashMap::new();
+    let mut roots: Vec<usize> = Vec::new();
+    let mut root_events: Vec<EventRecord> = Vec::new();
+
+    for record in records {
+        match record {
+            CaptureRecord::SpanOpened {
+                id,
+                parent_id,
+                name,
+                target,
+                level,
+                fields,
+            } => {
+                let key = span_data.len();
+                span_data.push(SpanData {
+                    name,
+                    target,
+                    level: (*level).to_string(),
+                    fields: fields.clone(),
+                    events: Vec::new(),
+                    children: Vec::new(),
+                });
+
+                if let Some(parent_key) =
+                    parent_id.and_then(|parent| open_spans.get(&parent).copied())
+                {
+                    span_data[parent_key].children.push(key);
+                } else {
+                    roots.push(key);
+                }
+
+                open_spans.insert(*id, key);
+            }
+            CaptureRecord::SpanRecorded { id, fields } => {
+                let Some(&key) = open_spans.get(id) else {
+                    continue;
+                };
+
+                let span = &mut span_data[key];
+                for (name, value) in fields {
+                    span.upsert_field(name.clone(), value.clone());
+                }
+            }
+            CaptureRecord::Event {
+                parent_span_id,
+                record,
+            } => {
+                if let Some(key) =
+                    parent_span_id.and_then(|parent| open_spans.get(&parent).copied())
+                {
+                    span_data[key].events.push(record.clone());
+                } else {
+                    root_events.push(record.clone());
+                }
+            }
+            CaptureRecord::SpanClosed { id } => {
+                open_spans.remove(id);
+            }
+        }
+    }
+
+    TraceSnapshot {
+        roots: roots
+            .into_iter()
+            .map(|key| build_node(&span_data, key))
+            .collect(),
+        root_events,
+    }
+}
+
+fn build_node(span_data: &[SpanData], key: usize) -> SpanNode {
+    let data = &span_data[key];
+
+    SpanNode {
         name: data.name.to_string(),
         target: data.target.to_string(),
         level: data.level.clone(),
@@ -183,7 +267,7 @@ fn build_node(store: &InnerStore, key: SpanKey) -> Option<SpanNode> {
         children: data
             .children
             .iter()
-            .filter_map(|&child| build_node(store, child))
+            .map(|&child| build_node(span_data, child))
             .collect(),
-    })
+    }
 }

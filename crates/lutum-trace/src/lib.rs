@@ -1,3 +1,4 @@
+mod filter;
 mod layer;
 mod snapshot;
 mod store;
@@ -9,15 +10,20 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use tracing::Instrument as _;
+
+pub use crate::filter::LUTUM_CAPTURE_FIELD;
 pub use crate::layer::{CaptureLayer, layer};
 pub use crate::snapshot::{
     EventRecord, FieldValue, SpanNode, TraceEvent, TraceSnapshot, TraceSpanId,
 };
 
 use crate::{
-    layer::{CAPTURE, TRACE_EVENTS},
+    layer::{
+        alloc_capture_id, ensure_capture_layer_installed, register_capture, unregister_capture,
+    },
     snapshot::build_snapshot,
-    store::InnerStore,
+    store::CaptureLog,
 };
 
 pub struct Collected<T> {
@@ -25,19 +31,6 @@ pub struct Collected<T> {
     pub trace: TraceSnapshot,
 }
 
-/// Run `future` under a capture scope and return the result together with a
-/// [`TraceSnapshot`] of all spans and events emitted during execution.
-///
-/// Requires [`layer()`] to be installed in the active subscriber stack (either
-/// via [`tracing::subscriber::set_global_default`] or
-/// [`tracing::instrument::WithSubscriber`]). If the layer is absent the trace
-/// will be empty but no error is returned.
-///
-/// # Task-local scope
-///
-/// The capture scope is bound to the current Tokio task. Spans and events
-/// emitted by [`tokio::spawn`]'d tasks will **not** be captured. To capture
-/// work in a spawned task, call [`capture`] inside that task.
 pub async fn capture<F, T>(future: F) -> Collected<T>
 where
     F: Future<Output = T>,
@@ -45,12 +38,6 @@ where
     capture_inner(future, None).await
 }
 
-/// Run `future` under a capture scope and synchronously emit each live
-/// [`TraceEvent`] to `emit`.
-///
-/// Like [`capture`], this requires [`layer()`] to be installed in the active
-/// subscriber stack. The sink is invoked inline from tracing callbacks, so it
-/// should stay lightweight and non-blocking.
 pub async fn capture_with_events<F, T, E>(future: F, emit: E) -> Collected<T>
 where
     F: Future<Output = T>,
@@ -59,20 +46,50 @@ where
     capture_inner(future, Some(Arc::new(emit))).await
 }
 
-type TraceEventSink = Arc<dyn Fn(TraceEvent) + Send + Sync>;
+type EventSink = Arc<dyn Fn(TraceEvent) + Send + Sync>;
 
-async fn capture_inner<F, T>(future: F, sink: Option<TraceEventSink>) -> Collected<T>
+async fn capture_inner<F, T>(future: F, sink: Option<EventSink>) -> Collected<T>
 where
     F: Future<Output = T>,
 {
-    let store = Arc::new(Mutex::new(InnerStore::default()));
-    let output = TRACE_EVENTS
-        .scope(sink, CAPTURE.scope(store.clone(), future))
-        .await;
-    let trace = {
-        let store = store.lock().unwrap_or_else(|err| err.into_inner());
-        build_snapshot(&store)
-    };
+    assert!(
+        ensure_capture_layer_installed(),
+        "lutum_trace::capture called without the capture layer installed on the active subscriber. \
+         Install it with: tracing_subscriber::registry().with(lutum_trace::layer())"
+    );
+
+    let capture_id = alloc_capture_id();
+    let log = Arc::new(CaptureLog {
+        records: Mutex::new(Vec::new()),
+        event_sink: sink,
+    });
+    register_capture(capture_id, Arc::clone(&log));
+
+    let anchor = tracing::trace_span!(
+        target: layer::CAPTURE_ANCHOR_TARGET,
+        "capture",
+        lutum.capture_id = capture_id,
+    );
+
+    let output = future.instrument(anchor).await;
+    unregister_capture(capture_id);
+
+    let records = log.records.lock().unwrap_or_else(|err| err.into_inner());
+    let trace = build_snapshot(&records);
 
     Collected { output, trace }
+}
+
+#[cfg(test)]
+mod capture_layer_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[should_panic(expected = "lutum_trace::capture called without the capture layer")]
+    async fn capture_without_layer_panics() {
+        use crate::layer::reset_capture_layer_installed_for_test;
+
+        reset_capture_layer_installed_for_test();
+        capture(async {}).await;
+    }
 }

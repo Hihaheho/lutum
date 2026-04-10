@@ -61,7 +61,7 @@ async fn judge_eval_returns_a_structured_report() {
         },
     );
     let collected = lutum_trace::test::collect(async {
-        tracing::info!("judge-trace");
+        tracing::info!(target: "lutum", "judge-trace");
         Draft {
             text: "ship it".into(),
         }

@@ -1,53 +1,35 @@
-use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use tracing::field::{Field, Visit};
 
-use crate::snapshot::{EventRecord, FieldValue};
+use crate::snapshot::{EventRecord, FieldValue, TraceEvent};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SpanKey(u64);
-
-impl SpanKey {
-    pub(crate) fn raw(self) -> u64 {
-        self.0
-    }
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CaptureRecord {
+    SpanOpened {
+        id: u64,
+        parent_id: Option<u64>,
+        name: &'static str,
+        target: &'static str,
+        level: &'static str,
+        fields: Vec<(String, FieldValue)>,
+    },
+    SpanRecorded {
+        id: u64,
+        fields: Vec<(String, FieldValue)>,
+    },
+    Event {
+        parent_span_id: Option<u64>,
+        record: EventRecord,
+    },
+    SpanClosed {
+        id: u64,
+    },
 }
 
-#[derive(Default)]
-pub(crate) struct InnerStore {
-    pub(crate) next_key: u64,
-    pub(crate) active_ids: HashMap<u64, SpanKey>,
-    pub(crate) spans: HashMap<SpanKey, SpanData>,
-    pub(crate) roots: Vec<SpanKey>,
-    pub(crate) root_events: Vec<EventRecord>,
-}
-
-impl InnerStore {
-    pub(crate) fn alloc_key(&mut self) -> SpanKey {
-        let key = SpanKey(self.next_key);
-        self.next_key += 1;
-        key
-    }
-}
-
-pub(crate) struct SpanData {
-    pub(crate) name: &'static str,
-    pub(crate) target: &'static str,
-    pub(crate) level: String,
-    pub(crate) fields: Vec<(String, FieldValue)>,
-    pub(crate) events: Vec<EventRecord>,
-    pub(crate) children: Vec<SpanKey>,
-}
-
-impl SpanData {
-    pub(crate) fn upsert_field(&mut self, name: String, value: FieldValue) {
-        if let Some((_, existing)) = self.fields.iter_mut().find(|(key, _)| key == &name) {
-            *existing = value;
-            return;
-        }
-
-        self.fields.push((name, value));
-    }
+pub(crate) struct CaptureLog {
+    pub(crate) records: Mutex<Vec<CaptureRecord>>,
+    pub(crate) event_sink: Option<Arc<dyn Fn(TraceEvent) + Send + Sync>>,
 }
 
 #[derive(Default)]

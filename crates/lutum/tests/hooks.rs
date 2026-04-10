@@ -529,15 +529,16 @@ fn singleton_hook_uses_registered_override() {
     assert_eq!(selected, "hooked:base");
 }
 
-#[test]
-fn singleton_hook_warns_and_uses_last_registered_override() {
-    let collected = block_on(lutum_trace::test::collect(async {
+#[tokio::test]
+async fn singleton_hook_warns_and_uses_last_registered_override() {
+    let collected = lutum_trace::test::collect(async {
         let hooks = TestHooks::new()
             .with_select_label(PrefixLabel)
             .with_select_label(SuffixLabel);
 
         hooks.select_label("base".into()).await
-    }));
+    })
+    .await;
 
     assert_eq!(collected.output, "base:suffix");
 

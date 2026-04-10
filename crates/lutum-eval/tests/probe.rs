@@ -357,14 +357,11 @@ async fn probe_without_hooks_can_finalize() {
     let runtime = ProbeRuntime::new(NoHooksProbe);
 
     let report = runtime
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("plain-trace");
-                7usize
-            }
-            .with_subscriber(subscriber()),
-        )
+        .run_future(&llm, async {
+            tracing::info!(target: "lutum", "plain-trace");
+            7usize
+        })
+        .with_subscriber(subscriber())
         .await
         .unwrap();
 
@@ -378,18 +375,15 @@ async fn probe_dispatcher_serializes_trace_events_and_hook_rpcs() {
     let llm = make_lutum();
 
     let report = runtime
-        .run_future(
-            &llm,
-            async move {
-                tracing::info!("before-hook");
-                let number = probe_hooks.rewrite_number(2).await;
-                let label = probe_hooks.decorate_label("seed").await;
-                tracing::info!("after-hook");
+        .run_future(&llm, async move {
+            tracing::info!(target: "lutum", "before-hook");
+            let number = probe_hooks.rewrite_number(2).await;
+            let label = probe_hooks.decorate_label("seed").await;
+            tracing::info!(target: "lutum", "after-hook");
 
-                ProbeArtifact { number, label }
-            }
-            .with_subscriber(subscriber()),
-        )
+            ProbeArtifact { number, label }
+        })
+        .with_subscriber(subscriber())
         .await
         .unwrap();
 
@@ -414,14 +408,11 @@ async fn complete_short_circuits_finalize() {
     });
 
     let report = runtime
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("stop-early");
-                7usize
-            }
-            .with_subscriber(subscriber()),
-        )
+        .run_future(&llm, async {
+            tracing::info!(target: "lutum", "stop-early");
+            7usize
+        })
+        .with_subscriber(subscriber())
         .await
         .unwrap();
 
@@ -436,14 +427,11 @@ async fn hook_proxy_can_return_probe_defined_errors() {
     let llm = make_lutum();
 
     let report = runtime
-        .run_future(
-            &llm,
-            async move {
-                let result = probe_hooks.validate_step("blocked").await;
-                assert_eq!(result, Err("blocked"));
-            }
-            .with_subscriber(subscriber()),
-        )
+        .run_future(&llm, async move {
+            let result = probe_hooks.validate_step("blocked").await;
+            assert_eq!(result, Err("blocked"));
+        })
+        .with_subscriber(subscriber())
         .await
         .unwrap();
 
@@ -456,14 +444,11 @@ async fn trace_errors_are_returned_from_runtime() {
     let runtime = ProbeRuntime::new(TraceErrorProbe);
 
     let err = runtime
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("trace-error");
-                1usize
-            }
-            .with_subscriber(subscriber()),
-        )
+        .run_future(&llm, async {
+            tracing::info!(target: "lutum", "trace-error");
+            1usize
+        })
+        .with_subscriber(subscriber())
         .await
         .unwrap_err();
 
@@ -479,7 +464,8 @@ async fn finalize_errors_are_returned_from_runtime() {
     let runtime = ProbeRuntime::new(FinalizeErrorProbe);
 
     let err = runtime
-        .run_future(&llm, async { 1usize }.with_subscriber(subscriber()))
+        .run_future(&llm, async { 1usize })
+        .with_subscriber(subscriber())
         .await
         .unwrap_err();
 
@@ -495,14 +481,11 @@ async fn eval_can_run_through_probe_runtime() {
     let runtime = ProbeRuntime::new(FinalArtifactEval);
 
     let report = runtime
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("eval-probe");
-                7usize
-            }
-            .with_subscriber(subscriber()),
-        )
+        .run_future(&llm, async {
+            tracing::info!(target: "lutum", "eval-probe");
+            7usize
+        })
+        .with_subscriber(subscriber())
         .await
         .unwrap();
 
@@ -517,14 +500,11 @@ async fn probe_runtime_can_score_reports_with_an_objective() {
 
     let scored = runtime
         .scored_by(&objective)
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("eval-probe");
-                7usize
-            }
-            .with_subscriber(subscriber()),
-        )
+        .run_future(&llm, async {
+            tracing::info!(target: "lutum", "eval-probe");
+            7usize
+        })
+        .with_subscriber(subscriber())
         .await
         .unwrap();
 
@@ -540,14 +520,11 @@ async fn objective_failures_are_returned_from_probe_scoring() {
 
     let scored = runtime
         .scored_by(&objective)
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("eval-probe");
-                7usize
-            }
-            .with_subscriber(subscriber()),
-        )
+        .run_future(&llm, async {
+            tracing::info!(target: "lutum", "eval-probe");
+            7usize
+        })
+        .with_subscriber(subscriber())
         .await
         .unwrap();
 
@@ -566,7 +543,8 @@ async fn objective_failures_are_returned_from_probe_scoring() {
 
     let err = runtime
         .scored_by(&FailingObjective)
-        .run_future(&llm, async { 1usize }.with_subscriber(subscriber()))
+        .run_future(&llm, async { 1usize })
+        .with_subscriber(subscriber())
         .await
         .unwrap_err();
 

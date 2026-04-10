@@ -252,6 +252,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     as ::std::sync::Arc<dyn #dyn_hook_trait_ident>;
                 if self.$field_ident.replace(hook).is_some() {
                     ::tracing::warn!(
+                        target: "lutum",
                         slot = #hook_name,
                         "singleton hook registration overwritten; last registered hook wins"
                     );
@@ -279,6 +280,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                         .is_some()
                     {
                         ::tracing::warn!(
+                            target: "lutum",
                             slot = ::std::concat!(#hook_name, ".chain"),
                             "companion chain overwritten; last registered wins"
                         );
@@ -317,6 +319,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                         .is_some()
                     {
                         ::tracing::warn!(
+                            target: "lutum",
                             slot = ::std::concat!(#hook_name, ".aggregate"),
                             "companion aggregate overwritten; last registered wins"
                         );
@@ -355,6 +358,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                         .is_some()
                     {
                         ::tracing::warn!(
+                            target: "lutum",
                             slot = ::std::concat!(#hook_name, ".finalize"),
                             "companion finalize overwritten; last registered wins"
                         );
