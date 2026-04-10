@@ -15,7 +15,7 @@ use crate::{
         QueryResult, SchemaInfo, SqliteDb, WritePreview, validate_sql_safety,
     },
     hooks::{AgentHooks, TransactionMode, WriteDecision},
-    tools::{SqlTools, SqlToolsCall},
+    tools::{SqlTools, SqlToolsCall, SqlToolsSelector},
 };
 
 /// Marker type inserted into `RequestExtensions` to signal that prompt caching
@@ -85,9 +85,11 @@ pub async fn run_turn(
 
     for _round in 0..config.max_rounds {
         let tx = text_tx.clone();
+        let mode = hooks.get_transaction_mode().await;
         let outcome = session
             .text_turn()
             .tools::<SqlTools>()
+            .available_tools(tool_selectors_for_mode(mode))
             .ext(CacheMarker)
             .collect_with(
                 move |event: &TextTurnEventWithTools<SqlTools>,
@@ -130,6 +132,23 @@ pub async fn run_turn(
     }
 
     Err(AgentError::RoundLimit(config.max_rounds))
+}
+
+fn tool_selectors_for_mode(mode: TransactionMode) -> Vec<SqlToolsSelector> {
+    use SqlToolsSelector::*;
+    let read_tools = [ListDatabases, CreateDatabase, GetSchema, Select];
+    match mode {
+        TransactionMode::ReadOnly => {
+            let mut v = vec![RequestWritableMode];
+            v.extend(read_tools);
+            v
+        }
+        TransactionMode::Writable => {
+            let mut v = read_tools.to_vec();
+            v.extend([Insert, Update, Delete, CreateTable, AlterTable, CreateIndex]);
+            v
+        }
+    }
 }
 
 /// Dispatch a single tool call.
