@@ -12,8 +12,11 @@ use lutum_eval::{
     Eval, ObjectiveExt, Probe, ProbeDecision, ProbeHandle, ProbeRunError, ProbeRuntime,
     ProbeScoreError, Score, maximize,
 };
+use lutum_trace::subscriber::otel_capture_subscriber;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::testing::trace::NoopSpanExporter;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::instrument::WithSubscriber as _;
-use tracing_subscriber::layer::SubscriberExt as _;
 
 #[lutum::def_hook(singleton)]
 async fn rewrite_number(value: usize) -> usize {
@@ -329,8 +332,12 @@ fn make_lutum() -> Lutum {
     )
 }
 
-fn subscriber() -> impl tracing::Subscriber + Send + Sync {
-    tracing_subscriber::registry().with(lutum_trace::layer())
+fn subscriber() -> impl tracing::Subscriber + Send + Sync + 'static {
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(NoopSpanExporter::new())
+        .build();
+    let tracer = provider.tracer("lutum_eval_probe_tests");
+    otel_capture_subscriber(tracer)
 }
 
 struct FinalArtifactEval;
@@ -356,17 +363,17 @@ async fn probe_without_hooks_can_finalize() {
     let llm = make_lutum();
     let runtime = ProbeRuntime::new(NoHooksProbe);
 
-    let report = runtime
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("plain-trace");
+    let report = async {
+        runtime
+            .run_future(&llm, async {
+                tracing::info!(target: "lutum", "plain-trace");
                 7usize
-            }
-            .with_subscriber(subscriber()),
-        )
-        .await
-        .unwrap();
+            })
+            .await
+    }
+    .with_subscriber(subscriber())
+    .await
+    .unwrap();
 
     assert_eq!(report, (true, 7));
 }
@@ -377,21 +384,21 @@ async fn probe_dispatcher_serializes_trace_events_and_hook_rpcs() {
     let probe_hooks = timeline_hooks(runtime.dispatcher());
     let llm = make_lutum();
 
-    let report = runtime
-        .run_future(
-            &llm,
-            async move {
-                tracing::info!("before-hook");
+    let report = async {
+        runtime
+            .run_future(&llm, async move {
+                tracing::info!(target: "lutum", "before-hook");
                 let number = probe_hooks.rewrite_number(2).await;
                 let label = probe_hooks.decorate_label("seed").await;
-                tracing::info!("after-hook");
+                tracing::info!(target: "lutum", "after-hook");
 
                 ProbeArtifact { number, label }
-            }
-            .with_subscriber(subscriber()),
-        )
-        .await
-        .unwrap();
+            })
+            .await
+    }
+    .with_subscriber(subscriber())
+    .await
+    .unwrap();
 
     assert_eq!(
         report,
@@ -413,17 +420,17 @@ async fn complete_short_circuits_finalize() {
         finalized: finalized.clone(),
     });
 
-    let report = runtime
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("stop-early");
+    let report = async {
+        runtime
+            .run_future(&llm, async {
+                tracing::info!(target: "lutum", "stop-early");
                 7usize
-            }
-            .with_subscriber(subscriber()),
-        )
-        .await
-        .unwrap();
+            })
+            .await
+    }
+    .with_subscriber(subscriber())
+    .await
+    .unwrap();
 
     assert_eq!(report, 99);
     assert!(!finalized.load(Ordering::SeqCst));
@@ -435,17 +442,17 @@ async fn hook_proxy_can_return_probe_defined_errors() {
     let probe_hooks = hook_error_hooks(runtime.dispatcher());
     let llm = make_lutum();
 
-    let report = runtime
-        .run_future(
-            &llm,
-            async move {
+    let report = async {
+        runtime
+            .run_future(&llm, async move {
                 let result = probe_hooks.validate_step("blocked").await;
                 assert_eq!(result, Err("blocked"));
-            }
-            .with_subscriber(subscriber()),
-        )
-        .await
-        .unwrap();
+            })
+            .await
+    }
+    .with_subscriber(subscriber())
+    .await
+    .unwrap();
 
     assert_eq!(report, 1);
 }
@@ -455,17 +462,17 @@ async fn trace_errors_are_returned_from_runtime() {
     let llm = make_lutum();
     let runtime = ProbeRuntime::new(TraceErrorProbe);
 
-    let err = runtime
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("trace-error");
+    let err = async {
+        runtime
+            .run_future(&llm, async {
+                tracing::info!(target: "lutum", "trace-error");
                 1usize
-            }
-            .with_subscriber(subscriber()),
-        )
-        .await
-        .unwrap_err();
+            })
+            .await
+    }
+    .with_subscriber(subscriber())
+    .await
+    .unwrap_err();
 
     assert!(matches!(
         err,
@@ -478,8 +485,8 @@ async fn finalize_errors_are_returned_from_runtime() {
     let llm = make_lutum();
     let runtime = ProbeRuntime::new(FinalizeErrorProbe);
 
-    let err = runtime
-        .run_future(&llm, async { 1usize }.with_subscriber(subscriber()))
+    let err = async { runtime.run_future(&llm, async { 1usize }).await }
+        .with_subscriber(subscriber())
         .await
         .unwrap_err();
 
@@ -494,17 +501,17 @@ async fn eval_can_run_through_probe_runtime() {
     let llm = make_lutum();
     let runtime = ProbeRuntime::new(FinalArtifactEval);
 
-    let report = runtime
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("eval-probe");
+    let report = async {
+        runtime
+            .run_future(&llm, async {
+                tracing::info!(target: "lutum", "eval-probe");
                 7usize
-            }
-            .with_subscriber(subscriber()),
-        )
-        .await
-        .unwrap();
+            })
+            .await
+    }
+    .with_subscriber(subscriber())
+    .await
+    .unwrap();
 
     assert_eq!(report, 8);
 }
@@ -515,18 +522,18 @@ async fn probe_runtime_can_score_reports_with_an_objective() {
     let runtime = ProbeRuntime::new(FinalArtifactEval);
     let objective = maximize(|report: &usize| Score::new_clamped(*report as f32 / 10.0));
 
-    let scored = runtime
-        .scored_by(&objective)
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("eval-probe");
+    let scored = async {
+        runtime
+            .scored_by(&objective)
+            .run_future(&llm, async {
+                tracing::info!(target: "lutum", "eval-probe");
                 7usize
-            }
-            .with_subscriber(subscriber()),
-        )
-        .await
-        .unwrap();
+            })
+            .await
+    }
+    .with_subscriber(subscriber())
+    .await
+    .unwrap();
 
     assert_eq!(scored.score, Score::new_clamped(0.8));
     assert_eq!(scored.report, 8);
@@ -538,18 +545,18 @@ async fn objective_failures_are_returned_from_probe_scoring() {
     let runtime = ProbeRuntime::new(FinalArtifactEval);
     let objective = maximize(|_report: &usize| Score::new_clamped(1.0)).map_error(|_| "never");
 
-    let scored = runtime
-        .scored_by(&objective)
-        .run_future(
-            &llm,
-            async {
-                tracing::info!("eval-probe");
+    let scored = async {
+        runtime
+            .scored_by(&objective)
+            .run_future(&llm, async {
+                tracing::info!(target: "lutum", "eval-probe");
                 7usize
-            }
-            .with_subscriber(subscriber()),
-        )
-        .await
-        .unwrap();
+            })
+            .await
+    }
+    .with_subscriber(subscriber())
+    .await
+    .unwrap();
 
     assert_eq!(scored.score, Score::pass());
     assert_eq!(scored.report, 8);
@@ -564,11 +571,15 @@ async fn objective_failures_are_returned_from_probe_scoring() {
         }
     }
 
-    let err = runtime
-        .scored_by(&FailingObjective)
-        .run_future(&llm, async { 1usize }.with_subscriber(subscriber()))
-        .await
-        .unwrap_err();
+    let err = async {
+        runtime
+            .scored_by(&FailingObjective)
+            .run_future(&llm, async { 1usize })
+            .await
+    }
+    .with_subscriber(subscriber())
+    .await
+    .unwrap_err();
 
     assert!(matches!(err, ProbeScoreError::Objective("bad objective")));
 }

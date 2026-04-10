@@ -372,23 +372,35 @@ let result = session
 
 ## Trace Capture
 
-`lutum-trace` is a separate crate for scoped, in-memory tracing capture. It is useful in tests,
-debug tooling, and local observability when you want to inspect span fields and events without
-shipping traces anywhere.
+`lutum-trace` captures **Lutum-related** spans and events into an in-memory [`TraceSnapshot`]. It
+builds on [`tracing-opentelemetry`](https://github.com/tokio-rs/tracing-opentelemetry): OpenTelemetry
+assigns the trace id, and capture **subscribes** to that id for the duration of
+[`try_capture`](https://docs.rs/lutum-trace/latest/lutum_trace/fn.try_capture.html).
 
-`Lutum` emits `llm_turn` spans during execution, so once the layer is installed you can capture
-request ids, finish reasons, and nested events. Assuming you already built `llm` as in the
-quickstart, wrap the same turn execution with capture:
+**Filtering:** spans and events are stored when `target` is `lutum` or starts with `lutum::`, or when
+a span sets `lutum.capture = true` (field name in [`LUTUM_CAPTURE_FIELD`](https://docs.rs/lutum-trace/latest/lutum_trace/constant.LUTUM_CAPTURE_FIELD.html)). Children of captured spans inherit capture for events even if their own target is different.
+
+Use [`subscriber::otel_capture_subscriber`](https://docs.rs/lutum-trace/latest/lutum_trace/subscriber/fn.otel_capture_subscriber.html) so the OTel layer is **inside** and the capture layer **outside** the registry. If the capture layer was never registered, [`try_capture`](https://docs.rs/lutum-trace/latest/lutum_trace/fn.try_capture.html) returns [`CaptureError::CaptureLayerNotInstalled`](https://docs.rs/lutum-trace/latest/lutum_trace/enum.CaptureError.html).
+
+`Lutum` emits `llm_turn` spans (target `lutum`) during execution. Wrap the turn with a subscriber
+active for the **whole** capture (including bootstrap), then call `try_capture`:
 
 ```rust
 use lutum::Session;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+// use your real exporter instead of NoopSpanExporter in production
+use opentelemetry_sdk::testing::trace::NoopSpanExporter;
 use tracing::instrument::WithSubscriber as _;
-use tracing_subscriber::layer::SubscriberExt as _;
 
-let subscriber = tracing_subscriber::registry().with(lutum_trace::layer());
+let provider = SdkTracerProvider::builder()
+    .with_simple_exporter(NoopSpanExporter::new())
+    .build();
+let tracer = provider.tracer("my_app");
+let subscriber = lutum_trace::subscriber::otel_capture_subscriber(tracer);
 
-let collected = lutum_trace::capture(
-    async {
+let collected = async {
+    lutum_trace::try_capture(async {
         let mut session = Session::new(llm.clone());
         session.push_user("Say hello.");
 
@@ -398,10 +410,11 @@ let collected = lutum_trace::capture(
             .await?;
 
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
-    .with_subscriber(subscriber),
-)
-.await;
+    })
+    .await?
+}
+.with_subscriber(subscriber)
+.await?;
 
 if let Some(turn) = collected.trace.span("llm_turn") {
     println!("request_id = {:?}", turn.field("request_id"));
@@ -409,9 +422,7 @@ if let Some(turn) = collected.trace.span("llm_turn") {
 }
 ```
 
-The capture scope is task-local. If you spawn a Tokio task, call `lutum_trace::capture(...)`
-inside that task as well. For tests, `lutum_trace::test::collect(...)` provides a small helper on
-top of the same machinery.
+For tests, [`lutum_trace::test::collect`](https://docs.rs/lutum-trace/latest/lutum_trace/test/fn.collect.html) installs the same stack and unwraps a successful capture.
 
 ## Evaluation
 
@@ -483,18 +494,31 @@ impl Eval for ScaledLengthEval {
 }
 
 // Assume `llm: Lutum` was already built as in the quickstart.
-let pure_report = LengthEval.run_future(async {
-    Draft { text: "hello".into() }
-}).await?;
+// `run_future` needs the OTel + capture subscriber (see Trace Capture); here `test::collect` wraps both.
+let pure_report = lutum_trace::test::collect(async {
+    LengthEval.run_future(async {
+        Draft { text: "hello".into() }
+    }).await
+})
+.await
+.output?;
 
-let eval_report = ScaledLengthEval.run_future(&llm, async {
-    Draft { text: "hello".into() }
-}).await?;
+let eval_report = lutum_trace::test::collect(async {
+    ScaledLengthEval.run_future(&llm, async {
+        Draft { text: "hello".into() }
+    }).await
+})
+.await
+.output?;
 
-let scored = ScaledLengthEval
-    .scored_by(&maximize(|report: &usize| Score::new_clamped(*report as f32 / 10.0)))
-    .run_future(&llm, async { Draft { text: "hello".into() } })
-    .await?;
+let scored = lutum_trace::test::collect(async {
+    ScaledLengthEval
+        .scored_by(&maximize(|report: &usize| Score::new_clamped(*report as f32 / 10.0)))
+        .run_future(&llm, async { Draft { text: "hello".into() } })
+        .await
+})
+.await
+.output?;
 
 let score = scored.score;
 ```
@@ -511,8 +535,8 @@ want hook calls to route back into the same mutable state machine.
 - build any local hook sets you need explicitly from `runtime.dispatcher()`
 - `ProbeRuntime::run_future(&llm, ...)` forwards live `TraceEvent`s, then calls `finalize(&llm, trace, artifact)`
 
-As with `lutum_trace::capture(...)`, live probe events require the active subscriber stack to
-include `lutum_trace::layer()`.
+As with `lutum_trace::try_capture(...)`, probes require the active subscriber stack built with
+`lutum_trace::subscriber::otel_capture_subscriber` (or equivalent) for the whole `run_future` call.
 
 A probe that intercepts a hook usually receives each call through `ProbeHandle::dispatch(...)`
 via a local hook set you build alongside the runtime.

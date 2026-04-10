@@ -19,9 +19,6 @@ note: the following trait bounds were not satisfied:
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: the trait `Fn` must be implemented
   --> $RUST/core/src/ops/function.rs
-   |
-   | pub const trait Fn<Args: Tuple>: FnMut<Args> {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: items from traits can only be used if the trait is in scope
    = note: this error originates in the macro `__lutum_hook_head_hook_set_0` which comes from the expansion of the attribute macro `lutum::def_hook` (in Nightly builds, run with -Z macro-backtrace for more info)
 help: trait `Aggregate` which provides `call` is implemented but not in scope; perhaps you want to import it

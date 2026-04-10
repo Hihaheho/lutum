@@ -3,7 +3,7 @@ use std::{future::Future, marker::PhantomData};
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::{Collected, Eval, Objective, PureEval, ScoreEvalError, Scored};
+use crate::{Collected, Eval, EvalRunError, Objective, PureEval, ScoreEvalError, Scored};
 
 type ScoredResult<R, EE, OE> = Result<Scored<R>, ScoreEvalError<EE, OE>>;
 
@@ -47,12 +47,12 @@ pub trait PureEvalExt: PureEval + Sized {
         self.evaluate(&collected.trace, &collected.output)
     }
 
-    async fn run_future<F>(&self, future: F) -> Result<Self::Report, Self::Error>
+    async fn run_future<F>(&self, future: F) -> Result<Self::Report, EvalRunError<Self::Error>>
     where
         F: Future<Output = Self::Artifact>,
     {
-        let collected = lutum_trace::capture(future).await;
-        self.run_collected(&collected)
+        let collected = lutum_trace::try_capture(future).await?;
+        self.run_collected(&collected).map_err(EvalRunError::Eval)
     }
 
     fn scored_by<'a, O>(&'a self, objective: &'a O) -> PureScoredBy<'a, Self, O>
@@ -138,13 +138,15 @@ pub trait EvalExt: Eval + Sized {
         &self,
         ctx: &lutum::Lutum,
         future: F,
-    ) -> Result<Self::Report, Self::Error>
+    ) -> Result<Self::Report, EvalRunError<Self::Error>>
     where
         Self::Artifact: Sync,
         F: Future<Output = Self::Artifact>,
     {
-        let collected = lutum_trace::capture(future).await;
-        self.run_collected(ctx, &collected).await
+        let collected = lutum_trace::try_capture(future).await?;
+        self.run_collected(ctx, &collected)
+            .await
+            .map_err(EvalRunError::Eval)
     }
 
     fn scored_by<'a, O>(&'a self, objective: &'a O) -> ScoredBy<'a, Self, O>
@@ -190,8 +192,12 @@ where
     where
         F: Future<Output = E::Artifact>,
     {
-        let collected = lutum_trace::capture(future).await;
-        self.run_collected(&collected)
+        let report = self.eval.run_future(future).await?;
+        let score = self
+            .objective
+            .score(&report)
+            .map_err(ScoreEvalError::Objective)?;
+        Ok(Scored { report, score })
     }
 }
 
@@ -234,8 +240,12 @@ where
         E::Artifact: Sync,
         F: Future<Output = E::Artifact>,
     {
-        let collected = lutum_trace::capture(future).await;
-        self.run_collected(ctx, &collected).await
+        let report = self.eval.run_future(ctx, future).await?;
+        let score = self
+            .objective
+            .score(&report)
+            .map_err(ScoreEvalError::Objective)?;
+        Ok(Scored { report, score })
     }
 }
 

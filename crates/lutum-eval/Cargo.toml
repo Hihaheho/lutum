@@ -17,6 +17,11 @@ paste.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
+opentelemetry = { version = "0.31.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31.0", default-features = false, features = [
+    "trace",
+    "testing",
+] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

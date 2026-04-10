@@ -1,15 +1,49 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tracing::{Event, Id, Subscriber};
+use opentelemetry::TraceId;
+use opentelemetry::trace::TraceContextExt as _;
+use tracing::{Event, Id, Subscriber, span};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
-use crate::{
-    snapshot::{EventRecord, TraceEvent, TraceSpanId},
-    store::{FieldVisitor, InnerStore, SpanData},
-};
+use crate::filter::{CaptureInterestVisitor, lutum_target};
+use crate::snapshot::{EventRecord, FieldValue, TraceEvent, TraceSpanId};
+use crate::store::{FieldVisitor, InnerStore, SpanData};
+
+/// Initial span fields stored until first `on_enter` (when OTel trace id is available).
+#[derive(Debug, Default)]
+pub(crate) struct LutumPendingSpan {
+    pub(crate) fields: Vec<(String, FieldValue)>,
+}
+
+impl LutumPendingSpan {
+    fn upsert_field(&mut self, name: String, value: FieldValue) {
+        if let Some((_, existing)) = self.fields.iter_mut().find(|(key, _)| key == &name) {
+            *existing = value;
+            return;
+        }
+        self.fields.push((name, value));
+    }
+}
+
+static CAPTURE_LAYER_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn ensure_capture_layer_installed() -> bool {
+    CAPTURE_LAYER_INSTALLED.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_capture_layer_installed_for_test() {
+    CAPTURE_LAYER_INSTALLED.store(false, Ordering::Release);
+}
 
 tokio::task_local! {
     pub(crate) static CAPTURE: Arc<Mutex<InnerStore>>;
+}
+
+tokio::task_local! {
+    pub(crate) static LISTEN_TRACE_ID: Option<TraceId>;
 }
 
 tokio::task_local! {
@@ -35,6 +69,18 @@ where
         .ok()
 }
 
+fn with_listen<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(TraceId) -> R,
+{
+    LISTEN_TRACE_ID
+        .try_with(|opt| {
+            let tid = opt.expect("LISTEN_TRACE_ID must be Some during capture");
+            f(tid)
+        })
+        .ok()
+}
+
 fn emit_trace_event(event: TraceEvent) {
     let _ = TRACE_EVENTS.try_with(|emit| {
         if let Some(emit) = emit {
@@ -43,140 +89,292 @@ fn emit_trace_event(event: TraceEvent) {
     });
 }
 
+fn span_otel_trace_id<'a, S>(ctx: &Context<'a, S>, id: &Id) -> Option<TraceId>
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    let span = ctx.span(id)?;
+    if let Some(otel) = span.extensions().get::<tracing_opentelemetry::OtelData>()
+        && let Some(tid) = otel.trace_id()
+    {
+        return Some(tid);
+    }
+    span.parent()
+        .and_then(|parent| span_otel_trace_id(ctx, &parent.id()))
+}
+
+fn event_interesting(event: &Event<'_>) -> bool {
+    let meta = event.metadata();
+    if lutum_target(meta.target()) {
+        return true;
+    }
+    let mut v = CaptureInterestVisitor::default();
+    event.record(&mut v);
+    v.lutum_capture
+}
+
+fn event_should_capture<'a, S>(event: &Event<'_>, ctx: &Context<'a, S>) -> bool
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    if event_interesting(event) {
+        return true;
+    }
+    let Some(span) = ctx.event_span(event) else {
+        return false;
+    };
+    let raw = span.id().into_u64();
+    with_store(|store| store.active_ids.contains_key(&raw)).unwrap_or(false)
+}
+
+fn event_otel_trace_id<'a, S>(event: &Event<'_>, ctx: &Context<'a, S>) -> Option<TraceId>
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    if let Some(span) = ctx.event_span(event) {
+        return span_otel_trace_id(ctx, &span.id());
+    }
+    let cx = tracing::Span::current().context();
+    let span = cx.span();
+    let tid = span.span_context().trace_id();
+    if tid != TraceId::INVALID {
+        Some(tid)
+    } else {
+        None
+    }
+}
+
+fn should_mark_span(attrs: &span::Attributes<'_>) -> bool {
+    if lutum_target(attrs.metadata().target()) {
+        return true;
+    }
+    let mut v = CaptureInterestVisitor::default();
+    attrs.record(&mut v);
+    v.lutum_capture
+}
+
 impl<S> Layer<S> for CaptureLayer
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
-    fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+    fn on_register_dispatch(&self, _subscriber: &tracing::Dispatch) {
+        CAPTURE_LAYER_INSTALLED.store(true, Ordering::Release);
+    }
+
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if !should_mark_span(attrs) {
+            return;
+        }
+
+        let span = ctx.span(id).expect("span must exist after on_new_span");
         let mut visitor = FieldVisitor::default();
         attrs.record(&mut visitor);
         let (fields, _) = visitor.into_parts();
+        span.extensions_mut().insert(LutumPendingSpan { fields });
+    }
 
-        let raw_parent = if attrs.is_root() {
-            None
-        } else if let Some(parent) = attrs.parent() {
-            Some(parent.clone().into_u64())
-        } else if attrs.is_contextual() {
-            ctx.current_span().id().map(|current| current.into_u64())
-        } else {
-            None
+    fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
+        let span = match ctx.span(id) {
+            Some(s) => s,
+            None => return,
         };
 
-        with_store(|store| {
-            let parent = raw_parent.and_then(|raw| store.active_ids.get(&raw).copied());
-            let key = store.alloc_key();
+        if !lutum_target(span.metadata().target())
+            && span.extensions().get::<LutumPendingSpan>().is_none()
+        {
+            return;
+        }
+
+        let Some(tid) = span_otel_trace_id(&ctx, id) else {
+            return;
+        };
+
+        let _ = with_listen(|listen| {
+            if tid != listen {
+                return;
+            }
+
             let raw_id = id.clone().into_u64();
-            let fields_for_event = fields.clone();
 
-            store.spans.insert(
-                key,
-                SpanData {
-                    name: attrs.metadata().name(),
-                    target: attrs.metadata().target(),
-                    level: attrs.metadata().level().to_string(),
-                    fields,
-                    events: Vec::new(),
-                    children: Vec::new(),
-                },
-            );
+            with_store(|store| {
+                if store.active_ids.contains_key(&raw_id) {
+                    return;
+                }
 
-            if let Some(parent) = parent {
-                if let Some(parent_span) = store.spans.get_mut(&parent) {
-                    parent_span.children.push(key);
+                let pending = span.extensions_mut().remove::<LutumPendingSpan>();
+                let fields = pending.map(|p| p.fields).unwrap_or_default();
+                let fields_for_event = fields.clone();
+
+                let meta = span.metadata();
+                let raw_parent = span.parent().map(|p| p.id().into_u64());
+                let parent_key = raw_parent.and_then(|rp| store.active_ids.get(&rp).copied());
+                let key = store.alloc_key();
+
+                store.spans.insert(
+                    key,
+                    SpanData {
+                        name: meta.name(),
+                        target: meta.target(),
+                        level: meta.level().to_string(),
+                        fields,
+                        events: Vec::new(),
+                        children: Vec::new(),
+                    },
+                );
+
+                if let Some(pk) = parent_key {
+                    if let Some(parent_span) = store.spans.get_mut(&pk) {
+                        parent_span.children.push(key);
+                    } else {
+                        store.roots.push(key);
+                    }
                 } else {
                     store.roots.push(key);
                 }
-            } else {
-                store.roots.push(key);
-            }
 
-            store.active_ids.insert(raw_id, key);
+                store.active_ids.insert(raw_id, key);
 
-            emit_trace_event(TraceEvent::SpanOpened {
-                span_id: TraceSpanId(key.raw()),
-                parent_span_id: parent.map(|parent| TraceSpanId(parent.raw())),
-                name: attrs.metadata().name().to_string(),
-                target: attrs.metadata().target().to_string(),
-                level: attrs.metadata().level().to_string(),
-                fields: fields_for_event,
+                emit_trace_event(TraceEvent::SpanOpened {
+                    span_id: TraceSpanId(key.raw()),
+                    parent_span_id: parent_key.map(|p| TraceSpanId(p.raw())),
+                    name: meta.name().to_string(),
+                    target: meta.target().to_string(),
+                    level: meta.level().to_string(),
+                    fields: fields_for_event,
+                });
             });
         });
     }
 
-    fn on_record(&self, id: &Id, values: &tracing::span::Record<'_>, _ctx: Context<'_, S>) {
-        with_store(|store| {
-            let Some(&key) = store.active_ids.get(&id.clone().into_u64()) else {
-                return;
-            };
+    fn on_record(&self, id: &Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
+        let span = match ctx.span(id) {
+            Some(s) => s,
+            None => return,
+        };
 
-            let Some(span) = store.spans.get_mut(&key) else {
-                return;
-            };
-
+        if let Some(pending) = span.extensions_mut().get_mut::<LutumPendingSpan>() {
             let mut visitor = FieldVisitor::default();
             values.record(&mut visitor);
             let (fields, _) = visitor.into_parts();
-            let fields_for_event = fields.clone();
-
             for (name, value) in fields {
-                span.upsert_field(name, value);
+                pending.upsert_field(name, value);
+            }
+            return;
+        }
+
+        let raw_id = id.clone().into_u64();
+
+        let Some(tid) = span_otel_trace_id(&ctx, id) else {
+            return;
+        };
+
+        let _ = with_listen(|listen| {
+            if tid != listen {
+                return;
             }
 
-            emit_trace_event(TraceEvent::SpanRecorded {
-                span_id: TraceSpanId(key.raw()),
-                fields: fields_for_event,
+            with_store(|store| {
+                let Some(&key) = store.active_ids.get(&raw_id) else {
+                    return;
+                };
+
+                let Some(span_data) = store.spans.get_mut(&key) else {
+                    return;
+                };
+
+                let mut visitor = FieldVisitor::default();
+                values.record(&mut visitor);
+                let (fields, _) = visitor.into_parts();
+                let fields_for_event = fields.clone();
+
+                for (name, value) in fields {
+                    span_data.upsert_field(name, value);
+                }
+
+                emit_trace_event(TraceEvent::SpanRecorded {
+                    span_id: TraceSpanId(key.raw()),
+                    fields: fields_for_event,
+                });
             });
         });
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        let mut visitor = FieldVisitor::default();
-        event.record(&mut visitor);
-        let (fields, message) = visitor.into_parts();
+        if !event_should_capture(event, &ctx) {
+            return;
+        }
 
-        let parent = ctx.event_span(event).map(|span| span.id().into_u64());
-        let record = EventRecord {
-            target: event.metadata().target().to_string(),
-            level: event.metadata().level().to_string(),
-            message,
-            fields,
+        let Some(event_tid) = event_otel_trace_id(event, &ctx) else {
+            return;
         };
-        let parent_span_id = parent
-            .and_then(|raw| with_store(|store| store.active_ids.get(&raw).copied()))
-            .flatten()
-            .map(|span_id| TraceSpanId(span_id.raw()));
 
-        with_store(|store| {
-            if let Some(key) = parent.and_then(|raw| store.active_ids.get(&raw).copied())
-                && let Some(span) = store.spans.get_mut(&key)
-            {
-                span.events.push(record);
-                emit_trace_event(TraceEvent::Event {
-                    parent_span_id,
-                    record: span.events.last().cloned().expect("event just inserted"),
-                });
+        let _ = with_listen(|listen| {
+            if event_tid != listen {
                 return;
             }
 
-            store.root_events.push(record);
-            emit_trace_event(TraceEvent::Event {
-                parent_span_id: None,
-                record: store
-                    .root_events
-                    .last()
-                    .cloned()
-                    .expect("root event just inserted"),
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            let (fields, message) = visitor.into_parts();
+
+            let parent = ctx.event_span(event).map(|span| span.id().into_u64());
+            let record = EventRecord {
+                target: event.metadata().target().to_string(),
+                level: event.metadata().level().to_string(),
+                message,
+                fields,
+            };
+            let parent_span_id = parent
+                .and_then(|raw| with_store(|store| store.active_ids.get(&raw).copied()))
+                .flatten()
+                .map(|span_id| TraceSpanId(span_id.raw()));
+
+            with_store(|store| {
+                if let Some(key) = parent.and_then(|raw| store.active_ids.get(&raw).copied())
+                    && let Some(span) = store.spans.get_mut(&key)
+                {
+                    span.events.push(record.clone());
+                    emit_trace_event(TraceEvent::Event {
+                        parent_span_id,
+                        record: span.events.last().cloned().expect("event just inserted"),
+                    });
+                    return;
+                }
+
+                store.root_events.push(record.clone());
+                emit_trace_event(TraceEvent::Event {
+                    parent_span_id: None,
+                    record: store
+                        .root_events
+                        .last()
+                        .cloned()
+                        .expect("root event just inserted"),
+                });
             });
         });
     }
 
-    fn on_close(&self, id: Id, _ctx: Context<'_, S>) {
-        with_store(|store| {
-            if let Some(span_id) = store.active_ids.remove(&id.into_u64()) {
-                emit_trace_event(TraceEvent::SpanClosed {
-                    span_id: TraceSpanId(span_id.raw()),
-                });
+    fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(&id) {
+            let _ = span.extensions_mut().remove::<LutumPendingSpan>();
+        }
+
+        let Some(tid) = span_otel_trace_id(&ctx, &id) else {
+            return;
+        };
+
+        let _ = with_listen(|listen| {
+            if tid != listen {
+                return;
             }
+
+            with_store(|store| {
+                if let Some(span_id) = store.active_ids.remove(&id.into_u64()) {
+                    emit_trace_event(TraceEvent::SpanClosed {
+                        span_id: TraceSpanId(span_id.raw()),
+                    });
+                }
+            });
         });
     }
 }

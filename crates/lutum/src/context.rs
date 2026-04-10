@@ -1806,9 +1806,9 @@ fn map_text_stream_with_tools<T>(
 where
     T: Toolset,
 {
-    Box::pin(
-        stream.map(move |item| item.and_then(|event| map_text_event_with_tools::<T>(event, &availability))),
-    )
+    Box::pin(stream.map(move |item| {
+        item.and_then(|event| map_text_event_with_tools::<T>(event, &availability))
+    }))
 }
 
 fn map_structured_stream<O>(stream: ErasedStructuredTurnEventStream) -> StructuredTurnEventStream<O>
@@ -1876,7 +1876,10 @@ fn map_text_event(event: ErasedTextTurnEvent) -> Result<TextTurnEvent, AgentErro
     }
 }
 
-fn is_tool_name_allowed<T: Toolset>(name: &str, availability: &ToolAvailability<T::Selector>) -> bool {
+fn is_tool_name_allowed<T: Toolset>(
+    name: &str,
+    availability: &ToolAvailability<T::Selector>,
+) -> bool {
     match availability {
         ToolAvailability::All => true,
         ToolAvailability::Only(selectors) => selectors.iter().any(|s| s.name() == name),
@@ -2148,6 +2151,7 @@ async fn recover_or_release_budget(
 
 fn turn_span(kind: &'static str, estimate: UsageEstimate) -> Span {
     tracing::info_span!(
+        target: "lutum",
         "llm_turn",
         kind = %kind,
         model = field::Empty,

@@ -17,7 +17,8 @@ pub use combinators::{
 };
 pub use judge::{JudgeEval, JudgeEvalError};
 pub use lutum_trace::{
-    Collected, EventRecord, FieldValue, SpanNode, TraceEvent, TraceSnapshot, TraceSpanId,
+    CaptureError, Collected, EventRecord, FieldValue, SpanNode, TraceEvent, TraceSnapshot,
+    TraceSpanId,
 };
 pub use objective::{
     InvertObjective, MapObjectiveError, Maximize, Minimize, Objective, ObjectiveExt,
@@ -69,9 +70,28 @@ pub struct Scored<R> {
 }
 
 #[derive(Debug, Error)]
+pub enum EvalRunError<E> {
+    #[error("trace capture failed: {0}")]
+    Capture(#[from] CaptureError),
+    #[error("evaluation failed: {0}")]
+    Eval(#[source] E),
+}
+
+#[derive(Debug, Error)]
 pub enum ScoreEvalError<EE, OE> {
+    #[error("trace capture failed: {0}")]
+    Capture(#[from] CaptureError),
     #[error("evaluation failed: {0}")]
     Eval(#[source] EE),
     #[error("objective failed: {0}")]
     Objective(#[source] OE),
+}
+
+impl<EE, OE> From<EvalRunError<EE>> for ScoreEvalError<EE, OE> {
+    fn from(value: EvalRunError<EE>) -> Self {
+        match value {
+            EvalRunError::Capture(c) => ScoreEvalError::Capture(c),
+            EvalRunError::Eval(e) => ScoreEvalError::Eval(e),
+        }
+    }
 }

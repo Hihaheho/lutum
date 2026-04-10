@@ -116,7 +116,7 @@ async fn combine_allows_custom_report_aggregation() {
         (count, saw_trace)
     });
     let collected = lutum_trace::test::collect(async {
-        tracing::info!("combine-trace");
+        tracing::info!(target: "lutum", "combine-trace");
         Draft {
             text: "alpha beta".into(),
         }

@@ -1,4 +1,5 @@
-use lutum_eval::{CombineError, ProbeRunError, ProbeScoreError, ScoreEvalError};
+use lutum_eval::{CombineError, EvalRunError, ProbeRunError, ProbeScoreError, ScoreEvalError};
+use lutum_trace::CaptureError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -30,6 +31,26 @@ fn score_eval_error_exposes_the_wrapped_source() {
     let error = ScoreEvalError::<EvalLeafError, ObjectiveLeafError>::Eval(EvalLeafError::Eval);
 
     assert_eq!(chain_messages(&error), vec!["eval leaf"]);
+}
+
+#[test]
+fn eval_run_error_maps_to_score_eval_error() {
+    let inner: ScoreEvalError<EvalLeafError, ObjectiveLeafError> =
+        EvalRunError::Eval(EvalLeafError::Eval).into();
+    assert!(matches!(inner, ScoreEvalError::Eval(EvalLeafError::Eval)));
+}
+
+#[test]
+fn score_eval_error_capture_variant() {
+    let error = ScoreEvalError::<EvalLeafError, ObjectiveLeafError>::Capture(
+        CaptureError::CaptureLayerNotInstalled,
+    );
+    assert_eq!(
+        chain_messages(&error),
+        vec![
+            "lutum-trace capture layer is not installed on the active tracing subscriber (use lutum_trace::subscriber::otel_capture_subscriber or equivalent)"
+        ]
+    );
 }
 
 #[test]

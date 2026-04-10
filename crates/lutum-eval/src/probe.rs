@@ -8,7 +8,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use lutum_trace::{TraceEvent, TraceSnapshot};
+use lutum_trace::{CaptureError, TraceEvent, TraceSnapshot};
 
 use crate::{Collected, Eval, Objective, Scored};
 
@@ -119,10 +119,11 @@ where
         let dispatcher = self.dispatcher.clone();
         let ctx = ctx.clone();
         let event_ctx = ctx.clone();
-        let collected = lutum_trace::capture_with_events(future, move |event| {
+        let collected = lutum_trace::try_capture_with_events(future, move |event| {
             let _ = dispatcher.send_trace(event_ctx.clone(), event);
         })
-        .await;
+        .await
+        .map_err(ProbeRunError::Capture)?;
 
         self.run_collected(&ctx, collected).await
     }
@@ -270,6 +271,8 @@ pub struct ProbeDispatchError;
 
 #[derive(Debug, Error)]
 pub enum ProbeRunError<E> {
+    #[error("trace capture failed: {0}")]
+    Capture(#[from] CaptureError),
     #[error("probe failed: {0}")]
     Probe(#[source] E),
     #[error("probe dispatcher closed")]

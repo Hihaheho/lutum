@@ -1,18 +1,28 @@
 use tracing::{Instrument, field};
-use tracing_subscriber::layer::SubscriberExt as _;
 
-use lutum_trace::FieldValue;
+use lutum_trace::{FieldValue, subscriber::otel_capture_subscriber};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::testing::trace::NoopSpanExporter;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+
+fn test_subscriber() -> impl tracing::Subscriber + Send + Sync + 'static {
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(NoopSpanExporter::new())
+        .build();
+    let tracer = provider.tracer("lutum_trace_tests");
+    otel_capture_subscriber(tracer)
+}
 
 #[tokio::test]
 async fn basic_tree() {
     let collected = lutum_trace::test::collect(async {
-        let root = tracing::info_span!("root", answer = 42_u64);
+        let root = tracing::info_span!(target: "lutum", "root", answer = 42_u64);
         let _root = root.enter();
 
-        let child = tracing::info_span!("child", ok = true);
+        let child = tracing::info_span!(target: "lutum", "child", ok = true);
         let _child = child.enter();
 
-        tracing::info!(kind = "note", "child event");
+        tracing::info!(target: "lutum", kind = "note", "child event");
     })
     .await;
 
@@ -30,9 +40,37 @@ async fn basic_tree() {
 }
 
 #[tokio::test]
+async fn lutum_capture_field_opt_in() {
+    let collected = lutum_trace::test::collect(async {
+        let span = tracing::info_span!("user_span", lutum.capture = true, x = 1_u64);
+        let _g = span.enter();
+        tracing::info!(target: "my_app", "hello");
+    })
+    .await;
+
+    let s = collected.trace.span("user_span").expect("user span");
+    assert_eq!(s.field("x"), Some(&FieldValue::U64(1)));
+    assert!(s.event("hello").is_some());
+}
+
+#[tokio::test]
+async fn non_lutum_spans_ignored() {
+    let collected = lutum_trace::test::collect(async {
+        let span = tracing::info_span!("noise", foo = 1_u64);
+        let _g = span.enter();
+        tracing::info!("ignored");
+    })
+    .await;
+
+    assert!(collected.trace.roots.is_empty());
+    assert!(collected.trace.events().is_empty());
+}
+
+#[tokio::test]
 async fn late_record() {
     let collected = lutum_trace::test::collect(async {
         let span = tracing::info_span!(
+            target: "lutum",
             "late_record",
             request_id = field::Empty,
             finish_reason = field::Empty
@@ -58,9 +96,9 @@ async fn contextual_event_under_instrument() {
     let collected = lutum_trace::test::collect(async {
         async {
             tokio::task::yield_now().await;
-            tracing::info!("inside instrumented future");
+            tracing::info!(target: "lutum", "inside instrumented future");
         }
-        .instrument(tracing::info_span!("instrumented"))
+        .instrument(tracing::info_span!(target: "lutum", "instrumented"))
         .await;
     })
     .await;
@@ -75,7 +113,7 @@ async fn contextual_event_under_instrument() {
 #[tokio::test]
 async fn event_outside_span() {
     let collected = lutum_trace::test::collect(async {
-        tracing::info!("outside");
+        tracing::info!(target: "lutum", "outside");
     })
     .await;
 
@@ -85,13 +123,12 @@ async fn event_outside_span() {
 
 #[tokio::test]
 async fn no_scope_no_panic() {
-    let dispatch =
-        tracing::Dispatch::new(tracing_subscriber::registry().with(lutum_trace::layer()));
+    let dispatch = tracing::Dispatch::new(test_subscriber());
 
     tracing::dispatcher::with_default(&dispatch, || {
-        let span = tracing::info_span!("outside_scope", request_id = field::Empty);
+        let span = tracing::info_span!(target: "lutum", "outside_scope", request_id = field::Empty);
         let _guard = span.enter();
-        tracing::info!("still fine");
+        tracing::info!(target: "lutum", "still fine");
         span.record("request_id", field::display("req-outside"));
     });
 }
@@ -100,15 +137,15 @@ async fn no_scope_no_panic() {
 async fn span_id_reuse() {
     let collected = lutum_trace::test::collect(async {
         {
-            let span = tracing::info_span!("reused", iteration = 1_u64);
+            let span = tracing::info_span!(target: "lutum", "reused", iteration = 1_u64);
             let _guard = span.enter();
-            tracing::info!("first");
+            tracing::info!(target: "lutum", "first");
         }
 
         {
-            let span = tracing::info_span!("reused", iteration = 2_u64);
+            let span = tracing::info_span!(target: "lutum", "reused", iteration = 2_u64);
             let _guard = span.enter();
-            tracing::info!("second");
+            tracing::info!(target: "lutum", "second");
         }
     })
     .await;
@@ -124,7 +161,7 @@ async fn span_id_reuse() {
 #[tokio::test]
 async fn test_collect_no_global() {
     let collected = lutum_trace::test::collect(async {
-        tracing::info!("helper works");
+        tracing::info!(target: "lutum", "helper works");
         7_u64
     })
     .await;
@@ -137,21 +174,31 @@ async fn test_collect_no_global() {
 async fn external_parent_becomes_root() {
     use tracing::instrument::WithSubscriber as _;
 
-    let subscriber = tracing_subscriber::registry().with(lutum_trace::layer());
+    let subscriber = test_subscriber();
     let dispatch = tracing::Dispatch::new(subscriber);
 
-    let parent =
-        tracing::dispatcher::with_default(&dispatch, || tracing::info_span!("external_parent"));
+    let parent = tracing::dispatcher::with_default(
+        &dispatch,
+        || tracing::info_span!(target: "lutum", "external_parent"),
+    );
 
-    let collected = lutum_trace::capture(
-        async {
-            let child = tracing::info_span!(parent: &parent, "captured_child", value = 99_u64);
+    let collected = async {
+        let _parent_enter = parent.enter();
+        lutum_trace::try_capture(async {
+            let child = tracing::info_span!(
+                parent: &parent,
+                "captured_child",
+                lutum.capture = true,
+                value = 99_u64
+            );
             let _guard = child.enter();
-            tracing::info!("captured event");
-        }
-        .with_subscriber(dispatch.clone()),
-    )
-    .await;
+            tracing::info!(target: "lutum", "captured event");
+        })
+        .await
+    }
+    .with_subscriber(dispatch.clone())
+    .await
+    .expect("subscriber includes capture");
 
     assert_eq!(collected.trace.roots.len(), 1);
 

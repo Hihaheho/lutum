@@ -147,6 +147,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             );
             if self.#method_ident.replace(wrapped).is_some() {
                 ::tracing::warn!(
+                    target: "lutum",
                     slot = "tool_hook",
                     "singleton hook registration overwritten; last registered hook wins"
                 );
