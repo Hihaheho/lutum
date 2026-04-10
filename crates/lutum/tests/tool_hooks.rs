@@ -281,7 +281,10 @@ impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
                 self.0.lock().unwrap().push(format!("chunk:{}", name));
             }
             TextTurnEventWithTools::InvalidToolCall(metadata) => {
-                self.0.lock().unwrap().push(format!("call:{}", metadata.name));
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("call:{}", metadata.name));
             }
             _ => {}
         }
@@ -356,6 +359,12 @@ fn invalid_tool_events_are_visible_in_raw_stream() {
         )
     });
 
-    assert!(has_invalid_chunk, "expected InvalidToolCallChunk in stream, got: {events:?}");
-    assert!(has_invalid_call, "expected InvalidToolCall in stream, got: {events:?}");
+    assert!(
+        has_invalid_chunk,
+        "expected InvalidToolCallChunk in stream, got: {events:?}"
+    );
+    assert!(
+        has_invalid_call,
+        "expected InvalidToolCall in stream, got: {events:?}"
+    );
 }

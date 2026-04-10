@@ -307,7 +307,8 @@ fn summarize_result(json: &str) -> String {
         if let (Some(cols), Some(rows)) = (v.get("columns"), v.get("rows"))
             && let (Some(nc), Some(nr)) = (cols.as_array(), rows.as_array())
         {
-            if nc.len() == 1 && nc[0].as_str() == Some("error")
+            if nc.len() == 1
+                && nc[0].as_str() == Some("error")
                 && let Some(first_row) = nr.first().and_then(|r| r.as_array())
                 && let Some(msg) = first_row.first().and_then(|m| m.as_str())
             {
