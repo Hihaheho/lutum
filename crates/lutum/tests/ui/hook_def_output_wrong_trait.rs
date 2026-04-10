@@ -25,5 +25,5 @@ fn expect_count_future<F: std::future::Future<Output = Count>>(_: F) {}
 
 fn main() {
     let hooks = HookSet::new();
-    expect_count_future(hooks.aggregate_label("x"));
+    expect_count_future(hooks.aggregate_labels("x"));
 }

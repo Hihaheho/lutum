@@ -77,8 +77,8 @@ pub async fn approve_mode_request(reason: &str) -> bool {
 
 #[lutum::hooks]
 pub struct AgentHooks {
-    sql_validator: ValidateSql,
-    write_approver: ApproveWrite,
-    mode_source: GetTransactionMode,
-    mode_request_approver: ApproveModeRequest,
+    validate_sql: ValidateSql,
+    approve_write: ApproveWrite,
+    get_transaction_mode: GetTransactionMode,
+    approve_mode_request: ApproveModeRequest,
 }

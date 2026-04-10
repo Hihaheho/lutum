@@ -47,9 +47,9 @@ async fn select_label(_ctx: &Lutum, previous: Option<String>) -> String {
 
 #[lutum::hooks]
 struct LocalHooks {
-    prompt_slot: ValidatePrompt,
-    label_slot: ChooseLabel,
-    selection_slot: SelectLabel,
+    validate_prompt: ValidatePrompt,
+    choose_label: ChooseLabel,
+    select_label: SelectLabel,
 }
 
 fn main() {

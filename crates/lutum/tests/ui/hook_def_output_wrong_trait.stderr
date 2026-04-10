@@ -5,7 +5,7 @@ error[E0599]: the method `call` exists for struct `WrongAggregate`, but its trai
    | --------------------- method `call` not found for this struct because it doesn't satisfy `<WrongAggregate as FnOnce<(String,)>>::Output = _`, `WrongAggregate: AggregateLabel` or `WrongAggregate: Fn<(String,)>`
 ...
 14 | #[lutum::def_hook(always, aggregate = WrongAggregate, output = Count)]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called on `WrongAggregate` due to unsatisfied trait bounds
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
 19 | #[lutum::hooks]
    | --------------- in this macro invocation

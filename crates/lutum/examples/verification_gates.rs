@@ -81,7 +81,7 @@ async fn audit_contact(source: &str, contact: &Contact) -> Result<(), Vec<String
 
 #[hooks]
 struct VerificationHooks {
-    checks: AuditContact,
+    audit_contact: AuditContact,
 }
 
 fn build_prompt(source: &str, prior_failure: Option<&GateFailure>) -> String {

@@ -11,7 +11,7 @@ async fn validate_command(_cmd: &str) -> Validation {
 
 #[hooks]
 struct ShellHooks {
-    validators: ValidateCommand,
+    validate_command: ValidateCommand,
 }
 
 struct CommandPolicy {

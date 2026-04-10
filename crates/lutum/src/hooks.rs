@@ -124,7 +124,7 @@
 //! ```rust,ignore
 //! #[hooks]
 //! struct AppHooks {
-//!     output_validators: ValidateOutput,
+//!     validate_output: ValidateOutput,
 //! }
 //!
 //! let hooks = AppHooks::new()
@@ -157,7 +157,7 @@
 //! OperationKind) -> UsageEstimate`. The default implementation reads a typed estimate from
 //! `RequestExtensions` and falls back to zero.
 
-use crate::{OperationKind, RequestExtensions, budget::UsageEstimate};
+use crate::{OperationKind, RequestExtensions, ToolInput, ToolMetadata, budget::UsageEstimate};
 
 pub use lutum_protocol::hooks::{HookReentrancyError, Stateful};
 
@@ -253,7 +253,17 @@ pub async fn resolve_usage_estimate(
         .unwrap_or_else(UsageEstimate::zero)
 }
 
+#[lutum_macros::def_hook(singleton)]
+pub async fn tool_hook<I: ToolInput>(
+    metadata: &ToolMetadata,
+    input: &I,
+) -> Option<I::Output> {
+    let _ = metadata;
+    let _ = input;
+    None
+}
+
 #[lutum_macros::hooks]
 pub struct LutumHooks {
-    usage_estimate_resolvers: ResolveUsageEstimate,
+    resolve_usage_estimate: ResolveUsageEstimate,
 }

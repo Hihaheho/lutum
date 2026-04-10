@@ -25,7 +25,7 @@ async fn summarize_more(_ctx: &lutum::Lutum, label: &str) -> String {
 
 #[lutum::hooks]
 struct HookSet {
-    labels: slots::SummarizeLabel,
+    summarize_label: slots::SummarizeLabel,
 }
 
 fn expect_count_future<F: std::future::Future<Output = Count>>(_: F) {}

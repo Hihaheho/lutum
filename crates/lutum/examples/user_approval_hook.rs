@@ -118,7 +118,7 @@ enum Approval {
 /// Called once per tool call before execution.
 ///
 /// Default: auto-accept (useful for non-interactive contexts and tests).
-/// Override with `ApprovalHooks::new().with_approve(impl ApproveToolCall)`.
+/// Override with `ApprovalHooks::new().with_approve_tool_call(impl ApproveToolCall)`.
 #[def_hook(fallback)]
 async fn approve_tool_call(_name: &str, _args: &serde_json::Value) -> Approval {
     Approval::Accept
@@ -126,7 +126,7 @@ async fn approve_tool_call(_name: &str, _args: &serde_json::Value) -> Approval {
 
 #[hooks]
 struct ApprovalHooks {
-    approve: ApproveToolCall,
+    approve_tool_call: ApproveToolCall,
 }
 
 // ---------------------------------------------------------------------------

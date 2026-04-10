@@ -68,6 +68,13 @@ pub fn expand_tool_input_struct(item: ItemStruct, args: ToolInputArgs) -> proc_m
             ) -> Result<::lutum::ToolResult, ::lutum::ToolResultError> {
                 #ident::tool_result(self.metadata, output)
             }
+
+            pub fn handled(
+                self,
+                output: #output,
+            ) -> ::lutum::HandledTool<#ident, #output> {
+                ::lutum::HandledTool::new(self.metadata, self.input, output)
+            }
         }
 
         impl From<#call_ident> for #ident {
@@ -141,6 +148,13 @@ pub fn expand_tool_input_enum(item: ItemEnum, args: ToolInputArgs) -> proc_macro
                 output: #output,
             ) -> Result<::lutum::ToolResult, ::lutum::ToolResultError> {
                 #ident::tool_result(self.metadata, output)
+            }
+
+            pub fn handled(
+                self,
+                output: #output,
+            ) -> ::lutum::HandledTool<#ident, #output> {
+                ::lutum::HandledTool::new(self.metadata, self.input, output)
             }
         }
 

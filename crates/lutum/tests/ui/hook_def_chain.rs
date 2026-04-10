@@ -40,8 +40,8 @@ async fn choose_special(_ctx: &lutum::Lutum, label: &str) -> Option<String> {
 
 #[lutum::hooks]
 struct HookSet {
-    validators: ValidateOutput,
-    choosers: ChooseLabel,
+    validate_output: ValidateOutput,
+    choose_label: ChooseLabel,
 }
 
 fn main() {

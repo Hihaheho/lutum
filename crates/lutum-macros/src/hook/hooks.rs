@@ -2,6 +2,11 @@ use heck::ToSnakeCase;
 use quote::{format_ident, quote};
 use syn::{Attribute, Fields, ItemStruct, Path, PathArguments, Type};
 
+struct HookField {
+    ident: syn::Ident,
+    slot_path: Path,
+}
+
 pub fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
     if !item_struct.generics.params.is_empty() || item_struct.generics.where_clause.is_some() {
         return syn::Error::new_spanned(
@@ -28,58 +33,70 @@ pub fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
         .to_compile_error();
     };
 
-    let mut slot_paths: Vec<Path> = Vec::new();
+    let mut hook_fields = Vec::new();
     for field in fields.named {
-        let ty = field.ty;
-        let Type::Path(type_path) = ty else {
-            return syn::Error::new_spanned(ty, "#[hooks] fields must use a hook slot type")
+        let Some(field_ident) = field.ident else {
+            return syn::Error::new_spanned(field, "#[hooks] fields must be named")
                 .to_compile_error();
         };
-        if type_path.qself.is_some()
-            || type_path
-                .path
-                .segments
-                .iter()
-                .any(|segment| !matches!(segment.arguments, PathArguments::None))
-        {
+        let Type::Path(type_path) = field.ty else {
+            return syn::Error::new_spanned(field_ident, "#[hooks] fields must use a hook slot type")
+                .to_compile_error();
+        };
+        if type_path.qself.is_some() {
             return syn::Error::new_spanned(
                 type_path,
-                "#[hooks] fields must use a hook slot type path without generic arguments",
+                "#[hooks] fields must use a hook slot type path",
             )
             .to_compile_error();
         }
-        slot_paths.push(type_path.path.clone());
-    }
-    let helper_macro_ident =
-        format_ident!("__lutum_define_{}_hooks", ident.to_string().to_snake_case());
-    let struct_snake = ident.to_string().to_snake_case();
+        if type_path
+            .path
+            .segments
+            .iter()
+            .take(type_path.path.segments.len().saturating_sub(1))
+            .any(|segment| !matches!(segment.arguments, PathArguments::None))
+        {
+            return syn::Error::new_spanned(
+                type_path,
+                "#[hooks] only the last slot path segment may use generic arguments",
+            )
+            .to_compile_error();
+        }
 
-    // For each slot, generate two specific arms in the helper macro:
-    //   A) [<path> , rest...]  — this slot is followed by more slots
-    //   B) [<path> (,)?]       — this slot is the last one
-    //
-    // We can't use a generic `$head:path` arm because:
-    // - `$head:path!(...)` is invalid Rust syntax (path metavar can't be a macro name)
-    // - `use $head as alias; alias!(...)` imports the trait alongside the macro;
-    //   multiple `use` items with the same alias name in the same scope → E0252
-    //
-    // Why two arms instead of optional `$(, $rest:tt+)?`:
-    //   After passing through @accumulate the remaining list arrives as raw :tt tokens.
-    //   Those tokens can be matched against literal tokens in patterns, but only when
-    //   NOT captured as :path/:ident metavariables first.  Two arms keep the pattern
-    //   explicit and avoid metavar restriction issues.
-    //
-    // Alias names encode both struct and slot index to prevent E0252 when multiple
-    // #[hooks] structs expand in the same module.
-    let slot_arms: Vec<proc_macro2::TokenStream> = slot_paths
+        hook_fields.push(HookField {
+            ident: field_ident,
+            slot_path: type_path.path,
+        });
+    }
+
+    let helper_macro_ident = format_ident!("__lutum_define_{}_hooks", ident.to_string().to_snake_case());
+
+    let slot_arms = hook_fields
         .iter()
         .enumerate()
-        .map(|(i, slot_path)| {
+        .map(|(index, hook_field)| {
+            let field_ident = &hook_field.ident;
+            let slot_path = &hook_field.slot_path;
             let hooks_macro_path = hooks_macro_path_for_slot(slot_path);
-            let alias_ident = format_ident!("__lutum_hook_head_{}_{}", struct_snake, i);
+            let alias_ident = format_ident!("__lutum_hook_head_{}_{}", ident.to_string().to_snake_case(), index);
             let use_imports = slot_use_imports(slot_path);
+
+            let with_fn_ident = format_ident!("with_{}", field_ident);
+            let register_fn_ident = format_ident!("register_{}", field_ident);
+            let dispatch_fn_ident = field_ident.clone();
+            let default_method_ident = format_ident!("__lutum_hook_default_{}", field_ident);
+            let chain_field_ident = format_ident!("{}_chain", field_ident);
+            let with_chain_fn_ident = format_ident!("with_{}_chain", field_ident);
+            let set_chain_fn_ident = format_ident!("set_{}_chain", field_ident);
+            let aggregate_field_ident = format_ident!("{}_aggregate", field_ident);
+            let with_aggregate_fn_ident = format_ident!("with_{}_aggregate", field_ident);
+            let set_aggregate_fn_ident = format_ident!("set_{}_aggregate", field_ident);
+            let finalize_field_ident = format_ident!("{}_finalize", field_ident);
+            let with_finalize_fn_ident = format_ident!("with_{}_finalize", field_ident);
+            let set_finalize_fn_ident = format_ident!("set_{}_finalize", field_ident);
+
             quote! {
-                // Arm A: this slot is followed by more slots.
                 (
                     [$($fields:tt)*]
                     [$($field_inits:tt)*]
@@ -99,10 +116,23 @@ pub fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
                         [$($register_methods)*]
                         [$($dispatch_methods)*]
                         [$($default_impls)*]
+                        [#field_ident]
+                        [#with_fn_ident]
+                        [#register_fn_ident]
+                        [#dispatch_fn_ident]
+                        [#default_method_ident]
+                        [#chain_field_ident]
+                        [#with_chain_fn_ident]
+                        [#set_chain_fn_ident]
+                        [#aggregate_field_ident]
+                        [#with_aggregate_fn_ident]
+                        [#set_aggregate_fn_ident]
+                        [#finalize_field_ident]
+                        [#with_finalize_fn_ident]
+                        [#set_finalize_fn_ident]
                         [$($rest)*]
                     );
                 };
-                // Arm B: this slot is the last one (optional trailing comma).
                 (
                     [$($fields:tt)*]
                     [$($field_inits:tt)*]
@@ -122,12 +152,28 @@ pub fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
                         [$($register_methods)*]
                         [$($dispatch_methods)*]
                         [$($default_impls)*]
+                        [#field_ident]
+                        [#with_fn_ident]
+                        [#register_fn_ident]
+                        [#dispatch_fn_ident]
+                        [#default_method_ident]
+                        [#chain_field_ident]
+                        [#with_chain_fn_ident]
+                        [#set_chain_fn_ident]
+                        [#aggregate_field_ident]
+                        [#with_aggregate_fn_ident]
+                        [#set_aggregate_fn_ident]
+                        [#finalize_field_ident]
+                        [#with_finalize_fn_ident]
+                        [#set_finalize_fn_ident]
                         []
                     );
                 };
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    let slot_paths = hook_fields.iter().map(|field| &field.slot_path).collect::<Vec<_>>();
 
     quote! {
         #[allow(unused_macros)]
@@ -182,11 +228,12 @@ pub fn expand_hooks(item_struct: ItemStruct) -> proc_macro2::TokenStream {
     }
 }
 
-/// Returns the path to the exported accumulate alias for a slot.
-/// `slots::SelectLabel` → `slots::__lutum_hooks_SelectLabel`
-/// `SelectLabel`        → `__lutum_hooks_SelectLabel`
 fn hooks_macro_path_for_slot(slot_path: &Path) -> Path {
-    let mut p = slot_path.clone();
+    if is_lutum_root_tool_hook(slot_path) {
+        return syn::parse_quote!(::lutum::hooks::__lutum_hooks_ToolHook);
+    }
+
+    let mut p = strip_last_segment_arguments(slot_path);
     let last = p
         .segments
         .last_mut()
@@ -195,39 +242,48 @@ fn hooks_macro_path_for_slot(slot_path: &Path) -> Path {
     p
 }
 
-/// For path-based slots (more than one segment), emits `use` imports for the
-/// implementation-detail items the `@accumulate` arm references by unqualified name:
-///   - `<module>::__LutumDyn<SlotIdent>`     (the dyn dispatch trait)
-///   - `<module>::<SlotIdent>`               (the public hook trait)
-///   - `<module>::__lutum_hook_default_impl_<snake_ident>` (the default-impl fn)
-///
-/// For single-segment (plain ident) slots everything is already in scope.
 fn slot_use_imports(slot_path: &Path) -> proc_macro2::TokenStream {
-    if slot_path.segments.len() <= 1 {
+    if is_lutum_root_tool_hook(slot_path) {
+        return quote! {
+            #[allow(unused_imports)]
+            use ::lutum::hooks::__LutumDynToolHook;
+            #[allow(unused_imports)]
+            use ::lutum::hooks::__lutum_hook_default_impl_tool_hook;
+            #[allow(unused_imports)]
+            use ::lutum::ToolHook;
+        };
+    }
+
+    let bare_slot_path = strip_last_segment_arguments(slot_path);
+    if bare_slot_path.segments.len() <= 1 {
         return quote! {};
     }
 
-    let last_ident = &slot_path.segments.last().unwrap().ident;
+    let last_ident = &bare_slot_path.segments.last().unwrap().ident;
     let snake = last_ident.to_string().to_snake_case();
 
-    // Build fully-qualified paths by replacing the last segment (avoids trailing `::` issues).
-    let dyn_path = replace_last_segment(slot_path, format_ident!("__LutumDyn{}", last_ident));
-    let default_impl_path = replace_last_segment(
-        slot_path,
-        format_ident!("__lutum_hook_default_impl_{}", snake),
-    );
+    let dyn_path = replace_last_segment(&bare_slot_path, format_ident!("__LutumDyn{}", last_ident));
+    let default_impl_path =
+        replace_last_segment(&bare_slot_path, format_ident!("__lutum_hook_default_impl_{}", snake));
 
     quote! {
         #[allow(unused_imports)]
         use #dyn_path;
         #[allow(unused_imports)]
-        use #slot_path;
+        use #bare_slot_path;
         #[allow(unused_imports)]
         use #default_impl_path;
     }
 }
 
-/// Returns a copy of `path` with the last segment's ident replaced by `new_ident`.
+fn strip_last_segment_arguments(path: &Path) -> Path {
+    let mut p = path.clone();
+    if let Some(last) = p.segments.last_mut() {
+        last.arguments = PathArguments::None;
+    }
+    p
+}
+
 fn replace_last_segment(path: &Path, new_ident: proc_macro2::Ident) -> Path {
     let mut p = path.clone();
     p.segments
@@ -235,6 +291,17 @@ fn replace_last_segment(path: &Path, new_ident: proc_macro2::Ident) -> Path {
         .expect("path must have at least one segment")
         .ident = new_ident;
     p
+}
+
+fn is_lutum_root_tool_hook(slot_path: &Path) -> bool {
+    let mut segments = slot_path.segments.iter();
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    let Some(second) = segments.next() else {
+        return false;
+    };
+    segments.next().is_none() && first.ident == "lutum" && second.ident == "ToolHook"
 }
 
 fn conditional_attrs(attrs: &[Attribute]) -> Vec<Attribute> {

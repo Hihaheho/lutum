@@ -65,8 +65,8 @@ pub async fn resolve_reasoning_effort(
 
 #[lutum_macros::hooks]
 pub struct OpenAiHooks {
-    model_selectors: SelectOpenaiModel,
-    reasoning_effort_resolvers: ResolveReasoningEffort,
+    select_openai_model: SelectOpenaiModel,
+    resolve_reasoning_effort: ResolveReasoningEffort,
 }
 
 /// A snapshot of tool name information available at the time an SSE decode error occurred.

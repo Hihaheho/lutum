@@ -34,9 +34,9 @@ async fn validate_step(_step: &str) -> Validation {
 
 #[lutum::hooks]
 struct ProbeHooks {
-    number_hooks: RewriteNumber,
-    label_hooks: DecorateLabel,
-    validation_hooks: ValidateStep,
+    rewrite_number: RewriteNumber,
+    decorate_label: DecorateLabel,
+    validate_step: ValidateStep,
 }
 
 #[derive(Debug, Eq, PartialEq)]

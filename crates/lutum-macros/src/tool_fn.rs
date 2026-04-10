@@ -116,6 +116,13 @@ pub fn expand_tool_fn(item_fn: ItemFn, args: ToolFnArgs) -> proc_macro2::TokenSt
                 #input_ident::tool_result(self.metadata, output)
             }
 
+            pub fn handled(
+                self,
+                output: #output_ty,
+            ) -> ::lutum::HandledTool<#input_ident, #output_ty> {
+                ::lutum::HandledTool::new(self.metadata, self.input, output)
+            }
+
             pub async fn call(
                 self,
                 #(#call_method_args),*

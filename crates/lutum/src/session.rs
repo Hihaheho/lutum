@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
-    GenerationParams, InputMessageRole, ModelInput, ModelInputItem, RequestBudget, ToolResult,
-    Toolset, TurnConfig, TurnView, UncommittedAssistantTurn,
+    GenerationParams, InputMessageRole, IntoToolResult, ModelInput, ModelInputItem,
+    RequestBudget, ToolResult, ToolResultError, Toolset, TurnConfig, TurnView,
+    UncommittedAssistantTurn,
     budget::Usage,
     reducer::{
         StagedStructuredTurnResultWithTools, StagedTextTurnResultWithTools,
@@ -171,6 +172,14 @@ pub enum ToolRoundArityError {
     ExpectedAtMostOne { actual: usize },
 }
 
+#[derive(Debug, Error)]
+pub enum ToolRoundCommitError {
+    #[error("failed to build tool result: {0}")]
+    ToolResult(#[from] ToolResultError),
+    #[error("tool round validation failed: {0}")]
+    AssistantTurn(#[from] AssistantTurnInputError),
+}
+
 impl<T> UncommittedToolRound<T>
 where
     T: Toolset,
@@ -204,14 +213,20 @@ where
     ///
     /// Returns an error if the tool results don't match the assistant turn's tool calls (missing,
     /// extra, or mismatched id/name/arguments).
-    pub fn commit(
+    pub fn commit<I, R>(
         self,
         session: &mut Session,
-        tool_results: impl IntoIterator<Item = ToolResult>,
-    ) -> Result<(), AssistantTurnInputError>
+        tool_results: I,
+    ) -> Result<(), ToolRoundCommitError>
     where
         T: Toolset,
+        I: IntoIterator<Item = R>,
+        R: IntoToolResult,
     {
+        let tool_results = tool_results
+            .into_iter()
+            .map(IntoToolResult::into_tool_result)
+            .collect::<Result<Vec<_>, _>>()?;
         let ordered_tool_results = validate_and_order_tool_results(&self.turn, tool_results)?;
         self.turn.commit_into(session.input_mut());
         for tool_result in ordered_tool_results {

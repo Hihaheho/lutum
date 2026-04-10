@@ -87,3 +87,9 @@ fn hook_cross_module_output_path_compiles() {
     let cases = trybuild::TestCases::new();
     cases.pass("tests/ui/hook_cross_module_output_paths.rs");
 }
+
+#[test]
+fn tool_hook_toolset_compiles() {
+    let cases = trybuild::TestCases::new();
+    cases.pass("tests/ui/tool_hook_toolset.rs");
+}

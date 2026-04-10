@@ -74,8 +74,8 @@ pub async fn resolve_budget_tokens(
 
 #[lutum_macros::hooks]
 pub struct ClaudeHooks {
-    model_selectors: SelectClaudeModel,
-    budget_token_resolvers: ResolveBudgetTokens,
+    select_claude_model: SelectClaudeModel,
+    resolve_budget_tokens: ResolveBudgetTokens,
 }
 
 #[derive(Clone)]

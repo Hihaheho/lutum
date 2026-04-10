@@ -43,8 +43,8 @@ async fn finalize_more(_ctx: &lutum::Lutum, label: &str, last: Option<String>) -
 
 #[lutum::hooks]
 struct HookSet {
-    aggregate_labels: AggregateLabel,
-    finalize_labels: FinalizeLabel,
+    aggregate_label: AggregateLabel,
+    finalize_label: FinalizeLabel,
 }
 
 fn expect_count_future<F: std::future::Future<Output = Count>>(_: F) {}

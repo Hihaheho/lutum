@@ -386,16 +386,16 @@ async fn describe_label(label: &str) -> String {
 
 #[lutum::hooks]
 struct TestHooks {
-    label_slot: SelectLabel,
-    label_formatters: FormatLabel,
-    legacy_label_formatters: LegacyFormatLabel,
-    label_chooser: ChooseLabel,
-    chain_label_validator: ValidateChainLabel,
-    chain_label_transformer: TransformChainLabel,
-    chain_label_chooser: ChooseChainLabel,
-    chain_label_default_after_hooks: ChooseChainDefaultAfterHooks,
-    counter_slot: NextCounter,
-    label_describer: DescribeLabel,
+    select_label: SelectLabel,
+    format_label: FormatLabel,
+    legacy_format_label: LegacyFormatLabel,
+    choose_label: ChooseLabel,
+    validate_chain_label: ValidateChainLabel,
+    transform_chain_label: TransformChainLabel,
+    choose_chain_label: ChooseChainLabel,
+    choose_chain_default_after_hooks: ChooseChainDefaultAfterHooks,
+    next_counter: NextCounter,
+    describe_label: DescribeLabel,
 }
 
 struct NestedLabelHook {
@@ -745,8 +745,8 @@ fn resolve_usage_estimate_registered_override_wins_over_default_extensions_looku
 
 #[lutum::hooks]
 struct FoldChainHooks {
-    fold_chain_validator: FoldChainLabel,
-    fold_chain_picker: FoldChainPick,
+    fold_chain_label: FoldChainLabel,
+    fold_chain_pick: FoldChainPick,
 }
 
 #[test]
@@ -830,18 +830,18 @@ fn context_entrypoints_pass_operation_kind_to_resolve_usage_estimate() {
 
 #[lutum::hooks]
 struct AccumulateHooks {
-    accumulator: AccumulateLabel,
-    accumulate_chain: AccumulateChainLabel,
-    finalized: FinalizedLabel,
-    chain_finalized: ChainFinalizedLabel,
+    accumulate_label: AccumulateLabel,
+    accumulate_chain_label: AccumulateChainLabel,
+    finalized_label: FinalizedLabel,
+    chain_finalized_label: ChainFinalizedLabel,
 }
 
 #[lutum::hooks]
 struct OutputIntoHooks {
-    accumulator_into: AccumulateLabelInto,
-    fallback_accumulator_into: FallbackAccumulateLabelInto,
-    accumulate_chain_into: AccumulateChainLabelInto,
-    finalized_into: FinalizedLabelInto,
+    accumulate_label_into: AccumulateLabelInto,
+    fallback_accumulate_label_into: FallbackAccumulateLabelInto,
+    accumulate_chain_label_into: AccumulateChainLabelInto,
+    finalized_label_into: FinalizedLabelInto,
 }
 
 #[test]

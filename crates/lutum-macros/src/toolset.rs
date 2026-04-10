@@ -1,3 +1,4 @@
+use heck::ToSnakeCase;
 use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Fields, FieldsNamed, FieldsUnnamed, Ident, Type};
 
@@ -10,12 +11,16 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     };
 
     let call_enum_ident = format_ident!("{enum_ident}Call");
+    let handled_enum_ident = format_ident!("{enum_ident}Handled");
     let selector_enum_ident = format_ident!("{enum_ident}Selector");
+    let hooks_struct_ident = format_ident!("{enum_ident}Hooks");
     let variants = data_enum.variants.into_iter().collect::<Vec<_>>();
 
     let mut wrapper_variants = Vec::new();
+    let mut handled_variants = Vec::new();
     let mut selector_variants = Vec::new();
     let mut metadata_arms = Vec::new();
+    let mut handled_metadata_arms = Vec::new();
     let mut call_selector_arms = Vec::new();
     let mut call_into_input_arms = Vec::new();
     let mut call_into_parts_arms = Vec::new();
@@ -26,9 +31,18 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     let mut selector_try_from_arms = Vec::new();
     let mut selector_all = Vec::new();
     let mut selector_expected_names = Vec::new();
+    let mut handled_into_tool_result_arms = Vec::new();
+    let mut handled_from_impls = Vec::new();
+    let mut hooks_inner_fields = Vec::new();
+    let mut hooks_field_inits = Vec::new();
+    let mut hooks_with_methods = Vec::new();
+    let mut hooks_register_methods = Vec::new();
+    let mut hooks_dispatch_methods = Vec::new();
+    let mut call_hook_arms = Vec::new();
 
     for (index, variant) in variants.into_iter().enumerate() {
         let variant_ident = variant.ident;
+        let method_ident = format_ident!("{}", variant_ident.to_string().to_snake_case());
         let input_ty = match variant.fields {
             Fields::Unnamed(FieldsUnnamed { unnamed, .. }) if unnamed.len() == 1 => {
                 unnamed.first().unwrap().ty.clone()
@@ -45,11 +59,17 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             }
         };
         let wrapper_ident = wrapper_ident_for_type(&input_ty);
+        let handled_variant_ty = quote! {
+            ::lutum::HandledTool<#input_ty, <#input_ty as ::lutum::ToolInput>::Output>
+        };
         let tool_name = quote! { <#input_ty as ::lutum::ToolInput>::NAME };
+        let output_ty = quote! { <#input_ty as ::lutum::ToolInput>::Output };
 
         wrapper_variants.push(quote! { #variant_ident(#wrapper_ident) });
+        handled_variants.push(quote! { #variant_ident(#handled_variant_ty) });
         selector_variants.push(quote! { #variant_ident });
         metadata_arms.push(quote! { Self::#variant_ident(inner) => &inner.metadata });
+        handled_metadata_arms.push(quote! { Self::#variant_ident(inner) => inner.metadata() });
         call_selector_arms
             .push(quote! { Self::#variant_ident(_) => #selector_enum_ident::#variant_ident });
         call_into_input_arms.push(
@@ -83,12 +103,127 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                 }))
             }
         });
+        handled_into_tool_result_arms.push(quote! {
+            Self::#variant_ident(inner) => inner.into_tool_result()
+        });
+        handled_from_impls.push(quote! {
+            impl From<#handled_variant_ty> for #handled_enum_ident {
+                fn from(value: #handled_variant_ty) -> Self {
+                    Self::#variant_ident(value)
+                }
+            }
+        });
+        let with_fn_ident = format_ident!("with_{}", method_ident);
+        let register_fn_ident = format_ident!("register_{}", method_ident);
+        let hook_fn_ty = quote! {
+            ::std::option::Option<
+                ::std::sync::Arc<
+                    dyn Fn(
+                        &::lutum::ToolMetadata,
+                        &#input_ty,
+                    ) -> ::std::pin::Pin<
+                        ::std::boxed::Box<
+                            dyn ::std::future::Future<
+                                Output = ::std::option::Option<#output_ty>
+                            > + ::std::marker::Send + 'static
+                        >
+                    >
+                    + ::std::marker::Send
+                    + ::std::marker::Sync
+                >
+            >
+        };
+        hooks_inner_fields.push(quote! {
+            #method_ident: #hook_fn_ty
+        });
+        hooks_field_inits.push(quote! {
+            #method_ident: ::std::option::Option::None
+        });
+        let registration_body = quote! {
+            let wrapped = ::std::sync::Arc::new(
+                move |metadata: &::lutum::ToolMetadata, input: &#input_ty| -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::std::option::Option<#output_ty>> + ::std::marker::Send + 'static>> {
+                    ::std::boxed::Box::pin(hook(metadata, input))
+                }
+            );
+            if self.#method_ident.replace(wrapped).is_some() {
+                ::tracing::warn!(
+                    slot = "tool_hook",
+                    "singleton hook registration overwritten; last registered hook wins"
+                );
+            }
+        };
+        hooks_with_methods.push(quote! {
+            #[allow(dead_code)]
+            pub fn #with_fn_ident<__F, __Fut>(
+                mut self,
+                hook: __F,
+            ) -> Self
+            where
+                __F: Fn(&::lutum::ToolMetadata, &#input_ty) -> __Fut + ::std::marker::Send + ::std::marker::Sync + 'static,
+                __Fut: ::std::future::Future<Output = ::std::option::Option<#output_ty>> + ::std::marker::Send + 'static,
+            {
+                #registration_body
+                self
+            }
+        });
+        hooks_register_methods.push(quote! {
+            #[allow(dead_code)]
+            pub fn #register_fn_ident<__F, __Fut>(
+                &mut self,
+                hook: __F,
+            ) -> &mut Self
+            where
+                __F: Fn(&::lutum::ToolMetadata, &#input_ty) -> __Fut + ::std::marker::Send + ::std::marker::Sync + 'static,
+                __Fut: ::std::future::Future<Output = ::std::option::Option<#output_ty>> + ::std::marker::Send + 'static,
+            {
+                #registration_body
+                self
+            }
+        });
+        hooks_dispatch_methods.push(quote! {
+            #[allow(dead_code)]
+            pub async fn #method_ident(
+                &self,
+                metadata: &::lutum::ToolMetadata,
+                input: &#input_ty,
+            ) -> ::std::option::Option<#output_ty> {
+                use ::tracing::Instrument as _;
+                let span = ::tracing::info_span!("lutum_hook", name = "tool_hook");
+                async move {
+                    match &self.#method_ident {
+                        ::std::option::Option::Some(hook) => hook(metadata, input).await,
+                        ::std::option::Option::None => ::std::option::Option::None,
+                    }
+                }
+                .instrument(span)
+                .await
+            }
+        });
+        call_hook_arms.push(quote! {
+            Self::#variant_ident(call) => {
+                match hooks.#method_ident(&call.metadata, &call.input).await {
+                    ::std::option::Option::Some(output) => {
+                        ::lutum::ToolHookOutcome::Handled(
+                            #handled_enum_ident::#variant_ident(call.handled(output))
+                        )
+                    }
+                    ::std::option::Option::None => {
+                        ::lutum::ToolHookOutcome::Unhandled(Self::#variant_ident(call))
+                    }
+                }
+            }
+        });
     }
 
     quote! {
         #[derive(Clone, Debug, Eq, PartialEq)]
         #vis enum #call_enum_ident {
             #(#wrapper_variants,)*
+        }
+
+        #[derive(Clone, Debug)]
+        #vis enum #handled_enum_ident {
+            #(#handled_variants,)*
         }
 
         #[derive(
@@ -102,6 +237,48 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         #vis enum #selector_enum_ident {
             #(#selector_variants,)*
         }
+
+        #[derive(::std::clone::Clone)]
+        #vis struct #hooks_struct_ident {
+            #(#hooks_inner_fields,)*
+        }
+
+        impl ::std::default::Default for #hooks_struct_ident {
+            fn default() -> Self {
+                Self {
+                    #(#hooks_field_inits,)*
+                }
+            }
+        }
+
+        #[allow(dead_code)]
+        impl #hooks_struct_ident {
+            pub fn new() -> Self {
+                Self::default()
+            }
+
+            #(#hooks_with_methods)*
+            #(#hooks_register_methods)*
+            #(#hooks_dispatch_methods)*
+        }
+
+        impl #handled_enum_ident {
+            pub fn metadata(&self) -> &::lutum::ToolMetadata {
+                match self {
+                    #(#handled_metadata_arms,)*
+                }
+            }
+        }
+
+        impl ::lutum::IntoToolResult for #handled_enum_ident {
+            fn into_tool_result(self) -> Result<::lutum::ToolResult, ::lutum::ToolResultError> {
+                match self {
+                    #(#handled_into_tool_result_arms,)*
+                }
+            }
+        }
+
+        #(#handled_from_impls)*
 
         impl #selector_enum_ident {
             pub const ALL: &'static [Self] = &[#(#selector_all),*];
@@ -223,6 +400,15 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             pub fn into_parts(self) -> (::lutum::ToolMetadata, #enum_ident) {
                 match self {
                     #(#call_into_parts_arms,)*
+                }
+            }
+
+            pub async fn hook(
+                self,
+                hooks: &#hooks_struct_ident,
+            ) -> ::lutum::ToolHookOutcome<Self, #handled_enum_ident> {
+                match self {
+                    #(#call_hook_arms,)*
                 }
             }
         }

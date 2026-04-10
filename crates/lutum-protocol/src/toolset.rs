@@ -78,6 +78,73 @@ pub enum ToolExecutionError<E> {
     ToolResult(#[from] ToolResultError),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HandledTool<I, O> {
+    metadata: ToolMetadata,
+    input: I,
+    output: O,
+}
+
+impl<I, O> HandledTool<I, O> {
+    pub fn new(metadata: ToolMetadata, input: I, output: O) -> Self {
+        Self {
+            metadata,
+            input,
+            output,
+        }
+    }
+
+    pub fn metadata(&self) -> &ToolMetadata {
+        &self.metadata
+    }
+
+    pub fn input(&self) -> &I {
+        &self.input
+    }
+
+    pub fn output(&self) -> &O {
+        &self.output
+    }
+
+    pub fn into_parts(self) -> (ToolMetadata, I, O) {
+        (self.metadata, self.input, self.output)
+    }
+}
+
+impl<I, O> HandledTool<I, O>
+where
+    I: ToolInput<Output = O>,
+{
+    pub fn into_tool_result(self) -> Result<ToolResult, ToolResultError> {
+        let (metadata, _input, output) = self.into_parts();
+        I::tool_result(metadata, output)
+    }
+}
+
+pub enum ToolHookOutcome<C, H> {
+    Handled(H),
+    Unhandled(C),
+}
+
+pub trait IntoToolResult {
+    fn into_tool_result(self) -> Result<ToolResult, ToolResultError>;
+}
+
+impl IntoToolResult for ToolResult {
+    fn into_tool_result(self) -> Result<ToolResult, ToolResultError> {
+        Ok(self)
+    }
+}
+
+impl<I, O> IntoToolResult for HandledTool<I, O>
+where
+    I: ToolInput<Output = O>,
+{
+    fn into_tool_result(self) -> Result<ToolResult, ToolResultError> {
+        self.into_tool_result()
+    }
+}
+
 pub trait ToolInput:
     Serialize + DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static
 {

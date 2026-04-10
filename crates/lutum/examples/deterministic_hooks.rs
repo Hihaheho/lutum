@@ -15,8 +15,8 @@ async fn validate_output(_output: &str) -> Result<(), String> {
 
 #[hooks]
 struct DeterministicHooks {
-    prompt_guards: ValidatePrompt,
-    output_guards: ValidateOutput,
+    validate_prompt: ValidatePrompt,
+    validate_output: ValidateOutput,
 }
 
 #[hook(ValidatePrompt)]

@@ -54,7 +54,7 @@ pub use context::{
 };
 pub use hooks::{
     Aggregate, AggregateInto, Chain, Finalize, FinalizeInto, FirstSuccess, HookReentrancyError,
-    LutumHooks, ResolveUsageEstimate, ShortCircuit, Stateful,
+    LutumHooks, ResolveUsageEstimate, ShortCircuit, Stateful, ToolHook,
 };
 pub use session::{CommitTurn, UncommittedToolRound};
 
@@ -84,10 +84,11 @@ pub use lutum_protocol::{
     TextTurnEvent, TextTurnEventStream, TextTurnEventStreamWithTools, TextTurnEventWithTools,
     TextTurnReducer, TextTurnReducerWithTools, TextTurnReductionError, TextTurnResult,
     TextTurnResultWithTools, TextTurnState, TextTurnStateWithTools, ToolCallError, ToolCallId,
-    ToolCallItemView, ToolCallWrapper, ToolDef, ToolExecutionError, ToolInput, ToolMetadata,
-    ToolName, ToolPolicy, ToolResult, ToolResultError, ToolResultItemView, ToolSelector, Toolset,
-    TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView, UncommittedAssistantTurn, Usage,
-    UsageEstimate, UsageRecoveryAdapter, assistant_json, find_tool_call_arguments,
+    ToolCallItemView, ToolCallWrapper, ToolDef, ToolExecutionError, ToolHookOutcome, ToolInput,
+    ToolMetadata, ToolName, ToolPolicy, ToolResult, ToolResultError, ToolResultItemView,
+    ToolSelector, Toolset, TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView,
+    UncommittedAssistantTurn, Usage, UsageEstimate, UsageRecoveryAdapter, assistant_json,
+    find_tool_call_arguments, HandledTool, IntoToolResult,
 };
 pub use mock::{
     MockCompletionScenario, MockError, MockLlmAdapter, MockStructuredCompletionScenario,
@@ -96,5 +97,5 @@ pub use mock::{
 };
 pub use session::{
     Session, SessionDefaults, StructuredStepOutcomeWithTools, TextStepOutcomeWithTools,
-    ToolRoundArityError,
+    ToolRoundArityError, ToolRoundCommitError,
 };

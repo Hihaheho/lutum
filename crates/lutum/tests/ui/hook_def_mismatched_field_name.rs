@@ -27,7 +27,7 @@ async fn reject_secrets(
 
 #[lutum::hooks]
 struct ShellHooks {
-    my_validators: ValidateCommand,
+    validate_command: ValidateCommand,
 }
 
 fn main() {
