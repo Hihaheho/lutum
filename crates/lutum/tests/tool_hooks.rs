@@ -64,15 +64,16 @@ fn tool_call_hook_preserves_metadata_input_and_output_when_handled() {
         RawJson::parse("{\"city\":\"Osaka\"}").unwrap(),
     ))
     .unwrap();
-    let hooks = ToolsHooks::new().with_weather(|metadata: &lutum::ToolMetadata, input: &WeatherArgs| {
-        let id = metadata.id.as_str().to_owned();
-        let city = input.city.clone();
-        async move {
-            Some(WeatherResult {
-                forecast: format!("hooked:{id}:{city}"),
-            })
-        }
-    });
+    let hooks =
+        ToolsHooks::new().with_weather(|metadata: &lutum::ToolMetadata, input: &WeatherArgs| {
+            let id = metadata.id.as_str().to_owned();
+            let city = input.city.clone();
+            async move {
+                Some(WeatherResult {
+                    forecast: format!("hooked:{id}:{city}"),
+                })
+            }
+        });
 
     match block_on(call.hook(&hooks)) {
         ToolHookOutcome::Handled(ToolsHandled::Weather(handled)) => {
@@ -127,19 +128,20 @@ fn tool_round_commit_accepts_typed_handled_values() {
         session
             .text_turn()
             .tools::<Tools>()
-            .allow_only(vec![ToolsSelector::Weather])
+            .available_tools(vec![ToolsSelector::Weather])
             .collect()
             .await
             .unwrap()
     });
-    let hooks = ToolsHooks::new().with_weather(|_metadata: &lutum::ToolMetadata, input: &WeatherArgs| {
-        let city = input.city.clone();
-        async move {
-            Some(WeatherResult {
-                forecast: format!("hooked:{city}"),
-            })
-        }
-    });
+    let hooks =
+        ToolsHooks::new().with_weather(|_metadata: &lutum::ToolMetadata, input: &WeatherArgs| {
+            let city = input.city.clone();
+            async move {
+                Some(WeatherResult {
+                    forecast: format!("hooked:{city}"),
+                })
+            }
+        });
 
     match outcome {
         TextStepOutcomeWithTools::NeedsTools(round) => {

@@ -220,50 +220,30 @@ pub trait Toolset: Send + Sync + 'static {
     fn parse_tool_call(metadata: ToolMetadata) -> Result<Self::ToolCall, ToolCallError>;
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Default)]
-pub enum ToolPolicy<T: Toolset> {
-    #[default]
-    Disabled,
-    AllowAll,
-    AllowOnly(Vec<T::Selector>),
-    RequireAll,
-    RequireOnly(Vec<T::Selector>),
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolAvailability<S> {
+    All,
+    Only(Vec<S>),
 }
 
-impl<T> ToolPolicy<T>
-where
-    T: Toolset,
-{
-    pub fn allow_only(selectors: impl IntoIterator<Item = T::Selector>) -> Self {
-        let selectors = selectors.into_iter().collect::<Vec<_>>();
-        if selectors.is_empty() {
-            Self::Disabled
-        } else {
-            Self::AllowOnly(selectors)
-        }
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolRequirement<S> {
+    Optional,
+    AtLeastOne,
+    Specific(S),
+}
 
-    pub fn require_only(selectors: impl IntoIterator<Item = T::Selector>) -> Self {
-        let selectors = selectors.into_iter().collect::<Vec<_>>();
-        if selectors.is_empty() {
-            Self::Disabled
-        } else {
-            Self::RequireOnly(selectors)
-        }
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolConstraints<T: Toolset> {
+    pub available: ToolAvailability<T::Selector>,
+    pub requirement: ToolRequirement<T::Selector>,
+}
 
-    pub fn uses_tools(&self) -> bool {
-        !matches!(self, Self::Disabled)
-    }
-
-    pub fn requires_tools(&self) -> bool {
-        matches!(self, Self::RequireAll | Self::RequireOnly(_))
-    }
-
-    pub fn selected(&self) -> Option<&[T::Selector]> {
-        match self {
-            Self::AllowOnly(selectors) | Self::RequireOnly(selectors) => Some(selectors.as_slice()),
-            _ => None,
+impl<T: Toolset> Default for ToolConstraints<T> {
+    fn default() -> Self {
+        Self {
+            available: ToolAvailability::All,
+            requirement: ToolRequirement::Optional,
         }
     }
 }

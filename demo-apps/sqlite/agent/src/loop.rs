@@ -88,16 +88,15 @@ pub async fn run_turn(
         let outcome = session
             .text_turn()
             .tools::<SqlTools>()
-            .allow_all()
             .ext(CacheMarker)
             .collect_with(
                 move |event: &TextTurnEventWithTools<SqlTools>,
                       _cx: &HandlerContext<TextTurnStateWithTools<SqlTools>>|
                       -> Result<HandlerDirective, Infallible> {
-                    if let TextTurnEventWithTools::TextDelta { delta } = event {
-                        if let Some(tx) = &tx {
-                            let _ = tx.send(delta.clone());
-                        }
+                    if let TextTurnEventWithTools::TextDelta { delta } = event
+                        && let Some(tx) = &tx
+                    {
+                        let _ = tx.send(delta.clone());
                     }
                     Ok(HandlerDirective::Continue)
                 },
@@ -432,15 +431,14 @@ async fn execute_ddl_op(
 /// Scan the session's committed turns and add their cache token counts to `usage`.
 fn collect_session_cache_tokens(session: &Session, usage: &mut CumulativeUsage) {
     for item in session.input().items() {
-        if let ModelInputItem::Turn(committed_turn) = item {
-            if let Some(ct) = committed_turn
+        if let ModelInputItem::Turn(committed_turn) = item
+            && let Some(ct) = committed_turn
                 .as_ref()
                 .as_any()
                 .downcast_ref::<ClaudeCommittedTurn>()
-            {
-                usage.cache_creation_tokens += ct.cache_creation_input_tokens;
-                usage.cache_read_tokens += ct.cache_read_input_tokens;
-            }
+        {
+            usage.cache_creation_tokens += ct.cache_creation_input_tokens;
+            usage.cache_read_tokens += ct.cache_read_input_tokens;
         }
     }
 }

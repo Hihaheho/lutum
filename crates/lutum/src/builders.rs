@@ -19,7 +19,7 @@ use lutum_protocol::{
         TextTurnReductionError, TextTurnState as TextTurnCollectedState, TextTurnStateWithTools,
     },
     structured::StructuredOutput,
-    toolset::{ToolPolicy, Toolset},
+    toolset::{ToolAvailability, ToolConstraints, ToolRequirement, Toolset},
 };
 
 use crate::{
@@ -140,7 +140,7 @@ impl<'a> TextTurn<'a> {
         let turn = ProtocolTextTurn {
             config: TurnConfig {
                 generation: turn.config.generation,
-                tools: ToolPolicy::Disabled,
+                tools: ToolConstraints::default(),
                 budget: turn.config.budget,
             },
         };
@@ -315,23 +315,18 @@ where
         self
     }
 
-    pub fn allow_all(mut self) -> Self {
-        self.turn.config.tools = ToolPolicy::AllowAll;
+    pub fn available_tools(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
+        self.turn.config.tools.available = ToolAvailability::Only(selectors.into_iter().collect());
         self
     }
 
-    pub fn allow_only(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
-        self.turn.config.tools = ToolPolicy::allow_only(selectors);
+    pub fn require_any_tool(mut self) -> Self {
+        self.turn.config.tools.requirement = ToolRequirement::AtLeastOne;
         self
     }
 
-    pub fn require_all(mut self) -> Self {
-        self.turn.config.tools = ToolPolicy::RequireAll;
-        self
-    }
-
-    pub fn require_only(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
-        self.turn.config.tools = ToolPolicy::require_only(selectors);
+    pub fn require_tool(mut self, selector: T::Selector) -> Self {
+        self.turn.config.tools.requirement = ToolRequirement::Specific(selector);
         self
     }
 
@@ -515,7 +510,7 @@ where
         let turn = ProtocolStructuredTurn {
             config: TurnConfig {
                 generation: turn.config.generation,
-                tools: ToolPolicy::Disabled,
+                tools: ToolConstraints::default(),
                 budget: turn.config.budget,
             },
             output: turn.output,
@@ -696,23 +691,18 @@ where
         self
     }
 
-    pub fn allow_all(mut self) -> Self {
-        self.turn.config.tools = ToolPolicy::AllowAll;
+    pub fn available_tools(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
+        self.turn.config.tools.available = ToolAvailability::Only(selectors.into_iter().collect());
         self
     }
 
-    pub fn allow_only(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
-        self.turn.config.tools = ToolPolicy::allow_only(selectors);
+    pub fn require_any_tool(mut self) -> Self {
+        self.turn.config.tools.requirement = ToolRequirement::AtLeastOne;
         self
     }
 
-    pub fn require_all(mut self) -> Self {
-        self.turn.config.tools = ToolPolicy::RequireAll;
-        self
-    }
-
-    pub fn require_only(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
-        self.turn.config.tools = ToolPolicy::require_only(selectors);
+    pub fn require_tool(mut self, selector: T::Selector) -> Self {
+        self.turn.config.tools.requirement = ToolRequirement::Specific(selector);
         self
     }
 

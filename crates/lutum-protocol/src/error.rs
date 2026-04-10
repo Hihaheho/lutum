@@ -20,6 +20,8 @@ pub enum AgentError {
     StructuredOutput(#[source] serde_json::Error),
     #[error("no-tools contract violated: {0}")]
     NoToolsContractViolation(#[from] NoToolsContractViolation),
+    #[error("invalid tool constraints: required tool `{tool}` is not in the available set")]
+    InvalidToolConstraints { tool: String },
     #[error("other error: {0}")]
     Other(#[source] BoxError),
 }

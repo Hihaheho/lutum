@@ -259,7 +259,7 @@ impl SqliteDb {
     pub fn execute_write(&self, sql: &str) -> Result<ModifyResult, DbError> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(sql)?;
-        let rows_affected = conn.changes() as u64;
+        let rows_affected = conn.changes();
         Ok(ModifyResult {
             rows_affected,
             message: format!("{rows_affected} row(s) affected"),

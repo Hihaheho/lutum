@@ -40,7 +40,7 @@ fn input() -> ModelInput {
 
 fn weather_turn<'a>(turn: lutum::TextTurn<'a>) -> lutum::TextTurnWithTools<'a, Tools> {
     turn.tools::<Tools>()
-        .allow_only(vec![ToolsSelector::Weather])
+        .available_tools(vec![ToolsSelector::Weather])
 }
 
 fn shared_pool_budget_error(err: &lutum::AgentError) -> &lutum::SharedPoolBudgetError {

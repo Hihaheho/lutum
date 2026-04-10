@@ -7,8 +7,8 @@ use lutum::{
     ErasedTextTurnEventStream, InputMessageRole, Lutum, LutumError, MessageContent, ModelInput,
     ModelInputItem, ModelName, ModelNameError, NonEmpty, OperationKind, RawJson, RequestBudget,
     RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions, Temperature,
-    TextTurnReducer, TextTurnReducerWithTools, ToolMetadata, ToolPolicy, ToolResult, TurnAdapter,
-    Usage, UsageEstimate, UsageRecoveryAdapter,
+    TextTurnReducer, TextTurnReducerWithTools, ToolAvailability, ToolConstraints, ToolMetadata,
+    ToolRequirement, ToolResult, TurnAdapter, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -138,7 +138,7 @@ fn typed_public_api_compiles_and_constructs_requests() {
     let _text = ctx
         .text_turn(input.clone())
         .tools::<Tools>()
-        .allow_only(vec![ToolsSelector::Weather])
+        .available_tools(vec![ToolsSelector::Weather])
         .budget(RequestBudget::from_tokens(256));
     let _structured = ctx
         .structured_turn::<Summary>(input.clone())
@@ -171,7 +171,7 @@ fn model_name_rejects_empty_strings() {
 }
 
 #[test]
-fn selector_plans_round_trip_and_drive_tool_policy() {
+fn selector_plans_round_trip_and_drive_tool_constraints() {
     let plan = ToolPlan {
         tools: vec![ToolsSelector::Weather],
     };
@@ -179,13 +179,17 @@ fn selector_plans_round_trip_and_drive_tool_policy() {
     assert_eq!(json, "{\"tools\":[\"weather\"]}");
 
     let decoded: ToolPlan = serde_json::from_str(&json).unwrap();
-    let policy = ToolPolicy::<Tools>::allow_only(decoded.tools);
-    let selected = policy
-        .selected()
-        .unwrap()
-        .iter()
-        .map(|selector| selector.name())
-        .collect::<Vec<_>>();
+    let constraints = ToolConstraints::<Tools> {
+        available: ToolAvailability::Only(decoded.tools),
+        requirement: ToolRequirement::Optional,
+    };
+    let selected = match &constraints.available {
+        ToolAvailability::Only(selectors) => selectors
+            .iter()
+            .map(|selector| selector.name())
+            .collect::<Vec<_>>(),
+        ToolAvailability::All => vec![],
+    };
 
     assert_eq!(selected, vec!["weather"]);
 }
@@ -278,8 +282,7 @@ fn context_rejects_invalid_model_input_before_adapter_call() {
         ),
     ]);
 
-    let err =
-        futures::executor::block_on(ctx.text_turn(input).tools::<Tools>().allow_all().start());
+    let err = futures::executor::block_on(ctx.text_turn(input).tools::<Tools>().start());
 
     assert!(matches!(
         err,

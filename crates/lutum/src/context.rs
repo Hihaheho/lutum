@@ -33,7 +33,7 @@ use lutum_protocol::{
         TextTurnReducerWithTools, TextTurnReductionError, TextTurnState, TextTurnStateWithTools,
     },
     structured::StructuredOutput,
-    toolset::{ToolSelector, Toolset},
+    toolset::{ToolAvailability, ToolConstraints, ToolRequirement, ToolSelector, Toolset},
 };
 
 use crate::hooks::LutumHooks;
@@ -1730,31 +1730,49 @@ fn erase_turn_config<T>(config: TurnConfig<T>) -> Result<AdapterTurnConfig, Agen
 where
     T: Toolset,
 {
-    let selected = config.tools.selected();
-    let selected_names = selected.as_ref().map(|selectors| {
-        selectors
-            .iter()
-            .map(|selector| selector.name())
-            .collect::<Vec<_>>()
-    });
-    let tool_choice = if config.tools.requires_tools() {
-        if let Some(names) = selected_names.as_ref() {
-            if names.len() == 1 {
-                AdapterToolChoice::Specific(names[0].to_string())
-            } else {
-                AdapterToolChoice::Required
-            }
-        } else {
-            AdapterToolChoice::Required
-        }
-    } else if config.tools.uses_tools() {
-        AdapterToolChoice::Auto
-    } else {
-        AdapterToolChoice::None
+    let ToolConstraints {
+        available,
+        requirement,
+    } = config.tools;
+
+    // Validate: require_tool(x) must be in the available set when availability is restricted.
+    if let ToolRequirement::Specific(ref selector) = requirement
+        && let ToolAvailability::Only(ref only) = available
+        && !only.contains(selector)
+    {
+        return Err(AgentError::InvalidToolConstraints {
+            tool: selector.name().to_string(),
+        });
+    }
+
+    let tool_defs = match &available {
+        ToolAvailability::All => T::definitions().iter().collect::<Vec<_>>(),
+        ToolAvailability::Only(selectors) => T::definitions_for(selectors.iter().copied()),
     };
-    let tool_defs = selected
-        .map(|selectors| T::definitions_for(selectors.iter().copied()))
-        .unwrap_or_else(|| T::definitions().iter().collect::<Vec<_>>());
+
+    // When the resolved tool list is empty, tools are effectively disabled.
+    // AtLeastOne with no available tools is a constraint violation.
+    if tool_defs.is_empty() {
+        if let ToolRequirement::AtLeastOne = requirement {
+            return Err(AgentError::InvalidToolConstraints {
+                tool: "(none available)".to_string(),
+            });
+        }
+        return Ok(AdapterTurnConfig {
+            generation: config.generation,
+            tools: vec![],
+            tool_choice: AdapterToolChoice::None,
+        });
+    }
+
+    let tool_choice = match requirement {
+        ToolRequirement::Optional => AdapterToolChoice::Auto,
+        ToolRequirement::AtLeastOne => AdapterToolChoice::Required,
+        ToolRequirement::Specific(selector) => {
+            AdapterToolChoice::Specific(selector.name().to_string())
+        }
+    };
+
     let tools = tool_defs
         .into_iter()
         .map(|tool| {

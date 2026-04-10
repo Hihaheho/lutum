@@ -128,7 +128,7 @@ fn tool_round_is_only_applied_on_explicit_commit() {
         session
             .text_turn()
             .tools::<Tools>()
-            .allow_only(vec![ToolsSelector::Weather])
+            .available_tools(vec![ToolsSelector::Weather])
             .collect()
             .await
             .unwrap()
@@ -266,7 +266,7 @@ fn structured_tool_round_stays_explicit_until_commit() {
         session
             .structured_turn::<Summary>()
             .tools::<Tools>()
-            .allow_only(vec![ToolsSelector::Weather])
+            .available_tools(vec![ToolsSelector::Weather])
             .collect()
             .await
             .unwrap()

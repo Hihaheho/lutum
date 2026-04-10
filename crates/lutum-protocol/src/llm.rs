@@ -8,7 +8,7 @@ use crate::{
     budget::{RequestBudget, Usage},
     conversation::{ModelInput, RawJson, ToolMetadata},
     structured::StructuredOutput,
-    toolset::{NoTools, ToolPolicy, Toolset},
+    toolset::{NoTools, ToolConstraints, Toolset},
     transcript::CommittedTurn,
 };
 
@@ -110,7 +110,7 @@ pub struct TurnConfig<T: Toolset = NoTools> {
     #[builder(default)]
     pub generation: GenerationParams,
     #[builder(default)]
-    pub tools: ToolPolicy<T>,
+    pub tools: ToolConstraints<T>,
     #[builder(default = RequestBudget::unlimited())]
     pub budget: RequestBudget,
 }
@@ -122,7 +122,7 @@ where
     pub fn new() -> Self {
         Self {
             generation: GenerationParams::default(),
-            tools: ToolPolicy::Disabled,
+            tools: ToolConstraints::default(),
             budget: RequestBudget::unlimited(),
         }
     }

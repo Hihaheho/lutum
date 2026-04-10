@@ -150,7 +150,7 @@ fn session_commits_parallel_tool_results_in_order() {
         session
             .text_turn()
             .tools::<Tools>()
-            .allow_only(vec![ToolsSelector::Weather, ToolsSelector::Search])
+            .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
             .collect()
             .await
             .unwrap()

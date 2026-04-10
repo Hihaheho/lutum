@@ -1,4 +1,3 @@
-use lutum::{ToolPolicy, llm::TextTurn};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -35,13 +34,9 @@ enum OtherTools {
 }
 
 fn main() {
-    let _turn = {
-        let mut turn =
-            TextTurn::<AppTools>::new();
-        turn.config.tools = ToolPolicy::allow_only(vec![
-            AppToolsSelector::Weather,
-            OtherToolsSelector::Search,
-        ]);
-        turn
-    };
+    // available_tools takes T::Selector — mixing selectors from different toolsets is a type error
+    let _selectors: Vec<AppToolsSelector> = vec![
+        AppToolsSelector::Weather,
+        OtherToolsSelector::Search,
+    ];
 }
