@@ -1780,6 +1780,7 @@ fn parse_response_usage_value(usage: &Value) -> Usage {
         output_tokens,
         total_tokens,
         cost_micros_usd: 0,
+        ..Usage::zero()
     }
 }
 
@@ -1798,6 +1799,7 @@ fn parse_completion_usage(value: &CompletionUsage) -> Usage {
         output_tokens: value.total_tokens.saturating_sub(value.prompt_tokens),
         total_tokens: value.total_tokens,
         cost_micros_usd: 0,
+        ..Usage::zero()
     }
 }
 

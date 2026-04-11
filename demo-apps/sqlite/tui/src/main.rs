@@ -12,8 +12,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use lutum::{Lutum, ModelName, SharedPoolBudgetManager, SharedPoolBudgetOptions};
-use lutum_claude::messages::{ClaudeContentBlock, MessagesRequest};
-use lutum_claude::{CacheControl, ClaudeAdapter, FallbackSerializer};
+use lutum_claude::ClaudeAdapter;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use sqlite_agent::{AgentConfig, DbRegistry, SqliteDb, WriteDecision};
 
@@ -53,53 +52,6 @@ struct Args {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt-cache FallbackSerializer
-// ---------------------------------------------------------------------------
-
-/// Applies `cache_control: { type: "ephemeral" }` at three cache breakpoints:
-///   1. Last system block  — covers the system prompt prefix
-///   2. Last tool          — covers system + all tool definitions (static across turns)
-///   3. Last content block of the second-to-last message — covers conversation history
-///
-/// Registered only in the TUI (which always wants prompt caching).
-struct CacheControlSerializer;
-
-impl FallbackSerializer for CacheControlSerializer {
-    fn apply(&self, request: &mut MessagesRequest) {
-        // 1. Last system block
-        if let Some(blocks) = request.system.as_mut()
-            && let Some(last) = blocks.last_mut()
-        {
-            last.cache_control = Some(CacheControl::ephemeral());
-        }
-
-        // 2. Last tool definition
-        if let Some(tools) = request.tools.as_mut()
-            && let Some(last) = tools.last_mut()
-        {
-            last.cache_control = Some(CacheControl::ephemeral());
-        }
-
-        // 3. Last content block of the second-to-last message (penultimate turn)
-        let n = request.messages.len();
-        if n >= 2 {
-            let msg = &mut request.messages[n - 2];
-            if let Some(block) = msg.content.last_mut() {
-                match block {
-                    ClaudeContentBlock::Text(b) => {
-                        b.cache_control = Some(CacheControl::ephemeral())
-                    }
-                    ClaudeContentBlock::ToolResult(b) => {
-                        b.cache_control = Some(CacheControl::ephemeral())
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -127,8 +79,9 @@ async fn main() -> anyhow::Result<()> {
 
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let model = ModelName::new(&args.model)?;
-    let mut adapter = ClaudeAdapter::new(api_key).with_default_model(model);
-    adapter.set_fallback_serializer(Box::new(CacheControlSerializer));
+    let adapter = ClaudeAdapter::new(api_key)
+        .with_default_model(model)
+        .with_prompt_caching();
     let llm = Lutum::new(Arc::new(adapter), budget);
     let config = AgentConfig {
         max_rows: args.max_rows,

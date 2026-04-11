@@ -41,6 +41,12 @@ pub struct Usage {
     pub output_tokens: u64,
     pub total_tokens: u64,
     pub cost_micros_usd: u64,
+    /// Tokens written into the prompt cache during this request (adapter-specific; 0 if not
+    /// supported).
+    pub cache_creation_tokens: u64,
+    /// Tokens read from the prompt cache during this request (adapter-specific; 0 if not
+    /// supported).
+    pub cache_read_tokens: u64,
 }
 
 impl Usage {
@@ -50,6 +56,8 @@ impl Usage {
             output_tokens: 0,
             total_tokens: 0,
             cost_micros_usd: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
         }
     }
 }

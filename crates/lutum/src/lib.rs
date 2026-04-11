@@ -1,5 +1,7 @@
 extern crate self as lutum;
 
+pub mod agent_loop;
+
 pub mod budget {
     pub use lutum_protocol::budget::*;
 }
@@ -56,6 +58,7 @@ pub use hooks::{
     Aggregate, AggregateInto, Chain, Finalize, FinalizeInto, FirstSuccess, HookReentrancyError,
     LutumHooks, ResolveUsageEstimate, ShortCircuit, Stateful,
 };
+pub use agent_loop::{AgentLoop, AgentLoopError, AgentLoopOutput};
 pub use session::{CommitTurn, UncommittedToolRound};
 
 pub use lutum_macros::{Toolset, hooks, impl_hook, tool_fn, tool_input};
