@@ -29,6 +29,7 @@ lutum-trace.workspace = true
 schemars.workspace = true
 serde.workspace = true
 tokio.workspace = true
+tracing-subscriber.workspace = true
 trybuild = "1"
 # for examples
 lutum-openai.workspace = true
@@ -92,3 +93,6 @@ name = "call_budget"
 
 [[example]]
 name = "completion"
+
+[[example]]
+name = "trace_dump"
