@@ -10,6 +10,7 @@ use std::{
 use anyhow::Context;
 use async_trait::async_trait;
 use lutum::{Lutum, ModelInputItem, Session, ToolResult, TurnItemIter};
+use lutum_eval::{Collected, EvalExt as _, PureEval, Score, TraceSnapshot};
 use sqlite_agent::{
     AgentConfig, AgentHooks, DbRegistry, QueryResult, SqliteDb, TransactionMode, WriteDecision,
     WritePreview, run_turn,
@@ -17,7 +18,7 @@ use sqlite_agent::{
 
 use crate::{
     cases::TestCase,
-    evaluators::{self, CaseScore},
+    evaluators::{self, CaseScore, SqlCheckInput},
 };
 
 static CASE_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -215,7 +216,7 @@ fn find_last_select_sql(tool_results: &[ToolResult], last_result: &QueryResult) 
 
 fn apply_select_checks(
     score: &mut CaseScore,
-    db: &SqliteDb,
+    db: Arc<SqliteDb>,
     tool_results: &[ToolResult],
     last_result: Option<&QueryResult>,
 ) {
@@ -227,8 +228,18 @@ fn apply_select_checks(
         score.no_large_scan = Some(false);
         return;
     };
-    score.sql_syntax_ok = Some(evaluators::sql_syntax::check_syntax(db, &sql));
-    score.no_large_scan = Some(evaluators::table_scan::no_large_scan(db, &sql));
+    let input = SqlCheckInput { db, sql };
+    let trace = TraceSnapshot { roots: vec![], root_events: vec![] };
+    score.sql_syntax_ok = Some(
+        evaluators::sql_syntax::SqlSyntaxCheck
+            .evaluate(&trace, &input)
+            .unwrap(),
+    );
+    score.no_large_scan = Some(
+        evaluators::table_scan::TableScanCheck
+            .evaluate(&trace, &input)
+            .unwrap(),
+    );
 }
 
 /// Run a single test case and return its score.
@@ -295,18 +306,23 @@ pub async fn run_case(
         .map(|e| e.result.clone());
     let mut score = CaseScore::default();
     apply_case_expectations(&mut score, case, &tool_results, last_result.as_ref());
-    apply_select_checks(&mut score, db.as_ref(), &tool_results, last_result.as_ref());
+    apply_select_checks(&mut score, Arc::clone(&db), &tool_results, last_result.as_ref());
 
     if let (Some(judge), Some(query_result)) = (judge_llm, last_result.as_ref()) {
         let assistant_text = last_assistant_text(&session).unwrap_or_default();
-        match crate::evaluators::consistency::score_consistency(
-            judge,
-            &assistant_text,
-            query_result,
-        )
-        .await
+        let artifact = evaluators::consistency::ConsistencyArtifact {
+            assistant_text,
+            query_result: query_result.clone(),
+        };
+        let collected = Collected {
+            output: artifact,
+            trace: TraceSnapshot { roots: vec![], root_events: vec![] },
+        };
+        match evaluators::consistency::consistency_judge()
+            .run_collected(judge, &collected)
+            .await
         {
-            Ok(value) => score.consistency_score = Some(value),
+            Ok(report) => score.consistency_score = Some(Score::new_clamped(report.score)),
             Err(error) => tracing::warn!("consistency eval failed: {error}"),
         }
     }

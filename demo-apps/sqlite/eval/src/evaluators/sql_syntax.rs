@@ -1,7 +1,19 @@
-use sqlite_agent::SqliteDb;
+use std::convert::Infallible;
 
-/// Check SQL syntax by running `EXPLAIN <sql>` against the live database.
-/// Returns true if the SQL is syntactically valid.
-pub fn check_syntax(db: &SqliteDb, sql: &str) -> bool {
-    db.check_syntax(sql).is_ok()
+use lutum_eval::{PureEval, TraceSnapshot};
+
+use super::SqlCheckInput;
+
+/// Pure evaluator that checks SQL syntax by running `EXPLAIN <sql>` against
+/// the live database. Returns `true` if the SQL is syntactically valid.
+pub struct SqlSyntaxCheck;
+
+impl PureEval for SqlSyntaxCheck {
+    type Artifact = SqlCheckInput;
+    type Report = bool;
+    type Error = Infallible;
+
+    fn evaluate(&self, _trace: &TraceSnapshot, artifact: &SqlCheckInput) -> Result<bool, Infallible> {
+        Ok(artifact.db.check_syntax(&artifact.sql).is_ok())
+    }
 }

@@ -1,6 +1,17 @@
+use std::sync::Arc;
+
+use lutum_eval::Score;
+use sqlite_agent::SqliteDb;
+
 pub mod consistency;
 pub mod sql_syntax;
 pub mod table_scan;
+
+/// Shared artifact for the SQL-level pure evaluators.
+pub struct SqlCheckInput {
+    pub db: Arc<SqliteDb>,
+    pub sql: String,
+}
 
 /// Aggregated scores for one test case run.
 #[derive(Debug, Clone, Default)]
@@ -9,7 +20,7 @@ pub struct CaseScore {
     pub expected_row_count_ok: Option<bool>,
     pub sql_syntax_ok: Option<bool>,
     pub no_large_scan: Option<bool>,
-    pub consistency_score: Option<f32>,
+    pub consistency_score: Option<Score>,
 }
 
 impl CaseScore {
@@ -41,7 +52,7 @@ impl CaseScore {
             parts.push(format!("scan:{}", if v { "✓" } else { "✗" }));
         }
         if let Some(s) = self.consistency_score {
-            parts.push(format!("consistency:{:.2}", s));
+            parts.push(format!("consistency:{:.2}", s.value()));
         }
         if parts.is_empty() {
             "no checks".to_string()
