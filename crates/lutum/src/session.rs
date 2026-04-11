@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
-    GenerationParams, InputMessageRole, IntoToolResult, ModelInput, ModelInputItem, RequestBudget,
-    ToolMetadata, ToolResult, ToolResultError, Toolset, TurnConfig, TurnView,
-    UncommittedAssistantTurn,
+    GenerationParams, HookableToolset, InputMessageRole, IntoToolResult, ModelInput, ModelInputItem,
+    RequestBudget, ToolHookOutcome, ToolHooks, ToolMetadata, ToolResult, ToolResultError, Toolset,
+    TurnConfig, TurnView, UncommittedAssistantTurn,
     budget::Usage,
     reducer::{
         StagedStructuredTurnResultWithTools, StagedTextTurnResultWithTools,
@@ -249,6 +249,119 @@ where
     }
 
     /// Explicitly discard this round without committing.
+    pub fn discard(self) {}
+}
+
+impl<T> UncommittedToolRound<T>
+where
+    T: HookableToolset,
+{
+    /// Apply a set of hooks to all tool calls, producing a [`ToolRoundPlan`].
+    ///
+    /// Calls that the hook handles move to `plan.handled`; the rest stay in `plan.pending`.
+    /// Can be chained further on the returned plan.
+    pub async fn apply_hooks<H>(self, hooks: &H) -> ToolRoundPlan<T>
+    where
+        H: ToolHooks<T>,
+    {
+        let mut plan = ToolRoundPlan {
+            request_id: self.request_id,
+            model: self.model,
+            finish_reason: self.finish_reason,
+            usage: self.usage,
+            pending: Vec::new(),
+            handled: Vec::new(),
+            policy_rejected: self.invalid_tool_calls,
+            turn: self.turn,
+        };
+        for call in self.tool_calls {
+            match hooks.hook_call(call).await {
+                ToolHookOutcome::Handled(h) => plan.handled.push(h),
+                ToolHookOutcome::Unhandled(c) => plan.pending.push(c),
+            }
+        }
+        plan
+    }
+}
+
+/// A tool round after hook application, holding pending, handled, and policy-rejected calls.
+///
+/// Produced by [`UncommittedToolRound::apply_hooks`]. Call [`apply_hooks`](ToolRoundPlan::apply_hooks)
+/// again for multi-pass hook application, then [`commit`](ToolRoundPlan::commit) with results
+/// for the remaining pending calls.
+#[derive(Debug)]
+#[must_use = "call .commit() to commit the turn and tool results, or .discard() to opt out"]
+pub struct ToolRoundPlan<T: HookableToolset> {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+    /// Tool calls not yet handled by any hook — execute these and pass results to `commit`.
+    pub pending: Vec<T::ToolCall>,
+    /// Tool calls already handled by a hook — results are committed automatically.
+    pub handled: Vec<T::HandledCall>,
+    /// Tool calls rejected by availability policy — not executed.
+    pub policy_rejected: Vec<ToolMetadata>,
+    turn: UncommittedAssistantTurn,
+}
+
+impl<T: HookableToolset> ToolRoundPlan<T> {
+    /// Apply another set of hooks to the remaining pending calls (multi-pass chaining).
+    pub async fn apply_hooks<H>(mut self, hooks: &H) -> Self
+    where
+        H: ToolHooks<T>,
+    {
+        let mut new_pending = Vec::new();
+        for call in self.pending {
+            match hooks.hook_call(call).await {
+                ToolHookOutcome::Handled(h) => self.handled.push(h),
+                ToolHookOutcome::Unhandled(c) => new_pending.push(c),
+            }
+        }
+        self.pending = new_pending;
+        self
+    }
+
+    pub fn pending_calls(&self) -> &[T::ToolCall] {
+        &self.pending
+    }
+
+    pub fn handled_calls(&self) -> &[T::HandledCall] {
+        &self.handled
+    }
+
+    pub fn policy_rejected_calls(&self) -> &[ToolMetadata] {
+        &self.policy_rejected
+    }
+
+    /// Commit the assistant turn and all tool results to the session.
+    ///
+    /// `pending_results` must contain one result for each call in [`pending_calls`](Self::pending_calls).
+    /// Results for hook-handled calls are supplied automatically from the stored handled outputs.
+    pub fn commit<I, R>(self, session: &mut Session, pending_results: I) -> Result<(), ToolRoundCommitError>
+    where
+        I: IntoIterator<Item = R>,
+        R: IntoToolResult,
+    {
+        let handled_results = self
+            .handled
+            .into_iter()
+            .map(IntoToolResult::into_tool_result)
+            .collect::<Result<Vec<_>, _>>()?;
+        let pending_results = pending_results
+            .into_iter()
+            .map(IntoToolResult::into_tool_result)
+            .collect::<Result<Vec<_>, _>>()?;
+        let all_results = handled_results.into_iter().chain(pending_results);
+        let ordered = validate_and_order_tool_results(&self.turn, all_results)?;
+        self.turn.commit_into(session.input_mut());
+        for tool_result in ordered {
+            session.input.push(ModelInputItem::ToolResult(tool_result));
+        }
+        Ok(())
+    }
+
+    /// Explicitly discard this plan without committing.
     pub fn discard(self) {}
 }
 

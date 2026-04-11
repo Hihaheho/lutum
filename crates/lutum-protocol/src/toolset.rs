@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, future::Future, pin::Pin};
 
 use schemars::{JsonSchema, Schema, schema_for};
 use serde::{Serialize, de::DeserializeOwned};
@@ -199,6 +199,39 @@ pub trait ToolSelector<T: ?Sized>:
     fn all() -> &'static [Self];
 
     fn try_from_name(name: &str) -> Option<Self>;
+}
+
+/// Extension of [`Toolset`] that supports batch hook application via [`ToolHooks`].
+///
+/// Implemented automatically by `#[derive(Toolset)]`.
+pub trait HookableToolset: Toolset {
+    type HandledCall: IntoToolResult + Clone + fmt::Debug + Send + Sync + 'static;
+}
+
+/// Abstraction over something that can intercept tool calls for a [`HookableToolset`].
+///
+/// Implemented automatically by `#[derive(Toolset)]` for the generated `ToolsHooks` struct.
+/// A blanket impl covers `Fn(T::ToolCall) -> Fut` closures.
+pub trait ToolHooks<T: HookableToolset>: Send + Sync {
+    fn hook_call<'a>(
+        &'a self,
+        call: T::ToolCall,
+    ) -> Pin<Box<dyn Future<Output = ToolHookOutcome<T::ToolCall, T::HandledCall>> + Send + 'a>>;
+}
+
+impl<T, F, Fut> ToolHooks<T> for F
+where
+    T: HookableToolset,
+    F: Fn(T::ToolCall) -> Fut + Send + Sync,
+    Fut: Future<Output = ToolHookOutcome<T::ToolCall, T::HandledCall>> + Send + 'static,
+{
+    fn hook_call<'a>(
+        &'a self,
+        call: T::ToolCall,
+    ) -> Pin<Box<dyn Future<Output = ToolHookOutcome<T::ToolCall, T::HandledCall>> + Send + 'a>>
+    {
+        Box::pin(self(call))
+    }
 }
 
 pub trait Toolset: Send + Sync + 'static {

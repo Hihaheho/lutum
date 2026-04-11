@@ -3,8 +3,8 @@ use std::{collections::HashMap, sync::Arc};
 use futures::executor::block_on;
 use lutum::{
     FinishReason, MockLlmAdapter, MockTextScenario, ModelInputItem, RawTextTurnEvent, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcomeWithTools, ToolHookOutcome,
-    ToolMetadata, Usage,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcomeWithTools, ToolMetadata,
+    ToolRoundPlan, Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -116,36 +116,35 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let mut tool_results = Vec::new();
-    for call in round.tool_calls.iter().cloned() {
-        let tool_result = match call.hook(&tool_hooks).await {
-            ToolHookOutcome::Handled(ToolsHandled::Weather(handled)) => {
-                println!(
-                    "tool hook handled weather({}) from cache",
-                    handled.input().city
-                );
-                handled.into_tool_result()?
+    // Apply hooks in batch — weather hits the cache, search stays pending.
+    let plan: ToolRoundPlan<Tools> = round.apply_hooks(&tool_hooks).await;
+
+    for handled in &plan.handled {
+        match handled {
+            ToolsHandled::Weather(h) => {
+                println!("hook handled weather({}) from cache", h.input().city)
             }
-            ToolHookOutcome::Handled(ToolsHandled::Search(handled)) => {
-                println!("tool hook handled search({})", handled.input().query);
-                handled.into_tool_result()?
-            }
-            ToolHookOutcome::Unhandled(ToolsCall::Weather(call)) => {
-                println!(
-                    "cache miss, executing weather tool for {}",
-                    call.input().city
-                );
-                WeatherArgs::tool_result(call.metadata.clone(), execute_weather(call.input()))?
-            }
-            ToolHookOutcome::Unhandled(ToolsCall::Search(call)) => {
-                println!("no hook for search, executing the normal tool code");
-                SearchArgs::tool_result(call.metadata.clone(), execute_search(call.input()))?
-            }
-        };
-        tool_results.push(tool_result);
+            ToolsHandled::Search(h) => println!("hook handled search({})", h.input().query),
+        }
     }
 
-    round.commit(&mut session, tool_results)?;
+    // Execute remaining pending calls.
+    let pending_results: Vec<_> = plan
+        .pending
+        .iter()
+        .map(|call| match call {
+            ToolsCall::Weather(c) => {
+                println!("cache miss, executing weather tool for {}", c.input().city);
+                WeatherArgs::tool_result(c.metadata.clone(), execute_weather(c.input()))
+            }
+            ToolsCall::Search(c) => {
+                println!("no hook for search, executing the normal tool code");
+                SearchArgs::tool_result(c.metadata.clone(), execute_search(c.input()))
+            }
+        })
+        .collect::<Result<_, _>>()?;
+
+    plan.commit(&mut session, pending_results)?;
 
     println!("\nCommitted tool results:");
     for item in session.input().items() {

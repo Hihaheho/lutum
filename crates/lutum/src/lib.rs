@@ -59,7 +59,7 @@ pub use hooks::{
     LutumHooks, ResolveUsageEstimate, ShortCircuit, Stateful,
 };
 pub use agent_loop::{AgentLoop, AgentLoopError, AgentLoopOutput};
-pub use session::{CommitTurn, UncommittedToolRound};
+pub use session::{CommitTurn, ToolRoundPlan, UncommittedToolRound};
 
 pub use lutum_macros::{Toolset, hooks, impl_hook, tool_fn, tool_input};
 pub use lutum_protocol::{
@@ -71,7 +71,8 @@ pub use lutum_protocol::{
     CompletionReductionError, CompletionRequest, CompletionTurnResult, CompletionTurnState,
     EmptyNonEmptyError, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
     ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-    ErasedTextTurnEventStream, FinishReason, GenerationParams, HandledTool, InputMessageRole,
+    ErasedTextTurnEventStream, FinishReason, GenerationParams, HandledTool, HookableToolset,
+    InputMessageRole,
     IntoToolResult, ItemView, MessageContent, ModelInput, ModelInputItem,
     ModelInputValidationError, ModelName, ModelNameError, NoToolSelector, NoTools, NonEmpty,
     OperationKind, RawJson, Remaining, RequestBudget, RequestExtensions, SharedPoolBudgetError,
@@ -88,8 +89,9 @@ pub use lutum_protocol::{
     TextTurnReducer, TextTurnReducerWithTools, TextTurnReductionError, TextTurnResult,
     TextTurnResultWithTools, TextTurnState, TextTurnStateWithTools, ToolAvailability,
     ToolCallError, ToolCallId, ToolCallItemView, ToolCallWrapper, ToolConstraints, ToolDef,
-    ToolExecutionError, ToolHookOutcome, ToolInput, ToolMetadata, ToolName, ToolRequirement,
-    ToolResult, ToolResultError, ToolResultItemView, ToolSelector, Toolset, TurnAdapter,
+    ToolExecutionError, ToolHookOutcome, ToolHooks, ToolInput, ToolMetadata, ToolName,
+    ToolRequirement, ToolResult, ToolResultError, ToolResultItemView, ToolSelector, Toolset,
+    TurnAdapter,
     TurnConfig, TurnItemIter, TurnRole, TurnView, UncommittedAssistantTurn, Usage, UsageEstimate,
     UsageRecoveryAdapter, assistant_json, find_tool_call_arguments,
 };

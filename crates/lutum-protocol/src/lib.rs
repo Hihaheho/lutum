@@ -49,9 +49,9 @@ pub use reducer::{
 };
 pub use structured::StructuredOutput;
 pub use toolset::{
-    HandledTool, IntoToolResult, NoToolSelector, NoTools, ToolAvailability, ToolCallError,
-    ToolCallWrapper, ToolConstraints, ToolDef, ToolExecutionError, ToolHookOutcome, ToolInput,
-    ToolRequirement, ToolResultError, ToolSelector, Toolset,
+    HandledTool, HookableToolset, IntoToolResult, NoToolSelector, NoTools, ToolAvailability,
+    ToolCallError, ToolCallWrapper, ToolConstraints, ToolDef, ToolExecutionError, ToolHookOutcome,
+    ToolHooks, ToolInput, ToolRequirement, ToolResultError, ToolSelector, Toolset,
 };
 pub use transcript::{
     AssistantTurnView, CommittedTurn, ItemView, ToolCallItemView, ToolResultItemView, TurnItemIter,

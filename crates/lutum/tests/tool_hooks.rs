@@ -7,6 +7,7 @@ use lutum::{
     MockTextScenario, ModelInputItem, RawJson, RawTextTurnEvent, Session, SharedPoolBudgetManager,
     SharedPoolBudgetOptions, TextStepOutcomeWithTools, TextTurnEventWithTools,
     TextTurnStateWithTools, ToolHookOutcome, ToolMetadata, ToolResult, Toolset, Usage,
+    ToolRoundPlan,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -182,6 +183,258 @@ fn tool_round_commit_accepts_typed_handled_values() {
             RawJson::parse("{\"forecast\":\"hooked:Nagoya\"}").unwrap(),
         )
     );
+}
+
+fn make_two_tool_adapter() -> MockLlmAdapter {
+    MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(RawTextTurnEvent::Started {
+            request_id: Some("req-two".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(RawTextTurnEvent::ToolCallChunk {
+            id: "call-w".into(),
+            name: "weather".into(),
+            arguments_json_delta: "{\"city\":\"Kyoto\"}".into(),
+        }),
+        Ok(RawTextTurnEvent::ToolCallChunk {
+            id: "call-s".into(),
+            name: "search".into(),
+            arguments_json_delta: "{\"query\":\"ramen\"}".into(),
+        }),
+        Ok(RawTextTurnEvent::Completed {
+            request_id: Some("req-two".into()),
+            finish_reason: FinishReason::ToolCall,
+            usage: Usage::zero(),
+        }),
+    ]))
+}
+
+// apply_hooks moves hook-handled calls to `handled` and leaves the rest in `pending`.
+#[test]
+fn apply_hooks_splits_handled_and_pending() {
+    let ctx = Lutum::new(
+        Arc::new(make_two_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("go");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
+            .collect(),
+    )
+    .unwrap();
+
+    let round = match outcome {
+        TextStepOutcomeWithTools::NeedsTools(r) => r,
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
+    };
+
+    // Hook only weather; search stays pending.
+    let hooks = ToolsHooks::new().with_weather(
+        |_metadata: &lutum::ToolMetadata, input: &WeatherArgs| {
+            let city = input.city.clone();
+            async move {
+                Some(WeatherResult {
+                    forecast: format!("cached:{city}"),
+                })
+            }
+        },
+    );
+
+    let plan: ToolRoundPlan<Tools> = block_on(round.apply_hooks(&hooks));
+
+    assert_eq!(plan.handled.len(), 1, "weather should be handled");
+    assert_eq!(plan.pending.len(), 1, "search should be pending");
+    assert_eq!(plan.policy_rejected.len(), 0);
+
+    match &plan.handled[0] {
+        ToolsHandled::Weather(h) => assert_eq!(h.output().forecast, "cached:Kyoto"),
+        other => panic!("unexpected handled variant: {other:?}"),
+    }
+    match &plan.pending[0] {
+        ToolsCall::Search(c) => assert_eq!(c.input().query, "ramen"),
+        other => panic!("unexpected pending variant: {other:?}"),
+    }
+}
+
+// apply_hooks called twice (multi-pass) narrows pending each time.
+#[test]
+fn apply_hooks_multi_pass_chaining_narrows_pending() {
+    let ctx = Lutum::new(
+        Arc::new(make_two_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("go");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
+            .collect(),
+    )
+    .unwrap();
+
+    let round = match outcome {
+        TextStepOutcomeWithTools::NeedsTools(r) => r,
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
+    };
+
+    let weather_hooks = ToolsHooks::new().with_weather(
+        |_: &lutum::ToolMetadata, input: &WeatherArgs| {
+            let city = input.city.clone();
+            async move { Some(WeatherResult { forecast: format!("pass1:{city}") }) }
+        },
+    );
+    let search_hooks = ToolsHooks::new().with_search(
+        |_: &lutum::ToolMetadata, input: &SearchArgs| {
+            let q = input.query.clone();
+            async move { Some(SearchResult { hits: vec![format!("pass2:{q}")] }) }
+        },
+    );
+
+    let plan = block_on(async {
+        round
+            .apply_hooks(&weather_hooks).await
+            .apply_hooks(&search_hooks).await
+    });
+
+    assert_eq!(plan.handled.len(), 2, "both calls should be handled after two passes");
+    assert_eq!(plan.pending.len(), 0, "nothing should remain pending");
+}
+
+// ToolRoundPlan::commit combines handled + pending results in AssistantTurn order.
+#[test]
+fn tool_round_plan_commit_merges_handled_and_pending_results() {
+    let ctx = Lutum::new(
+        Arc::new(make_two_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("go");
+    let before_len = session.input().items().len();
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
+            .collect(),
+    )
+    .unwrap();
+
+    let round = match outcome {
+        TextStepOutcomeWithTools::NeedsTools(r) => r,
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
+    };
+
+    let hooks = ToolsHooks::new().with_weather(
+        |_: &lutum::ToolMetadata, input: &WeatherArgs| {
+            let city = input.city.clone();
+            async move { Some(WeatherResult { forecast: format!("hooked:{city}") }) }
+        },
+    );
+
+    let plan = block_on(round.apply_hooks(&hooks));
+
+    // Execute the remaining pending call (search).
+    let pending_results: Vec<ToolResult> = plan
+        .pending
+        .iter()
+        .map(|call| match call {
+            ToolsCall::Search(c) => {
+                SearchArgs::tool_result(
+                    c.metadata.clone(),
+                    SearchResult { hits: vec!["ramen-shop".into()] },
+                )
+                .unwrap()
+            }
+            other => panic!("unexpected: {other:?}"),
+        })
+        .collect();
+
+    plan.commit(&mut session, pending_results).unwrap();
+
+    // assistant turn + 2 tool results = 3 items added
+    assert_eq!(session.input().items().len(), before_len + 3);
+
+    let tool_results: Vec<_> = session
+        .input()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            ModelInputItem::ToolResult(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 2);
+
+    let weather_result: WeatherResult = tool_results
+        .iter()
+        .find(|r| r.name.as_str() == "weather")
+        .expect("weather result")
+        .result
+        .deserialize()
+        .unwrap();
+    assert_eq!(weather_result.forecast, "hooked:Kyoto");
+
+    let search_result: SearchResult = tool_results
+        .iter()
+        .find(|r| r.name.as_str() == "search")
+        .expect("search result")
+        .result
+        .deserialize()
+        .unwrap();
+    assert_eq!(search_result.hits, vec!["ramen-shop"]);
+}
+
+// apply_hooks also accepts a closure directly via the blanket ToolHooks impl.
+#[test]
+fn apply_hooks_accepts_closure_via_blanket_impl() {
+    let ctx = Lutum::new(
+        Arc::new(make_two_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("go");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
+            .collect(),
+    )
+    .unwrap();
+
+    let round = match outcome {
+        TextStepOutcomeWithTools::NeedsTools(r) => r,
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
+    };
+
+    // Pass a bare closure — exercising the blanket impl on Fn(T::ToolCall) -> Fut.
+    let hook = |call| async move {
+        match call {
+            ToolsCall::Weather(c) => {
+                let output = WeatherResult { forecast: format!("closure:{}", c.input().city) };
+                ToolHookOutcome::Handled(ToolsHandled::Weather(c.handled(output)))
+            }
+            other => ToolHookOutcome::Unhandled(other),
+        }
+    };
+    let plan = block_on(round.apply_hooks(&hook));
+
+    assert_eq!(plan.handled.len(), 1);
+    assert_eq!(plan.pending.len(), 1);
+    match &plan.handled[0] {
+        ToolsHandled::Weather(h) => assert!(h.output().forecast.starts_with("closure:")),
+        other => panic!("unexpected: {other:?}"),
+    }
 }
 
 /// Helper: make a mock adapter that emits a single disallowed (search) tool call.

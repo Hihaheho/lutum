@@ -475,6 +475,19 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             }
         }
 
+        impl ::lutum::toolset::HookableToolset for #enum_ident {
+            type HandledCall = #handled_enum_ident;
+        }
+
+        impl ::lutum::toolset::ToolHooks<#enum_ident> for #hooks_struct_ident {
+            fn hook_call<'a>(
+                &'a self,
+                call: #call_enum_ident,
+            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::lutum::ToolHookOutcome<#call_enum_ident, #handled_enum_ident>> + ::std::marker::Send + 'a>> {
+                ::std::boxed::Box::pin(call.hook(self))
+            }
+        }
+
         impl ::lutum::Toolset for #enum_ident {
             type ToolCall = #call_enum_ident;
             type Selector = #selector_enum_ident;
