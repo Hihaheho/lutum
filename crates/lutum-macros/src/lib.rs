@@ -152,8 +152,18 @@ pub fn impl_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_hook_impl(item_fn, slot_path).into()
 }
 
-#[proc_macro_derive(Toolset)]
+#[proc_macro_derive(Toolset, attributes(toolset))]
 pub fn derive_toolset(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand_toolset(input).into()
+}
+
+/// Helper attribute consumed by `#[hooks]` to declare nested hooks fields.
+///
+/// Usage: `#[nested_hooks(field_name = HooksType, ...)]` on a `#[hooks]`-annotated trait.
+/// Not intended to be used standalone — `#[hooks]` strips and processes it.
+#[proc_macro_attribute]
+pub fn nested_hooks(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Pass-through: actual processing is done by #[hooks].
+    item
 }

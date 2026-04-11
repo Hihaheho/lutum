@@ -22,8 +22,22 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
         .to_compile_error();
     }
 
-    let struct_cfg_attrs = conditional_attrs(&item_trait.attrs);
-    let struct_attrs = item_trait.attrs.clone();
+    // Separate #[nested_hooks(...)] from the remaining attrs.
+    let mut nested_hooks_entries: Vec<(syn::Ident, syn::Type)> = Vec::new();
+    let mut remaining_attrs: Vec<Attribute> = Vec::new();
+    for attr in &item_trait.attrs {
+        if is_nested_hooks_attr(attr) {
+            match attr.parse_args::<crate::NestedHooksAttr>() {
+                Ok(parsed) => nested_hooks_entries.extend(parsed.entries),
+                Err(e) => return e.to_compile_error(),
+            }
+        } else {
+            remaining_attrs.push(attr.clone());
+        }
+    }
+
+    let struct_cfg_attrs = conditional_attrs(&remaining_attrs);
+    let struct_attrs = remaining_attrs;
     let ident = item_trait.ident.clone();
     let vis = item_trait.vis.clone();
 
@@ -64,6 +78,41 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
         default_methods.push(slot.default_method);
     }
 
+    // Build nested hooks fields and inits.
+    let nested_fields: Vec<proc_macro2::TokenStream> = nested_hooks_entries
+        .iter()
+        .map(|(fid, fty)| quote! { pub #fid: #fty, })
+        .collect();
+    let nested_field_inits: Vec<proc_macro2::TokenStream> = nested_hooks_entries
+        .iter()
+        .map(|(fid, fty)| {
+            quote! { #fid: <#fty as ::std::default::Default>::default(), }
+        })
+        .collect();
+
+    // new() signature: no args when no nested hooks (backwards-compat), positional args otherwise.
+    let new_fn = if nested_hooks_entries.is_empty() {
+        quote! {
+            pub fn new() -> Self {
+                Self::default()
+            }
+        }
+    } else {
+        let params: Vec<proc_macro2::TokenStream> = nested_hooks_entries
+            .iter()
+            .map(|(fid, fty)| quote! { #fid: #fty })
+            .collect();
+        let param_names: Vec<&syn::Ident> = nested_hooks_entries.iter().map(|(fid, _)| fid).collect();
+        quote! {
+            pub fn new(#(#params,)*) -> Self {
+                Self {
+                    #(#param_names,)*
+                    ..::std::default::Default::default()
+                }
+            }
+        }
+    };
+
     quote! {
         #(#items)*
 
@@ -71,6 +120,7 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
         #[allow(dead_code)]
         #[derive(::std::clone::Clone)]
         #vis struct #ident {
+            #(#nested_fields)*
             #(#fields)*
         }
 
@@ -78,6 +128,7 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
         impl ::std::default::Default for #ident {
             fn default() -> Self {
                 Self {
+                    #(#nested_field_inits)*
                     #(#field_inits)*
                 }
             }
@@ -86,9 +137,7 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
         #(#struct_cfg_attrs)*
         #[allow(dead_code)]
         impl #ident {
-            pub fn new() -> Self {
-                Self::default()
-            }
+            #new_fn
 
             #(#register_methods)*
             #(#dispatch_methods)*
@@ -165,4 +214,15 @@ fn conditional_attrs(attrs: &[Attribute]) -> Vec<Attribute> {
         })
         .cloned()
         .collect()
+}
+
+fn is_nested_hooks_attr(attr: &Attribute) -> bool {
+    let path = attr.path();
+    // Accept both `nested_hooks` and `lutum::nested_hooks`.
+    if path.is_ident("nested_hooks") {
+        return true;
+    }
+    path.segments
+        .last()
+        .is_some_and(|last| last.ident == "nested_hooks")
 }

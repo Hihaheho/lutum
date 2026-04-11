@@ -3,6 +3,27 @@ use syn::{
     punctuated::Punctuated,
 };
 
+/// Parses `ident = Type, ident2 = Type2, ...` from `#[nested_hooks(...)]`.
+pub struct NestedHooksAttr {
+    pub entries: Vec<(Ident, Type)>,
+}
+
+impl Parse for NestedHooksAttr {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut entries = Vec::new();
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+            let ty: Type = input.parse()?;
+            entries.push((ident, ty));
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        Ok(Self { entries })
+    }
+}
+
 #[derive(Clone)]
 pub struct HookAttrValue<T> {
     pub value: T,

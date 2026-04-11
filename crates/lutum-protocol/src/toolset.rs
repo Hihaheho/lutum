@@ -191,6 +191,17 @@ where
     }
 }
 
+impl<C> RejectedToolCall<C> {
+    pub fn map_call<D>(self, f: impl FnOnce(C) -> D) -> RejectedToolCall<D> {
+        RejectedToolCall {
+            source: self.source,
+            metadata: self.metadata,
+            call: self.call.map(f),
+            reason: self.reason,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ToolHookOutcome<C, H> {
     Handled(H),

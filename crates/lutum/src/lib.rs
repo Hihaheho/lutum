@@ -61,7 +61,7 @@ pub use hooks::{
 };
 pub use session::{CommitTurn, ToolRoundPlan, UncommittedToolRound};
 
-pub use lutum_macros::{Toolset, hooks, impl_hook, tool_fn, tool_input};
+pub use lutum_macros::{Toolset, hooks, impl_hook, nested_hooks, tool_fn, tool_input};
 pub use lutum_protocol::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
     AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AgentError,
