@@ -89,3 +89,6 @@ name = "user_approval_hook"
 
 [[example]]
 name = "call_budget"
+
+[[example]]
+name = "completion"
