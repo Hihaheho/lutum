@@ -1,6 +1,5 @@
 /// Tests for runtime tool description overrides (use case 1: builder API,
 /// use case 2: #[ToolSet]-generated description hooks).
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -10,8 +9,8 @@ use lutum::{
     AssistantTurnView, CommittedTurn, CompletionAdapter, CompletionEventStream, CompletionRequest,
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
     ErasedTextTurnEventStream, FinishReason, InputMessageRole, Lutum, ModelInput, ModelInputItem,
-    OperationKind, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions, TurnAdapter,
-    Usage, UsageRecoveryAdapter,
+    OperationKind, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    TurnAdapter, Usage, UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -161,7 +160,10 @@ impl CompletionAdapter for SpyAdapter {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn make_ctx(spy: Arc<SpyAdapter>) -> Lutum {
-    Lutum::new(spy, SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()))
+    Lutum::new(
+        spy,
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    )
 }
 
 fn user_input() -> ModelInput {
@@ -195,13 +197,11 @@ fn describe_overrides_single_tool_description() {
         .collect();
 
     assert_eq!(
-        tool_map["weather"],
-        "Weather (calls left: 2)",
+        tool_map["weather"], "Weather (calls left: 2)",
         "description override should replace the static description"
     );
     assert_eq!(
-        tool_map["search"],
-        "Search the web",
+        tool_map["search"], "Search the web",
         "unoverridden tool should keep its static description"
     );
 }
@@ -307,9 +307,15 @@ fn description_hook_receives_static_tool_def() {
     // EchoToolName returns Some(def.name) so we can assert on the override value.
     let hooks = ToolsHooks::new().with_weather_description_hook(EchoToolName);
     let overrides = block_on(hooks.description_overrides());
-    let (sel, name) = overrides.iter().find(|(s, _)| *s == ToolsSelector::Weather).unwrap();
+    let (sel, name) = overrides
+        .iter()
+        .find(|(s, _)| *s == ToolsSelector::Weather)
+        .unwrap();
     assert_eq!(*sel, ToolsSelector::Weather);
-    assert_eq!(name, "weather", "hook should receive the ToolDef for the weather tool");
+    assert_eq!(
+        name, "weather",
+        "hook should receive the ToolDef for the weather tool"
+    );
 }
 
 #[test]

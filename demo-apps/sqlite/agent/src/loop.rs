@@ -103,9 +103,6 @@ pub async fn run_turn(
     let available = tool_selectors_for_mode(mode);
 
     let history_ref = sql_history.clone();
-    let registry_ref = registry.clone();
-    let hooks_ref = hooks.clone();
-    let config_ref = config.clone();
 
     let mut builder = session
         .agent_loop::<SqlTools>()
@@ -121,12 +118,7 @@ pub async fn run_turn(
     let loop_output = builder
         .run(move |call| {
             let history = history_ref.clone();
-            let registry = registry_ref.clone();
-            let hooks = hooks_ref.clone();
-            let config = config_ref.clone();
-            async move {
-                dispatch_tool(call, &registry, &hooks, &config, &history).await
-            }
+            async move { dispatch_tool(call, registry, hooks, config, &history).await }
         })
         .await
         .map_err(AgentError::from)?;
@@ -247,7 +239,9 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: insert");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c.complete(error_modify(&format!("unknown db_id: '{db_id}'"))).unwrap());
+                return Ok(c
+                    .complete(error_modify(&format!("unknown db_id: '{db_id}'")))
+                    .unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
             sql_history.lock().await.push(SqlHistoryEntry {
@@ -264,7 +258,9 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: update");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c.complete(error_modify(&format!("unknown db_id: '{db_id}'"))).unwrap());
+                return Ok(c
+                    .complete(error_modify(&format!("unknown db_id: '{db_id}'")))
+                    .unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
             sql_history.lock().await.push(SqlHistoryEntry {
@@ -281,7 +277,9 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: delete");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c.complete(error_modify(&format!("unknown db_id: '{db_id}'"))).unwrap());
+                return Ok(c
+                    .complete(error_modify(&format!("unknown db_id: '{db_id}'")))
+                    .unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
             sql_history.lock().await.push(SqlHistoryEntry {
@@ -299,7 +297,9 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: create_table");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c.complete(error_ddl(&format!("unknown db_id: '{db_id}'"))).unwrap());
+                return Ok(c
+                    .complete(error_ddl(&format!("unknown db_id: '{db_id}'")))
+                    .unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
             sql_history.lock().await.push(SqlHistoryEntry {
@@ -316,7 +316,9 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: alter_table");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c.complete(error_ddl(&format!("unknown db_id: '{db_id}'"))).unwrap());
+                return Ok(c
+                    .complete(error_ddl(&format!("unknown db_id: '{db_id}'")))
+                    .unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
             sql_history.lock().await.push(SqlHistoryEntry {
@@ -333,7 +335,9 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: create_index");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c.complete(error_ddl(&format!("unknown db_id: '{db_id}'"))).unwrap());
+                return Ok(c
+                    .complete(error_ddl(&format!("unknown db_id: '{db_id}'")))
+                    .unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
             sql_history.lock().await.push(SqlHistoryEntry {

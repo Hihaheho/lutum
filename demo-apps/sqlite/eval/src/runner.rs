@@ -273,9 +273,16 @@ pub async fn run_case(
 
     let mut session = sqlite_agent::init_session(main_llm.clone(), &hooks).await;
 
-    let output = run_turn(&mut session, &registry, &hooks, &config, case.prompt.clone(), None)
-        .await
-        .with_context(|| format!("case '{}' failed during execution", case.name))?;
+    let output = run_turn(
+        &mut session,
+        &registry,
+        &hooks,
+        &config,
+        case.prompt.clone(),
+        None,
+    )
+    .await
+    .with_context(|| format!("case '{}' failed during execution", case.name))?;
 
     let tool_results = executed_tool_results(&session);
     // The last SELECT result is the last sql_history entry that has no rows_affected
@@ -288,12 +295,7 @@ pub async fn run_case(
         .map(|e| e.result.clone());
     let mut score = CaseScore::default();
     apply_case_expectations(&mut score, case, &tool_results, last_result.as_ref());
-    apply_select_checks(
-        &mut score,
-        db.as_ref(),
-        &tool_results,
-        last_result.as_ref(),
-    );
+    apply_select_checks(&mut score, db.as_ref(), &tool_results, last_result.as_ref());
 
     if let (Some(judge), Some(query_result)) = (judge_llm, last_result.as_ref()) {
         let assistant_text = last_assistant_text(&session).unwrap_or_default();

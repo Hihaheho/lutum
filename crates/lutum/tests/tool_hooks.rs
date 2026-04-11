@@ -6,8 +6,8 @@ use lutum::{
     EventHandler, FinishReason, HandlerContext, HandlerDirective, Lutum, MockLlmAdapter,
     MockTextScenario, ModelInputItem, RawJson, RawTextTurnEvent, Session, SharedPoolBudgetManager,
     SharedPoolBudgetOptions, TextStepOutcomeWithTools, TextTurnEventWithTools,
-    TextTurnStateWithTools, ToolHookOutcome, ToolMetadata, ToolResult, Toolset, Usage,
-    ToolRoundPlan,
+    TextTurnStateWithTools, ToolHookOutcome, ToolMetadata, ToolResult, ToolRoundPlan, Toolset,
+    Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -93,10 +93,7 @@ async fn pass1_weather(
 
 /// Second-pass search hook for multi-pass chaining test.
 #[lutum::impl_hook(SearchHook)]
-async fn pass2_search(
-    _metadata: &lutum::ToolMetadata,
-    input: &SearchArgs,
-) -> Option<SearchResult> {
+async fn pass2_search(_metadata: &lutum::ToolMetadata, input: &SearchArgs) -> Option<SearchResult> {
     let q = input.query.clone();
     Some(SearchResult {
         hits: vec![format!("pass2:{q}")],
@@ -335,7 +332,11 @@ fn apply_hooks_multi_pass_chaining_narrows_pending() {
             .await
     });
 
-    assert_eq!(plan.handled.len(), 2, "both calls should be handled after two passes");
+    assert_eq!(
+        plan.handled.len(),
+        2,
+        "both calls should be handled after two passes"
+    );
     assert_eq!(plan.pending.len(), 0, "nothing should remain pending");
 }
 
@@ -373,13 +374,13 @@ fn tool_round_plan_commit_merges_handled_and_pending_results() {
         .pending
         .iter()
         .map(|call| match call {
-            ToolsCall::Search(c) => {
-                SearchArgs::tool_result(
-                    c.metadata.clone(),
-                    SearchResult { hits: vec!["ramen-shop".into()] },
-                )
-                .unwrap()
-            }
+            ToolsCall::Search(c) => SearchArgs::tool_result(
+                c.metadata.clone(),
+                SearchResult {
+                    hits: vec!["ramen-shop".into()],
+                },
+            )
+            .unwrap(),
             other => panic!("unexpected: {other:?}"),
         })
         .collect();
@@ -447,7 +448,9 @@ fn apply_hooks_accepts_closure_via_blanket_impl() {
     let hook = |call| async move {
         match call {
             ToolsCall::Weather(c) => {
-                let output = WeatherResult { forecast: format!("closure:{}", c.input().city) };
+                let output = WeatherResult {
+                    forecast: format!("closure:{}", c.input().city),
+                };
                 ToolHookOutcome::Handled(ToolsHandled::Weather(c.handled(output)))
             }
             other => ToolHookOutcome::Unhandled(other),

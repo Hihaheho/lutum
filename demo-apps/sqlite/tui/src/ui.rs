@@ -424,7 +424,8 @@ fn build_history_lines(history: &[SqlHistoryEntry]) -> Vec<Line<'static>> {
 
         // SQL label — cyan for SELECT (rows_affected = None, has columns), yellow for writes/DDL.
         let is_select = entry.rows_affected.is_none() && !entry.result.columns.is_empty()
-            || (entry.rows_affected.is_none() && entry.result.columns.is_empty()
+            || (entry.rows_affected.is_none()
+                && entry.result.columns.is_empty()
                 && entry.sql.trim_start().to_uppercase().starts_with("SELECT"));
         let label_color = if is_select {
             Color::Cyan
@@ -454,12 +455,7 @@ fn build_history_lines(history: &[SqlHistoryEntry]) -> Vec<Line<'static>> {
             lines.extend(format_query_result(&entry.result));
         } else {
             // DDL or SELECT with no rows.
-            let msg = if entry
-                .sql
-                .trim_start()
-                .to_uppercase()
-                .starts_with("SELECT")
-            {
+            let msg = if entry.sql.trim_start().to_uppercase().starts_with("SELECT") {
                 "  (no rows)"
             } else {
                 "  ✓ done"
@@ -586,7 +582,9 @@ fn render_input(f: &mut Frame, area: Rect, app: &TuiApp) {
         AppState::Approval(_) => " [y] Accept  [n] Reject  [e] Edit SQL  [Esc] Cancel",
         AppState::ModeRequest(_) => " [y] Grant write access  [n] Deny",
         AppState::Running => " Thinking…",
-        _ => " [Tab] mode  [Enter] send  [↑↓] scroll chat  [Alt+↑↓] scroll SQL  [Ctrl+N] new  [q] quit",
+        _ => {
+            " [Tab] mode  [Enter] send  [↑↓] scroll chat  [Alt+↑↓] scroll SQL  [Ctrl+N] new  [q] quit"
+        }
     };
 
     let block = Block::default()

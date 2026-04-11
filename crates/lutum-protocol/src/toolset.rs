@@ -213,6 +213,7 @@ pub trait HookableToolset: Toolset {
 /// Implemented automatically by `#[derive(Toolset)]` for the generated `ToolsHooks` struct.
 /// A blanket impl covers `Fn(T::ToolCall) -> Fut` closures.
 pub trait ToolHooks<T: HookableToolset>: Send + Sync {
+    #[allow(clippy::type_complexity)]
     fn hook_call<'a>(
         &'a self,
         call: T::ToolCall,

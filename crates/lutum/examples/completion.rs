@@ -43,8 +43,7 @@ impl EventHandler<CompletionEvent, CompletionTurnState> for PrintDelta {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let endpoint =
-        std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
+    let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model = std::env::var("MODEL").unwrap_or_else(|_| "qwen2.5:0.5b".into());
 
@@ -65,7 +64,11 @@ async fn main() -> anyhow::Result<()> {
     println!("{}", style("─".repeat(60)).dim());
 
     for prompt in PROMPTS {
-        print!("\n{} {}", style("PROMPT").bold().cyan(), style(prompt).dim());
+        print!(
+            "\n{} {}",
+            style("PROMPT").bold().cyan(),
+            style(prompt).dim()
+        );
         print!("\n{} ", style("OUTPUT").bold().green());
         std::io::stdout().flush()?;
 

@@ -1779,8 +1779,7 @@ where
     };
 
     // Build a last-write-wins override map from selector name → description.
-    let mut override_map: std::collections::HashMap<&str, &str> =
-        std::collections::HashMap::new();
+    let mut override_map: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for (sel, desc) in &description_overrides {
         override_map.insert(sel.name(), desc.as_str());
     }

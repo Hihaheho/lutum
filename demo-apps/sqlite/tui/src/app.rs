@@ -11,8 +11,8 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 use lutum::Usage;
 use sqlite_agent::{
-    AgentConfig, AgentError, AgentHooks, DbRegistry, SqlHistoryEntry,
-    TransactionMode, TurnOutput, WriteDecision, WritePreview, run_turn,
+    AgentConfig, AgentError, AgentHooks, DbRegistry, SqlHistoryEntry, TransactionMode, TurnOutput,
+    WriteDecision, WritePreview, run_turn,
 };
 
 use crate::{
@@ -84,9 +84,9 @@ pub struct TuiApp {
     pub sql_history: Vec<SqlHistoryEntry>,
     pub state: AppState,
     pub textarea: tui_textarea::TextArea<'static>,
-    pub scroll: Cell<usize>,             // left pane (conversation)
-    pub scroll_to_bottom: Cell<bool>,    // left pane auto-follow
-    pub result_scroll: Cell<usize>,      // right pane (SQL history)
+    pub scroll: Cell<usize>,                 // left pane (conversation)
+    pub scroll_to_bottom: Cell<bool>,        // left pane auto-follow
+    pub result_scroll: Cell<usize>,          // right pane (SQL history)
     pub result_scroll_to_bottom: Cell<bool>, // right pane auto-follow
     pub running_task: Option<JoinHandle<()>>,
     pub token_stats: Usage,
@@ -268,7 +268,15 @@ impl TuiApp {
         let event_tx = self.agent_event_tx.clone();
 
         self.running_task = Some(tokio::spawn(async move {
-            let result = run_turn(&mut session, &registry, &hooks, &config, input, Some(text_tx)).await;
+            let result = run_turn(
+                &mut session,
+                &registry,
+                &hooks,
+                &config,
+                input,
+                Some(text_tx),
+            )
+            .await;
             let event = match result {
                 Ok(output) => AgentEvent::Finished(output, session),
                 Err(e) => AgentEvent::Failed(e, session),

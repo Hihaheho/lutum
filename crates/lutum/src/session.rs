@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
-    GenerationParams, HookableToolset, InputMessageRole, IntoToolResult, ModelInput, ModelInputItem,
-    RequestBudget, ToolHookOutcome, ToolHooks, ToolMetadata, ToolResult, ToolResultError, Toolset,
-    TurnConfig, TurnView, UncommittedAssistantTurn,
+    GenerationParams, HookableToolset, InputMessageRole, IntoToolResult, ModelInput,
+    ModelInputItem, RequestBudget, ToolHookOutcome, ToolHooks, ToolMetadata, ToolResult,
+    ToolResultError, Toolset, TurnConfig, TurnView, UncommittedAssistantTurn,
     budget::Usage,
     reducer::{
         StagedStructuredTurnResultWithTools, StagedTextTurnResultWithTools,
@@ -338,7 +338,11 @@ impl<T: HookableToolset> ToolRoundPlan<T> {
     ///
     /// `pending_results` must contain one result for each call in [`pending_calls`](Self::pending_calls).
     /// Results for hook-handled calls are supplied automatically from the stored handled outputs.
-    pub fn commit<I, R>(self, session: &mut Session, pending_results: I) -> Result<(), ToolRoundCommitError>
+    pub fn commit<I, R>(
+        self,
+        session: &mut Session,
+        pending_results: I,
+    ) -> Result<(), ToolRoundCommitError>
     where
         I: IntoIterator<Item = R>,
         R: IntoToolResult,

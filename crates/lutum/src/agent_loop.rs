@@ -196,8 +196,9 @@ where
                     let tool_calls = round.tool_calls.clone();
                     let mut tool_results = Vec::with_capacity(tool_calls.len());
                     for tool_call in tool_calls {
-                        let result =
-                            dispatch(tool_call).await.map_err(AgentLoopError::Dispatch)?;
+                        let result = dispatch(tool_call)
+                            .await
+                            .map_err(AgentLoopError::Dispatch)?;
                         tool_results.push(result);
                     }
 

@@ -347,7 +347,11 @@ where
         mut self,
         overrides: impl IntoIterator<Item = (T::Selector, String)>,
     ) -> Self {
-        self.turn.config.tools.description_overrides.extend(overrides);
+        self.turn
+            .config
+            .tools
+            .description_overrides
+            .extend(overrides);
         self
     }
 
@@ -744,7 +748,11 @@ where
         mut self,
         overrides: impl IntoIterator<Item = (T::Selector, String)>,
     ) -> Self {
-        self.turn.config.tools.description_overrides.extend(overrides);
+        self.turn
+            .config
+            .tools
+            .description_overrides
+            .extend(overrides);
         self
     }
 

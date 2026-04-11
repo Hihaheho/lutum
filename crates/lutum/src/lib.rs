@@ -44,6 +44,7 @@ pub mod toolset {
     pub use lutum_protocol::toolset::*;
 }
 
+pub use agent_loop::{AgentLoop, AgentLoopError, AgentLoopOutput};
 pub use builders::{
     Completion, StructuredCompletion, StructuredTurn, StructuredTurnWithTools, TextTurn,
     TextTurnWithTools,
@@ -58,7 +59,6 @@ pub use hooks::{
     Aggregate, AggregateInto, Chain, Finalize, FinalizeInto, FirstSuccess, HookReentrancyError,
     LutumHooks, ResolveUsageEstimate, ShortCircuit, Stateful,
 };
-pub use agent_loop::{AgentLoop, AgentLoopError, AgentLoopOutput};
 pub use session::{CommitTurn, ToolRoundPlan, UncommittedToolRound};
 
 pub use lutum_macros::{Toolset, hooks, impl_hook, tool_fn, tool_input};
@@ -72,8 +72,7 @@ pub use lutum_protocol::{
     EmptyNonEmptyError, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
     ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
     ErasedTextTurnEventStream, FinishReason, GenerationParams, HandledTool, HookableToolset,
-    InputMessageRole,
-    IntoToolResult, ItemView, MessageContent, ModelInput, ModelInputItem,
+    InputMessageRole, IntoToolResult, ItemView, MessageContent, ModelInput, ModelInputItem,
     ModelInputValidationError, ModelName, ModelNameError, NoToolSelector, NoTools, NonEmpty,
     OperationKind, RawJson, Remaining, RequestBudget, RequestExtensions, SharedPoolBudgetError,
     SharedPoolBudgetManager, SharedPoolBudgetOptions, StagedStructuredTurnResult,
@@ -91,9 +90,8 @@ pub use lutum_protocol::{
     ToolCallError, ToolCallId, ToolCallItemView, ToolCallWrapper, ToolConstraints, ToolDef,
     ToolExecutionError, ToolHookOutcome, ToolHooks, ToolInput, ToolMetadata, ToolName,
     ToolRequirement, ToolResult, ToolResultError, ToolResultItemView, ToolSelector, Toolset,
-    TurnAdapter,
-    TurnConfig, TurnItemIter, TurnRole, TurnView, UncommittedAssistantTurn, Usage, UsageEstimate,
-    UsageRecoveryAdapter, assistant_json, find_tool_call_arguments,
+    TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView, UncommittedAssistantTurn, Usage,
+    UsageEstimate, UsageRecoveryAdapter, assistant_json, find_tool_call_arguments,
 };
 pub use mock::{
     MockCompletionScenario, MockError, MockLlmAdapter, MockStructuredCompletionScenario,

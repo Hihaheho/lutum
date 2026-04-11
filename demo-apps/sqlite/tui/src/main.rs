@@ -163,10 +163,7 @@ fn handle_idle_key(app: &mut TuiApp, key: KeyEvent) -> bool {
     let mods = key.modifiers;
 
     // Quit (only when textarea is empty)
-    if code == KeyCode::Char('q')
-        && mods.is_empty()
-        && app.textarea.lines().join("").is_empty()
-    {
+    if code == KeyCode::Char('q') && mods.is_empty() && app.textarea.lines().join("").is_empty() {
         return true;
     }
     if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
@@ -218,11 +215,13 @@ fn handle_idle_key(app: &mut TuiApp, key: KeyEvent) -> bool {
     if mods.contains(KeyModifiers::ALT) {
         match code {
             KeyCode::Up => {
-                app.result_scroll.set(app.result_scroll.get().saturating_sub(1));
+                app.result_scroll
+                    .set(app.result_scroll.get().saturating_sub(1));
                 return false;
             }
             KeyCode::Down => {
-                app.result_scroll.set(app.result_scroll.get().saturating_add(1));
+                app.result_scroll
+                    .set(app.result_scroll.get().saturating_add(1));
                 return false;
             }
             _ => {}

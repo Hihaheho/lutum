@@ -125,7 +125,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         // a `ListUsers` struct and a `ListUsers` trait in the same scope).
         let hook_method_ident = format_ident!("{}_hook", method_ident);
         // CamelCase("weather_hook") = WeatherHook
-        let hook_trait_ident = format_ident!("{}Hook", variant_ident);
+        let _hook_trait_ident = format_ident!("{}Hook", variant_ident);
 
         call_hook_arms.push(quote! {
             Self::#variant_ident(call) => {
@@ -154,7 +154,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
 
         // ── Description hook slot ────────────────────────────────────────────
         let desc_method_ident = format_ident!("{}_description_hook", method_ident);
-        let desc_hook_trait_ident = format_ident!("{}DescriptionHook", variant_ident);
+        let _desc_hook_trait_ident = format_ident!("{}DescriptionHook", variant_ident);
 
         hooks_trait_methods.push(quote! {
             #[hook(singleton)]
@@ -164,7 +164,6 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                 ::std::option::Option::None
             }
         });
-
 
         desc_overrides_arms.push(quote! {
             if let ::std::option::Option::Some(desc) = self.#desc_method_ident(&defs[#index]).await {
