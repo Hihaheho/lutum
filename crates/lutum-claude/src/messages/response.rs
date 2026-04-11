@@ -366,9 +366,10 @@ pub struct MessageDeltaUsage {
 
 impl MessageDeltaUsage {
     pub(crate) fn into_protocol_usage(self) -> lutum_protocol::budget::Usage {
-        let input_tokens = self.input_tokens.unwrap_or_default()
-            + self.cache_creation_input_tokens.unwrap_or_default()
-            + self.cache_read_input_tokens.unwrap_or_default();
+        let cache_creation_tokens = self.cache_creation_input_tokens.unwrap_or_default();
+        let cache_read_tokens = self.cache_read_input_tokens.unwrap_or_default();
+        let input_tokens =
+            self.input_tokens.unwrap_or_default() + cache_creation_tokens + cache_read_tokens;
         let output_tokens = self.output_tokens.unwrap_or_default();
 
         lutum_protocol::budget::Usage {
@@ -376,6 +377,8 @@ impl MessageDeltaUsage {
             output_tokens,
             total_tokens: input_tokens + output_tokens,
             cost_micros_usd: 0,
+            cache_creation_tokens,
+            cache_read_tokens,
         }
     }
 }

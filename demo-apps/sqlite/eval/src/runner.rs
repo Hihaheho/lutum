@@ -280,16 +280,24 @@ pub async fn run_case(
         .with_context(|| format!("case '{}' failed during execution", case.name))?;
 
     let tool_results = executed_tool_results(&session);
+    // The last SELECT result is the last sql_history entry that has no rows_affected
+    // (i.e. a SELECT rather than a write).
+    let last_result = output
+        .sql_history
+        .iter()
+        .rev()
+        .find(|e| e.rows_affected.is_none())
+        .map(|e| e.result.clone());
     let mut score = CaseScore::default();
-    apply_case_expectations(&mut score, case, &tool_results, output.last_result.as_ref());
+    apply_case_expectations(&mut score, case, &tool_results, last_result.as_ref());
     apply_select_checks(
         &mut score,
         db.as_ref(),
         &tool_results,
-        output.last_result.as_ref(),
+        last_result.as_ref(),
     );
 
-    if let (Some(judge), Some(query_result)) = (judge_llm, output.last_result.as_ref()) {
+    if let (Some(judge), Some(query_result)) = (judge_llm, last_result.as_ref()) {
         let assistant_text = last_assistant_text(&session).unwrap_or_default();
         match crate::evaluators::consistency::score_consistency(
             judge,

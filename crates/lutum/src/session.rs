@@ -16,6 +16,7 @@ use thiserror::Error;
 
 use crate::{
     Lutum,
+    agent_loop::AgentLoop,
     builders::{StructuredTurn, TextTurn},
 };
 
@@ -90,6 +91,14 @@ impl Session {
     /// to this session. Use `collect_staged()` to opt out of auto-commit.
     pub fn text_turn(&mut self) -> TextTurn<'_> {
         TextTurn::from_session(self)
+    }
+
+    /// Create an [`AgentLoop`] builder for running a tool-calling agentic loop on this session.
+    ///
+    /// The loop drives the model through tool calls until it produces a text-only
+    /// response or the round limit is reached.
+    pub fn agent_loop<T: Toolset>(&mut self) -> AgentLoop<'_, T> {
+        AgentLoop::new(self)
     }
 
     /// Create a structured turn builder. Calling `collect()` on the builder will auto-commit the

@@ -1,13 +1,9 @@
-use std::convert::Infallible;
+use std::sync::Arc;
 
-use lutum::{
-    HandlerContext, HandlerDirective, Session, TextStepOutcomeWithTools, TextTurnEventWithTools,
-    TextTurnStateWithTools,
-};
-use lutum_claude::ClaudeCommittedTurn;
-use lutum_protocol::conversation::ModelInputItem;
+use lutum::{AgentLoopError, Session, ToolResult};
+use lutum_protocol::budget::Usage;
 use thiserror::Error;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::{
     db::{
@@ -18,18 +14,15 @@ use crate::{
     tools::{SqlTools, SqlToolsCall, SqlToolsSelector},
 };
 
-/// Marker type inserted into `RequestExtensions` to signal that prompt caching
-/// should be applied by the adapter layer (e.g. via a `FallbackSerializer`).
-#[derive(Clone, Copy, Debug)]
-pub struct CacheMarker;
-
-/// Accumulated token usage across all rounds of a single turn.
-#[derive(Clone, Debug, Default)]
-pub struct CumulativeUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_creation_tokens: u64,
-    pub cache_read_tokens: u64,
+/// A single SQL execution recorded during an agent turn.
+#[derive(Debug, Clone)]
+pub struct SqlHistoryEntry {
+    /// The SQL statement that was executed.
+    pub sql: String,
+    /// Result rows for SELECT statements; empty for writes/DDL.
+    pub result: QueryResult,
+    /// Rows affected for INSERT/UPDATE/DELETE; `None` for SELECT and DDL.
+    pub rows_affected: Option<u64>,
 }
 
 /// Configuration for a single agent session.
@@ -50,24 +43,13 @@ impl Default for AgentConfig {
     }
 }
 
-/// A single SQL execution recorded during an agent turn.
-#[derive(Debug, Clone)]
-pub struct SqlHistoryEntry {
-    /// The SQL statement that was executed.
-    pub sql: String,
-    /// Result rows for SELECT statements; empty for writes/DDL.
-    pub result: QueryResult,
-    /// Rows affected for INSERT/UPDATE/DELETE; `None` for SELECT and DDL.
-    pub rows_affected: Option<u64>,
-}
-
 /// Output of a completed agent turn.
 #[derive(Debug)]
 pub struct TurnOutput {
     /// All SQL statements executed during this turn, in order.
     pub sql_history: Vec<SqlHistoryEntry>,
     /// Token usage accumulated across all rounds.
-    pub usage: CumulativeUsage,
+    pub usage: Usage,
 }
 
 #[derive(Debug, Error)]
@@ -78,6 +60,16 @@ pub enum AgentError {
     Db(#[from] DbError),
     #[error("reached {0}-round limit without a final answer")]
     RoundLimit(usize),
+}
+
+impl<E: std::error::Error + 'static> From<AgentLoopError<E>> for AgentError {
+    fn from(e: AgentLoopError<E>) -> Self {
+        match e {
+            AgentLoopError::RoundLimit(n) => AgentError::RoundLimit(n),
+            AgentLoopError::Dispatch(e) => AgentError::Collect(e.to_string()),
+            AgentLoopError::Collect(s) => AgentError::Collect(s),
+        }
+    }
 }
 
 /// Run one complete agent turn, streaming text deltas to `text_tx` if provided.
@@ -91,58 +83,48 @@ pub async fn run_turn(
     config: &AgentConfig,
     text_tx: Option<UnboundedSender<String>>,
 ) -> Result<TurnOutput, AgentError> {
-    let mut sql_history: Vec<SqlHistoryEntry> = Vec::new();
-    let mut usage = CumulativeUsage::default();
+    let sql_history: Arc<Mutex<Vec<SqlHistoryEntry>>> = Arc::new(Mutex::new(Vec::new()));
 
-    for _round in 0..config.max_rounds {
-        let tx = text_tx.clone();
-        let mode = hooks.get_transaction_mode().await;
-        let outcome = session
-            .text_turn()
-            .tools::<SqlTools>()
-            .available_tools(tool_selectors_for_mode(mode))
-            .ext(CacheMarker)
-            .collect_with(
-                move |event: &TextTurnEventWithTools<SqlTools>,
-                      _cx: &HandlerContext<TextTurnStateWithTools<SqlTools>>|
-                      -> Result<HandlerDirective, Infallible> {
-                    if let TextTurnEventWithTools::TextDelta { delta } = event
-                        && let Some(tx) = &tx
-                    {
-                        let _ = tx.send(delta.clone());
-                    }
-                    Ok(HandlerDirective::Continue)
-                },
-            )
-            .await
-            .map_err(|e| AgentError::Collect(e.to_string()))?;
+    let mode = hooks.get_transaction_mode().await;
+    let available = tool_selectors_for_mode(mode);
 
-        match outcome {
-            TextStepOutcomeWithTools::Finished(result) => {
-                usage.input_tokens += result.usage.input_tokens;
-                usage.output_tokens += result.usage.output_tokens;
-                collect_session_cache_tokens(session, &mut usage);
-                return Ok(TurnOutput { sql_history, usage });
-            }
-            TextStepOutcomeWithTools::NeedsTools(round) => {
-                usage.input_tokens += round.usage.input_tokens;
-                usage.output_tokens += round.usage.output_tokens;
-                let mut tool_results = Vec::with_capacity(round.tool_calls.len());
+    let history_ref = sql_history.clone();
+    let registry_ref = registry.clone();
+    let hooks_ref = hooks.clone();
+    let config_ref = config.clone();
 
-                for tool_call in round.tool_calls.iter().cloned() {
-                    let tool_result =
-                        dispatch_tool(tool_call, registry, hooks, config, &mut sql_history).await?;
-                    tool_results.push(tool_result);
-                }
+    let mut builder = session
+        .agent_loop::<SqlTools>()
+        .max_rounds(config.max_rounds)
+        .available_tools(available);
 
-                round
-                    .commit(session, tool_results)
-                    .expect("tool result ordering should be valid");
-            }
-        }
+    if let Some(tx) = text_tx {
+        builder = builder.on_text_delta(move |delta| {
+            let _ = tx.send(delta);
+        });
     }
 
-    Err(AgentError::RoundLimit(config.max_rounds))
+    let loop_output = builder
+        .run(move |call| {
+            let history = history_ref.clone();
+            let registry = registry_ref.clone();
+            let hooks = hooks_ref.clone();
+            let config = config_ref.clone();
+            async move {
+                dispatch_tool(call, &registry, &hooks, &config, &history).await
+            }
+        })
+        .await
+        .map_err(AgentError::from)?;
+
+    let sql_history = Arc::try_unwrap(sql_history)
+        .expect("no other Arc references after loop")
+        .into_inner();
+
+    Ok(TurnOutput {
+        sql_history,
+        usage: loop_output.usage,
+    })
 }
 
 fn tool_selectors_for_mode(mode: TransactionMode) -> Vec<SqlToolsSelector> {
@@ -168,8 +150,8 @@ async fn dispatch_tool(
     registry: &DbRegistry,
     hooks: &AgentHooks,
     config: &AgentConfig,
-    sql_history: &mut Vec<SqlHistoryEntry>,
-) -> Result<lutum::ToolResult, AgentError> {
+    sql_history: &Mutex<Vec<SqlHistoryEntry>>,
+) -> Result<ToolResult, DbError> {
     match call {
         // ── Mode request ───────────────────────────────────────────────────
         SqlToolsCall::RequestWritableMode(c) => {
@@ -233,7 +215,7 @@ async fn dispatch_tool(
             }
             match db.execute_read(&sql) {
                 Ok(qr) => {
-                    sql_history.push(SqlHistoryEntry {
+                    sql_history.lock().await.push(SqlHistoryEntry {
                         sql,
                         result: qr.clone(),
                         rows_affected: None,
@@ -251,12 +233,10 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: insert");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c
-                    .complete(error_modify(&format!("unknown db_id: '{db_id}'")))
-                    .unwrap());
+                return Ok(c.complete(error_modify(&format!("unknown db_id: '{db_id}'"))).unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
-            sql_history.push(SqlHistoryEntry {
+            sql_history.lock().await.push(SqlHistoryEntry {
                 sql,
                 result: QueryResult::empty(),
                 rows_affected: Some(result.rows_affected),
@@ -270,12 +250,10 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: update");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c
-                    .complete(error_modify(&format!("unknown db_id: '{db_id}'")))
-                    .unwrap());
+                return Ok(c.complete(error_modify(&format!("unknown db_id: '{db_id}'"))).unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
-            sql_history.push(SqlHistoryEntry {
+            sql_history.lock().await.push(SqlHistoryEntry {
                 sql,
                 result: QueryResult::empty(),
                 rows_affected: Some(result.rows_affected),
@@ -289,12 +267,10 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: delete");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c
-                    .complete(error_modify(&format!("unknown db_id: '{db_id}'")))
-                    .unwrap());
+                return Ok(c.complete(error_modify(&format!("unknown db_id: '{db_id}'"))).unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
-            sql_history.push(SqlHistoryEntry {
+            sql_history.lock().await.push(SqlHistoryEntry {
                 sql,
                 result: QueryResult::empty(),
                 rows_affected: Some(result.rows_affected),
@@ -309,12 +285,10 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: create_table");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c
-                    .complete(error_ddl(&format!("unknown db_id: '{db_id}'")))
-                    .unwrap());
+                return Ok(c.complete(error_ddl(&format!("unknown db_id: '{db_id}'"))).unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
-            sql_history.push(SqlHistoryEntry {
+            sql_history.lock().await.push(SqlHistoryEntry {
                 sql,
                 result: QueryResult::empty(),
                 rows_affected: None,
@@ -328,12 +302,10 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: alter_table");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c
-                    .complete(error_ddl(&format!("unknown db_id: '{db_id}'")))
-                    .unwrap());
+                return Ok(c.complete(error_ddl(&format!("unknown db_id: '{db_id}'"))).unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
-            sql_history.push(SqlHistoryEntry {
+            sql_history.lock().await.push(SqlHistoryEntry {
                 sql,
                 result: QueryResult::empty(),
                 rows_affected: None,
@@ -347,12 +319,10 @@ async fn dispatch_tool(
             let db_id = args.db_id.clone();
             tracing::debug!(%db_id, %sql, "tool: create_index");
             let Some(db) = registry.get(&db_id) else {
-                return Ok(c
-                    .complete(error_ddl(&format!("unknown db_id: '{db_id}'")))
-                    .unwrap());
+                return Ok(c.complete(error_ddl(&format!("unknown db_id: '{db_id}'"))).unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
-            sql_history.push(SqlHistoryEntry {
+            sql_history.lock().await.push(SqlHistoryEntry {
                 sql,
                 result: QueryResult::empty(),
                 rows_affected: None,
@@ -432,7 +402,7 @@ async fn execute_write_op(
     db: &SqliteDb,
     hooks: &AgentHooks,
     config: &AgentConfig,
-) -> Result<ModifyResult, AgentError> {
+) -> Result<ModifyResult, DbError> {
     if let Err(e) = validate_sql_safety(sql) {
         return Ok(ModifyResult {
             rows_affected: 0,
@@ -473,7 +443,7 @@ async fn execute_ddl_op(
     sql: &str,
     db: &SqliteDb,
     hooks: &AgentHooks,
-) -> Result<DdlResult, AgentError> {
+) -> Result<DdlResult, DbError> {
     if let Err(e) = validate_sql_safety(sql) {
         return Ok(DdlResult {
             message: format!("rejected (invalid SQL): {e}"),
@@ -489,21 +459,6 @@ async fn execute_ddl_op(
         Err(e) => Ok(DdlResult {
             message: format!("error: {e}"),
         }),
-    }
-}
-
-/// Scan the session's committed turns and add their cache token counts to `usage`.
-fn collect_session_cache_tokens(session: &Session, usage: &mut CumulativeUsage) {
-    for item in session.input().items() {
-        if let ModelInputItem::Turn(committed_turn) = item
-            && let Some(ct) = committed_turn
-                .as_ref()
-                .as_any()
-                .downcast_ref::<ClaudeCommittedTurn>()
-        {
-            usage.cache_creation_tokens += ct.cache_creation_input_tokens;
-            usage.cache_read_tokens += ct.cache_read_input_tokens;
-        }
     }
 }
 

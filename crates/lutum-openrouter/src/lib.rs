@@ -37,6 +37,7 @@ impl Generation {
             output_tokens: output,
             total_tokens: input + output,
             cost_micros_usd: cost_micros,
+            ..Usage::zero()
         }
     }
 }

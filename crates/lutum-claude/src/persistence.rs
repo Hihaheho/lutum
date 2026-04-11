@@ -29,8 +29,9 @@
 //! assert_eq!(input.items().len(), restored.items().len());
 //! ```
 
-use std::sync::Arc;
+use std::{io::ErrorKind, path::Path, sync::Arc};
 
+use lutum::Session;
 use lutum_protocol::conversation::{
     AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, NonEmpty,
     RawJson, ToolCallId, ToolName, ToolResult,
@@ -170,6 +171,77 @@ pub fn restore(items: Vec<ClaudeModelInputItem>) -> ModelInput {
 }
 
 // ---------------------------------------------------------------------------
+// High-level session helpers
+// ---------------------------------------------------------------------------
+
+/// Error returned by [`save_session`] and [`load_session`].
+#[derive(Debug, Error)]
+pub enum SessionPersistenceError {
+    #[error("session snapshot failed: {0}")]
+    Snapshot(#[from] SnapshotError),
+    #[error("session file not found: {0}")]
+    NotFound(std::path::PathBuf),
+    #[error("failed to read session file {path}: {source}")]
+    Read {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to write session file {path}: {source}")]
+    Write {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to serialize session: {0}")]
+    Serialize(serde_json::Error),
+    #[error("failed to deserialize session: {0}")]
+    Deserialize(serde_json::Error),
+}
+
+/// Serialize `session.input()` to `path` as JSON.
+///
+/// The session must have been driven exclusively by [`ClaudeAdapter`][crate::ClaudeAdapter];
+/// otherwise [`SnapshotError`] is returned.
+pub fn save_session(session: &Session, path: &Path) -> Result<(), SessionPersistenceError> {
+    let items = snapshot(session.input())?;
+    let json = serde_json::to_string(&items).map_err(SessionPersistenceError::Serialize)?;
+    std::fs::write(path, json).map_err(|source| SessionPersistenceError::Write {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+/// Load a session from `path`.
+///
+/// Returns `Err(SessionPersistenceError::NotFound)` if the file does not exist — the
+/// caller can then fall back to creating a fresh session.
+///
+/// If the file exists but cannot be parsed, returns a descriptive error. Warnings
+/// about recoverable issues (e.g. future version tags) are returned alongside the
+/// session so callers can surface them to the user.
+pub fn load_session(
+    lutum: lutum::Lutum,
+    path: &Path,
+) -> Result<Session, SessionPersistenceError> {
+    let json = std::fs::read_to_string(path).map_err(|source| {
+        if source.kind() == ErrorKind::NotFound {
+            SessionPersistenceError::NotFound(path.to_owned())
+        } else {
+            SessionPersistenceError::Read {
+                path: path.to_owned(),
+                source,
+            }
+        }
+    })?;
+
+    let items: Vec<ClaudeModelInputItem> =
+        serde_json::from_str(&json).map_err(SessionPersistenceError::Deserialize)?;
+
+    let mut session = Session::new(lutum);
+    *session.input_mut() = restore(items);
+    Ok(session)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -204,6 +276,7 @@ mod tests {
                 output_tokens: 5,
                 total_tokens: 15,
                 cost_micros_usd: 0,
+                ..Usage::zero()
             },
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,

@@ -59,6 +59,51 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply(&self, request: &mut MessagesRequest);
 }
 
+/// Built-in prompt-caching serializer.
+///
+/// Applies `cache_control: { type: "ephemeral" }` at three cache breakpoints:
+///   1. Last system block  — covers the system prompt prefix
+///   2. Last tool          — covers system + all tool definitions (static across turns)
+///   3. Last content block of the second-to-last message — covers conversation history
+struct BuiltinCacheSerializer;
+
+impl FallbackSerializer for BuiltinCacheSerializer {
+    fn apply(&self, request: &mut MessagesRequest) {
+        use crate::messages::{CacheControl, ClaudeContentBlock};
+
+        // 1. Last system block
+        if let Some(blocks) = request.system.as_mut()
+            && let Some(last) = blocks.last_mut()
+        {
+            last.cache_control = Some(CacheControl::ephemeral());
+        }
+
+        // 2. Last tool definition
+        if let Some(tools) = request.tools.as_mut()
+            && let Some(last) = tools.last_mut()
+        {
+            last.cache_control = Some(CacheControl::ephemeral());
+        }
+
+        // 3. Last content block of the second-to-last message (penultimate turn)
+        let n = request.messages.len();
+        if n >= 2 {
+            let msg = &mut request.messages[n - 2];
+            if let Some(block) = msg.content.last_mut() {
+                match block {
+                    ClaudeContentBlock::Text(b) => {
+                        b.cache_control = Some(CacheControl::ephemeral())
+                    }
+                    ClaudeContentBlock::ToolResult(b) => {
+                        b.cache_control = Some(CacheControl::ephemeral())
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 #[lutum_macros::hooks]
 pub trait ClaudeHooks {
     #[hook(singleton)]
@@ -175,6 +220,17 @@ impl ClaudeAdapter {
 
     pub fn set_fallback_serializer(&mut self, s: Box<dyn FallbackSerializer>) {
         self.fallback_serializer = Some(s.into());
+    }
+
+    /// Enable the built-in 3-breakpoint prompt-caching strategy.
+    ///
+    /// Cache breakpoints are inserted at: the last system block, the last tool
+    /// definition, and the last content block of the penultimate message. This
+    /// covers the system prompt, tool schema, and conversation history —
+    /// the three parts of the context that grow slowly across turns.
+    pub fn with_prompt_caching(mut self) -> Self {
+        self.set_fallback_serializer(Box::new(BuiltinCacheSerializer));
+        self
     }
 
     fn request_headers(&self) -> Result<HeaderMap, ClaudeError> {
@@ -943,12 +999,17 @@ where
                     }
                     SseEvent::MessageStop(_) => {
                         let finish_reason = map_claude_stop_reason(stop_reason.as_deref());
+                        let final_usage = Usage {
+                            cache_creation_tokens,
+                            cache_read_tokens,
+                            ..usage
+                        };
                         let committed_turn = Arc::new(ClaudeCommittedTurn {
                             request_id: request_id.clone(),
                             model: model.clone(),
                             items: finalize_committed_items(&mut blocks, &finish_reason)?,
                             finish_reason: finish_reason.clone(),
-                            usage,
+                            usage: final_usage,
                             cache_creation_input_tokens: cache_creation_tokens,
                             cache_read_input_tokens: cache_read_tokens,
                         });
@@ -958,7 +1019,7 @@ where
                         yield ErasedTextTurnEvent::Completed {
                             request_id: request_id.clone(),
                             finish_reason,
-                            usage,
+                            usage: final_usage,
                             committed_turn,
                         };
                     }
@@ -1103,12 +1164,17 @@ where
                         }
 
                         let finish_reason = map_claude_stop_reason(stop_reason.as_deref());
+                        let final_usage = Usage {
+                            cache_creation_tokens,
+                            cache_read_tokens,
+                            ..usage
+                        };
                         let committed_turn = Arc::new(ClaudeCommittedTurn {
                             request_id: request_id.clone(),
                             model: model.clone(),
                             items: finalize_committed_items(&mut blocks, &finish_reason)?,
                             finish_reason: finish_reason.clone(),
-                            usage,
+                            usage: final_usage,
                             cache_creation_input_tokens: cache_creation_tokens,
                             cache_read_input_tokens: cache_read_tokens,
                         });
@@ -1118,7 +1184,7 @@ where
                         yield ErasedStructuredTurnEvent::Completed {
                             request_id: request_id.clone(),
                             finish_reason,
-                            usage,
+                            usage: final_usage,
                             committed_turn,
                         };
                     }
@@ -1436,6 +1502,7 @@ mod tests {
                 output_tokens: 15,
                 total_tokens: 40,
                 cost_micros_usd: 0,
+                ..Usage::zero()
             })
         );
         assert_eq!(
@@ -1478,12 +1545,13 @@ mod tests {
                 request_id: Some(request_id),
                 usage,
                 ..
-            }) if request_id == "msg_done" && *usage == Usage {
+            }) if request_id == "msg_done" && *usage == (Usage {
                 input_tokens: 25,
                 output_tokens: 15,
                 total_tokens: 40,
                 cost_micros_usd: 0,
-            }
+                ..Usage::zero()
+            })
         ));
         assert_eq!(
             block_on(adapter.recover_usage(OperationKind::TextTurn, "msg_done")).unwrap(),

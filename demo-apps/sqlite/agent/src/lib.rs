@@ -9,7 +9,7 @@ pub use db::{
     TableInfo, WritePreview,
 };
 pub use hooks::{AgentHooks, ApproveModeRequest, TransactionMode, WriteDecision};
-pub use r#loop::{AgentConfig, AgentError, CacheMarker, CumulativeUsage, SqlHistoryEntry, TurnOutput, run_turn};
+pub use r#loop::{AgentConfig, AgentError, SqlHistoryEntry, TurnOutput, run_turn};
 pub use lutum::Session;
 pub use tools::SqlTools;
 

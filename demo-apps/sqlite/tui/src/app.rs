@@ -6,11 +6,12 @@ use std::{
 };
 
 use lutum::{Lutum, Session};
-use lutum_claude::persistence::{ClaudeModelInputItem, restore, snapshot};
+use lutum_claude::{SessionPersistenceError, load_session, save_session};
 use tokio::{sync::mpsc, task::JoinHandle};
 
+use lutum::Usage;
 use sqlite_agent::{
-    AgentConfig, AgentError, AgentHooks, CumulativeUsage, DbRegistry, SqlHistoryEntry,
+    AgentConfig, AgentError, AgentHooks, DbRegistry, SqlHistoryEntry,
     TransactionMode, TurnOutput, WriteDecision, WritePreview, run_turn,
 };
 
@@ -88,7 +89,7 @@ pub struct TuiApp {
     pub result_scroll: Cell<usize>,      // right pane (SQL history)
     pub result_scroll_to_bottom: Cell<bool>, // right pane auto-follow
     pub running_task: Option<JoinHandle<()>>,
-    pub token_stats: CumulativeUsage,
+    pub token_stats: Usage,
 
     // Session persistence
     session_path: Option<PathBuf>,
@@ -142,7 +143,7 @@ impl TuiApp {
             result_scroll: Cell::new(0),
             result_scroll_to_bottom: Cell::new(false),
             running_task: None,
-            token_stats: CumulativeUsage::default(),
+            token_stats: Usage::zero(),
             session_path,
             registry_path,
         };
@@ -171,8 +172,26 @@ impl TuiApp {
     }
 
     pub fn load_persisted_session(&mut self) {
-        let (session, warnings) =
-            load_or_new_session(self.llm.clone(), self.session_path.as_deref());
+        let (session, warnings) = match self.session_path.as_deref() {
+            None => (new_session(self.llm.clone()), vec![]),
+            Some(path) => match load_session(self.llm.clone(), path) {
+                Ok(session) => {
+                    tracing::info!("session loaded from {}", path.display());
+                    (session, vec![])
+                }
+                Err(SessionPersistenceError::NotFound(_)) => {
+                    (new_session(self.llm.clone()), vec![])
+                }
+                Err(e) => {
+                    let message = format!(
+                        "session file {} could not be loaded; starting fresh: {e}",
+                        path.display()
+                    );
+                    tracing::warn!("{message}");
+                    (new_session(self.llm.clone()), vec![message])
+                }
+            },
+        };
         self.display_session = session.clone();
         self.session = Some(session);
         for warning in warnings {
@@ -286,6 +305,8 @@ impl TuiApp {
                     }
                     self.token_stats.input_tokens += output.usage.input_tokens;
                     self.token_stats.output_tokens += output.usage.output_tokens;
+                    self.token_stats.total_tokens += output.usage.total_tokens;
+                    self.token_stats.cost_micros_usd += output.usage.cost_micros_usd;
                     self.token_stats.cache_creation_tokens += output.usage.cache_creation_tokens;
                     self.token_stats.cache_read_tokens += output.usage.cache_read_tokens;
                     self.display_session = session.clone();
@@ -333,20 +354,8 @@ impl TuiApp {
             return;
         };
         let Some(session) = &self.session else { return };
-        let items = match snapshot(session.input()) {
-            Ok(items) => items,
-            Err(e) => {
-                tracing::warn!("session snapshot failed: {e}");
-                return;
-            }
-        };
-        match serde_json::to_string(&items) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(path, json) {
-                    tracing::warn!("session save failed: {e}");
-                }
-            }
-            Err(e) => tracing::warn!("session serialize failed: {e}"),
+        if let Err(e) = save_session(session, path) {
+            tracing::warn!("session save failed: {e}");
         }
     }
 
@@ -383,26 +392,6 @@ fn new_session(llm: Lutum) -> Session {
     let mut session = Session::new(llm);
     session.push_system(sqlite_agent::SYSTEM_PROMPT);
     session
-}
-
-fn load_or_new_session(llm: Lutum, path: Option<&Path>) -> (Session, Vec<String>) {
-    if let Some(path) = path
-        && let Ok(json) = std::fs::read_to_string(path)
-    {
-        if let Ok(items) = serde_json::from_str::<Vec<ClaudeModelInputItem>>(&json) {
-            let mut session = Session::new(llm);
-            *session.input_mut() = restore(items);
-            tracing::info!("session loaded from {}", path.display());
-            return (session, vec![]);
-        }
-        let message = format!(
-            "session file {} exists but could not be parsed; starting fresh",
-            path.display(),
-        );
-        tracing::warn!("{message}");
-        return (new_session(llm), vec![message]);
-    }
-    (new_session(llm), vec![])
 }
 
 fn send_over<T: Send + 'static>(tx: mpsc::Sender<T>, value: T) {
@@ -458,8 +447,7 @@ mod tests {
         let mut session = Session::new(test_lutum());
         session.push_system(sqlite_agent::SYSTEM_PROMPT);
         session.push_user("remember this prompt");
-        let items = snapshot(session.input()).unwrap();
-        fs::write(path, serde_json::to_string(&items).unwrap()).unwrap();
+        save_session(&session, path).unwrap();
     }
 
     #[test]

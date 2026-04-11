@@ -7,6 +7,7 @@ pub mod sse;
 pub use adapter::{
     ClaudeAdapter, ClaudeHooks, FallbackSerializer, ResolveBudgetTokens, SelectClaudeModel,
 };
+pub use persistence::{SessionPersistenceError, load_session, save_session};
 pub use error::ClaudeError;
 pub use messages::{
     CacheControl, ClaudeCommittedTurn, ClaudeContentBlock, ClaudeMessage, ClaudeRole, ClaudeTool,
