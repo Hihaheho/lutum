@@ -44,7 +44,7 @@ async fn ask(llm: &Lutum, system: &str, user: impl Into<String>) -> anyhow::Resu
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
-    let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
+    let model_name = std::env::var("MODEL").unwrap_or_else(|_| "gemma4:e2b".into());
     let model = ModelName::new(&model_name)?;
     let llm = Lutum::new(Arc::new(OpenAiAdapter::new(token).with_base_url(endpoint).with_default_model(model)), SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()));
     let ticket = "I was charged twice for my subscription last month.";

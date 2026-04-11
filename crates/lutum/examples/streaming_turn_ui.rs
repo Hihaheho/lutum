@@ -10,7 +10,7 @@ use lutum_openai::OpenAiAdapter;
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
-    let model_name = std::env::var("MODEL").unwrap_or_else(|_| "qwen3.5:2b".into());
+    let model_name = std::env::var("MODEL").unwrap_or_else(|_| "gemma4:e2b".into());
     let adapter = OpenAiAdapter::new(token)
         .with_base_url(endpoint)
         .with_default_model(ModelName::new(&model_name)?);

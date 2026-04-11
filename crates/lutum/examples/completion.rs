@@ -1,7 +1,7 @@
 //! Completion example using the high-level Lutum API with collect_with.
 //!
 //! Defaults to a local Ollama instance (requires a base model, not chat/thinking):
-//!   ollama pull qwen2.5:0.5b
+//!   ollama pull gemma4:e2b
 //!   cargo run --example completion -p lutum
 //!
 //! Override via environment variables:
@@ -45,7 +45,7 @@ impl EventHandler<CompletionEvent, CompletionTurnState> for PrintDelta {
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
-    let model = std::env::var("MODEL").unwrap_or_else(|_| "qwen2.5:0.5b".into());
+    let model = std::env::var("MODEL").unwrap_or_else(|_| "gemma4:e2b".into());
 
     let adapter = Arc::new(
         OpenAiAdapter::new(token)
