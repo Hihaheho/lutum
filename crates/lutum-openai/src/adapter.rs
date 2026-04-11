@@ -32,6 +32,8 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(target_family = "wasm")]
+use lutum_protocol::SendWrapper;
 
 use crate::{
     completion::CompletionRequest,
@@ -236,29 +238,56 @@ impl OpenAiAdapter {
     where
         T: Serialize + ?Sized,
     {
-        let response = self
-            .client
-            .post(format!("{}{}", self.base_url, path))
-            .headers(self.request_headers()?)
-            .json(body)
-            .send()
-            .await?;
-        let response = error_for_status_with_body(response).await?;
-        Ok(Box::pin(response.bytes_stream()))
+        let url = format!("{}{}", self.base_url, path);
+        let headers = self.request_headers()?;
+        let body_bytes = serde_json::to_vec(body)?;
+        let client = self.client.clone();
+        #[cfg(target_family = "wasm")]
+        return SendWrapper::new(async move {
+            let response = client
+                .post(url)
+                .headers(headers)
+                .header(CONTENT_TYPE, "application/json")
+                .body(body_bytes)
+                .send()
+                .await?;
+            let response = error_for_status_with_body(response).await?;
+            Ok(Box::pin(SendWrapper::new(response.bytes_stream())) as ByteStream)
+        })
+        .await;
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let response = client
+                .post(url)
+                .headers(headers)
+                .header(CONTENT_TYPE, "application/json")
+                .body(body_bytes)
+                .send()
+                .await?;
+            let response = error_for_status_with_body(response).await?;
+            Ok(Box::pin(response.bytes_stream()))
+        }
     }
 
     async fn get_json(&self, path: &str) -> Result<Value, OpenAiError> {
-        let response = self
-            .client
-            .get(format!("{}{}", self.base_url, path))
-            .headers(self.request_headers()?)
-            .send()
-            .await?;
-        let value = error_for_status_with_body(response)
-            .await?
-            .json::<Value>()
-            .await?;
-        Ok(value)
+        let url = format!("{}{}", self.base_url, path);
+        let headers = self.request_headers()?;
+        let client = self.client.clone();
+        #[cfg(target_family = "wasm")]
+        return SendWrapper::new(async move {
+            let response = client.get(url).headers(headers).send().await?;
+            error_for_status_with_body(response).await?.json::<Value>().await.map_err(Into::into)
+        })
+        .await;
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let response = client.get(url).headers(headers).send().await?;
+            error_for_status_with_body(response)
+                .await?
+                .json::<Value>()
+                .await
+                .map_err(Into::into)
+        }
     }
 }
 

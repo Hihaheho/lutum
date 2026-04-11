@@ -4,6 +4,8 @@
 use std::sync::Arc;
 
 use lutum_protocol::{AgentError, OperationKind, UsageRecoveryAdapter, budget::Usage};
+#[cfg(target_family = "wasm")]
+use lutum_protocol::SendWrapper;
 
 pub const OPENAI_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const ANTHROPIC_BASE_URL: &str = "https://openrouter.ai/api";
@@ -83,16 +85,33 @@ impl OpenRouterGenerationClient {
 
     pub async fn get_generation(&self, id: &str) -> Result<Generation, OpenRouterError> {
         let url = format!("{}/generation?id={id}", self.base_url);
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(self.api_key.as_ref())
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<GenerationResponse>()
-            .await?;
-        Ok(resp.data)
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        #[cfg(target_family = "wasm")]
+        return SendWrapper::new(async move {
+            let resp = client
+                .get(&url)
+                .bearer_auth(api_key.as_ref())
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<GenerationResponse>()
+                .await?;
+            Ok(resp.data)
+        })
+        .await;
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let resp = client
+                .get(&url)
+                .bearer_auth(api_key.as_ref())
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<GenerationResponse>()
+                .await?;
+            Ok(resp.data)
+        }
     }
 }
 

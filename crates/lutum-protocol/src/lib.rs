@@ -1,3 +1,12 @@
+/// Re-export of [`send_wrapper::SendWrapper`] for WASM targets.
+///
+/// On `wasm32-unknown-unknown`, `reqwest` futures are `!Send` because they
+/// hold `js_sys::JsFuture` (which wraps `Rc`).  Adapter crates that use
+/// `#[async_trait]` (which requires `+ Send`) wrap their `!Send` async
+/// bodies in this type.  WASM is single-threaded so the assertion is safe.
+#[cfg(target_family = "wasm")]
+pub use send_wrapper::SendWrapper;
+
 pub mod budget;
 pub mod conversation;
 pub mod error;
