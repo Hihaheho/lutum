@@ -226,10 +226,13 @@ impl TuiApp {
 
         self.state = AppState::Running;
 
-        // Take session, push user message, snapshot for display, pass to task.
+        // Take session, snapshot for display with the raw user message already
+        // appended so it remains visible during the running/approval states.
+        // run_turn will push the hook-augmented version to the actual session.
         let mut session = self.session.take().expect("session missing while idle");
-        session.push_user(input);
-        self.display_session = session.clone();
+        let mut display_snapshot = session.clone();
+        display_snapshot.push_user(input.clone());
+        self.display_session = display_snapshot;
         self.streaming_text.clear();
         self.scroll_to_bottom.set(true);
 
@@ -265,7 +268,7 @@ impl TuiApp {
         let event_tx = self.agent_event_tx.clone();
 
         self.running_task = Some(tokio::spawn(async move {
-            let result = run_turn(&mut session, &registry, &hooks, &config, Some(text_tx)).await;
+            let result = run_turn(&mut session, &registry, &hooks, &config, input, Some(text_tx)).await;
             let event = match result {
                 Ok(output) => AgentEvent::Finished(output, session),
                 Err(e) => AgentEvent::Failed(e, session),

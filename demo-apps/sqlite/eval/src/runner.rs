@@ -271,11 +271,9 @@ pub async fn run_case(
         max_rounds: 10,
     };
 
-    let mut session = Session::new(main_llm.clone());
-    session.push_system(sqlite_agent::SYSTEM_PROMPT);
-    session.push_user(case.prompt.clone());
+    let mut session = sqlite_agent::init_session(main_llm.clone(), &hooks).await;
 
-    let output = run_turn(&mut session, &registry, &hooks, &config, None)
+    let output = run_turn(&mut session, &registry, &hooks, &config, case.prompt.clone(), None)
         .await
         .with_context(|| format!("case '{}' failed during execution", case.name))?;
 

@@ -26,6 +26,27 @@ pub enum TransactionMode {
 
 #[lutum::hooks]
 pub trait AgentHooks {
+    /// System prompt generation.
+    ///
+    /// Return the full system prompt to use when initialising a new session.
+    /// The default returns the built-in `SYSTEM_PROMPT` constant. Register a
+    /// custom implementation to inject domain-specific instructions or context.
+    #[hook(fallback)]
+    async fn system_prompt() -> String {
+        crate::SYSTEM_PROMPT.to_string()
+    }
+
+    /// User message augmentation.
+    ///
+    /// Called once per turn with the raw user message before it is pushed to
+    /// the session. The default passes it through unchanged. Register a custom
+    /// implementation to prepend context, reformat the message, or inject
+    /// dynamic information (e.g. current time, active database schema).
+    #[hook(fallback)]
+    async fn augment_user_message(message: String) -> String {
+        message
+    }
+
     /// SQL safety validation — chain stops on the first error.
     ///
     /// The default passes everything; add implementations to enforce custom rules

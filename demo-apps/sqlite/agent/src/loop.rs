@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use lutum::{AgentLoopError, Session, ToolResult};
+use lutum::{AgentLoopError, Lutum, Session, ToolResult};
 use lutum_protocol::budget::Usage;
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
@@ -72,17 +72,31 @@ impl<E: std::error::Error + 'static> From<AgentLoopError<E>> for AgentError {
     }
 }
 
+/// Create a new [`Session`] initialised with the system prompt from `hooks`.
+///
+/// Use this instead of calling `Session::new` directly when you want the
+/// [`AgentHooks::system_prompt`] hook to control the system prompt.
+pub async fn init_session(llm: Lutum, hooks: &AgentHooks) -> Session {
+    let mut session = Session::new(llm);
+    session.push_system(hooks.system_prompt().await);
+    session
+}
+
 /// Run one complete agent turn, streaming text deltas to `text_tx` if provided.
 ///
-/// The caller must call `session.push_user(...)` before invoking this.
-/// The session is mutated in-place (committed turns are pushed to it).
+/// `user_message` is augmented via [`AgentHooks::augment_user_message`] before
+/// being pushed to the session. The session is mutated in-place (committed
+/// turns are appended to it).
 pub async fn run_turn(
     session: &mut Session,
     registry: &DbRegistry,
     hooks: &AgentHooks,
     config: &AgentConfig,
+    user_message: String,
     text_tx: Option<UnboundedSender<String>>,
 ) -> Result<TurnOutput, AgentError> {
+    let formatted = hooks.augment_user_message(user_message).await;
+    session.push_user(formatted);
     let sql_history: Arc<Mutex<Vec<SqlHistoryEntry>>> = Arc::new(Mutex::new(Vec::new()));
 
     let mode = hooks.get_transaction_mode().await;

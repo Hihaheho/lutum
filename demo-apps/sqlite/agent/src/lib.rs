@@ -8,8 +8,11 @@ pub use db::{
     ListDatabasesResult, ModeRequestResult, ModifyResult, QueryResult, SchemaInfo, SqliteDb,
     TableInfo, WritePreview,
 };
-pub use hooks::{AgentHooks, ApproveModeRequest, TransactionMode, WriteDecision};
-pub use r#loop::{AgentConfig, AgentError, SqlHistoryEntry, TurnOutput, run_turn};
+pub use hooks::{
+    AgentHooks, ApproveModeRequest, AugmentUserMessage, SystemPrompt, TransactionMode,
+    WriteDecision,
+};
+pub use r#loop::{AgentConfig, AgentError, SqlHistoryEntry, TurnOutput, init_session, run_turn};
 pub use lutum::Session;
 pub use tools::SqlTools;
 
