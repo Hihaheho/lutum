@@ -11,7 +11,6 @@ pub use def_shared::*;
 pub use hook::*;
 pub use hooks::*;
 
-use heck::{ToSnakeCase, ToUpperCamelCase};
 use quote::{format_ident, quote};
 use syn::{
     FnArg, GenericArgument, Ident, ItemFn, Pat, PatIdent, PathArguments, ReturnType, Type,
@@ -22,7 +21,6 @@ pub struct HookSignature {
     explicit_args: Vec<(Ident, Type)>,
     output_ty: Type,
     has_last: bool,
-    last_span: Option<proc_macro2::Span>,
     generics: syn::Generics,
 }
 
@@ -47,13 +45,11 @@ pub fn dispatch_output_type(kind: &HookKind, hook_output_ty: &Type) -> Type {
 }
 
 impl HookKind {
-    fn default_last_requirement(&self) -> HookLastRequirement {
-        HookLastRequirement::Forbidden
-    }
-
     fn trait_has_last(&self) -> bool {
         match self {
-            Self::Always(opts) | Self::Fallback(opts) => opts.aggregate.is_none(),
+            Self::Always(opts) | Self::Fallback(opts) => {
+                opts.chain.is_none() && opts.aggregate.is_none()
+            }
             Self::Singleton => false,
         }
     }
@@ -161,7 +157,6 @@ fn analyze_hook_signature(
         explicit_args,
         output_ty,
         has_last,
-        last_span,
         generics: if allow_generics {
             item_fn.sig.generics.clone()
         } else {
@@ -235,13 +230,6 @@ fn option_inner_type(ty: &Type) -> Option<&Type> {
         GenericArgument::Type(inner) => Some(inner),
         _ => None,
     }
-}
-
-fn hook_named_impl_helper_macro_ident(slot_ident: &Ident) -> Ident {
-    format_ident!(
-        "__lutum_hook_named_impl_{}",
-        slot_ident.to_string().to_snake_case()
-    )
 }
 
 fn is_hook_last_ident(ident: &Ident) -> bool {

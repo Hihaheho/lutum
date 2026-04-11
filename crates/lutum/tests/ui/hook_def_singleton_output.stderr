@@ -1,5 +1,5 @@
-error: #[def_hook(singleton)] does not support 'chain', 'aggregate', 'finalize', or 'output'
- --> tests/ui/hook_def_singleton_output.rs:1:19
+error: #[hook(singleton)] does not support 'chain', 'aggregate', 'finalize', or 'output'
+ --> tests/ui/hook_def_singleton_output.rs:3:12
   |
-1 | #[lutum::def_hook(singleton, output = usize)]
-  |                   ^^^^^^^^^
+3 |     #[hook(singleton, output = usize)]
+  |            ^^^^^^^^^

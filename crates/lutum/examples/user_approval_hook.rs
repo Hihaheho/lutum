@@ -119,14 +119,12 @@ enum Approval {
 ///
 /// Default: auto-accept (useful for non-interactive contexts and tests).
 /// Override with `ApprovalHooks::new().with_approve_tool_call(impl ApproveToolCall)`.
-#[def_hook(fallback)]
-async fn approve_tool_call(_name: &str, _args: &serde_json::Value) -> Approval {
-    Approval::Accept
-}
-
 #[hooks]
-struct ApprovalHooks {
-    approve_tool_call: ApproveToolCall,
+trait ApprovalHooks {
+    #[hook(fallback)]
+    async fn approve_tool_call(_name: &str, _args: &serde_json::Value) -> Approval {
+        Approval::Accept
+    }
 }
 
 // ---------------------------------------------------------------------------

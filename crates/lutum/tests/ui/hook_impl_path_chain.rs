@@ -1,12 +1,15 @@
 mod slots {
-    #[lutum::def_hook(always, chain = lutum::ShortCircuit<String, String>)]
-    pub async fn validate_output(_ctx: &lutum::Lutum, output: &str) -> Result<String, String> {
-        Ok(format!("default:{output}"))
+    #[lutum::hooks]
+    pub trait SlotHooks {
+        #[hook(always, chain = lutum::ShortCircuit<String, String>)]
+        async fn validate_output(output: &str) -> Result<String, String> {
+            Ok(format!("default:{output}"))
+        }
     }
 }
 
-#[lutum::hook(slots::ValidateOutput)]
-async fn append_suffix(_ctx: &lutum::Lutum, output: &str) -> Result<String, String> {
+#[lutum::impl_hook(slots::ValidateOutput)]
+async fn append_suffix(output: &str) -> Result<String, String> {
     Ok(format!("{output}:hook"))
 }
 

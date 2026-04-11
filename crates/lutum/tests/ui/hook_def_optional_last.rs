@@ -4,21 +4,30 @@ use lutum::{
     Lutum, LutumHooks, MockLlmAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions,
 };
 
-#[lutum::def_hook(always)]
-async fn validate_prompt(_ctx: &Lutum, prompt: &str) -> Result<(), String> {
-    if prompt.trim().is_empty() {
-        Err("empty prompt".into())
-    } else {
-        Ok(())
+#[lutum::hooks]
+trait LocalHooks {
+    #[hook(always)]
+    async fn validate_prompt(prompt: &str) -> Result<(), String> {
+        if prompt.trim().is_empty() {
+            Err("empty prompt".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[hook(fallback)]
+    async fn choose_label(label: &str) -> String {
+        format!("default:{label}")
+    }
+
+    #[hook(singleton)]
+    async fn select_label(previous: Option<String>) -> String {
+        previous.unwrap_or_else(|| "default".into())
     }
 }
 
-#[lutum::hook(ValidatePrompt)]
-async fn reject_secrets(
-    _ctx: &Lutum,
-    prompt: &str,
-    last: Option<Result<(), String>>,
-) -> Result<(), String> {
+#[lutum::impl_hook(ValidatePrompt)]
+async fn reject_secrets(prompt: &str, last: Option<Result<(), String>>) -> Result<(), String> {
     if let Some(previous) = last {
         previous?;
     }
@@ -29,27 +38,10 @@ async fn reject_secrets(
     }
 }
 
-#[lutum::def_hook(fallback)]
-async fn choose_label(_ctx: &Lutum, label: &str) -> String {
-    format!("default:{label}")
-}
-
-#[lutum::hook(ChooseLabel)]
-async fn use_registered_label(_ctx: &Lutum, label: &str, last: Option<String>) -> String {
+#[lutum::impl_hook(ChooseLabel)]
+async fn use_registered_label(label: &str, last: Option<String>) -> String {
     assert!(last.is_none());
     format!("hook:{label}")
-}
-
-#[lutum::def_hook(singleton)]
-async fn select_label(_ctx: &Lutum, previous: Option<String>) -> String {
-    previous.unwrap_or_else(|| "default".into())
-}
-
-#[lutum::hooks]
-struct LocalHooks {
-    validate_prompt: ValidatePrompt,
-    choose_label: ChooseLabel,
-    select_label: SelectLabel,
 }
 
 fn main() {
@@ -63,9 +55,10 @@ fn main() {
         .with_choose_label(UseRegisteredLabel);
 
     futures::executor::block_on(async {
-        hooks.validate_prompt(&llm, "hello").await.unwrap();
-        let _ = hooks.choose_label(&llm, "base").await;
-        let _ = hooks.select_label(&llm, Some(String::from("picked"))).await;
+        hooks.validate_prompt("hello").await.unwrap();
+        let _ = hooks.choose_label("base").await;
+        let _ = hooks.select_label(Some(String::from("picked"))).await;
+        let _ = llm.resolve_usage_estimate(&lutum::RequestExtensions::new(), lutum::OperationKind::TextTurn).await;
     });
 
     hooks.register_choose_label(UseRegisteredLabel);

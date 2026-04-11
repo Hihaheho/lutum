@@ -138,7 +138,7 @@ impl syn::parse::Parse for HookDefAttrs {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown #[def_hook] option '{other}'; expected 'chain', 'aggregate', 'finalize', or 'output'"
+                            "unknown hook option '{other}'; expected 'chain', 'aggregate', 'finalize', or 'output'"
                         ),
                     ));
                 }

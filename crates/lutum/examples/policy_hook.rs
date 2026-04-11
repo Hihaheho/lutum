@@ -4,14 +4,12 @@ use std::sync::Arc;
 
 type Validation = Result<(), Vec<String>>;
 
-#[def_hook(fallback)]
-async fn validate_command(_cmd: &str) -> Validation {
-    Ok(())
-}
-
 #[hooks]
-struct ShellHooks {
-    validate_command: ValidateCommand,
+trait ShellHooks {
+    #[hook(fallback)]
+    async fn validate_command(_cmd: &str) -> Validation {
+        Ok(())
+    }
 }
 
 struct CommandPolicy {

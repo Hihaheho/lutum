@@ -1,0 +1,5 @@
+error: hook attributes do not support generics or where clauses
+ --> tests/ui/hook_def_generics.rs:4:26
+  |
+4 |     async fn select_label<T: Send + Sync + 'static>(value: T) -> T {
+  |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^

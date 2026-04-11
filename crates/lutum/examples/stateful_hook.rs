@@ -9,19 +9,17 @@ const ALLOWED_PREFIXES: &[&str] = &["/var/log", "/tmp"];
 const FORBIDDEN_TOKENS: &[&str] = &["rm", "mv", "sudo", ">", ">>", "dd"];
 const MAX_PIPES: usize = 2;
 
-#[def_hook(always)]
-async fn validate_command(cmd: &str) -> Validation {
-    let failures = policy_failures(cmd);
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures)
-    }
-}
-
 #[hooks]
-struct ShellHooks {
-    validate_command: ValidateCommand,
+trait ShellHooks {
+    #[hook(always)]
+    async fn validate_command(cmd: &str) -> Validation {
+        let failures = policy_failures(cmd);
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures)
+        }
+    }
 }
 
 #[derive(Default)]

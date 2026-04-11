@@ -15,28 +15,24 @@ use lutum_eval::{
 use tracing::instrument::WithSubscriber as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
-#[lutum::def_hook(singleton)]
-async fn rewrite_number(value: usize) -> usize {
-    value
-}
-
-#[lutum::def_hook(singleton)]
-async fn decorate_label(label: &str) -> String {
-    label.to_string()
-}
-
 type Validation = Result<(), &'static str>;
 
-#[lutum::def_hook(singleton)]
-async fn validate_step(_step: &str) -> Validation {
-    Ok(())
-}
-
 #[lutum::hooks]
-struct ProbeHooks {
-    rewrite_number: RewriteNumber,
-    decorate_label: DecorateLabel,
-    validate_step: ValidateStep,
+trait ProbeHooks {
+    #[hook(singleton)]
+    async fn rewrite_number(value: usize) -> usize {
+        value
+    }
+
+    #[hook(singleton)]
+    async fn decorate_label(label: &str) -> String {
+        label.to_string()
+    }
+
+    #[hook(singleton)]
+    async fn validate_step(_step: &str) -> Validation {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]

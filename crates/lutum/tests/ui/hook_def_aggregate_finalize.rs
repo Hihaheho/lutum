@@ -18,9 +18,12 @@ impl lutum::Finalize<String> for WrapResult {
     }
 }
 
-#[lutum::def_hook(always, aggregate = JoinStrings, finalize = WrapResult)]
-async fn invalid_companions(label: &str) -> String {
-    label.to_owned()
+#[lutum::hooks]
+trait InvalidHooks {
+    #[hook(always, aggregate = JoinStrings, finalize = WrapResult)]
+    async fn invalid_companions(label: &str) -> String {
+        label.to_owned()
+    }
 }
 
 fn main() {}

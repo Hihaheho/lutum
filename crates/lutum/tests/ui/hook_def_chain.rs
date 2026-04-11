@@ -1,10 +1,18 @@
-#[lutum::def_hook(always, chain = lutum::ShortCircuit<String, String>)]
-async fn validate_output(_ctx: &lutum::Lutum, output: &str) -> Result<String, String> {
-    Ok(format!("default:{output}"))
+#[lutum::hooks]
+trait HookSet {
+    #[hook(always, chain = lutum::ShortCircuit<String, String>)]
+    async fn validate_output(output: &str) -> Result<String, String> {
+        Ok(format!("default:{output}"))
+    }
+
+    #[hook(fallback, chain = custom::PreferFirstSome)]
+    async fn choose_label(label: &str) -> Option<String> {
+        Some(format!("default:{label}"))
+    }
 }
 
-#[lutum::hook(ValidateOutput)]
-async fn append_suffix(_ctx: &lutum::Lutum, output: &str) -> Result<String, String> {
+#[lutum::impl_hook(ValidateOutput)]
+async fn append_suffix(output: &str) -> Result<String, String> {
     Ok(format!("{output}:hook"))
 }
 
@@ -28,20 +36,9 @@ mod custom {
     }
 }
 
-#[lutum::def_hook(fallback, chain = custom::PreferFirstSome)]
-async fn choose_label(_ctx: &lutum::Lutum, label: &str) -> Option<String> {
-    Some(format!("default:{label}"))
-}
-
-#[lutum::hook(ChooseLabel)]
-async fn choose_special(_ctx: &lutum::Lutum, label: &str) -> Option<String> {
+#[lutum::impl_hook(ChooseLabel)]
+async fn choose_special(label: &str) -> Option<String> {
     Some(format!("special:{label}"))
-}
-
-#[lutum::hooks]
-struct HookSet {
-    validate_output: ValidateOutput,
-    choose_label: ChooseLabel,
 }
 
 fn main() {

@@ -12,7 +12,7 @@ use tool_input::*;
 use toolset::*;
 
 use proc_macro::TokenStream;
-use syn::{DeriveInput, ItemFn, ItemStruct, Path, parse_macro_input};
+use syn::{DeriveInput, ItemFn, ItemTrait, Path, parse_macro_input};
 
 fn build_hook_kind(attrs: HookDefAttrs, macro_name: &str) -> syn::Result<HookKind> {
     let mode_str = attrs.mode.to_string();
@@ -94,38 +94,6 @@ pub fn tool_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn hook(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if attr.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "use #[def_hook(always)], #[def_hook(fallback)], or #[def_hook(singleton)] to declare a hook slot, or #[hook(SlotType)] / #[hook(path::to::SlotType)] to implement one",
-        )
-        .to_compile_error()
-        .into();
-    }
-    let slot_path = parse_macro_input!(attr as Path);
-    let item_fn = parse_macro_input!(item as ItemFn);
-    expand_hook_impl(item_fn, slot_path).into()
-}
-
-#[proc_macro_attribute]
-pub fn def_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let attrs: HookDefAttrs = match syn::parse(attr) {
-        Ok(a) => a,
-        Err(e) => return e.to_compile_error().into(),
-    };
-    let item_fn = match syn::parse(item) {
-        Ok(f) => f,
-        Err(e) => return e.to_compile_error().into(),
-    };
-    let kind = match build_hook_kind(attrs, "def_hook") {
-        Ok(kind) => kind,
-        Err(err) => return err.to_compile_error().into(),
-    };
-    expand_local_hook(item_fn, kind).into()
-}
-
-#[proc_macro_attribute]
 pub fn hooks(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
         return syn::Error::new(
@@ -136,8 +104,15 @@ pub fn hooks(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
 
-    let item_struct = parse_macro_input!(item as ItemStruct);
-    expand_hooks(item_struct).into()
+    let item_trait = parse_macro_input!(item as ItemTrait);
+    expand_hooks(item_trait).into()
+}
+
+#[proc_macro_attribute]
+pub fn impl_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let slot_path = parse_macro_input!(attr as Path);
+    let item_fn = parse_macro_input!(item as ItemFn);
+    expand_hook_impl(item_fn, slot_path).into()
 }
 
 #[proc_macro_derive(Toolset)]

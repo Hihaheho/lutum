@@ -1,13 +1,7 @@
 #[test]
-fn hook_def_optional_last_compiles() {
+fn hook_trait_basics_compile() {
     let cases = trybuild::TestCases::new();
     cases.pass("tests/ui/hook_def_optional_last.rs");
-}
-
-#[test]
-fn hook_def_mismatched_field_name_compiles() {
-    let cases = trybuild::TestCases::new();
-    cases.pass("tests/ui/hook_def_mismatched_field_name.rs");
 }
 
 #[test]
@@ -29,13 +23,13 @@ fn hook_impl_path_chain_compiles() {
 }
 
 #[test]
-fn hook_def_singleton_rejects_last_argument() {
+fn hook_slot_definition_rejects_last_argument() {
     let cases = trybuild::TestCases::new();
     cases.compile_fail("tests/ui/hook_def_singleton_last.rs");
 }
 
 #[test]
-fn hook_def_singleton_rejects_chain_argument() {
+fn hook_singleton_rejects_chain_argument() {
     let cases = trybuild::TestCases::new();
     cases.compile_fail("tests/ui/hook_def_singleton_chain.rs");
 }
@@ -71,9 +65,21 @@ fn hook_impl_singleton_rejects_last_argument() {
 }
 
 #[test]
-fn hooks_path_slot_compiles() {
+fn hooks_rejects_struct_input() {
     let cases = trybuild::TestCases::new();
-    cases.pass("tests/ui/hooks_path_slot.rs");
+    cases.compile_fail("tests/ui/hooks_path_slot.rs");
+}
+
+#[test]
+fn hooks_reject_bodyless_methods() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/hook_def_mismatched_field_name.rs");
+}
+
+#[test]
+fn hooks_reject_generic_user_slots() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/hook_def_generics.rs");
 }
 
 #[test]

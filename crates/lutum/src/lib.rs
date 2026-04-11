@@ -54,11 +54,11 @@ pub use context::{
 };
 pub use hooks::{
     Aggregate, AggregateInto, Chain, Finalize, FinalizeInto, FirstSuccess, HookReentrancyError,
-    LutumHooks, ResolveUsageEstimate, ShortCircuit, Stateful, ToolHook,
+    LutumHooks, ResolveUsageEstimate, ShortCircuit, Stateful,
 };
 pub use session::{CommitTurn, UncommittedToolRound};
 
-pub use lutum_macros::{Toolset, def_hook, hook, hooks, tool_fn, tool_input};
+pub use lutum_macros::{Toolset, hooks, impl_hook, tool_fn, tool_input};
 pub use lutum_protocol::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
     AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AgentError,

@@ -24,61 +24,44 @@ pub enum TransactionMode {
     Writable,
 }
 
-// ---------------------------------------------------------------------------
-// Hook slot definitions
-// ---------------------------------------------------------------------------
-
-/// SQL safety validation — chain stops on the first error.
-///
-/// The default passes everything; add implementations to enforce custom rules
-/// on top of the built-in sqlparser structural check that always runs in the
-/// agent loop.
-#[lutum::def_hook(always, chain = lutum::ShortCircuit<(), SqlValidationError>)]
-pub async fn validate_sql(sql: &str) -> Result<(), SqlValidationError> {
-    let _ = sql;
-    Ok(())
-}
-
-/// Write-operation approval gate.
-///
-/// Called for every INSERT, UPDATE, DELETE before execution.  The hook
-/// receives a `WritePreview` describing the SQL and how many rows would be
-/// affected.  The default rejects everything — callers must register an
-/// implementation (e.g. `TuiApprover` or a scripted test approver).
-#[lutum::def_hook(fallback)]
-pub async fn approve_write(preview: WritePreview) -> WriteDecision {
-    let _ = preview;
-    WriteDecision::Reject("no write approver is configured".to_string())
-}
-
-/// Current transaction mode.
-///
-/// Return `ReadOnly` to block all write tools, `Writable` to allow them.
-/// The default is `ReadOnly` (safe); override in the TUI via `TuiModeSource`.
-#[lutum::def_hook(fallback)]
-pub async fn get_transaction_mode() -> TransactionMode {
-    TransactionMode::ReadOnly
-}
-
-/// Write-mode request gate.
-///
-/// Called when the agent invokes the `request_writable_mode` tool.  Return
-/// `true` to grant writable access, `false` to deny.  The default denies
-/// everything — callers must register an implementation (e.g. `TuiModeRequestApprover`).
-#[lutum::def_hook(fallback)]
-pub async fn approve_mode_request(reason: &str) -> bool {
-    let _ = reason;
-    false
-}
-
-// ---------------------------------------------------------------------------
-// Hook container
-// ---------------------------------------------------------------------------
-
 #[lutum::hooks]
-pub struct AgentHooks {
-    validate_sql: ValidateSql,
-    approve_write: ApproveWrite,
-    get_transaction_mode: GetTransactionMode,
-    approve_mode_request: ApproveModeRequest,
+pub trait AgentHooks {
+    /// SQL safety validation — chain stops on the first error.
+    ///
+    /// The default passes everything; add implementations to enforce custom rules
+    /// on top of the built-in sqlparser structural check that always runs in the
+    /// agent loop.
+    #[hook(always, chain = lutum::ShortCircuit<(), SqlValidationError>)]
+    async fn validate_sql(sql: &str) -> Result<(), SqlValidationError> {
+        let _ = sql;
+        Ok(())
+    }
+
+    /// Write-operation approval gate.
+    ///
+    /// Called for every INSERT, UPDATE, DELETE before execution. The hook
+    /// receives a `WritePreview` describing the SQL and how many rows would be
+    /// affected. The default rejects everything.
+    #[hook(fallback)]
+    async fn approve_write(preview: WritePreview) -> WriteDecision {
+        let _ = preview;
+        WriteDecision::Reject("no write approver is configured".to_string())
+    }
+
+    /// Current transaction mode.
+    ///
+    /// Return `ReadOnly` to block all write tools, `Writable` to allow them.
+    #[hook(fallback)]
+    async fn get_transaction_mode() -> TransactionMode {
+        TransactionMode::ReadOnly
+    }
+
+    /// Write-mode request gate.
+    ///
+    /// Called when the agent invokes the `request_writable_mode` tool.
+    #[hook(fallback)]
+    async fn approve_mode_request(reason: &str) -> bool {
+        let _ = reason;
+        false
+    }
 }

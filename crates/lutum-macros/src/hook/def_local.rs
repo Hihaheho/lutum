@@ -1,60 +1,72 @@
 use super::*;
 use heck::ToUpperCamelCase;
 use quote::{format_ident, quote};
-use syn::ItemFn;
+use syn::{ItemFn, Visibility};
 
-pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::TokenStream {
-    let allow_generics = matches!(&kind, HookKind::Singleton);
+pub struct SlotExpansion {
+    pub items: proc_macro2::TokenStream,
+    pub field: proc_macro2::TokenStream,
+    pub field_init: proc_macro2::TokenStream,
+    pub register_methods: proc_macro2::TokenStream,
+    pub dispatch_method: proc_macro2::TokenStream,
+    pub default_method: proc_macro2::TokenStream,
+}
+
+pub fn expand_slot(
+    mut item_fn: ItemFn,
+    kind: HookKind,
+    vis: &Visibility,
+) -> syn::Result<SlotExpansion> {
     let HookSignature {
         explicit_args,
         output_ty: hook_output_ty,
         has_last: _,
-        last_span: _,
         generics,
-    } = match analyze_hook_signature(
+    } = analyze_hook_signature(
         &item_fn,
-        kind.default_last_requirement(),
-        "#[def_hook(singleton)] does not accept a `last: Option<Return>` argument",
+        HookLastRequirement::Forbidden,
+        "#[hooks] slot definitions must not declare `last: Option<Return>`",
         HookLastRecognition::LastNamedCompatibleOption,
-        allow_generics,
-    ) {
-        Ok(signature) => signature,
-        Err(err) => return err.to_compile_error(),
-    };
+        false,
+    )?;
     let trait_has_last = kind.trait_has_last();
 
     let fn_ident = item_fn.sig.ident.clone();
-    let vis = item_fn.vis.clone();
     let hook_name = fn_ident.to_string();
     let slot_ident = format_ident!("{}", hook_name.to_upper_camel_case());
     let hook_trait_ident = slot_ident.clone();
     let stateful_hook_trait_ident = format_ident!("Stateful{slot_ident}");
     let dyn_hook_trait_ident = format_ident!("__LutumDyn{slot_ident}");
     let default_impl_fn_ident = format_ident!("__lutum_hook_default_impl_{}", fn_ident);
-    let _default_method_ident = format_ident!("__lutum_hook_default_{}", fn_ident);
-    let _with_fn_ident = format_ident!("with_{}", fn_ident);
-    let _register_fn_ident = format_ident!("register_{}", fn_ident);
-    let _field_ident = fn_ident.clone();
+    let default_method_ident = format_ident!("__lutum_hook_default_{}", fn_ident);
+    let with_fn_ident = format_ident!("with_{}", fn_ident);
+    let register_fn_ident = format_ident!("register_{}", fn_ident);
+    let field_ident = fn_ident.clone();
+    let chain_field_ident = format_ident!("{}_chain", fn_ident);
+    let with_chain_fn_ident = format_ident!("with_{}_chain", fn_ident);
+    let set_chain_fn_ident = format_ident!("set_{}_chain", fn_ident);
+    let aggregate_field_ident = format_ident!("{}_aggregate", fn_ident);
+    let with_aggregate_fn_ident = format_ident!("with_{}_aggregate", fn_ident);
+    let set_aggregate_fn_ident = format_ident!("set_{}_aggregate", fn_ident);
+    let finalize_field_ident = format_ident!("{}_finalize", fn_ident);
+    let with_finalize_fn_ident = format_ident!("with_{}_finalize", fn_ident);
+    let set_finalize_fn_ident = format_ident!("set_{}_finalize", fn_ident);
 
-    item_fn.vis = vis.clone();
+    item_fn.vis = Visibility::Inherited;
     item_fn.sig.ident = default_impl_fn_ident.clone();
+    item_fn.attrs.clear();
     item_fn.attrs.push(syn::parse_quote!(#[allow(dead_code)]));
 
     let args_field_idents = normalized_hook_arg_field_idents(&explicit_args);
 
-    // dispatch_args: params in the user-facing dispatch method (original types).
     let dispatch_args = explicit_args
         .iter()
         .map(|(ident, ty)| quote! { #ident: #ty })
         .collect::<Vec<_>>();
-
-    // hook_call_arg_names: original param names used inside the dispatch body.
     let hook_call_arg_names = explicit_args
         .iter()
         .map(|(ident, _)| quote! { #ident })
         .collect::<Vec<_>>();
-
-    // cloned_hook_call_arg_names: for default_call (original types, cloned/ref as needed).
     let cloned_hook_call_arg_names = explicit_args
         .iter()
         .map(|(ident, ty)| {
@@ -96,15 +108,13 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
 
     let hook_trait_defs = generate_hook_trait_defs(
         def_span,
-        &vis,
+        vis,
         &hook_output_ty,
         &slot,
         &arg_tokens.trait_args,
         &generics,
     );
-
     let fn_impl = generate_fn_blanket_impl(&slot, &flags, &hook_output_ty, &arg_tokens, &generics);
-
     let blanket_impls =
         generate_blanket_impls(&slot, &hook_output_ty, &arg_tokens, &generics, &hook_name);
 
@@ -115,7 +125,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         .await
     };
     let default_call = quote! {
-        Self::$default_method_ident(
+        Self::#default_method_ident(
             #(#cloned_hook_call_arg_names,)*
         )
         .await
@@ -146,16 +156,6 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         quote! { use ::lutum::Finalize as _; }
     };
 
-    // Companion chain field idents and tokens (only when chain option is set).
-    let _chain_field_ident = format_ident!("{}_chain", fn_ident);
-    let _chain_reg_fn_ident = format_ident!("{}_chain", fn_ident);
-    let _chain_set_fn_ident = format_ident!("set_{}_chain", fn_ident);
-    let _aggregate_field_ident = format_ident!("{}_aggregate", fn_ident);
-    let _aggregate_reg_fn_ident = format_ident!("with_{}_aggregate", fn_ident);
-    let _aggregate_set_fn_ident = format_ident!("set_{}_aggregate", fn_ident);
-    let _finalize_field_ident = format_ident!("{}_finalize", fn_ident);
-    let _finalize_reg_fn_ident = format_ident!("with_{}_finalize", fn_ident);
-    let _finalize_set_fn_ident = format_ident!("set_{}_finalize", fn_ident);
     let chain_companion_tokens =
         kind.opts()
             .and_then(|o| o.chain.as_ref())
@@ -166,11 +166,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                     >
                 };
                 let chain_field_init = quote! { ::std::option::Option::None };
-                let check = quote! {
+                let chain_check = quote! {
                     if {
                         use ::lutum::Chain as _;
-                        let __cf = match &self.$chain_field_ident {
-                            ::std::option::Option::Some(__h) => (**__h).call(&__next).await,
+                        let __cf = match &self.#chain_field_ident {
+                            ::std::option::Option::Some(__h) => (__h).call(&__next).await,
                             ::std::option::Option::None => {
                                 let __d: #chain_default_ty = ::std::default::Default::default();
                                 __d.call(&__next).await
@@ -179,7 +179,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                         __cf.is_break()
                     }
                 };
-                (chain_field_ty, chain_field_init, check)
+                (chain_field_ty, chain_field_init, chain_check)
             });
     let aggregate_companion_tokens =
         kind.opts()
@@ -194,7 +194,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 let aggregate_call = quote! {
                     {
                         #aggregate_trait_import
-                        match &self.$aggregate_field_ident {
+                        match &self.#aggregate_field_ident {
                             ::std::option::Option::Some(__h) => __h.call(__outputs).await,
                             ::std::option::Option::None => {
                                 let __a: #aggregate_default_ty =
@@ -219,7 +219,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 let finalize_call = quote! {
                     {
                         #finalize_trait_import
-                        match &self.$finalize_field_ident {
+                        match &self.#finalize_field_ident {
                             ::std::option::Option::Some(__h) => __h.call(__result).await,
                             ::std::option::Option::None => {
                                 let __f: #finalize_default_ty =
@@ -233,24 +233,20 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             });
 
     let (field_ty, field_init, register_impl) = match &kind {
-        HookKind::Always { .. } | HookKind::Fallback { .. } => (
-            quote! {
-                ::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident>>
-            },
+        HookKind::Always(_) | HookKind::Fallback(_) => (
+            quote! { ::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident>> },
             quote! { ::std::vec::Vec::new() },
             quote! {
-                self.$field_ident.push(::std::sync::Arc::new(hook));
+                self.#field_ident.push(::std::sync::Arc::new(hook));
             },
         ),
         HookKind::Singleton => (
-            quote! {
-                ::std::option::Option<::std::sync::Arc<dyn #dyn_hook_trait_ident>>
-            },
+            quote! { ::std::option::Option<::std::sync::Arc<dyn #dyn_hook_trait_ident>> },
             quote! { ::std::option::Option::None },
             quote! {
                 let hook = ::std::sync::Arc::new(hook)
                     as ::std::sync::Arc<dyn #dyn_hook_trait_ident>;
-                if self.$field_ident.replace(hook).is_some() {
+                if self.#field_ident.replace(hook).is_some() {
                     ::tracing::warn!(
                         target: "lutum",
                         slot = #hook_name,
@@ -260,25 +256,23 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             },
         ),
     };
-    // Flatten companion tokens into Vec for use in @accumulate arm.
-    let (
-        chain_companion_field_tokens,
-        chain_companion_field_init_tokens,
-        chain_companion_register_tokens,
-    ): (Vec<_>, Vec<_>, Vec<_>) = match &chain_companion_tokens {
-        Some((chain_field_ty, chain_field_init, _)) => (
-            vec![quote! { $chain_field_ident: #chain_field_ty, }],
-            vec![quote! { $chain_field_ident: #chain_field_init, }],
-            vec![quote! {
+
+    let chain_field = chain_companion_tokens
+        .as_ref()
+        .map(|(field_ty, _, _)| quote! { #chain_field_ident: #field_ty, });
+    let chain_field_init = chain_companion_tokens
+        .as_ref()
+        .map(|(_, field_init, _)| quote! { #chain_field_ident: #field_init, });
+    let chain_methods = chain_companion_tokens
+        .as_ref()
+        .map(|_| {
+            quote! {
                 #[allow(dead_code)]
-                pub fn $chain_reg_fn_ident(
+                pub fn #with_chain_fn_ident(
                     mut self,
                     h: impl ::lutum::Chain<#hook_output_ty> + 'static,
                 ) -> Self {
-                    if self.$chain_field_ident
-                        .replace(::std::sync::Arc::new(h))
-                        .is_some()
-                    {
+                    if self.#chain_field_ident.replace(::std::sync::Arc::new(h)).is_some() {
                         ::tracing::warn!(
                             target: "lutum",
                             slot = ::std::concat!(#hook_name, ".chain"),
@@ -289,32 +283,33 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 }
 
                 #[allow(dead_code)]
-                pub fn $chain_set_fn_ident(
+                pub fn #set_chain_fn_ident(
                     &mut self,
                     h: impl ::lutum::Chain<#hook_output_ty> + 'static,
                 ) {
-                    self.$chain_field_ident =
+                    self.#chain_field_ident =
                         ::std::option::Option::Some(::std::sync::Arc::new(h));
                 }
-            }],
-        ),
-        None => (vec![], vec![], vec![]),
-    };
-    let (
-        aggregate_companion_field_tokens,
-        aggregate_companion_field_init_tokens,
-        aggregate_companion_register_tokens,
-    ): (Vec<_>, Vec<_>, Vec<_>) = match &aggregate_companion_tokens {
-        Some((aggregate_field_ty, aggregate_field_init, _)) => (
-            vec![quote! { $aggregate_field_ident: #aggregate_field_ty, }],
-            vec![quote! { $aggregate_field_ident: #aggregate_field_init, }],
-            vec![quote! {
+            }
+        })
+        .unwrap_or_default();
+    let aggregate_field = aggregate_companion_tokens
+        .as_ref()
+        .map(|(field_ty, _, _)| quote! { #aggregate_field_ident: #field_ty, });
+    let aggregate_field_init = aggregate_companion_tokens
+        .as_ref()
+        .map(|(_, field_init, _)| quote! { #aggregate_field_ident: #field_init, });
+    let aggregate_methods = aggregate_companion_tokens
+        .as_ref()
+        .map(|_| {
+            quote! {
                 #[allow(dead_code)]
-                pub fn $aggregate_reg_fn_ident(
+                pub fn #with_aggregate_fn_ident(
                     mut self,
                     h: impl #aggregate_trait + 'static,
                 ) -> Self {
-                    if self.$aggregate_field_ident
+                    if self
+                        .#aggregate_field_ident
                         .replace(::std::sync::Arc::new(h))
                         .is_some()
                     {
@@ -328,32 +323,33 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 }
 
                 #[allow(dead_code)]
-                pub fn $aggregate_set_fn_ident(
+                pub fn #set_aggregate_fn_ident(
                     &mut self,
                     h: impl #aggregate_trait + 'static,
                 ) {
-                    self.$aggregate_field_ident =
+                    self.#aggregate_field_ident =
                         ::std::option::Option::Some(::std::sync::Arc::new(h));
                 }
-            }],
-        ),
-        None => (vec![], vec![], vec![]),
-    };
-    let (
-        finalize_companion_field_tokens,
-        finalize_companion_field_init_tokens,
-        finalize_companion_register_tokens,
-    ): (Vec<_>, Vec<_>, Vec<_>) = match &finalize_companion_tokens {
-        Some((finalize_field_ty, finalize_field_init, _)) => (
-            vec![quote! { $finalize_field_ident: #finalize_field_ty, }],
-            vec![quote! { $finalize_field_ident: #finalize_field_init, }],
-            vec![quote! {
+            }
+        })
+        .unwrap_or_default();
+    let finalize_field = finalize_companion_tokens
+        .as_ref()
+        .map(|(field_ty, _, _)| quote! { #finalize_field_ident: #field_ty, });
+    let finalize_field_init = finalize_companion_tokens
+        .as_ref()
+        .map(|(_, field_init, _)| quote! { #finalize_field_ident: #field_init, });
+    let finalize_methods = finalize_companion_tokens
+        .as_ref()
+        .map(|_| {
+            quote! {
                 #[allow(dead_code)]
-                pub fn $finalize_reg_fn_ident(
+                pub fn #with_finalize_fn_ident(
                     mut self,
                     h: impl #finalize_trait + 'static,
                 ) -> Self {
-                    if self.$finalize_field_ident
+                    if self
+                        .#finalize_field_ident
                         .replace(::std::sync::Arc::new(h))
                         .is_some()
                     {
@@ -367,17 +363,16 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 }
 
                 #[allow(dead_code)]
-                pub fn $finalize_set_fn_ident(
+                pub fn #set_finalize_fn_ident(
                     &mut self,
                     h: impl #finalize_trait + 'static,
                 ) {
-                    self.$finalize_field_ident =
+                    self.#finalize_field_ident =
                         ::std::option::Option::Some(::std::sync::Arc::new(h));
                 }
-            }],
-        ),
-        None => (vec![], vec![], vec![]),
-    };
+            }
+        })
+        .unwrap_or_default();
 
     let inner_dispatch = match (&kind, &chain_companion_tokens, &aggregate_companion_tokens) {
         (
@@ -390,7 +385,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             _,
         ) => quote! {
             let mut last = ::std::option::Option::Some(#default_call);
-            for hook in &self.$field_ident {
+            for hook in &self.#field_ident {
                 last = ::std::option::Option::Some(#dyn_hook_dispatch_call);
             }
             last.expect("hook chain unexpectedly empty")
@@ -409,7 +404,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 let __next = last.as_ref().unwrap().clone();
                 #chain_check { return __next; }
             }
-            for hook in &self.$field_ident {
+            for hook in &self.#field_ident {
                 let __next = #dyn_hook_dispatch_call;
                 #chain_check { return __next; }
                 last = ::std::option::Option::Some(__next);
@@ -427,7 +422,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         ) => quote! {
             let mut __outputs = ::std::vec::Vec::new();
             __outputs.push(#default_call);
-            for hook in &self.$field_ident {
+            for hook in &self.#field_ident {
                 __outputs.push(#dyn_hook_dispatch_call);
             }
             #aggregate_call
@@ -448,7 +443,7 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 return #aggregate_call;
             }
             __outputs.push(__next);
-            for hook in &self.$field_ident {
+            for hook in &self.#field_ident {
                 let __next = #dyn_hook_dispatch_call;
                 #chain_check {
                     __outputs.push(__next);
@@ -467,11 +462,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             _,
             _,
         ) => quote! {
-            if self.$field_ident.is_empty() {
+            if self.#field_ident.is_empty() {
                 #default_call
             } else {
                 let mut last = ::std::option::Option::None;
-                for hook in &self.$field_ident {
+                for hook in &self.#field_ident {
                     last = ::std::option::Option::Some(#dyn_hook_dispatch_call);
                 }
                 last.expect("hook chain unexpectedly empty")
@@ -486,14 +481,12 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             Some((_, _, chain_check)),
             _,
         ) => quote! {
-            if self.$field_ident.is_empty() {
+            if self.#field_ident.is_empty() {
                 #default_call
             } else {
-                let mut last = ::std::option::Option::None;
-                for hook in &self.$field_ident {
+                for hook in &self.#field_ident {
                     let __next = #dyn_hook_dispatch_call;
                     #chain_check { return __next; }
-                    last = ::std::option::Option::Some(__next);
                 }
                 #default_call
             }
@@ -517,11 +510,11 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
                 quote! { #default_call }
             };
             quote! {
-                if self.$field_ident.is_empty() {
+                if self.#field_ident.is_empty() {
                     #fallback_default
                 } else {
                     let mut __outputs = ::std::vec::Vec::new();
-                    for hook in &self.$field_ident {
+                    for hook in &self.#field_ident {
                         __outputs.push(#dyn_hook_dispatch_call);
                     }
                     #aggregate_call
@@ -536,43 +529,32 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
             }),
             Some((_, _, chain_check)),
             Some((_, _, aggregate_call)),
-        ) => {
-            let fallback_default = if has_output_override {
-                quote! {
-                    let mut __outputs = ::std::vec::Vec::new();
-                    __outputs.push(#default_call);
-                    #aggregate_call
-                }
+        ) => quote! {
+            if self.#field_ident.is_empty() {
+                let mut __outputs = ::std::vec::Vec::new();
+                __outputs.push(#default_call);
+                #aggregate_call
             } else {
-                quote! { #default_call }
-            };
-            quote! {
-                if self.$field_ident.is_empty() {
-                    #fallback_default
-                } else {
-                    let mut __outputs = ::std::vec::Vec::new();
-                    for hook in &self.$field_ident {
-                        let __next = #dyn_hook_dispatch_call;
-                        #chain_check {
-                            __outputs.push(__next);
-                            return #aggregate_call;
-                        }
+                let mut __outputs = ::std::vec::Vec::new();
+                for hook in &self.#field_ident {
+                    let __next = #dyn_hook_dispatch_call;
+                    #chain_check {
                         __outputs.push(__next);
+                        return #aggregate_call;
                     }
-                    #aggregate_call
+                    __outputs.push(__next);
                 }
+                #aggregate_call
             }
-        }
+        },
         (HookKind::Singleton, _, _) => {
             let singleton_args: Vec<proc_macro2::TokenStream> =
                 dispatch_vars.iter().map(|v| quote! { #v }).collect();
-            let some_call = quote! {
-                hook.call_dyn(#(#singleton_args,)*).await
-            };
+            let some_call = quote! { hook.call_dyn(#(#singleton_args,)*).await };
             quote! {
-                match &self.$field_ident {
-                    Some(hook) => #some_call,
-                    None => #default_call,
+                match &self.#field_ident {
+                    ::std::option::Option::Some(hook) => #some_call,
+                    ::std::option::Option::None => #default_call,
                 }
             }
         }
@@ -581,8 +563,6 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         ),
     };
 
-    // Wrap with finalize if specified. Chain dispatch uses early `return`s, so we wrap
-    // in an async block to capture all exit paths through the same finalize call.
     let dispatch = match &finalize_companion_tokens {
         Some((_, _, finalize_call)) => quote! {
             let __result = async move { #inner_dispatch }.await;
@@ -591,142 +571,85 @@ pub fn expand_local_hook(mut item_fn: ItemFn, kind: HookKind) -> proc_macro2::To
         None => inner_dispatch,
     };
 
-    let hooks_slot_ident = format_ident!("__lutum_hooks_{}", slot_ident);
-    let macro_reexport = quote! {
-        #[doc(hidden)]
-        pub(crate) use #hooks_slot_ident;
-    };
-    let named_impl_helper_macro_ident = hook_named_impl_helper_macro_ident(&slot_ident);
-    let helper_macro_reexport = quote! {
-        #[doc(hidden)]
-        pub(crate) use #named_impl_helper_macro_ident;
-    };
-
-    let named_impl_with_last_arm = if trait_has_last {
-        quote! {
-            (@named_impl_with_last { $($ok:tt)* } { $($err:tt)* }) => {
-                $($ok)*
-            };
-        }
-    } else {
-        quote! {
-            (@named_impl_with_last { $($ok:tt)* } { $($err:tt)* }) => {
-                $($err)*
-            };
-        }
-    };
-
-    quote! {
+    let items = quote! {
         #item_fn
-
-        #[doc(hidden)]
-        #[allow(unused_macros)]
-        macro_rules! #hooks_slot_ident {
-            #named_impl_with_last_arm
-            (
-                @accumulate
-                $callback:ident
-                [$($fields:tt)*]
-                [$($field_inits:tt)*]
-                [$($register_methods:tt)*]
-                [$($dispatch_methods:tt)*]
-                [$($default_impls:tt)*]
-                [$field_ident:ident]
-                [$with_fn_ident:ident]
-                [$register_fn_ident:ident]
-                [$dispatch_fn_ident:ident]
-                [$default_method_ident:ident]
-                [$chain_field_ident:ident]
-                [$chain_reg_fn_ident:ident]
-                [$chain_set_fn_ident:ident]
-                [$aggregate_field_ident:ident]
-                [$aggregate_reg_fn_ident:ident]
-                [$aggregate_set_fn_ident:ident]
-                [$finalize_field_ident:ident]
-                [$finalize_reg_fn_ident:ident]
-                [$finalize_set_fn_ident:ident]
-                [$($remaining:tt)*]
-            ) => {
-                $callback!(
-                    [$($fields)*
-                        $field_ident: #field_ty,
-                        #(#chain_companion_field_tokens)*
-                        #(#aggregate_companion_field_tokens)*
-                        #(#finalize_companion_field_tokens)*
-                    ]
-                    [$($field_inits)*
-                        $field_ident: #field_init,
-                        #(#chain_companion_field_init_tokens)*
-                        #(#aggregate_companion_field_init_tokens)*
-                        #(#finalize_companion_field_init_tokens)*
-                    ]
-                    [$($register_methods)*
-                        #[allow(dead_code)]
-                        pub fn $with_fn_ident(
-                            mut self,
-                            hook: impl #hook_trait_ident + 'static,
-                        ) -> Self {
-                            #register_impl
-                            self
-                        }
-
-                        #[allow(dead_code)]
-                        pub fn $register_fn_ident(
-                            &mut self,
-                            hook: impl #hook_trait_ident + 'static,
-                        ) -> &mut Self {
-                            #register_impl
-                            self
-                        }
-
-                        #(#chain_companion_register_tokens)*
-                        #(#aggregate_companion_register_tokens)*
-                        #(#finalize_companion_register_tokens)*
-                    ]
-                    [$($dispatch_methods)*
-                        #[allow(dead_code)]
-                        pub async fn $dispatch_fn_ident(
-                            &self,
-                            #(#dispatch_args,)*
-                        ) -> #dispatch_output_ty
-                        #clone_where {
-                            use ::tracing::Instrument as _;
-
-                            let span = ::tracing::info_span!("lutum_hook", name = #hook_name);
-                            async move {
-                                #args_pre_conversion
-                                #dispatch
-                            }
-                            .instrument(span)
-                            .await
-                        }
-                    ]
-                    [$($default_impls)*
-                        #[allow(dead_code)]
-                        async fn $default_method_ident(
-                            #(#dispatch_args,)*
-                        ) -> #hook_output_ty {
-                            #default_impl_call
-                        }
-                    ]
-                    [$($remaining)*]
-                );
-            };
-        }
-
-        #[doc(hidden)]
-        #[allow(unused_macros)]
-        macro_rules! #named_impl_helper_macro_ident {
-            #named_impl_with_last_arm
-        }
-
-        #macro_reexport
-        #helper_macro_reexport
 
         #fn_impl
 
         #hook_trait_defs
 
         #blanket_impls
-    }
+    };
+
+    let field = quote! {
+        #field_ident: #field_ty,
+        #chain_field
+        #aggregate_field
+        #finalize_field
+    };
+    let field_init = quote! {
+        #field_ident: #field_init,
+        #chain_field_init
+        #aggregate_field_init
+        #finalize_field_init
+    };
+    let register_methods = quote! {
+        #[allow(dead_code)]
+        pub fn #with_fn_ident(
+            mut self,
+            hook: impl #hook_trait_ident + 'static,
+        ) -> Self {
+            #register_impl
+            self
+        }
+
+        #[allow(dead_code)]
+        pub fn #register_fn_ident(
+            &mut self,
+            hook: impl #hook_trait_ident + 'static,
+        ) -> &mut Self {
+            #register_impl
+            self
+        }
+
+        #chain_methods
+        #aggregate_methods
+        #finalize_methods
+    };
+    let dispatch_method = quote! {
+        #[allow(dead_code)]
+        pub async fn #fn_ident(
+            &self,
+            #(#dispatch_args,)*
+        ) -> #dispatch_output_ty
+        #clone_where
+        {
+            use ::tracing::Instrument as _;
+
+            let span = ::tracing::info_span!("lutum_hook", name = #hook_name);
+            async move {
+                #args_pre_conversion
+                #dispatch
+            }
+            .instrument(span)
+            .await
+        }
+    };
+    let default_method = quote! {
+        #[allow(dead_code)]
+        async fn #default_method_ident(
+            #(#dispatch_args,)*
+        ) -> #hook_output_ty {
+            #default_impl_call
+        }
+    };
+
+    Ok(SlotExpansion {
+        items,
+        field,
+        field_init,
+        register_methods,
+        dispatch_method,
+        default_method,
+    })
 }

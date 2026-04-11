@@ -281,36 +281,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 For single-tool rounds, `round.expect_one()?` and `round.expect_at_most_one()?` are often cleaner
 than manually inspecting the vector.
 
+For a complete tool-hook example, see
+[`crates/lutum/examples/tool_hook.rs`](crates/lutum/examples/tool_hook.rs). It shows a
+cache-backed hook that handles some tool calls immediately and falls back to normal Rust tool
+execution for the rest.
+
 ## Hooks
 
-Hooks are named, typed async slots. Define a slot with `#[def_hook(...)]`, implement handlers with
-`#[hook(...)]`, include the slot in a local `#[hooks]` container, and call it from your own code.
+Hooks are named, typed async slots. Define them inside a local `#[hooks] trait`, implement
+handlers with `#[impl_hook(...)]`, and call the generated methods from your own code.
 
 ```rust
-use std::sync::Arc;
-
-use lutum::{
-    Lutum, LutumHooks, ModelName, OpenAiAdapter, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions,
-};
-
-#[lutum::def_hook(always)]
-async fn validate_prompt(_ctx: &Lutum, prompt: &str) -> Result<(), String> {
-    if prompt.trim().is_empty() {
-        Err("prompt must not be empty".into())
-    } else {
-        Ok(())
+#[lutum::hooks]
+trait AppHooks {
+    #[hook(always)]
+    async fn validate_prompt(prompt: &str) -> Result<(), String> {
+        if prompt.trim().is_empty() {
+            Err("prompt must not be empty".into())
+        } else {
+            Ok(())
+        }
     }
 }
 
-#[lutum::hook(ValidatePrompt)]
+#[lutum::impl_hook(ValidatePrompt)]
 async fn reject_secrets(
-    _ctx: &Lutum,
     prompt: &str,
     last: Option<Result<(), String>>,
 ) -> Result<(), String> {
     if let Some(previous) = last {
-        return previous;
+        previous?;
     }
     if prompt.contains("sk-") {
         Err("looks like an API key".into())
@@ -326,26 +326,18 @@ struct AppHooks {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let llm = Lutum::with_hooks(
-        Arc::new(
-            OpenAiAdapter::new(std::env::var("TOKEN")?)
-                .with_base_url(std::env::var("ENDPOINT")?)
-                .with_default_model(ModelName::new(&std::env::var("MODEL")?)?),
-        ),
-        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        LutumHooks::new(),
-    );
     let hooks = AppHooks::new().with_validate_prompt(RejectSecrets);
 
     hooks
-        .validate_prompt(&llm, "Explain borrow checking in one paragraph.")
+        .validate_prompt("Explain borrow checking in one paragraph.")
         .await?;
 
     Ok(())
 }
 ```
 
-- The slot definition can omit `last`; registered chaining hooks still receive it.
+- Slot definitions live inside one `#[hooks] trait` and never declare `last`.
+- `#[impl_hook(SlotType)]` is exact-signature: write `last: Option<R>` yourself whenever the slot trait has it.
 - `always`: run the default implementation first, then chain registered hooks on top
 - `fallback`: use registered hooks if present, otherwise run the default
 - `singleton`: pick one override or use the default; the last registration wins and emits a warning
@@ -438,9 +430,17 @@ use lutum_eval::{
     Eval, EvalExt, PureEval, PureEvalExt, Score, maximize,
 };
 
-#[lutum::def_hook(singleton)]
-async fn score_bias(_llm: &Lutum, score: usize) -> usize {
-    score
+#[lutum::hooks]
+trait EvalHooks {
+    #[hook(singleton)]
+    async fn score_bias(score: usize) -> usize {
+        score
+    }
+}
+
+#[lutum::impl_hook(ScoreBias)]
+async fn double_score(score: usize) -> usize {
+    score * 2
 }
 
 #[derive(Debug)]
@@ -449,6 +449,10 @@ struct Draft {
 }
 
 struct LengthEval;
+
+struct ScaledLengthEval {
+    hooks: EvalHooks,
+}
 
 impl PureEval for LengthEval {
     type Artifact = Draft;
@@ -474,11 +478,11 @@ impl Eval for ScaledLengthEval {
 
     async fn evaluate(
         &self,
-        llm: &Lutum,
+        _llm: &Lutum,
         _trace: &lutum_eval::TraceSnapshot,
         artifact: &Self::Artifact,
     ) -> Result<Self::Report, Self::Error> {
-        Ok(llm.score_bias(artifact.text.len()).await)
+        Ok(self.hooks.score_bias(artifact.text.len()).await)
     }
 }
 
@@ -487,11 +491,15 @@ let pure_report = LengthEval.run_future(async {
     Draft { text: "hello".into() }
 }).await?;
 
-let eval_report = ScaledLengthEval.run_future(&llm, async {
+let eval = ScaledLengthEval {
+    hooks: EvalHooks::new().with_score_bias(DoubleScore),
+};
+
+let eval_report = eval.run_future(&llm, async {
     Draft { text: "hello".into() }
 }).await?;
 
-let scored = ScaledLengthEval
+let scored = eval
     .scored_by(&maximize(|report: &usize| Score::new_clamped(*report as f32 / 10.0)))
     .run_future(&llm, async { Draft { text: "hello".into() } })
     .await?;
@@ -524,16 +532,13 @@ use lutum_eval::{
     Probe, ProbeDecision, ProbeHandle, ProbeRuntime, Score, TraceEvent, TraceSnapshot, maximize,
 };
 
-// -- Define a hook slot (once per slot, e.g. in a shared library) ----------------
-
-#[lutum::def_hook(singleton)]
-async fn validate_response(response: &str) -> Result<(), String> {
-    Ok(())
-}
-
 #[lutum::hooks]
-struct ResponseQualityHooks {
-    response_validators: ValidateResponse,
+trait ResponseQualityHooks {
+    #[hook(singleton)]
+    async fn validate_response(response: &str) -> Result<(), String> {
+        let _ = response;
+        Ok(())
+    }
 }
 
 // -- Implement the probe ---------------------------------------------------------
@@ -567,8 +572,9 @@ impl Probe for ResponseQuality {
 }
 
 fn response_quality_hooks(dispatcher: ProbeHandle<ResponseQuality>) -> ResponseQualityHooks {
-    ResponseQualityHooks::new().with_validate_response(move |response: String| {
+    ResponseQualityHooks::new().with_validate_response(move |response: &str| {
         let dispatcher = dispatcher.clone();
+        let response = response.to_owned();
         async move {
             dispatcher
                 .dispatch(move |probe| {
@@ -626,6 +632,7 @@ cargo run -p lutum --example <name> --features openai
 |---|---|---|---|
 | [`streaming_turn_ui`](crates/lutum/examples/streaming_turn_ui.rs) | Stream `TextTurnEvent` deltas directly to a UI or terminal | `cargo run -p lutum --example streaming_turn_ui --features openai` | You want the smallest streaming example without tools or transcript branching |
 | [`react_loop`](crates/lutum/examples/react_loop.rs) | Explicit tool loop with `.tools::<T>()`, `NeedsTools`, and `round.commit(...)` | `cargo run -p lutum --example react_loop --features openai` | You want a ReAct-style loop but still keep tool execution in Rust |
+| [`tool_hook`](crates/lutum/examples/tool_hook.rs) | Short-circuit selected tool calls with a cache, then fall back to normal tool execution | `cargo run -p lutum --example tool_hook` | You want to intercept tool calls without moving tool execution ownership out of app code |
 | [`verification_gates`](crates/lutum/examples/verification_gates.rs) | Structured output checked by deterministic Rust gates and retried | `cargo run -p lutum --example verification_gates --features openai` | You want model output to pass strict post-validation before acceptance |
 | [`deterministic_hooks`](crates/lutum/examples/deterministic_hooks.rs) | Prompt and output validation through typed hooks | `cargo run -p lutum --example deterministic_hooks --features openai` | You want reusable policy checks without baking them into every call site |
 | [`policy_hook`](crates/lutum/examples/policy_hook.rs) | A configured Rust policy object plugged into a typed hook | `cargo run -p lutum --example policy_hook --features openai` | You want hook behavior to come from app-owned configuration instead of hard-coded closures |

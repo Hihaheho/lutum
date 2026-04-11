@@ -59,23 +59,20 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply(&self, request: &mut MessagesRequest);
 }
 
-#[lutum_macros::def_hook(singleton)]
-pub async fn select_claude_model(_extensions: &RequestExtensions, default: ModelName) -> ModelName {
-    default
-}
-
-#[lutum_macros::def_hook(singleton)]
-pub async fn resolve_budget_tokens(
-    _extensions: &RequestExtensions,
-    default: Option<u32>,
-) -> Option<u32> {
-    default
-}
-
 #[lutum_macros::hooks]
-pub struct ClaudeHooks {
-    select_claude_model: SelectClaudeModel,
-    resolve_budget_tokens: ResolveBudgetTokens,
+pub trait ClaudeHooks {
+    #[hook(singleton)]
+    async fn select_claude_model(_extensions: &RequestExtensions, default: ModelName) -> ModelName {
+        default
+    }
+
+    #[hook(singleton)]
+    async fn resolve_budget_tokens(
+        _extensions: &RequestExtensions,
+        default: Option<u32>,
+    ) -> Option<u32> {
+        default
+    }
 }
 
 #[derive(Clone)]
@@ -1295,7 +1292,7 @@ mod tests {
 
     use super::*;
 
-    #[lutum_macros::hook(SelectClaudeModel)]
+    #[lutum_macros::impl_hook(SelectClaudeModel)]
     async fn prefer_claude_sonnet(
         _extensions: &RequestExtensions,
         _default: ModelName,
@@ -1303,7 +1300,7 @@ mod tests {
         ModelName::new("claude-sonnet-4-5").unwrap()
     }
 
-    #[lutum_macros::hook(SelectClaudeModel)]
+    #[lutum_macros::impl_hook(SelectClaudeModel)]
     async fn prefer_claude_haiku(
         _extensions: &RequestExtensions,
         _default: ModelName,

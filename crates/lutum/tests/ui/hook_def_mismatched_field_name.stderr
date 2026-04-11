@@ -1,0 +1,6 @@
+error: #[hooks] methods must provide a default body; bodyless required hooks are not supported yet
+ --> tests/ui/hook_def_mismatched_field_name.rs:3:5
+  |
+3 | /     #[hook(fallback)]
+4 | |     async fn validate_command(cmd: &str) -> Result<(), &'static str>;
+  | |_____________________________________________________________________^

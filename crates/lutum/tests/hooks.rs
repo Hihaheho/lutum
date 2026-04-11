@@ -15,147 +15,52 @@ use lutum_trace::FieldValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[lutum::def_hook(singleton)]
-async fn select_label(default: String) -> String {
-    default
-}
+#[lutum::hooks]
+trait TestHooks {
+    #[hook(singleton)]
+    async fn select_label(default: String) -> String {
+        default
+    }
 
-#[lutum::hook(SelectLabel)]
-async fn prefix_label(default: String) -> String {
-    format!("hooked:{default}")
-}
+    #[hook(always)]
+    async fn format_label(label: &str) -> String {
+        format!("default:{label}")
+    }
 
-#[lutum::hook(SelectLabel)]
-async fn suffix_label(default: String) -> String {
-    format!("{default}:suffix")
-}
+    #[hook(fallback)]
+    async fn choose_label(label: &str) -> String {
+        format!("default:{label}")
+    }
 
-#[lutum::def_hook(always)]
-async fn format_label(label: &str) -> String {
-    format!("default:{label}")
-}
+    #[hook(always, chain = lutum::ShortCircuit<String, String>)]
+    async fn validate_chain_label(label: &str) -> Result<String, String> {
+        Err(format!("default-blocked:{label}"))
+    }
 
-#[lutum::hook(FormatLabel)]
-async fn append_suffix(source_label: &str, last: Option<String>) -> String {
-    let previous = last.expect("always hooks should receive the default result");
-    assert_eq!(previous, format!("default:{source_label}"));
-    format!("{previous}:hook")
-}
+    #[hook(always, chain = lutum::ShortCircuit<String, String>)]
+    async fn transform_chain_label(label: &str) -> Result<String, String> {
+        Ok(format!("default:{label}"))
+    }
 
-#[lutum::def_hook(always)]
-async fn legacy_format_label(label: &str) -> String {
-    format!("legacy:{label}")
-}
+    #[hook(fallback, chain = lutum::FirstSuccess<String>)]
+    async fn choose_chain_label(label: &str) -> Option<String> {
+        Some(format!("default:{label}"))
+    }
 
-#[lutum::def_hook(fallback)]
-async fn choose_label(label: &str) -> String {
-    format!("default:{label}")
-}
+    #[hook(fallback, chain = lutum::FirstSuccess<String>)]
+    async fn choose_chain_default_after_hooks(label: &str) -> Option<String> {
+        Some(format!("fallback-default:{label}"))
+    }
 
-#[lutum::hook(ChooseLabel)]
-async fn pick_registered_label(label: &str, last: Option<String>) -> String {
-    assert!(last.is_none(), "fallback chains should start from None");
-    format!("hook:{label}")
-}
+    #[hook(singleton)]
+    async fn next_counter(seed: usize) -> CounterResult {
+        Ok(seed)
+    }
 
-#[lutum::def_hook(always, chain = lutum::ShortCircuit<String, String>)]
-async fn validate_chain_label(label: &str) -> Result<String, String> {
-    Err(format!("default-blocked:{label}"))
-}
-
-#[lutum::hook(ValidateChainLabel)]
-async fn append_chain_suffix(label: &str) -> Result<String, String> {
-    Ok(format!("hooked:{label}"))
-}
-
-#[lutum::def_hook(always, chain = lutum::ShortCircuit<String, String>)]
-async fn transform_chain_label(label: &str) -> Result<String, String> {
-    Ok(format!("default:{label}"))
-}
-
-#[lutum::hook(TransformChainLabel)]
-async fn transform_chain_middle(label: &str) -> Result<String, String> {
-    Ok(format!("mid:{label}"))
-}
-
-#[lutum::hook(TransformChainLabel)]
-async fn transform_chain_final(label: &str) -> Result<String, String> {
-    Ok(format!("final:{label}"))
-}
-
-#[lutum::def_hook(fallback, chain = lutum::FirstSuccess<String>)]
-async fn choose_chain_label(label: &str) -> Option<String> {
-    Some(format!("default:{label}"))
-}
-
-#[lutum::hook(ChooseChainLabel)]
-async fn choose_none(_label: &str) -> Option<String> {
-    None
-}
-
-#[lutum::hook(ChooseChainLabel)]
-async fn choose_special(label: &str) -> Option<String> {
-    Some(format!("hook:{label}"))
-}
-
-#[lutum::def_hook(fallback, chain = lutum::FirstSuccess<String>)]
-async fn choose_chain_default_after_hooks(label: &str) -> Option<String> {
-    Some(format!("fallback-default:{label}"))
-}
-
-#[lutum::hook(ChooseChainDefaultAfterHooks)]
-async fn choose_none_again(_label: &str) -> Option<String> {
-    None
-}
-
-// fold + chain (try_fold): each hook sees the previous result AND can short-circuit.
-#[lutum::def_hook(always, chain = lutum::ShortCircuit<String, String>)]
-async fn fold_chain_label(label: &str) -> Result<String, String> {
-    Ok(format!("default:{label}"))
-}
-
-#[lutum::hook(FoldChainLabel)]
-async fn fold_chain_append(
-    label: &str,
-    last: Option<Result<String, String>>,
-) -> Result<String, String> {
-    let prev = last.unwrap().unwrap();
-    Ok(format!("{prev}+{label}"))
-}
-
-#[lutum::hook(FoldChainLabel)]
-async fn fold_chain_err(
-    _label: &str,
-    last: Option<Result<String, String>>,
-) -> Result<String, String> {
-    let prev = last.unwrap().unwrap();
-    Err(format!("blocked:{prev}"))
-}
-
-#[lutum::hook(FoldChainLabel)]
-async fn fold_chain_unreachable(
-    _label: &str,
-    _last: Option<Result<String, String>>,
-) -> Result<String, String> {
-    panic!("must not be called after Err short-circuits")
-}
-
-// fallback + fold + chain: hooks fold and can short-circuit; default is the fallback.
-#[lutum::def_hook(fallback, chain = lutum::FirstSuccess<String>)]
-async fn fold_chain_pick(label: &str) -> Option<String> {
-    Some(format!("fallback:{label}"))
-}
-
-#[lutum::hook(FoldChainPick)]
-async fn fold_chain_pick_pass(_label: &str, last: Option<Option<String>>) -> Option<String> {
-    // Propagate whatever was accumulated; None means "keep going"
-    last.flatten()
-}
-
-#[lutum::hook(FoldChainPick)]
-async fn fold_chain_pick_decide(label: &str, last: Option<Option<String>>) -> Option<String> {
-    assert!(last.unwrap().is_none(), "previous hook passed None through");
-    Some(format!("hook:{label}"))
+    #[hook(singleton)]
+    async fn describe_label(label: &str) -> String {
+        label.to_string()
+    }
 }
 
 // aggregate: each hook contributes independently (no `last`), outputs collected and reduced.
@@ -169,17 +74,116 @@ impl lutum::Aggregate<String> for JoinStrings {
     }
 }
 
-#[lutum::def_hook(always, aggregate = JoinStrings)]
-async fn accumulate_label(label: &str) -> String {
-    format!("default:{label}")
+#[lutum::hooks]
+trait AccumulateHooks {
+    #[hook(always, aggregate = JoinStrings)]
+    async fn accumulate_label(label: &str) -> String {
+        format!("default:{label}")
+    }
+
+    #[hook(always, chain = IsShortCircuitString, aggregate = JoinStrings)]
+    async fn accumulate_chain_label(label: &str) -> String {
+        format!("default:{label}")
+    }
+
+    #[hook(always, finalize = WrapResult)]
+    async fn finalized_label(label: &str) -> String {
+        format!("default:{label}")
+    }
+
+    #[hook(always, chain = IsShortCircuitString, finalize = WrapResult)]
+    async fn chain_finalized_label(label: &str) -> String {
+        format!("default:{label}")
+    }
 }
 
-#[lutum::hook(AccumulateLabel)]
+#[lutum::hooks]
+trait OutputIntoHooks {
+    #[hook(always, aggregate = CollectIntoLabels, output = CollectedLabels)]
+    async fn accumulate_label_into(label: &str) -> String {
+        format!("default:{label}")
+    }
+
+    #[hook(fallback, aggregate = CollectIntoLabels, output = CollectedLabels)]
+    async fn fallback_accumulate_label_into(label: &str) -> String {
+        format!("fallback:{label}")
+    }
+
+    #[hook(fallback, chain = IsShortCircuitString, aggregate = CollectIntoLabels, output = CollectedLabels)]
+    async fn fallback_accumulate_chain_label_into(label: &str) -> String {
+        format!("fallback:{label}")
+    }
+
+    #[hook(always, chain = IsShortCircuitString, aggregate = CollectIntoLabels, output = CollectedLabels)]
+    async fn accumulate_chain_label_into(label: &str) -> String {
+        format!("default:{label}")
+    }
+
+    #[hook(always, finalize = WrapLabelInto, output = WrappedLabel)]
+    async fn finalized_label_into(label: &str) -> String {
+        format!("default:{label}")
+    }
+}
+
+#[lutum::impl_hook(SelectLabel)]
+async fn prefix_label(default: String) -> String {
+    format!("hooked:{default}")
+}
+
+#[lutum::impl_hook(SelectLabel)]
+async fn suffix_label(default: String) -> String {
+    format!("{default}:suffix")
+}
+
+#[lutum::impl_hook(FormatLabel)]
+async fn append_suffix(source_label: &str, last: Option<String>) -> String {
+    let previous = last.expect("always hooks should receive the default result");
+    assert_eq!(previous, format!("default:{source_label}"));
+    format!("{previous}:hook")
+}
+
+#[lutum::impl_hook(ChooseLabel)]
+async fn pick_registered_label(label: &str, last: Option<String>) -> String {
+    assert!(last.is_none(), "fallback chains should start from None");
+    format!("hook:{label}")
+}
+
+#[lutum::impl_hook(ValidateChainLabel)]
+async fn append_chain_suffix(label: &str) -> Result<String, String> {
+    Ok(format!("hooked:{label}"))
+}
+
+#[lutum::impl_hook(TransformChainLabel)]
+async fn transform_chain_middle(label: &str) -> Result<String, String> {
+    Ok(format!("mid:{label}"))
+}
+
+#[lutum::impl_hook(TransformChainLabel)]
+async fn transform_chain_final(label: &str) -> Result<String, String> {
+    Ok(format!("final:{label}"))
+}
+
+#[lutum::impl_hook(ChooseChainLabel)]
+async fn choose_none(_label: &str) -> Option<String> {
+    None
+}
+
+#[lutum::impl_hook(ChooseChainLabel)]
+async fn choose_special(label: &str) -> Option<String> {
+    Some(format!("hook:{label}"))
+}
+
+#[lutum::impl_hook(ChooseChainDefaultAfterHooks)]
+async fn choose_none_again(_label: &str) -> Option<String> {
+    None
+}
+
+#[lutum::impl_hook(AccumulateLabel)]
 async fn accumulate_hook_a(label: &str) -> String {
     format!("hook-a:{label}")
 }
 
-#[lutum::hook(AccumulateLabel)]
+#[lutum::impl_hook(AccumulateLabel)]
 async fn accumulate_hook_b(label: &str) -> String {
     format!("hook-b:{label}")
 }
@@ -204,17 +208,12 @@ impl lutum::Chain<String> for IsShortCircuitString {
     }
 }
 
-#[lutum::def_hook(always, chain = IsShortCircuitString, aggregate = JoinStrings)]
-async fn accumulate_chain_label(label: &str) -> String {
-    format!("default:{label}")
-}
-
-#[lutum::hook(AccumulateChainLabel)]
+#[lutum::impl_hook(AccumulateChainLabel)]
 async fn accumulate_chain_hook_stop(_label: &str) -> String {
     "stop:early".to_owned()
 }
 
-#[lutum::hook(AccumulateChainLabel)]
+#[lutum::impl_hook(AccumulateChainLabel)]
 async fn accumulate_chain_hook_unreachable(_label: &str) -> String {
     panic!("must not be called after stop")
 }
@@ -230,28 +229,18 @@ impl lutum::Finalize<String> for WrapResult {
     }
 }
 
-#[lutum::def_hook(always, finalize = WrapResult)]
-async fn finalized_label(label: &str) -> String {
-    format!("default:{label}")
-}
-
-#[lutum::hook(FinalizedLabel)]
+#[lutum::impl_hook(FinalizedLabel)]
 async fn finalized_append(label: &str, last: Option<String>) -> String {
     format!("{}+{label}", last.unwrap())
 }
 
 // chain + finalize: finalize captures early exits from chain dispatch.
-#[lutum::def_hook(always, chain = IsShortCircuitString, finalize = WrapResult)]
-async fn chain_finalized_label(label: &str) -> String {
-    format!("default:{label}")
-}
-
-#[lutum::hook(ChainFinalizedLabel)]
+#[lutum::impl_hook(ChainFinalizedLabel)]
 async fn chain_finalized_stop(_label: &str) -> String {
     "stop:chain".to_owned()
 }
 
-#[lutum::hook(ChainFinalizedLabel)]
+#[lutum::impl_hook(ChainFinalizedLabel)]
 async fn chain_finalized_unreachable(_label: &str) -> String {
     panic!("must not be called after stop")
 }
@@ -282,47 +271,37 @@ impl lutum::FinalizeInto<String, WrappedLabel> for WrapLabelInto {
     }
 }
 
-#[lutum::def_hook(always, aggregate = CollectIntoLabels, output = CollectedLabels)]
-async fn accumulate_label_into(label: &str) -> String {
-    format!("default:{label}")
-}
-
-#[lutum::hook(AccumulateLabelInto)]
+#[lutum::impl_hook(AccumulateLabelInto)]
 async fn accumulate_into_hook_a(label: &str) -> String {
     format!("hook-a:{label}")
 }
 
-#[lutum::def_hook(fallback, aggregate = CollectIntoLabels, output = CollectedLabels)]
-async fn fallback_accumulate_label_into(label: &str) -> String {
-    format!("fallback:{label}")
-}
-
-#[lutum::hook(FallbackAccumulateLabelInto)]
+#[lutum::impl_hook(FallbackAccumulateLabelInto)]
 async fn fallback_accumulate_into_hook(label: &str) -> String {
     format!("hook:{label}")
 }
 
-#[lutum::def_hook(always, chain = IsShortCircuitString, aggregate = CollectIntoLabels, output = CollectedLabels)]
-async fn accumulate_chain_label_into(label: &str) -> String {
-    format!("default:{label}")
+#[lutum::impl_hook(FallbackAccumulateChainLabelInto)]
+async fn fallback_accumulate_chain_into_hook_a(label: &str) -> String {
+    format!("hook-a:{label}")
 }
 
-#[lutum::hook(AccumulateChainLabelInto)]
+#[lutum::impl_hook(FallbackAccumulateChainLabelInto)]
+async fn fallback_accumulate_chain_into_hook_b(label: &str) -> String {
+    format!("hook-b:{label}")
+}
+
+#[lutum::impl_hook(AccumulateChainLabelInto)]
 async fn accumulate_chain_into_hook_stop(_label: &str) -> String {
     "stop:early".to_owned()
 }
 
-#[lutum::hook(AccumulateChainLabelInto)]
+#[lutum::impl_hook(AccumulateChainLabelInto)]
 async fn accumulate_chain_into_hook_unreachable(_label: &str) -> String {
     panic!("must not be called after stop")
 }
 
-#[lutum::def_hook(always, finalize = WrapLabelInto, output = WrappedLabel)]
-async fn finalized_label_into(label: &str) -> String {
-    format!("default:{label}")
-}
-
-#[lutum::hook(FinalizedLabelInto)]
+#[lutum::impl_hook(FinalizedLabelInto)]
 async fn finalized_into_append(label: &str, last: Option<String>) -> String {
     format!("{}+{label}", last.unwrap())
 }
@@ -333,11 +312,6 @@ enum CounterError {
 }
 
 type CounterResult = Result<usize, CounterError>;
-
-#[lutum::def_hook(singleton)]
-async fn next_counter(seed: usize) -> CounterResult {
-    Ok(seed)
-}
 
 struct CountingHook {
     next: usize,
@@ -377,25 +351,6 @@ impl StatefulNextCounter for ReentrantCounter {
                 .await
         }
     }
-}
-
-#[lutum::def_hook(singleton)]
-async fn describe_label(label: &str) -> String {
-    label.to_string()
-}
-
-#[lutum::hooks]
-struct TestHooks {
-    select_label: SelectLabel,
-    format_label: FormatLabel,
-    legacy_format_label: LegacyFormatLabel,
-    choose_label: ChooseLabel,
-    validate_chain_label: ValidateChainLabel,
-    transform_chain_label: TransformChainLabel,
-    choose_chain_label: ChooseChainLabel,
-    choose_chain_default_after_hooks: ChooseChainDefaultAfterHooks,
-    next_counter: NextCounter,
-    describe_label: DescribeLabel,
 }
 
 struct NestedLabelHook {
@@ -578,15 +533,6 @@ fn always_hook_passes_default_result_to_registered_hook() {
 }
 
 #[test]
-fn always_hook_keeps_supporting_default_definitions_with_last() {
-    let hooks = TestHooks::new();
-
-    let selected = block_on(hooks.legacy_format_label("base"));
-
-    assert_eq!(selected, "legacy:base");
-}
-
-#[test]
 fn fallback_hook_uses_default_without_last_when_unregistered() {
     let hooks = TestHooks::new();
 
@@ -744,65 +690,6 @@ fn resolve_usage_estimate_registered_override_wins_over_default_extensions_looku
     );
 }
 
-#[lutum::hooks]
-struct FoldChainHooks {
-    fold_chain_label: FoldChainLabel,
-    fold_chain_pick: FoldChainPick,
-}
-
-#[test]
-fn fold_chain_always_no_hooks_returns_default() {
-    let hooks = FoldChainHooks::new();
-    // No hooks: chain checks default (Ok → Continue), returns default.
-    let result = block_on(hooks.fold_chain_label("x"));
-    assert_eq!(result, Ok("default:x".to_owned()));
-}
-
-#[test]
-fn fold_chain_fallback_no_hooks_returns_default() {
-    let hooks = FoldChainHooks::new();
-    // No hooks: fallback default runs.
-    let result = block_on(hooks.fold_chain_pick("y"));
-    assert_eq!(result, Some("fallback:y".to_owned()));
-}
-
-#[test]
-fn fold_chain_always_all_continue_returns_last_fold_result() {
-    // Two fold hooks, both Continue: second gets last=Ok("default:x+x") and folds again.
-    let hooks = FoldChainHooks::new()
-        .with_fold_chain_label(FoldChainAppend)
-        .with_fold_chain_label(FoldChainAppend);
-    let result = block_on(hooks.fold_chain_label("x"));
-    // default="default:x", append1 sees last=Ok("default:x") → Ok("default:x+x"),
-    // append2 sees last=Ok("default:x+x") → Ok("default:x+x+x"), both Continue.
-    assert_eq!(result, Ok("default:x+x+x".to_owned()));
-}
-
-#[test]
-fn fold_and_chain_are_orthogonal_always() {
-    // always + chain: default runs first, hooks see `last` and can short-circuit.
-    // Hook order: fold_chain_append (continues), fold_chain_err (Err → Break),
-    // fold_chain_unreachable (never reached).
-    let hooks = FoldChainHooks::new()
-        .with_fold_chain_label(FoldChainAppend)
-        .with_fold_chain_label(FoldChainErr)
-        .with_fold_chain_label(FoldChainUnreachable);
-    let result = block_on(hooks.fold_chain_label("x"));
-    // default → Ok("default:x"), append gets last=Ok("default:x") → Ok("default:x+x"),
-    // err gets last=Ok("default:x+x") → Err("blocked:default:x+x") → Break.
-    assert_eq!(result, Err("blocked:default:x+x".to_owned()));
-}
-
-#[test]
-fn fold_and_chain_are_orthogonal_fallback() {
-    // fallback + chain: hooks fold through None → Some; default is never called.
-    let hooks = FoldChainHooks::new()
-        .with_fold_chain_pick(FoldChainPickPass)
-        .with_fold_chain_pick(FoldChainPickDecide);
-    let result = block_on(hooks.fold_chain_pick("y"));
-    assert_eq!(result, Some("hook:y".to_owned()));
-}
-
 #[test]
 fn context_entrypoints_pass_operation_kind_to_resolve_usage_estimate() {
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -827,22 +714,6 @@ fn context_entrypoints_pass_operation_kind_to_resolve_usage_estimate() {
             OperationKind::StructuredCompletion,
         ]
     );
-}
-
-#[lutum::hooks]
-struct AccumulateHooks {
-    accumulate_label: AccumulateLabel,
-    accumulate_chain_label: AccumulateChainLabel,
-    finalized_label: FinalizedLabel,
-    chain_finalized_label: ChainFinalizedLabel,
-}
-
-#[lutum::hooks]
-struct OutputIntoHooks {
-    accumulate_label_into: AccumulateLabelInto,
-    fallback_accumulate_label_into: FallbackAccumulateLabelInto,
-    accumulate_chain_label_into: AccumulateChainLabelInto,
-    finalized_label_into: FinalizedLabelInto,
 }
 
 #[test]
@@ -922,6 +793,19 @@ fn fallback_aggregate_output_override_runs_companion_without_hooks() {
     let result = block_on(hooks.fallback_accumulate_label_into("x"));
 
     assert_eq!(result, CollectedLabels(vec!["fallback:x".to_owned()]));
+}
+
+#[test]
+fn fallback_chain_aggregate_excludes_default_when_hooks_are_registered() {
+    let hooks = OutputIntoHooks::new()
+        .with_fallback_accumulate_chain_label_into(FallbackAccumulateChainIntoHookA)
+        .with_fallback_accumulate_chain_label_into(FallbackAccumulateChainIntoHookB);
+    let result = block_on(hooks.fallback_accumulate_chain_label_into("x"));
+
+    assert_eq!(
+        result,
+        CollectedLabels(vec!["hook-a:x".to_owned(), "hook-b:x".to_owned()])
+    );
 }
 
 #[test]

@@ -38,50 +38,48 @@ fn normalize_phone(value: &str) -> String {
         .collect()
 }
 
-#[def_hook(always)]
-async fn audit_contact(source: &str, contact: &Contact) -> Result<(), Vec<String>> {
-    let mut failures = Vec::new();
-    let source_tokens = source
-        .split_whitespace()
-        .map(|token| token.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
+#[hooks]
+trait VerificationHooks {
+    #[hook(always)]
+    async fn audit_contact(source: &str, contact: &Contact) -> Result<(), Vec<String>> {
+        let mut failures = Vec::new();
+        let source_tokens = source
+            .split_whitespace()
+            .map(|token| token.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
 
-    if contact.name.trim().is_empty() {
-        failures.push("name must not be empty".into());
-    } else {
-        for token in contact.name.split_whitespace() {
-            if !source_tokens.contains(&token.to_ascii_lowercase()) {
-                failures.push(format!("name token '{token}' not found in source"));
+        if contact.name.trim().is_empty() {
+            failures.push("name must not be empty".into());
+        } else {
+            for token in contact.name.split_whitespace() {
+                if !source_tokens.contains(&token.to_ascii_lowercase()) {
+                    failures.push(format!("name token '{token}' not found in source"));
+                }
             }
         }
-    }
 
-    if contact.email.trim().is_empty() {
-        failures.push("email must not be empty".into());
-    } else if !source.contains(&contact.email) {
-        failures.push(format!("email '{}' not found in source", contact.email));
-    }
+        if contact.email.trim().is_empty() {
+            failures.push("email must not be empty".into());
+        } else if !source.contains(&contact.email) {
+            failures.push(format!("email '{}' not found in source", contact.email));
+        }
 
-    if contact.phone.trim().is_empty() {
-        failures.push("phone must not be empty".into());
-    } else {
-        let normalized_source = normalize_phone(source);
-        let normalized_phone = normalize_phone(&contact.phone);
-        if normalized_phone.is_empty() || !normalized_source.contains(&normalized_phone) {
-            failures.push(format!("phone '{}' not found in source", contact.phone));
+        if contact.phone.trim().is_empty() {
+            failures.push("phone must not be empty".into());
+        } else {
+            let normalized_source = normalize_phone(source);
+            let normalized_phone = normalize_phone(&contact.phone);
+            if normalized_phone.is_empty() || !normalized_source.contains(&normalized_phone) {
+                failures.push(format!("phone '{}' not found in source", contact.phone));
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures)
         }
     }
-
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures)
-    }
-}
-
-#[hooks]
-struct VerificationHooks {
-    audit_contact: AuditContact,
 }
 
 fn build_prompt(source: &str, prior_failure: Option<&GateFailure>) -> String {

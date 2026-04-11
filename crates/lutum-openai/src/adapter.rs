@@ -51,22 +51,19 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply_to_completion(&self, request: &mut CompletionRequest);
 }
 
-#[lutum_macros::def_hook(singleton)]
-pub async fn select_openai_model(_extensions: &RequestExtensions, default: ModelName) -> ModelName {
-    default
-}
-
-#[lutum_macros::def_hook(singleton)]
-pub async fn resolve_reasoning_effort(
-    _extensions: &RequestExtensions,
-) -> Option<OpenAiReasoningEffort> {
-    None
-}
-
 #[lutum_macros::hooks]
-pub struct OpenAiHooks {
-    select_openai_model: SelectOpenaiModel,
-    resolve_reasoning_effort: ResolveReasoningEffort,
+pub trait OpenAiHooks {
+    #[hook(singleton)]
+    async fn select_openai_model(_extensions: &RequestExtensions, default: ModelName) -> ModelName {
+        default
+    }
+
+    #[hook(singleton)]
+    async fn resolve_reasoning_effort(
+        _extensions: &RequestExtensions,
+    ) -> Option<OpenAiReasoningEffort> {
+        None
+    }
 }
 
 /// A snapshot of tool name information available at the time an SSE decode error occurred.
@@ -1853,12 +1850,12 @@ mod tests {
         }
     }
 
-    #[lutum_macros::hook(SelectOpenaiModel)]
+    #[lutum_macros::impl_hook(SelectOpenaiModel)]
     async fn prefer_gpt_4_1(_extensions: &RequestExtensions, _default: ModelName) -> ModelName {
         ModelName::new("gpt-4.1").unwrap()
     }
 
-    #[lutum_macros::hook(SelectOpenaiModel)]
+    #[lutum_macros::impl_hook(SelectOpenaiModel)]
     async fn prefer_gpt_4_1_mini(
         _extensions: &RequestExtensions,
         _default: ModelName,

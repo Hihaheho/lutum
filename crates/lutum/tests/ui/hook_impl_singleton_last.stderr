@@ -1,5 +1,14 @@
-error: #[hook(SlotType)] implementations for this slot must not declare `last: Option<Return>`
- --> tests/ui/hook_impl_singleton_last.rs:7:58
+error[E0050]: method `call` has 3 parameters but the declaration in trait `SelectLabel::call` has 2
+ --> tests/ui/hook_impl_singleton_last.rs:9:1
   |
-7 | async fn append_suffix(_ctx: &lutum::Lutum, label: &str, last: Option<String>) -> String {
-  |                                                          ^^^^
+1 |   #[lutum::hooks]
+  |  ________________-
+2 | | trait HookSet {
+3 | |     #[hook(singleton)]
+4 | |     async fn select_label(label: &str) -> String {
+  | |_____________- trait requires 2 parameters
+...
+9 |   #[lutum::impl_hook(SelectLabel)]
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected 2 parameters, found 3
+  |
+  = note: this error originates in the attribute macro `lutum::impl_hook` (in Nightly builds, run with -Z macro-backtrace for more info)

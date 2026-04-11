@@ -469,7 +469,6 @@ mod tests {
     use super::*;
     use crate::{
         db::SqlValidationError,
-        hooks::__lutum_hook_named_impl_validate_sql,
         hooks::{ApproveWrite, GetTransactionMode, ValidateSql},
     };
 
@@ -497,7 +496,7 @@ mod tests {
         }
     }
 
-    #[lutum::hook(ValidateSql)]
+    #[lutum::impl_hook(ValidateSql)]
     async fn reject_approved_status(sql: &str) -> Result<(), SqlValidationError> {
         if sql.contains("status = 'approved'") {
             Err(SqlValidationError::ParseError(
