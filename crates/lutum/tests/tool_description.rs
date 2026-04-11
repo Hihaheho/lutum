@@ -141,7 +141,7 @@ fn user_input() -> ModelInput {
     ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hi")])
 }
 
-// ── use case 1: builder `.describe()` ────────────────────────────────────────
+// ── use case 1: builder `.describe_tool()` ────────────────────────────────────────
 
 #[test]
 fn describe_overrides_single_tool_description() {
@@ -153,7 +153,7 @@ fn describe_overrides_single_tool_description() {
     block_on(
         ctx.text_turn(user_input())
             .tools::<Tools>()
-            .describe(ToolsSelector::Weather, "Weather (calls left: 2)")
+            .describe_tool(ToolsSelector::Weather, "Weather (calls left: 2)")
             .start(),
     )
     .unwrap();
@@ -192,7 +192,7 @@ fn describe_many_applies_bulk_overrides() {
     block_on(
         ctx.text_turn(user_input())
             .tools::<Tools>()
-            .describe_many(overrides)
+            .describe_many_tools(overrides)
             .start(),
     )
     .unwrap();
@@ -218,8 +218,8 @@ fn describe_last_write_wins_for_same_selector() {
     block_on(
         ctx.text_turn(user_input())
             .tools::<Tools>()
-            .describe(ToolsSelector::Weather, "first")
-            .describe(ToolsSelector::Weather, "second")
+            .describe_tool(ToolsSelector::Weather, "first")
+            .describe_tool(ToolsSelector::Weather, "second")
             .start(),
     )
     .unwrap();
@@ -315,7 +315,7 @@ fn description_hooks_integrate_with_builder_describe_many() {
     block_on(
         ctx.text_turn(user_input())
             .tools::<Tools>()
-            .describe_many(overrides)
+            .describe_many_tools(overrides)
             .start(),
     )
     .unwrap();

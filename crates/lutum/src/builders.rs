@@ -332,7 +332,7 @@ where
 
     /// Override the description for a single tool at this turn site. Useful for
     /// injecting live state into tool descriptions (e.g. "calls remaining: 2").
-    pub fn describe(mut self, selector: T::Selector, description: impl Into<String>) -> Self {
+    pub fn describe_tool(mut self, selector: T::Selector, description: impl Into<String>) -> Self {
         self.turn
             .config
             .tools
@@ -343,7 +343,7 @@ where
 
     /// Bulk-apply description overrides. Pairs well with
     /// `{Name}Hooks::description_overrides().await` for eval-driven description probing.
-    pub fn describe_many(
+    pub fn describe_many_tools(
         mut self,
         overrides: impl IntoIterator<Item = (T::Selector, String)>,
     ) -> Self {
@@ -729,7 +729,7 @@ where
 
     /// Override the description for a single tool at this turn site. Useful for
     /// injecting live state into tool descriptions (e.g. "calls remaining: 2").
-    pub fn describe(mut self, selector: T::Selector, description: impl Into<String>) -> Self {
+    pub fn describe_tool(mut self, selector: T::Selector, description: impl Into<String>) -> Self {
         self.turn
             .config
             .tools
@@ -740,7 +740,7 @@ where
 
     /// Bulk-apply description overrides. Pairs well with
     /// `{Name}Hooks::description_overrides().await` for eval-driven description probing.
-    pub fn describe_many(
+    pub fn describe_many_tools(
         mut self,
         overrides: impl IntoIterator<Item = (T::Selector, String)>,
     ) -> Self {
