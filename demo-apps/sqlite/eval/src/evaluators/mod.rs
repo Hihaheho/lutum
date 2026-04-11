@@ -3,6 +3,7 @@ use std::sync::Arc;
 use lutum_eval::Score;
 use sqlite_agent::SqliteDb;
 
+pub mod case;
 pub mod consistency;
 pub mod sql_syntax;
 pub mod table_scan;
@@ -12,6 +13,7 @@ pub struct SqlCheckInput {
     pub db: Arc<SqliteDb>,
     pub sql: String,
 }
+
 
 /// Aggregated scores for one test case run.
 #[derive(Debug, Clone, Default)]

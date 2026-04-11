@@ -9,16 +9,13 @@ use std::{
 
 use anyhow::Context;
 use async_trait::async_trait;
-use lutum::{Lutum, ModelInputItem, Session, ToolResult, TurnItemIter};
-use lutum_eval::{Collected, EvalExt as _, PureEval, Score, TraceSnapshot};
-use sqlite_agent::{
-    AgentConfig, AgentHooks, DbRegistry, QueryResult, SqliteDb, TransactionMode, WriteDecision,
-    WritePreview, run_turn,
-};
+use lutum::{Lutum, ModelInputItem, Session, ToolResult};
+use lutum_eval::EvalExt as _;
+use sqlite_agent::{AgentConfig, AgentHooks, DbRegistry, SqliteDb, TransactionMode, WriteDecision, WritePreview, run_turn};
 
 use crate::{
     cases::TestCase,
-    evaluators::{self, CaseScore, SqlCheckInput},
+    evaluators::{CaseScore, case::{CaseArtifact, CaseEval}},
 };
 
 static CASE_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -139,25 +136,6 @@ fn copy_sqlite_database(source: &Path, destination: &Path) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Extract the last assistant text from committed session turns.
-fn last_assistant_text(session: &Session) -> Option<String> {
-    let mut result = None;
-    for item in session.input().items() {
-        if let ModelInputItem::Turn(turn) = item {
-            let mut text = String::new();
-            for view in TurnItemIter::new(turn.as_ref()) {
-                if let Some(t) = view.as_text() {
-                    text.push_str(t);
-                }
-            }
-            if !text.is_empty() {
-                result = Some(text);
-            }
-        }
-    }
-    result
-}
-
 fn executed_tool_results(session: &Session) -> Vec<ToolResult> {
     session
         .input()
@@ -168,78 +146,6 @@ fn executed_tool_results(session: &Session) -> Vec<ToolResult> {
             _ => None,
         })
         .collect()
-}
-
-fn apply_case_expectations(
-    score: &mut CaseScore,
-    case: &TestCase,
-    tool_results: &[ToolResult],
-    last_result: Option<&QueryResult>,
-) {
-    score.expected_tool_ok = case.expect_tool.as_ref().map(|expected| {
-        tool_results
-            .iter()
-            .any(|tool_result| tool_result.name.as_str() == expected)
-    });
-    score.expected_row_count_ok = case.expect_rows.map(|expected| {
-        last_result
-            .map(|query_result| query_result.row_count() == expected)
-            .unwrap_or(false)
-    });
-}
-
-fn query_result_matches(left: &QueryResult, right: &QueryResult) -> bool {
-    left.columns == right.columns && left.rows == right.rows
-}
-
-fn tool_result_sql(tool_result: &ToolResult) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(tool_result.arguments.get())
-        .ok()?
-        .get("sql")?
-        .as_str()
-        .map(ToOwned::to_owned)
-}
-
-fn find_last_select_sql(tool_results: &[ToolResult], last_result: &QueryResult) -> Option<String> {
-    tool_results.iter().rev().find_map(|tool_result| {
-        if tool_result.name.as_str() != "select" {
-            return None;
-        }
-        let result = serde_json::from_str::<QueryResult>(tool_result.result.get()).ok()?;
-        if query_result_matches(&result, last_result) {
-            tool_result_sql(tool_result)
-        } else {
-            None
-        }
-    })
-}
-
-fn apply_select_checks(
-    score: &mut CaseScore,
-    db: Arc<SqliteDb>,
-    tool_results: &[ToolResult],
-    last_result: Option<&QueryResult>,
-) {
-    let Some(last_result) = last_result else {
-        return;
-    };
-    let Some(sql) = find_last_select_sql(tool_results, last_result) else {
-        score.sql_syntax_ok = Some(false);
-        score.no_large_scan = Some(false);
-        return;
-    };
-    let input = SqlCheckInput { db, sql };
-    let trace = TraceSnapshot { roots: vec![], root_events: vec![] };
-    score.sql_syntax_ok = Some(
-        evaluators::sql_syntax::SqlSyntaxCheck
-            .evaluate(&trace, &input)
-            .unwrap(),
-    );
-    score.no_large_scan = Some(
-        evaluators::table_scan::TableScanCheck
-            .evaluate(&trace, &input)
-            .unwrap(),
-    );
 }
 
 /// Run a single test case and return its score.
@@ -284,50 +190,16 @@ pub async fn run_case(
 
     let mut session = sqlite_agent::init_session(main_llm.clone(), &hooks).await;
 
-    let output = run_turn(
-        &mut session,
-        &registry,
-        &hooks,
-        &config,
-        case.prompt.clone(),
-        None,
-    )
-    .await
-    .with_context(|| format!("case '{}' failed during execution", case.name))?;
-
-    let tool_results = executed_tool_results(&session);
-    // The last SELECT result is the last sql_history entry that has no rows_affected
-    // (i.e. a SELECT rather than a write).
-    let last_result = output
-        .sql_history
-        .iter()
-        .rev()
-        .find(|e| e.rows_affected.is_none())
-        .map(|e| e.result.clone());
-    let mut score = CaseScore::default();
-    apply_case_expectations(&mut score, case, &tool_results, last_result.as_ref());
-    apply_select_checks(&mut score, Arc::clone(&db), &tool_results, last_result.as_ref());
-
-    if let (Some(judge), Some(query_result)) = (judge_llm, last_result.as_ref()) {
-        let assistant_text = last_assistant_text(&session).unwrap_or_default();
-        let artifact = evaluators::consistency::ConsistencyArtifact {
-            assistant_text,
-            query_result: query_result.clone(),
-        };
-        let collected = Collected {
-            output: artifact,
-            trace: TraceSnapshot { roots: vec![], root_events: vec![] },
-        };
-        match evaluators::consistency::consistency_judge()
-            .run_collected(judge, &collected)
-            .await
-        {
-            Ok(report) => score.consistency_score = Some(Score::new_clamped(report.score)),
-            Err(error) => tracing::warn!("consistency eval failed: {error}"),
-        }
-    }
-
-    Ok(score)
+    CaseEval::new(case.clone(), judge_llm.cloned())
+        .run_future(main_llm, async move {
+            let output = run_turn(&mut session, &registry, &hooks, &config, case.prompt.clone(), None).await;
+            CaseArtifact {
+                tool_results: executed_tool_results(&session),
+                output: output.map_err(anyhow::Error::from),
+                db,
+            }
+        })
+        .await
 }
 
 #[cfg(test)]

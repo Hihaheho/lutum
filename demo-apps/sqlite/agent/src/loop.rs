@@ -44,7 +44,7 @@ impl Default for AgentConfig {
 }
 
 /// Output of a completed agent turn.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TurnOutput {
     /// All SQL statements executed during this turn, in order.
     pub sql_history: Vec<SqlHistoryEntry>,
