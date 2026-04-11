@@ -1737,6 +1737,7 @@ where
     let ToolConstraints {
         available,
         requirement,
+        description_overrides,
     } = config.tools;
 
     // Validate: require_tool(x) must be in the available set when availability is restricted.
@@ -1777,12 +1778,23 @@ where
         }
     };
 
+    // Build a last-write-wins override map from selector name → description.
+    let mut override_map: std::collections::HashMap<&str, &str> =
+        std::collections::HashMap::new();
+    for (sel, desc) in &description_overrides {
+        override_map.insert(sel.name(), desc.as_str());
+    }
+
     let tools = tool_defs
         .into_iter()
         .map(|tool| {
+            let description = override_map
+                .get(tool.name)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| tool.description.to_string());
             Ok(AdapterToolDefinition {
                 name: tool.name.to_string(),
-                description: tool.description.to_string(),
+                description,
                 input_schema: serde_json::to_value(tool.input_schema())?,
             })
         })
