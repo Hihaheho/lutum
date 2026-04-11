@@ -5,10 +5,10 @@
 //! 1. **Call budget** — each tool is given a maximum call count.  Before every
 //!    round, tools whose budget is exhausted are removed from `available_tools`.
 //!
-//! 2. **`describe_hook`** — the generated `{Name}Hooks::with_*_description` hooks
-//!    read the remaining count from the shared budget and inject it into the tool
-//!    description that the model sees.  This way the model can reason about how
-//!    many times it can still use a tool.
+//! 2. **Dynamic descriptions** — before each round, the remaining call count is
+//!    read from the budget and injected into the tool description via
+//!    `.describe_many_tools()`.  This way the model can reason about how many
+//!    times it can still use a tool.
 //!
 //! The example runs against a `MockLlmAdapter` so it works without an API key.
 //!
@@ -24,7 +24,7 @@ use std::{
 use futures::executor::block_on;
 use lutum::{
     FinishReason, MockLlmAdapter, MockTextScenario, RawTextTurnEvent, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcomeWithTools, ToolDef, Usage,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcomeWithTools, Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -181,27 +181,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .into(),
     ));
 
-    // description hooks: read remaining count and append it to the static description
-    let hooks = ToolsHooks::new()
-        .with_weather_description({
-            let b = Arc::clone(&budget);
-            move |def: &ToolDef| {
-                let (used, limit) = b.lock().unwrap()[&ToolsSelector::Weather];
-                let remaining = limit - used;
-                let desc = format!("{} ({remaining} calls remaining)", def.description);
-                async move { Some(desc) }
-            }
-        })
-        .with_search_description({
-            let b = Arc::clone(&budget);
-            move |def: &ToolDef| {
-                let (used, limit) = b.lock().unwrap()[&ToolsSelector::Search];
-                let remaining = limit - used;
-                let desc = format!("{} ({remaining} calls remaining)", def.description);
-                async move { Some(desc) }
-            }
-        });
-
     let mut round_number = 0;
 
     loop {
@@ -219,8 +198,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             v
         };
 
-        // ask hooks for per-tool description overrides
-        let desc_overrides = hooks.description_overrides().await;
+        // build per-tool description overrides from current budget state
+        let desc_overrides: Vec<(ToolsSelector, String)> = {
+            let b = budget.lock().unwrap();
+            available
+                .iter()
+                .map(|&sel| {
+                    let (used, limit) = b[&sel];
+                    let desc = format!(
+                        "{} ({} calls remaining)",
+                        sel.definition().description,
+                        limit - used
+                    );
+                    (sel, desc)
+                })
+                .collect()
+        };
 
         println!(
             "\n=== round {round_number} | available: [{}] ===",

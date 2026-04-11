@@ -48,6 +48,33 @@ enum Tools {
     Search(SearchArgs),
 }
 
+// ── impl_hook definitions ─────────────────────────────────────────────────────
+
+#[lutum::impl_hook(WeatherDescriptionHook)]
+async fn dynamic_weather_desc(_def: &lutum::ToolDef) -> Option<String> {
+    Some("Dynamic weather description".to_string())
+}
+
+#[lutum::impl_hook(WeatherDescriptionHook)]
+async fn w_override_desc(_def: &lutum::ToolDef) -> Option<String> {
+    Some("W override".to_string())
+}
+
+#[lutum::impl_hook(SearchDescriptionHook)]
+async fn s_override_desc(_def: &lutum::ToolDef) -> Option<String> {
+    Some("S override".to_string())
+}
+
+#[lutum::impl_hook(WeatherDescriptionHook)]
+async fn echo_tool_name(def: &lutum::ToolDef) -> Option<String> {
+    Some(def.name.to_string())
+}
+
+#[lutum::impl_hook(WeatherDescriptionHook)]
+async fn hooked_weather_desc(_def: &lutum::ToolDef) -> Option<String> {
+    Some("Hooked weather".to_string())
+}
+
 // ── spy adapter ───────────────────────────────────────────────────────────────
 
 /// Captures the `AdapterTurnConfig` from each `text_turn` call so tests can
@@ -239,9 +266,7 @@ fn describe_last_write_wins_for_same_selector() {
 
 #[test]
 fn description_hook_fires_when_registered() {
-    let hooks = ToolsHooks::new().with_weather_description(|_def| async {
-        Some("Dynamic weather description".to_string())
-    });
+    let hooks = ToolsHooks::new().with_weather_description_hook(DynamicWeatherDesc);
 
     let overrides = block_on(hooks.description_overrides());
     assert_eq!(overrides.len(), 1, "only the registered hook should fire");
@@ -264,8 +289,8 @@ fn description_hook_returns_none_when_not_registered() {
 #[test]
 fn description_hooks_for_all_tools_collected_together() {
     let hooks = ToolsHooks::new()
-        .with_weather_description(|_def| async { Some("W override".to_string()) })
-        .with_search_description(|_def| async { Some("S override".to_string()) });
+        .with_weather_description_hook(WOverrideDesc)
+        .with_search_description_hook(SOverrideDesc);
 
     let overrides = block_on(hooks.description_overrides());
     assert_eq!(overrides.len(), 2);
@@ -278,34 +303,20 @@ fn description_hooks_for_all_tools_collected_together() {
 
 #[test]
 fn description_hook_receives_static_tool_def() {
-    // The hook receives the ToolDef for the correct tool
-    let received_name: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let received_name_clone = Arc::clone(&received_name);
-
-    let hooks = ToolsHooks::new().with_weather_description(move |def| {
-        let name = def.name.to_string();
-        let slot = Arc::clone(&received_name_clone);
-        async move {
-            *slot.lock().unwrap() = Some(name);
-            None::<String>
-        }
-    });
-
-    block_on(hooks.description_overrides());
-
-    assert_eq!(
-        received_name.lock().unwrap().as_deref(),
-        Some("weather"),
-        "description hook should receive the ToolDef for that tool"
-    );
+    // The hook receives the ToolDef for the correct tool.
+    // EchoToolName returns Some(def.name) so we can assert on the override value.
+    let hooks = ToolsHooks::new().with_weather_description_hook(EchoToolName);
+    let overrides = block_on(hooks.description_overrides());
+    let (sel, name) = overrides.iter().find(|(s, _)| *s == ToolsSelector::Weather).unwrap();
+    assert_eq!(*sel, ToolsSelector::Weather);
+    assert_eq!(name, "weather", "hook should receive the ToolDef for the weather tool");
 }
 
 #[test]
 fn description_hooks_integrate_with_builder_describe_many() {
     // Combine use case 2 → use case 1: collect overrides from hooks then pass to
     // the builder via describe_many().
-    let hooks = ToolsHooks::new()
-        .with_weather_description(|_def| async { Some("Hooked weather".to_string()) });
+    let hooks = ToolsHooks::new().with_weather_description_hook(HookedWeatherDesc);
 
     let overrides = block_on(hooks.description_overrides());
 

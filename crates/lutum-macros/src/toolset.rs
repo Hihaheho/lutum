@@ -33,18 +33,12 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     let mut selector_expected_names = Vec::new();
     let mut handled_into_tool_result_arms = Vec::new();
     let mut handled_from_impls = Vec::new();
-    let mut hooks_inner_fields = Vec::new();
-    let mut hooks_field_inits = Vec::new();
-    let mut hooks_with_methods = Vec::new();
-    let mut hooks_register_methods = Vec::new();
-    let mut hooks_dispatch_methods = Vec::new();
     let mut call_hook_arms = Vec::new();
-    // Description hook collections (one entry per variant)
-    let mut desc_inner_fields = Vec::new();
-    let mut desc_field_inits = Vec::new();
-    let mut desc_with_methods = Vec::new();
-    let mut desc_register_methods = Vec::new();
-    let mut desc_dispatch_methods = Vec::new();
+    // Hooks trait methods (fed into #[::lutum::hooks] trait)
+    let mut hooks_trait_methods = Vec::new();
+    // Closure blanket impls: #[hooks] skips Fn(..) impls for non-str ref args,
+    // so we emit them here with the concrete types.
+    // Arms for description_overrides()
     let mut desc_overrides_arms = Vec::new();
 
     for (index, variant) in variants.into_iter().enumerate() {
@@ -120,96 +114,22 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                 }
             }
         });
-        let with_fn_ident = format_ident!("with_{}", method_ident);
-        let register_fn_ident = format_ident!("register_{}", method_ident);
-        let hook_fn_ty = quote! {
-            ::std::option::Option<
-                ::std::sync::Arc<
-                    dyn Fn(
-                        &::lutum::ToolMetadata,
-                        &#input_ty,
-                    ) -> ::std::pin::Pin<
-                        ::std::boxed::Box<
-                            dyn ::std::future::Future<
-                                Output = ::std::option::Option<#output_ty>
-                            > + ::std::marker::Send + 'static
-                        >
-                    >
-                    + ::std::marker::Send
-                    + ::std::marker::Sync
-                >
-            >
-        };
-        hooks_inner_fields.push(quote! {
-            #method_ident: #hook_fn_ty
-        });
-        hooks_field_inits.push(quote! {
-            #method_ident: ::std::option::Option::None
-        });
-        let registration_body = quote! {
-            let wrapped = ::std::sync::Arc::new(
-                move |metadata: &::lutum::ToolMetadata, input: &#input_ty| -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::std::option::Option<#output_ty>> + ::std::marker::Send + 'static>> {
-                    ::std::boxed::Box::pin(hook(metadata, input))
-                }
-            );
-            if self.#method_ident.replace(wrapped).is_some() {
-                ::tracing::warn!(
-                    target: "lutum",
-                    slot = "tool_hook",
-                    "singleton hook registration overwritten; last registered hook wins"
-                );
-            }
-        };
-        hooks_with_methods.push(quote! {
-            #[allow(dead_code)]
-            pub fn #with_fn_ident<__F, __Fut>(
-                mut self,
-                hook: __F,
-            ) -> Self
-            where
-                __F: Fn(&::lutum::ToolMetadata, &#input_ty) -> __Fut + ::std::marker::Send + ::std::marker::Sync + 'static,
-                __Fut: ::std::future::Future<Output = ::std::option::Option<#output_ty>> + ::std::marker::Send + 'static,
-            {
-                #registration_body
-                self
-            }
-        });
-        hooks_register_methods.push(quote! {
-            #[allow(dead_code)]
-            pub fn #register_fn_ident<__F, __Fut>(
-                &mut self,
-                hook: __F,
-            ) -> &mut Self
-            where
-                __F: Fn(&::lutum::ToolMetadata, &#input_ty) -> __Fut + ::std::marker::Send + ::std::marker::Sync + 'static,
-                __Fut: ::std::future::Future<Output = ::std::option::Option<#output_ty>> + ::std::marker::Send + 'static,
-            {
-                #registration_body
-                self
-            }
-        });
-        hooks_dispatch_methods.push(quote! {
-            #[allow(dead_code)]
-            pub async fn #method_ident(
-                &self,
-                metadata: &::lutum::ToolMetadata,
-                input: &#input_ty,
-            ) -> ::std::option::Option<#output_ty> {
-                use ::tracing::Instrument as _;
-                let span = ::tracing::info_span!("lutum_hook", name = "tool_hook");
-                async move {
-                    match &self.#method_ident {
-                        ::std::option::Option::Some(hook) => hook(metadata, input).await,
-                        ::std::option::Option::None => ::std::option::Option::None,
-                    }
-                }
-                .instrument(span)
-                .await
-            }
-        });
+
+        // ── Tool hook slot ──────────────────────────────────────────────────
+        //
+        // We append `_hook` to the method name so that the trait generated by
+        // `#[hooks]` is named `WeatherHook` / `SearchHook` / etc.  This avoids
+        // a naming conflict when `#[tool_fn]` generates a struct with the same
+        // name as the variant (e.g. `fn list_users` → `struct ListUsers` and
+        // `enum AppTools { ListUsers(ListUsers) }` would otherwise produce both
+        // a `ListUsers` struct and a `ListUsers` trait in the same scope).
+        let hook_method_ident = format_ident!("{}_hook", method_ident);
+        // CamelCase("weather_hook") = WeatherHook
+        let hook_trait_ident = format_ident!("{}Hook", variant_ident);
+
         call_hook_arms.push(quote! {
             Self::#variant_ident(call) => {
-                match hooks.#method_ident(&call.metadata, &call.input).await {
+                match hooks.#hook_method_ident(&call.metadata, &call.input).await {
                     ::std::option::Option::Some(output) => {
                         ::lutum::ToolHookOutcome::Handled(
                             #handled_enum_ident::#variant_ident(call.handled(output))
@@ -222,93 +142,29 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             }
         });
 
-        // ── Description hook for this variant ────────────────────────────
-        let desc_method_ident = format_ident!("{}_description", method_ident);
-        let with_desc_fn_ident = format_ident!("with_{}_description", method_ident);
-        let register_desc_fn_ident = format_ident!("register_{}_description", method_ident);
-
-        let desc_hook_fn_ty = quote! {
-            ::std::option::Option<
-                ::std::sync::Arc<
-                    dyn Fn(
-                        &::lutum::ToolDef,
-                    ) -> ::std::pin::Pin<
-                        ::std::boxed::Box<
-                            dyn ::std::future::Future<
-                                Output = ::std::option::Option<::std::string::String>
-                            > + ::std::marker::Send + 'static
-                        >
-                    >
-                    + ::std::marker::Send
-                    + ::std::marker::Sync
-                >
-            >
-        };
-
-        desc_inner_fields.push(quote! {
-            #desc_method_ident: #desc_hook_fn_ty
-        });
-        desc_field_inits.push(quote! {
-            #desc_method_ident: ::std::option::Option::None
-        });
-
-        let desc_registration_body = quote! {
-            let wrapped = ::std::sync::Arc::new(
-                move |def: &::lutum::ToolDef| -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::std::option::Option<::std::string::String>> + ::std::marker::Send + 'static>> {
-                    ::std::boxed::Box::pin(hook(def))
-                }
-            );
-            if self.#desc_method_ident.replace(wrapped).is_some() {
-                ::tracing::warn!(
-                    target: "lutum",
-                    slot = "tool_description_hook",
-                    "singleton hook registration overwritten; last registered hook wins"
-                );
-            }
-        };
-
-        desc_with_methods.push(quote! {
-            #[allow(dead_code)]
-            pub fn #with_desc_fn_ident<__F, __Fut>(
-                mut self,
-                hook: __F,
-            ) -> Self
-            where
-                __F: Fn(&::lutum::ToolDef) -> __Fut + ::std::marker::Send + ::std::marker::Sync + 'static,
-                __Fut: ::std::future::Future<Output = ::std::option::Option<::std::string::String>> + ::std::marker::Send + 'static,
-            {
-                #desc_registration_body
-                self
+        hooks_trait_methods.push(quote! {
+            #[hook(singleton)]
+            async fn #hook_method_ident(
+                _metadata: &::lutum::ToolMetadata,
+                _input: &#input_ty,
+            ) -> ::std::option::Option<#output_ty> {
+                ::std::option::Option::None
             }
         });
 
-        desc_register_methods.push(quote! {
-            #[allow(dead_code)]
-            pub fn #register_desc_fn_ident<__F, __Fut>(
-                &mut self,
-                hook: __F,
-            ) -> &mut Self
-            where
-                __F: Fn(&::lutum::ToolDef) -> __Fut + ::std::marker::Send + ::std::marker::Sync + 'static,
-                __Fut: ::std::future::Future<Output = ::std::option::Option<::std::string::String>> + ::std::marker::Send + 'static,
-            {
-                #desc_registration_body
-                self
-            }
-        });
+        // ── Description hook slot ────────────────────────────────────────────
+        let desc_method_ident = format_ident!("{}_description_hook", method_ident);
+        let desc_hook_trait_ident = format_ident!("{}DescriptionHook", variant_ident);
 
-        desc_dispatch_methods.push(quote! {
-            #[allow(dead_code)]
-            pub async fn #desc_method_ident(
-                &self,
-                def: &::lutum::ToolDef,
+        hooks_trait_methods.push(quote! {
+            #[hook(singleton)]
+            async fn #desc_method_ident(
+                _def: &::lutum::ToolDef,
             ) -> ::std::option::Option<::std::string::String> {
-                match &self.#desc_method_ident {
-                    ::std::option::Option::Some(hook) => hook(def).await,
-                    ::std::option::Option::None => ::std::option::Option::None,
-                }
+                ::std::option::Option::None
             }
         });
+
 
         desc_overrides_arms.push(quote! {
             if let ::std::option::Option::Some(desc) = self.#desc_method_ident(&defs[#index]).await {
@@ -340,39 +196,28 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             #(#selector_variants,)*
         }
 
-        #[derive(::std::clone::Clone)]
-        #vis struct #hooks_struct_ident {
-            #(#hooks_inner_fields,)*
-            #(#desc_inner_fields,)*
+        // Stage-1 output: a `#[hooks]`-annotated trait.  The `#[hooks]` macro
+        // expands it in stage 2 into the ToolsHooks struct with per-slot
+        // `with_*` / `register_*` / dispatch methods, a `Default` impl, and
+        // `new()`.
+        //
+        // Method names carry the `_hook` / `_description_hook` suffix so that
+        // the generated trait names (`WeatherHook`, `WeatherDescriptionHook`)
+        // never collide with the ToolInput payload types.
+        #[::lutum::hooks]
+        #vis trait #hooks_struct_ident {
+            #(#hooks_trait_methods)*
         }
 
-        impl ::std::default::Default for #hooks_struct_ident {
-            fn default() -> Self {
-                Self {
-                    #(#hooks_field_inits,)*
-                    #(#desc_field_inits,)*
-                }
-            }
-        }
-
+        // Extra impl block: description_overrides() is not generated by
+        // `#[hooks]` (it aggregates multiple slots) so we emit it separately.
         #[allow(dead_code)]
         impl #hooks_struct_ident {
-            pub fn new() -> Self {
-                Self::default()
-            }
-
-            #(#hooks_with_methods)*
-            #(#hooks_register_methods)*
-            #(#hooks_dispatch_methods)*
-
-            #(#desc_with_methods)*
-            #(#desc_register_methods)*
-            #(#desc_dispatch_methods)*
-
-            /// Call every registered description hook and return the overrides that fired.
+            /// Call every registered description hook and return the overrides
+            /// that fired.
             ///
-            /// Pass the result to `.describe_many()` on a turn builder to apply the
-            /// overrides for eval-driven description probing.
+            /// Pass the result to `.describe_many()` on a turn builder to
+            /// apply the overrides for eval-driven description probing.
             pub async fn description_overrides(
                 &self,
             ) -> ::std::vec::Vec<(#selector_enum_ident, ::std::string::String)> {

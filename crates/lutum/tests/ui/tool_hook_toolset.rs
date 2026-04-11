@@ -31,6 +31,17 @@ enum Tools {
     Search(SearchArgs),
 }
 
+#[lutum::impl_hook(WeatherHook)]
+async fn hooked_forecast(
+    _metadata: &lutum::ToolMetadata,
+    input: &WeatherArgs,
+) -> Option<WeatherResult> {
+    let city = input.city.clone();
+    Some(WeatherResult {
+        forecast: format!("hooked:{city}"),
+    })
+}
+
 fn main() {
     let call = Tools::parse_tool_call(ToolMetadata::new(
         "call-1",
@@ -38,15 +49,7 @@ fn main() {
         RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
     ))
     .unwrap();
-    let hooks = ToolsHooks::new().with_weather(|metadata: &lutum::ToolMetadata, input: &WeatherArgs| {
-        let _ = metadata;
-        let city = input.city.clone();
-        async move {
-            Some(WeatherResult {
-                forecast: format!("hooked:{city}"),
-            })
-        }
-    });
+    let hooks = ToolsHooks::new().with_weather_hook(HookedForecast);
 
     block_on(async move {
         match call.hook(&hooks).await {

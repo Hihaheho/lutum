@@ -40,6 +40,71 @@ enum Tools {
     Search(SearchArgs),
 }
 
+// ── impl_hook definitions ─────────────────────────────────────────────────────
+
+/// Returns "hooked:{id}:{city}" — used to verify metadata and input are forwarded.
+#[lutum::impl_hook(WeatherHook)]
+async fn hooked_forecast(
+    metadata: &lutum::ToolMetadata,
+    input: &WeatherArgs,
+) -> Option<WeatherResult> {
+    let id = metadata.id.as_str().to_owned();
+    let city = input.city.clone();
+    Some(WeatherResult {
+        forecast: format!("hooked:{id}:{city}"),
+    })
+}
+
+/// Returns "hooked:{city}" — plain weather hook without metadata inspection.
+#[lutum::impl_hook(WeatherHook)]
+async fn weather_hook_plain(
+    _metadata: &lutum::ToolMetadata,
+    input: &WeatherArgs,
+) -> Option<WeatherResult> {
+    let city = input.city.clone();
+    Some(WeatherResult {
+        forecast: format!("hooked:{city}"),
+    })
+}
+
+/// Returns "cached:{city}" — simulates a cache hit.
+#[lutum::impl_hook(WeatherHook)]
+async fn cached_weather_hook(
+    _metadata: &lutum::ToolMetadata,
+    input: &WeatherArgs,
+) -> Option<WeatherResult> {
+    let city = input.city.clone();
+    Some(WeatherResult {
+        forecast: format!("cached:{city}"),
+    })
+}
+
+/// First-pass weather hook for multi-pass chaining test.
+#[lutum::impl_hook(WeatherHook)]
+async fn pass1_weather(
+    _metadata: &lutum::ToolMetadata,
+    input: &WeatherArgs,
+) -> Option<WeatherResult> {
+    let city = input.city.clone();
+    Some(WeatherResult {
+        forecast: format!("pass1:{city}"),
+    })
+}
+
+/// Second-pass search hook for multi-pass chaining test.
+#[lutum::impl_hook(SearchHook)]
+async fn pass2_search(
+    _metadata: &lutum::ToolMetadata,
+    input: &SearchArgs,
+) -> Option<SearchResult> {
+    let q = input.query.clone();
+    Some(SearchResult {
+        hits: vec![format!("pass2:{q}")],
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[test]
 fn tool_call_hook_returns_unhandled_when_no_override_is_registered() {
     let call = Tools::parse_tool_call(ToolMetadata::new(
@@ -67,16 +132,7 @@ fn tool_call_hook_preserves_metadata_input_and_output_when_handled() {
         RawJson::parse("{\"city\":\"Osaka\"}").unwrap(),
     ))
     .unwrap();
-    let hooks =
-        ToolsHooks::new().with_weather(|metadata: &lutum::ToolMetadata, input: &WeatherArgs| {
-            let id = metadata.id.as_str().to_owned();
-            let city = input.city.clone();
-            async move {
-                Some(WeatherResult {
-                    forecast: format!("hooked:{id}:{city}"),
-                })
-            }
-        });
+    let hooks = ToolsHooks::new().with_weather_hook(HookedForecast);
 
     match block_on(call.hook(&hooks)) {
         ToolHookOutcome::Handled(ToolsHandled::Weather(handled)) => {
@@ -136,15 +192,7 @@ fn tool_round_commit_accepts_typed_handled_values() {
             .await
             .unwrap()
     });
-    let hooks =
-        ToolsHooks::new().with_weather(|_metadata: &lutum::ToolMetadata, input: &WeatherArgs| {
-            let city = input.city.clone();
-            async move {
-                Some(WeatherResult {
-                    forecast: format!("hooked:{city}"),
-                })
-            }
-        });
+    let hooks = ToolsHooks::new().with_weather_hook(WeatherHookPlain);
 
     match outcome {
         TextStepOutcomeWithTools::NeedsTools(round) => {
@@ -234,16 +282,7 @@ fn apply_hooks_splits_handled_and_pending() {
     };
 
     // Hook only weather; search stays pending.
-    let hooks = ToolsHooks::new().with_weather(
-        |_metadata: &lutum::ToolMetadata, input: &WeatherArgs| {
-            let city = input.city.clone();
-            async move {
-                Some(WeatherResult {
-                    forecast: format!("cached:{city}"),
-                })
-            }
-        },
-    );
+    let hooks = ToolsHooks::new().with_weather_hook(CachedWeatherHook);
 
     let plan: ToolRoundPlan<Tools> = block_on(round.apply_hooks(&hooks));
 
@@ -285,23 +324,15 @@ fn apply_hooks_multi_pass_chaining_narrows_pending() {
         TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
     };
 
-    let weather_hooks = ToolsHooks::new().with_weather(
-        |_: &lutum::ToolMetadata, input: &WeatherArgs| {
-            let city = input.city.clone();
-            async move { Some(WeatherResult { forecast: format!("pass1:{city}") }) }
-        },
-    );
-    let search_hooks = ToolsHooks::new().with_search(
-        |_: &lutum::ToolMetadata, input: &SearchArgs| {
-            let q = input.query.clone();
-            async move { Some(SearchResult { hits: vec![format!("pass2:{q}")] }) }
-        },
-    );
+    let weather_hooks = ToolsHooks::new().with_weather_hook(Pass1Weather);
+    let search_hooks = ToolsHooks::new().with_search_hook(Pass2Search);
 
     let plan = block_on(async {
         round
-            .apply_hooks(&weather_hooks).await
-            .apply_hooks(&search_hooks).await
+            .apply_hooks(&weather_hooks)
+            .await
+            .apply_hooks(&search_hooks)
+            .await
     });
 
     assert_eq!(plan.handled.len(), 2, "both calls should be handled after two passes");
@@ -333,12 +364,7 @@ fn tool_round_plan_commit_merges_handled_and_pending_results() {
         TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
     };
 
-    let hooks = ToolsHooks::new().with_weather(
-        |_: &lutum::ToolMetadata, input: &WeatherArgs| {
-            let city = input.city.clone();
-            async move { Some(WeatherResult { forecast: format!("hooked:{city}") }) }
-        },
-    );
+    let hooks = ToolsHooks::new().with_weather_hook(WeatherHookPlain);
 
     let plan = block_on(round.apply_hooks(&hooks));
 
