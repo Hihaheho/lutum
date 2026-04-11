@@ -86,3 +86,6 @@ name = "entropy_gc"
 
 [[example]]
 name = "user_approval_hook"
+
+[[example]]
+name = "call_budget"
