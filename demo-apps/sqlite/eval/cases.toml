@@ -1,0 +1,47 @@
+[[case]]
+name        = "schema_inspection"
+prompt      = "Describe the structure of the main database — what tables exist and what columns do they have?"
+expect_tool = "get_schema"
+
+[[case]]
+name        = "lookup_product_by_id"
+prompt      = "Show me all details for the product with id 5."
+expect_tool = "select"
+expect_rows = 1
+
+[[case]]
+name        = "books_category"
+prompt      = "List all products in the Books category."
+expect_tool = "select"
+expect_rows = 3
+
+[[case]]
+name        = "electronics_count"
+prompt      = "How many products are there in the Electronics category?"
+expect_tool = "select"
+expect_rows = 1
+
+[[case]]
+name        = "orders_by_customer"
+prompt      = "Show all orders placed by the customer with id 2."
+expect_tool = "select"
+expect_rows = 2
+
+[[case]]
+name        = "recent_5_orders"
+prompt      = "Show the 5 most recent orders sorted by date, newest first."
+expect_tool = "select"
+expect_rows = 5
+
+[[case]]
+name         = "insert_product"
+prompt       = "Add a new product called 'Laptop Stand' to the Electronics category, priced at 45.99, with 20 units in stock."
+expect_tool  = "insert"
+allow_writes = true
+auto_approve = true
+
+[[case]]
+name        = "count_customers"
+prompt      = "How many customers are registered in the database?"
+expect_tool = "select"
+expect_rows = 1

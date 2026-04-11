@@ -348,9 +348,9 @@ impl TurnAdapter for ClaudeAdapter {
             .resolve_budget_tokens(turn.extensions.as_ref(), self.default_thinking_budget)
             .await
             .map(|budget| budget.max(MIN_THINKING_BUDGET_TOKENS));
-        let format = Some(OutputFormat::JsonSchema {
-            schema: turn.output.schema.clone(),
-        });
+        let mut schema = turn.output.schema.clone();
+        require_no_additional_properties(&mut schema);
+        let format = Some(OutputFormat::JsonSchema { schema });
         let body = self
             .prepare_messages_request(
                 &input,
@@ -1343,6 +1343,29 @@ fn map_claude_stop_reason(reason: Option<&str>) -> FinishReason {
         Some("tool_use") => FinishReason::ToolCall,
         Some("refusal") => FinishReason::ContentFilter,
         Some(other) => FinishReason::Unknown(other.to_string()),
+    }
+}
+
+/// Recursively add `"additionalProperties": false` to every JSON object schema
+/// that declares `"type": "object"`. The Claude API requires this for structured
+/// output schemas; `schemars` does not emit it by default.
+fn require_no_additional_properties(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Object(map) => {
+            if map.get("type").and_then(|t| t.as_str()) == Some("object") {
+                map.entry("additionalProperties")
+                    .or_insert(serde_json::Value::Bool(false));
+            }
+            for value in map.values_mut() {
+                require_no_additional_properties(value);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                require_no_additional_properties(item);
+            }
+        }
+        _ => {}
     }
 }
 

@@ -1,4 +1,4 @@
-use lutum::{Lutum, StructuredTurnOutcome};
+use lutum::{InputMessageRole, Lutum, ModelInput, ModelInputItem, StructuredTurnOutcome};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sqlite_agent::QueryResult;
@@ -21,8 +21,12 @@ pub async fn score_consistency(
          with a float between 0.0 (completely wrong) and 1.0 (fully accurate)."
     );
 
+    let input = ModelInput::from_items(vec![ModelInputItem::text(
+        InputMessageRole::User,
+        prompt,
+    )]);
     let result = judge
-        .structured_completion::<ConsistencyScore>(&prompt)
+        .structured_turn::<ConsistencyScore>(input)
         .collect()
         .await?;
 
