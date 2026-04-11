@@ -237,6 +237,11 @@ pub enum ToolRequirement<S> {
 pub struct ToolConstraints<T: Toolset> {
     pub available: ToolAvailability<T::Selector>,
     pub requirement: ToolRequirement<T::Selector>,
+    /// Per-turn description overrides. When a selector appears here, its static
+    /// `ToolDef::description` is replaced with this string before the request is
+    /// sent to the adapter. Last entry wins when the same selector appears more
+    /// than once.
+    pub description_overrides: Vec<(T::Selector, String)>,
 }
 
 impl<T: Toolset> Default for ToolConstraints<T> {
@@ -244,6 +249,7 @@ impl<T: Toolset> Default for ToolConstraints<T> {
         Self {
             available: ToolAvailability::All,
             requirement: ToolRequirement::Optional,
+            description_overrides: Vec::new(),
         }
     }
 }

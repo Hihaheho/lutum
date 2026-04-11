@@ -182,6 +182,7 @@ fn selector_plans_round_trip_and_drive_tool_constraints() {
     let constraints = ToolConstraints::<Tools> {
         available: ToolAvailability::Only(decoded.tools),
         requirement: ToolRequirement::Optional,
+        description_overrides: Vec::new(),
     };
     let selected = match &constraints.available {
         ToolAvailability::Only(selectors) => selectors

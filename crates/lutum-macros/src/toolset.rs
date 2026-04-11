@@ -39,6 +39,13 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     let mut hooks_register_methods = Vec::new();
     let mut hooks_dispatch_methods = Vec::new();
     let mut call_hook_arms = Vec::new();
+    // Description hook collections (one entry per variant)
+    let mut desc_inner_fields = Vec::new();
+    let mut desc_field_inits = Vec::new();
+    let mut desc_with_methods = Vec::new();
+    let mut desc_register_methods = Vec::new();
+    let mut desc_dispatch_methods = Vec::new();
+    let mut desc_overrides_arms = Vec::new();
 
     for (index, variant) in variants.into_iter().enumerate() {
         let variant_ident = variant.ident;
@@ -214,6 +221,100 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                 }
             }
         });
+
+        // ── Description hook for this variant ────────────────────────────
+        let desc_method_ident = format_ident!("{}_description", method_ident);
+        let with_desc_fn_ident = format_ident!("with_{}_description", method_ident);
+        let register_desc_fn_ident = format_ident!("register_{}_description", method_ident);
+
+        let desc_hook_fn_ty = quote! {
+            ::std::option::Option<
+                ::std::sync::Arc<
+                    dyn Fn(
+                        &::lutum::ToolDef,
+                    ) -> ::std::pin::Pin<
+                        ::std::boxed::Box<
+                            dyn ::std::future::Future<
+                                Output = ::std::option::Option<::std::string::String>
+                            > + ::std::marker::Send + 'static
+                        >
+                    >
+                    + ::std::marker::Send
+                    + ::std::marker::Sync
+                >
+            >
+        };
+
+        desc_inner_fields.push(quote! {
+            #desc_method_ident: #desc_hook_fn_ty
+        });
+        desc_field_inits.push(quote! {
+            #desc_method_ident: ::std::option::Option::None
+        });
+
+        let desc_registration_body = quote! {
+            let wrapped = ::std::sync::Arc::new(
+                move |def: &::lutum::ToolDef| -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::std::option::Option<::std::string::String>> + ::std::marker::Send + 'static>> {
+                    ::std::boxed::Box::pin(hook(def))
+                }
+            );
+            if self.#desc_method_ident.replace(wrapped).is_some() {
+                ::tracing::warn!(
+                    target: "lutum",
+                    slot = "tool_description_hook",
+                    "singleton hook registration overwritten; last registered hook wins"
+                );
+            }
+        };
+
+        desc_with_methods.push(quote! {
+            #[allow(dead_code)]
+            pub fn #with_desc_fn_ident<__F, __Fut>(
+                mut self,
+                hook: __F,
+            ) -> Self
+            where
+                __F: Fn(&::lutum::ToolDef) -> __Fut + ::std::marker::Send + ::std::marker::Sync + 'static,
+                __Fut: ::std::future::Future<Output = ::std::option::Option<::std::string::String>> + ::std::marker::Send + 'static,
+            {
+                #desc_registration_body
+                self
+            }
+        });
+
+        desc_register_methods.push(quote! {
+            #[allow(dead_code)]
+            pub fn #register_desc_fn_ident<__F, __Fut>(
+                &mut self,
+                hook: __F,
+            ) -> &mut Self
+            where
+                __F: Fn(&::lutum::ToolDef) -> __Fut + ::std::marker::Send + ::std::marker::Sync + 'static,
+                __Fut: ::std::future::Future<Output = ::std::option::Option<::std::string::String>> + ::std::marker::Send + 'static,
+            {
+                #desc_registration_body
+                self
+            }
+        });
+
+        desc_dispatch_methods.push(quote! {
+            #[allow(dead_code)]
+            pub async fn #desc_method_ident(
+                &self,
+                def: &::lutum::ToolDef,
+            ) -> ::std::option::Option<::std::string::String> {
+                match &self.#desc_method_ident {
+                    ::std::option::Option::Some(hook) => hook(def).await,
+                    ::std::option::Option::None => ::std::option::Option::None,
+                }
+            }
+        });
+
+        desc_overrides_arms.push(quote! {
+            if let ::std::option::Option::Some(desc) = self.#desc_method_ident(&defs[#index]).await {
+                out.push((#selector_enum_ident::#variant_ident, desc));
+            }
+        });
     }
 
     quote! {
@@ -242,12 +343,14 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         #[derive(::std::clone::Clone)]
         #vis struct #hooks_struct_ident {
             #(#hooks_inner_fields,)*
+            #(#desc_inner_fields,)*
         }
 
         impl ::std::default::Default for #hooks_struct_ident {
             fn default() -> Self {
                 Self {
                     #(#hooks_field_inits,)*
+                    #(#desc_field_inits,)*
                 }
             }
         }
@@ -261,6 +364,23 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             #(#hooks_with_methods)*
             #(#hooks_register_methods)*
             #(#hooks_dispatch_methods)*
+
+            #(#desc_with_methods)*
+            #(#desc_register_methods)*
+            #(#desc_dispatch_methods)*
+
+            /// Call every registered description hook and return the overrides that fired.
+            ///
+            /// Pass the result to `.describe_many()` on a turn builder to apply the
+            /// overrides for eval-driven description probing.
+            pub async fn description_overrides(
+                &self,
+            ) -> ::std::vec::Vec<(#selector_enum_ident, ::std::string::String)> {
+                let defs = <#enum_ident as ::lutum::Toolset>::definitions();
+                let mut out = ::std::vec::Vec::new();
+                #(#desc_overrides_arms)*
+                out
+            }
         }
 
         impl #handled_enum_ident {
