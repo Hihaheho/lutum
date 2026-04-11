@@ -223,14 +223,18 @@ where
         }
     }
 
-    /// Validate `tool_results`, then commit the assistant turn and all tool results to the session.
+    /// Validate `tool_results`, then commit the assistant turn and all tool results to a
+    /// [`ModelInput`] directly.
+    ///
+    /// Use this when managing transcript state without a [`Session`]. For session-based flows,
+    /// prefer [`commit`](Self::commit).
     ///
     /// Returns an error if the tool results don't match the assistant turn's tool calls (missing,
     /// extra, or mismatched id/name/arguments). Availability-policy rejects are committed
     /// automatically as standard rejection results.
-    pub fn commit<I, R>(
+    pub fn commit_into<I, R>(
         self,
-        session: &mut Session,
+        input: &mut ModelInput,
         tool_results: I,
     ) -> Result<(), ToolRoundCommitError>
     where
@@ -252,11 +256,29 @@ where
             &self.turn,
             tool_results.into_iter().chain(rejected_results),
         )?;
-        self.turn.commit_into(session.input_mut());
+        self.turn.commit_into(input);
         for tool_result in ordered_tool_results {
-            session.input.push(ModelInputItem::ToolResult(tool_result));
+            input.push(ModelInputItem::ToolResult(tool_result));
         }
         Ok(())
+    }
+
+    /// Validate `tool_results`, then commit the assistant turn and all tool results to the session.
+    ///
+    /// Returns an error if the tool results don't match the assistant turn's tool calls (missing,
+    /// extra, or mismatched id/name/arguments). Availability-policy rejects are committed
+    /// automatically as standard rejection results.
+    pub fn commit<I, R>(
+        self,
+        session: &mut Session,
+        tool_results: I,
+    ) -> Result<(), ToolRoundCommitError>
+    where
+        T: Toolset,
+        I: IntoIterator<Item = R>,
+        R: IntoToolResult,
+    {
+        self.commit_into(session.input_mut(), tool_results)
     }
 
     /// Explicitly discard this round without committing.
