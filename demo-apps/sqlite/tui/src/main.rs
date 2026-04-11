@@ -7,7 +7,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -195,7 +195,7 @@ async fn run_event_loop(
                     }
                 }
                 AppState::Idle | AppState::Done => {
-                    if handle_idle_key(app, key.code, key.modifiers) {
+                    if handle_idle_key(app, key) {
                         break;
                     }
                 }
@@ -205,34 +205,80 @@ async fn run_event_loop(
     Ok(())
 }
 
-fn handle_idle_key(app: &mut TuiApp, code: KeyCode, mods: KeyModifiers) -> bool {
-    match code {
-        // Quit
-        KeyCode::Char('q') if app.input_buf.is_empty() => return true,
-        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return true,
+fn handle_idle_key(app: &mut TuiApp, key: KeyEvent) -> bool {
+    let code = key.code;
+    let mods = key.modifiers;
 
-        // New chat
-        KeyCode::Char('n') if mods.contains(KeyModifiers::CONTROL) => app.reset_session(),
+    // Quit (only when textarea is empty)
+    if code == KeyCode::Char('q')
+        && mods.is_empty()
+        && app.textarea.lines().join("").is_empty()
+    {
+        return true;
+    }
+    if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
+        return true;
+    }
 
-        // Toggle mode
-        KeyCode::Tab => app.toggle_mode(),
+    // New chat
+    if code == KeyCode::Char('n') && mods.contains(KeyModifiers::CONTROL) {
+        app.reset_session();
+        return false;
+    }
 
-        // Submit input
-        KeyCode::Enter => app.submit_input(),
+    // Toggle mode
+    if code == KeyCode::Tab {
+        app.toggle_mode();
+        return false;
+    }
 
-        // Edit input buffer
-        KeyCode::Char(c) => app.input_buf.push(c),
-        KeyCode::Backspace => {
-            app.input_buf.pop();
+    // Submit
+    if code == KeyCode::Enter && mods.is_empty() {
+        app.submit_input();
+        return false;
+    }
+
+    // Conversation scroll (plain Up/Down/PageUp/PageDown)
+    if mods.is_empty() {
+        match code {
+            KeyCode::Up => {
+                app.scroll.set(app.scroll.get().saturating_sub(1));
+                return false;
+            }
+            KeyCode::Down => {
+                app.scroll.set(app.scroll.get().saturating_add(1));
+                return false;
+            }
+            KeyCode::PageUp => {
+                app.scroll.set(app.scroll.get().saturating_sub(10));
+                return false;
+            }
+            KeyCode::PageDown => {
+                app.scroll.set(app.scroll.get().saturating_add(10));
+                return false;
+            }
+            _ => {}
         }
+    }
 
-        // Scroll conversation
-        KeyCode::Up => app.scroll.set(app.scroll.get().saturating_sub(1)),
-        KeyCode::Down => app.scroll.set(app.scroll.get().saturating_add(1)),
-        KeyCode::PageUp => app.scroll.set(app.scroll.get().saturating_sub(10)),
-        KeyCode::PageDown => app.scroll.set(app.scroll.get().saturating_add(10)),
+    // SQL history pane scroll (Alt+Up / Alt+Down)
+    if mods.contains(KeyModifiers::ALT) {
+        match code {
+            KeyCode::Up => {
+                app.result_scroll.set(app.result_scroll.get().saturating_sub(1));
+                return false;
+            }
+            KeyCode::Down => {
+                app.result_scroll.set(app.result_scroll.get().saturating_add(1));
+                return false;
+            }
+            _ => {}
+        }
+    }
 
-        _ => {}
+    // Forward all other key presses to the textarea.
+    if key.kind == KeyEventKind::Press {
+        app.textarea.input(tui_textarea::Input::from(key));
     }
     false
 }
@@ -261,10 +307,10 @@ fn handle_approval_key(app: &mut TuiApp, code: KeyCode) {
             app.send_decision(WriteDecision::Reject("user declined".to_string()));
             app.state = AppState::Running;
         }
-        // 'e' for edit: simple implementation — user types new SQL in the input buffer
+        // 'e' for edit: copy SQL into textarea for user to edit and re-submit
         KeyCode::Char('e') | KeyCode::Char('E') => {
             if let AppState::Approval(ref preview) = app.state {
-                app.input_buf = preview.sql.clone();
+                app.textarea = tui_textarea::TextArea::from(vec![preview.sql.clone()]);
             }
             app.send_decision(WriteDecision::Reject(
                 "user chose to edit — re-submit corrected request".to_string(),

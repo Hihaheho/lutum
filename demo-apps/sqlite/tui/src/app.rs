@@ -10,8 +10,8 @@ use lutum_claude::persistence::{ClaudeModelInputItem, restore, snapshot};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use sqlite_agent::{
-    AgentConfig, AgentError, AgentHooks, CumulativeUsage, DbRegistry, QueryResult, TransactionMode,
-    TurnOutput, WriteDecision, WritePreview, run_turn,
+    AgentConfig, AgentError, AgentHooks, CumulativeUsage, DbRegistry, SqlHistoryEntry,
+    TransactionMode, TurnOutput, WriteDecision, WritePreview, run_turn,
 };
 
 use crate::{
@@ -80,13 +80,15 @@ pub struct TuiApp {
     agent_event_tx: mpsc::Sender<AgentEvent>,
 
     // Display state
-    pub last_result: Option<QueryResult>,
+    pub sql_history: Vec<SqlHistoryEntry>,
     pub state: AppState,
-    pub input_buf: String,
-    pub scroll: Cell<usize>,
+    pub textarea: tui_textarea::TextArea<'static>,
+    pub scroll: Cell<usize>,             // left pane (conversation)
+    pub scroll_to_bottom: Cell<bool>,    // left pane auto-follow
+    pub result_scroll: Cell<usize>,      // right pane (SQL history)
+    pub result_scroll_to_bottom: Cell<bool>, // right pane auto-follow
     pub running_task: Option<JoinHandle<()>>,
     pub token_stats: CumulativeUsage,
-    pub scroll_to_bottom: Cell<bool>,
 
     // Session persistence
     session_path: Option<PathBuf>,
@@ -132,13 +134,15 @@ impl TuiApp {
             mode_decision_rx_holder: Some(mode_decision_rx),
             agent_event_rx,
             agent_event_tx,
-            last_result: None,
+            sql_history: Vec::new(),
             state: AppState::Idle,
-            input_buf: String::new(),
+            textarea: new_textarea(),
             scroll: Cell::new(0),
+            scroll_to_bottom: Cell::new(false),
+            result_scroll: Cell::new(0),
+            result_scroll_to_bottom: Cell::new(false),
             running_task: None,
             token_stats: CumulativeUsage::default(),
-            scroll_to_bottom: Cell::new(false),
             session_path,
             registry_path,
         };
@@ -183,20 +187,23 @@ impl TuiApp {
         self.session = Some(fresh);
         self.streaming_text.clear();
         self.turn_errors.clear();
-        self.last_result = None;
+        self.sql_history.clear();
+        self.textarea = new_textarea();
         self.state = AppState::Idle;
         self.scroll.set(0);
+        self.result_scroll.set(0);
         if let Some(path) = &self.session_path {
             let _ = std::fs::remove_file(path);
         }
     }
 
-    /// Submit the current input buffer as a user message and launch the agent task.
+    /// Submit the current textarea content as a user message and launch the agent task.
     pub fn submit_input(&mut self) {
-        let input = std::mem::take(&mut self.input_buf);
+        let input = self.textarea.lines().join("\n");
         if input.trim().is_empty() {
             return;
         }
+        self.textarea = new_textarea();
 
         self.state = AppState::Running;
 
@@ -273,8 +280,9 @@ impl TuiApp {
         if let Ok(event) = self.agent_event_rx.try_recv() {
             match event {
                 AgentEvent::Finished(output, session) => {
-                    if let Some(qr) = output.last_result {
-                        self.last_result = Some(qr);
+                    if !output.sql_history.is_empty() {
+                        self.sql_history.extend(output.sql_history);
+                        self.result_scroll_to_bottom.set(true);
                     }
                     self.token_stats.input_tokens += output.usage.input_tokens;
                     self.token_stats.output_tokens += output.usage.output_tokens;
@@ -365,6 +373,10 @@ impl TuiApp {
             self.turn_errors.remove(0);
         }
     }
+}
+
+fn new_textarea() -> tui_textarea::TextArea<'static> {
+    tui_textarea::TextArea::default()
 }
 
 fn new_session(llm: Lutum) -> Session {

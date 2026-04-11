@@ -50,11 +50,22 @@ impl Default for AgentConfig {
     }
 }
 
+/// A single SQL execution recorded during an agent turn.
+#[derive(Debug, Clone)]
+pub struct SqlHistoryEntry {
+    /// The SQL statement that was executed.
+    pub sql: String,
+    /// Result rows for SELECT statements; empty for writes/DDL.
+    pub result: QueryResult,
+    /// Rows affected for INSERT/UPDATE/DELETE; `None` for SELECT and DDL.
+    pub rows_affected: Option<u64>,
+}
+
 /// Output of a completed agent turn.
 #[derive(Debug)]
 pub struct TurnOutput {
-    /// The last SQL query result, if any SELECT was executed.
-    pub last_result: Option<QueryResult>,
+    /// All SQL statements executed during this turn, in order.
+    pub sql_history: Vec<SqlHistoryEntry>,
     /// Token usage accumulated across all rounds.
     pub usage: CumulativeUsage,
 }
@@ -80,7 +91,7 @@ pub async fn run_turn(
     config: &AgentConfig,
     text_tx: Option<UnboundedSender<String>>,
 ) -> Result<TurnOutput, AgentError> {
-    let mut last_result: Option<QueryResult> = None;
+    let mut sql_history: Vec<SqlHistoryEntry> = Vec::new();
     let mut usage = CumulativeUsage::default();
 
     for _round in 0..config.max_rounds {
@@ -111,7 +122,7 @@ pub async fn run_turn(
                 usage.input_tokens += result.usage.input_tokens;
                 usage.output_tokens += result.usage.output_tokens;
                 collect_session_cache_tokens(session, &mut usage);
-                return Ok(TurnOutput { last_result, usage });
+                return Ok(TurnOutput { sql_history, usage });
             }
             TextStepOutcomeWithTools::NeedsTools(round) => {
                 usage.input_tokens += round.usage.input_tokens;
@@ -120,7 +131,7 @@ pub async fn run_turn(
 
                 for tool_call in round.tool_calls.iter().cloned() {
                     let tool_result =
-                        dispatch_tool(tool_call, registry, hooks, config, &mut last_result).await?;
+                        dispatch_tool(tool_call, registry, hooks, config, &mut sql_history).await?;
                     tool_results.push(tool_result);
                 }
 
@@ -157,7 +168,7 @@ async fn dispatch_tool(
     registry: &DbRegistry,
     hooks: &AgentHooks,
     config: &AgentConfig,
-    last_result: &mut Option<QueryResult>,
+    sql_history: &mut Vec<SqlHistoryEntry>,
 ) -> Result<lutum::ToolResult, AgentError> {
     match call {
         // ── Mode request ───────────────────────────────────────────────────
@@ -222,7 +233,11 @@ async fn dispatch_tool(
             }
             match db.execute_read(&sql) {
                 Ok(qr) => {
-                    *last_result = Some(qr.clone());
+                    sql_history.push(SqlHistoryEntry {
+                        sql,
+                        result: qr.clone(),
+                        rows_affected: None,
+                    });
                     Ok(c.complete(qr).unwrap())
                 }
                 Err(e) => Ok(c.complete(error_query(&e.to_string())).unwrap()),
@@ -241,6 +256,11 @@ async fn dispatch_tool(
                     .unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
+            sql_history.push(SqlHistoryEntry {
+                sql,
+                result: QueryResult::empty(),
+                rows_affected: Some(result.rows_affected),
+            });
             Ok(c.complete(result).unwrap())
         }
 
@@ -255,6 +275,11 @@ async fn dispatch_tool(
                     .unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
+            sql_history.push(SqlHistoryEntry {
+                sql,
+                result: QueryResult::empty(),
+                rows_affected: Some(result.rows_affected),
+            });
             Ok(c.complete(result).unwrap())
         }
 
@@ -269,6 +294,11 @@ async fn dispatch_tool(
                     .unwrap());
             };
             let result = execute_write_op(&sql, &db, hooks, config).await?;
+            sql_history.push(SqlHistoryEntry {
+                sql,
+                result: QueryResult::empty(),
+                rows_affected: Some(result.rows_affected),
+            });
             Ok(c.complete(result).unwrap())
         }
 
@@ -284,6 +314,11 @@ async fn dispatch_tool(
                     .unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
+            sql_history.push(SqlHistoryEntry {
+                sql,
+                result: QueryResult::empty(),
+                rows_affected: None,
+            });
             Ok(c.complete(result).unwrap())
         }
 
@@ -298,6 +333,11 @@ async fn dispatch_tool(
                     .unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
+            sql_history.push(SqlHistoryEntry {
+                sql,
+                result: QueryResult::empty(),
+                rows_affected: None,
+            });
             Ok(c.complete(result).unwrap())
         }
 
@@ -312,6 +352,11 @@ async fn dispatch_tool(
                     .unwrap());
             };
             let result = execute_ddl_op(&sql, &db, hooks).await?;
+            sql_history.push(SqlHistoryEntry {
+                sql,
+                result: QueryResult::empty(),
+                rows_affected: None,
+            });
             Ok(c.complete(result).unwrap())
         }
     }

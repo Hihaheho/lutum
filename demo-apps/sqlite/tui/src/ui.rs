@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
 
-use sqlite_agent::{QueryResult, TransactionMode, WritePreview};
+use sqlite_agent::{QueryResult, SqlHistoryEntry, TransactionMode, WritePreview};
 
 use crate::app::{AppState, TuiApp};
 
@@ -80,7 +80,7 @@ fn render_main(f: &mut Frame, area: Rect, app: &TuiApp) {
         .split(area);
 
     render_conversation(f, cols[0], app);
-    render_results(f, cols[1], app);
+    render_sql_history(f, cols[1], app);
 }
 
 // ---------------------------------------------------------------------------
@@ -354,28 +354,187 @@ fn summarize_result(json: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// SQL results pane
+// SQL history pane (right column)
 // ---------------------------------------------------------------------------
 
-fn render_results(f: &mut Frame, area: Rect, app: &TuiApp) {
+fn render_sql_history(f: &mut Frame, area: Rect, app: &TuiApp) {
+    let count = app.sql_history.len();
+    let title = if count == 0 {
+        " SQL History ".to_string()
+    } else {
+        format!(" SQL History ({count}) ")
+    };
     let block = Block::default()
-        .title(" SQL Result ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let Some(ref qr) = app.last_result else {
+    if app.sql_history.is_empty() {
         f.render_widget(
-            Paragraph::new("No results yet.").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("No SQL executed yet.").style(Style::default().fg(Color::DarkGray)),
             inner,
         );
         return;
-    };
+    }
 
-    render_query_table(f, inner, qr);
+    let lines = build_history_lines(&app.sql_history);
+
+    // Scroll with auto-follow (same pattern as conversation pane).
+    let wrap_width = inner.width as usize;
+    let wrapped_total: usize = lines
+        .iter()
+        .map(|l| {
+            let w = l.width();
+            if wrap_width == 0 || w == 0 {
+                1
+            } else {
+                w.div_ceil(wrap_width)
+            }
+        })
+        .sum();
+    let height = inner.height as usize;
+    let max_offset = wrapped_total.saturating_sub(height);
+
+    if app.result_scroll_to_bottom.get() {
+        app.result_scroll_to_bottom.set(false);
+        app.result_scroll.set(max_offset);
+    }
+    let offset = app.result_scroll.get().min(max_offset);
+
+    let para = Paragraph::new(Text::from(lines))
+        .scroll((offset as u16, 0))
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, inner);
 }
 
+/// Build display lines for all SQL history entries.
+fn build_history_lines(history: &[SqlHistoryEntry]) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    for (i, entry) in history.iter().enumerate() {
+        // Separator between entries.
+        if i > 0 {
+            lines.push(Line::from(Span::styled(
+                "─".repeat(40),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        // SQL label — cyan for SELECT (rows_affected = None, has columns), yellow for writes/DDL.
+        let is_select = entry.rows_affected.is_none() && !entry.result.columns.is_empty()
+            || (entry.rows_affected.is_none() && entry.result.columns.is_empty()
+                && entry.sql.trim_start().to_uppercase().starts_with("SELECT"));
+        let label_color = if is_select {
+            Color::Cyan
+        } else {
+            Color::Yellow
+        };
+        let sql_preview = truncate(&entry.sql.replace('\n', " "), 60);
+        lines.push(Line::from(vec![
+            Span::styled("▶ ", Style::default().fg(label_color)),
+            Span::styled(
+                sql_preview,
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        // Result body.
+        if let Some(n) = entry.rows_affected {
+            // Write operation.
+            lines.push(Line::from(Span::styled(
+                format!("  ✓ {n} row(s) affected"),
+                Style::default().fg(Color::Green),
+            )));
+        } else if !entry.result.columns.is_empty() {
+            // SELECT with results — render as text table.
+            lines.extend(format_query_result(&entry.result));
+        } else {
+            // DDL or SELECT with no rows.
+            let msg = if entry
+                .sql
+                .trim_start()
+                .to_uppercase()
+                .starts_with("SELECT")
+            {
+                "  (no rows)"
+            } else {
+                "  ✓ done"
+            };
+            lines.push(Line::from(Span::styled(
+                msg,
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    lines
+}
+
+/// Format a QueryResult as text lines (pipe-separated columns).
+fn format_query_result(qr: &QueryResult) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // Compute column widths.
+    let mut widths: Vec<usize> = qr.columns.iter().map(|c| c.len()).collect();
+    for row in &qr.rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.len());
+            }
+        }
+    }
+
+    let fmt_row = |cells: &[String]| -> String {
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let w = widths.get(i).copied().unwrap_or(c.len());
+                format!("{:width$}", c, width = w)
+            })
+            .collect::<Vec<_>>()
+            .join(" │ ")
+    };
+
+    // Header.
+    let header = fmt_row(&qr.columns);
+    lines.push(Line::from(Span::styled(
+        format!("  {header}"),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+
+    // Divider.
+    let divider: String = widths
+        .iter()
+        .map(|&w| "─".repeat(w))
+        .collect::<Vec<_>>()
+        .join("─┼─");
+    lines.push(Line::from(Span::styled(
+        format!("  {divider}"),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Rows (cap at 50 to avoid overwhelming the pane).
+    let shown = qr.rows.len().min(50);
+    for row in &qr.rows[..shown] {
+        let text = fmt_row(row);
+        lines.push(Line::from(Span::raw(format!("  {text}"))));
+    }
+    if qr.rows.len() > shown {
+        lines.push(Line::from(Span::styled(
+            format!("  … {} more rows", qr.rows.len() - shown),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines
+}
+
+// Keep render_query_table for use inside the approval modal preview.
 fn render_query_table(f: &mut Frame, area: Rect, qr: &QueryResult) {
     if qr.columns.is_empty() {
         f.render_widget(
@@ -427,7 +586,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &TuiApp) {
         AppState::Approval(_) => " [y] Accept  [n] Reject  [e] Edit SQL  [Esc] Cancel",
         AppState::ModeRequest(_) => " [y] Grant write access  [n] Deny",
         AppState::Running => " Thinking…",
-        _ => " [Tab] toggle mode  [Enter] send  [Ctrl+N] new chat  [q] quit",
+        _ => " [Tab] mode  [Enter] send  [↑↓] scroll chat  [Alt+↑↓] scroll SQL  [Ctrl+N] new  [q] quit",
     };
 
     let block = Block::default()
@@ -437,9 +596,10 @@ fn render_input(f: &mut Frame, area: Rect, app: &TuiApp) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let prompt =
-        Paragraph::new(format!("> {}", app.input_buf)).style(Style::default().fg(Color::White));
-    f.render_widget(prompt, inner);
+    // Only show the textarea when idle (not in modal/running state).
+    if matches!(app.state, AppState::Idle | AppState::Done) {
+        f.render_widget(&app.textarea, inner);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -494,7 +654,11 @@ fn render_approval_modal(f: &mut Frame, area: Rect, preview: &WritePreview) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(2), // SQL + rows affected
+            Constraint::Min(0),    // sample table
+            Constraint::Length(1), // controls
+        ])
         .split(inner);
 
     let header = Paragraph::new(vec![
@@ -522,4 +686,15 @@ fn render_approval_modal(f: &mut Frame, area: Rect, preview: &WritePreview) {
     if !preview.sample.columns.is_empty() {
         render_query_table(f, chunks[1], &preview.sample);
     }
+
+    let controls = Paragraph::new(Line::from(vec![
+        Span::styled("[y] Accept", Style::default().fg(Color::Green)),
+        Span::raw("   "),
+        Span::styled("[n] Reject", Style::default().fg(Color::Red)),
+        Span::raw("   "),
+        Span::styled("[e] Edit SQL", Style::default().fg(Color::Yellow)),
+        Span::raw("   "),
+        Span::styled("[Esc] Cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+    f.render_widget(controls, chunks[2]);
 }

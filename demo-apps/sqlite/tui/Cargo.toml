@@ -12,6 +12,7 @@ sqlite-agent = { path = "../agent" }
 lutum        = { workspace = true }
 lutum-claude = { workspace = true }
 ratatui      = "0.29"
+tui-textarea = "0.7"
 crossterm    = "0.28"
 tokio        = { workspace = true, features = ["sync"] }
 async-trait  = { workspace = true }
