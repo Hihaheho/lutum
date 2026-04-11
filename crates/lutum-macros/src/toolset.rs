@@ -128,27 +128,64 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         let _hook_trait_ident = format_ident!("{}Hook", variant_ident);
 
         call_hook_arms.push(quote! {
-            Self::#variant_ident(call) => {
-                match hooks.#hook_method_ident(&call.metadata, &call.input).await {
-                    ::std::option::Option::Some(output) => {
+            Self::#variant_ident(mut call) => {
+                match hooks.#hook_method_ident(&call.metadata, call.input.clone()).await {
+                    ::lutum::ToolDecision::RunNormally(input) => {
+                        let effective_input_json = match ::serde_json::to_string(&input) {
+                            Ok(json) => json,
+                            Err(err) => format!("<failed to serialize effective input: {err}>"),
+                        };
+                        ::tracing::info!(
+                            target: "lutum::tool_hook",
+                            tool_name = %call.metadata.name,
+                            tool_call_id = %call.metadata.id,
+                            decision = "run_normally",
+                            effective_input_json = %effective_input_json,
+                            "tool hook decision"
+                        );
+                        call.input = input;
+                        ::lutum::ToolHookOutcome::Unhandled(Self::#variant_ident(call))
+                    }
+                    ::lutum::ToolDecision::Complete(output) => {
+                        ::tracing::info!(
+                            target: "lutum::tool_hook",
+                            tool_name = %call.metadata.name,
+                            tool_call_id = %call.metadata.id,
+                            decision = "complete",
+                            "tool hook decision"
+                        );
                         ::lutum::ToolHookOutcome::Handled(
                             #handled_enum_ident::#variant_ident(call.handled(output))
                         )
                     }
-                    ::std::option::Option::None => {
-                        ::lutum::ToolHookOutcome::Unhandled(Self::#variant_ident(call))
+                    ::lutum::ToolDecision::Reject(reason) => {
+                        ::tracing::info!(
+                            target: "lutum::tool_hook",
+                            tool_name = %call.metadata.name,
+                            tool_call_id = %call.metadata.id,
+                            decision = "reject",
+                            reason = %reason,
+                            "tool hook decision"
+                        );
+                        ::lutum::ToolHookOutcome::Rejected(
+                            ::lutum::RejectedToolCall::from_call(
+                                ::lutum::RejectedToolSource::Hook,
+                                Self::#variant_ident(call),
+                                reason,
+                            )
+                        )
                     }
                 }
             }
         });
 
         hooks_trait_methods.push(quote! {
-            #[hook(singleton)]
+            #[hook(fallback, custom = ::lutum::tool_decision_pipeline)]
             async fn #hook_method_ident(
                 _metadata: &::lutum::ToolMetadata,
-                _input: &#input_ty,
-            ) -> ::std::option::Option<#output_ty> {
-                ::std::option::Option::None
+                _input: #input_ty,
+            ) -> ::lutum::ToolDecision<#input_ty, #output_ty> {
+                ::lutum::ToolDecision::RunNormally(_input)
             }
         });
 

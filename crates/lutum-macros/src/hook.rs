@@ -29,6 +29,7 @@ pub struct HookOptions {
     pub aggregate: Option<syn::Path>,
     pub finalize: Option<syn::Path>,
     pub output: Option<Type>,
+    pub custom: Option<syn::Path>,
 }
 
 pub enum HookKind {
@@ -48,7 +49,7 @@ impl HookKind {
     fn trait_has_last(&self) -> bool {
         match self {
             Self::Always(opts) | Self::Fallback(opts) => {
-                opts.chain.is_none() && opts.aggregate.is_none()
+                opts.chain.is_none() && opts.aggregate.is_none() && opts.custom.is_none()
             }
             Self::Singleton => false,
         }

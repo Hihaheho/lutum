@@ -181,6 +181,8 @@ pub struct ToolResult {
     pub result: RawJson,
 }
 
+pub const REJECTED_TOOL_RESULT_PREFIX: &str = "__lutum_rejected__: ";
+
 impl ToolResult {
     pub fn new(
         id: impl Into<ToolCallId>,
@@ -194,6 +196,14 @@ impl ToolResult {
             arguments,
             result,
         }
+    }
+
+    pub fn rejection_reason(&self) -> Option<String> {
+        self.result
+            .deserialize::<String>()
+            .ok()?
+            .strip_prefix(REJECTED_TOOL_RESULT_PREFIX)
+            .map(ToOwned::to_owned)
     }
 }
 

@@ -1,4 +1,4 @@
-error: #[hook(singleton)] does not support 'chain', 'aggregate', 'finalize', or 'output'
+error: #[hook(singleton)] does not support 'chain', 'aggregate', 'finalize', 'output', or 'custom'
  --> tests/ui/hook_def_singleton_chain.rs:3:12
   |
 3 |     #[hook(singleton, chain = lutum::ShortCircuit<String, String>)]

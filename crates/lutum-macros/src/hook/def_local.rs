@@ -67,17 +67,6 @@ pub fn expand_slot(
         .iter()
         .map(|(ident, _)| quote! { #ident })
         .collect::<Vec<_>>();
-    let cloned_hook_call_arg_names = explicit_args
-        .iter()
-        .map(|(ident, ty)| {
-            if matches!(ty, syn::Type::Reference(_)) {
-                quote! { #ident }
-            } else {
-                quote! { #ident.clone() }
-            }
-        })
-        .collect::<Vec<_>>();
-
     let has_explicit_args = !explicit_args.is_empty();
     let has_ref_arg = explicit_args.iter().any(|(_, ty)| is_non_str_ref(ty));
     let dispatch_output_ty = dispatch_output_type(&kind, &hook_output_ty);
@@ -124,9 +113,24 @@ pub fn expand_slot(
         )
         .await
     };
+    // For default_call we call `default_method`, which takes the ORIGINAL parameter types.
+    // References (&T, &str) can be passed from the original ident (they are Copy / coerce fine).
+    // Owned types must use the normalized dispatch_var (which was `let fi = orig_ident;` after
+    // pre_conversion), because the original ident may have been moved.
+    let default_call_arg_tokens: Vec<proc_macro2::TokenStream> = explicit_args
+        .iter()
+        .zip(dispatch_vars.iter())
+        .map(|((orig_ident, ty), var)| {
+            if matches!(ty, syn::Type::Reference(_)) {
+                quote! { #orig_ident }
+            } else {
+                quote! { #var.clone() }
+            }
+        })
+        .collect();
     let default_call = quote! {
         Self::#default_method_ident(
-            #(#cloned_hook_call_arg_names,)*
+            #(#default_call_arg_tokens,)*
         )
         .await
     };
@@ -375,6 +379,37 @@ pub fn expand_slot(
         .unwrap_or_default();
 
     let inner_dispatch = match (&kind, &chain_companion_tokens, &aggregate_companion_tokens) {
+        // Pipeline dispatch — custom replaces the entire loop with an owned-input threading loop.
+        (HookKind::Fallback(HookOptions { custom: Some(_), .. }), _, _) => {
+            // Identify the single owned (non-reference) arg and collect the reference args.
+            let mut owned_var: Option<&syn::Ident> = None;
+            let mut ref_vars: Vec<&syn::Ident> = Vec::new();
+            for ((_, ty), var) in explicit_args.iter().zip(dispatch_vars.iter()) {
+                if matches!(ty, syn::Type::Reference(_)) {
+                    ref_vars.push(var);
+                } else {
+                    owned_var = Some(var);
+                }
+            }
+            let owned_var = owned_var
+                .expect("custom pipeline hook must have exactly one owned (non-reference) argument");
+            let ref_var_tokens: Vec<proc_macro2::TokenStream> =
+                ref_vars.iter().map(|v| quote! { #v }).collect();
+            quote! {
+                if self.#field_ident.is_empty() {
+                    #default_call
+                } else {
+                    let mut __current = #owned_var;
+                    for __hook in &self.#field_ident {
+                        match __hook.call_dyn(#(#ref_var_tokens,)* __current).await {
+                            ::lutum::ToolDecision::RunNormally(__next) => __current = __next,
+                            __terminal => return __terminal,
+                        }
+                    }
+                    ::lutum::ToolDecision::RunNormally(__current)
+                }
+            }
+        }
         (
             HookKind::Always(HookOptions {
                 chain: None,

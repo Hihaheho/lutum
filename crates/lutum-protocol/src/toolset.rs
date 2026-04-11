@@ -4,7 +4,7 @@ use schemars::{JsonSchema, Schema, schema_for};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-use crate::conversation::{ToolMetadata, ToolResult};
+use crate::conversation::{REJECTED_TOOL_RESULT_PREFIX, ToolMetadata, ToolResult};
 
 #[derive(Clone, Copy)]
 pub struct ToolDef {
@@ -121,9 +121,81 @@ where
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolDecision<I, O> {
+    RunNormally(I),
+    Complete(O),
+    Reject(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RejectedToolSource {
+    Hook,
+    Policy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RejectedToolCall<C> {
+    source: RejectedToolSource,
+    metadata: ToolMetadata,
+    call: Option<C>,
+    reason: String,
+}
+
+impl<C> RejectedToolCall<C> {
+    pub fn from_metadata(
+        source: RejectedToolSource,
+        metadata: ToolMetadata,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            source,
+            metadata,
+            call: None,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn source(&self) -> RejectedToolSource {
+        self.source
+    }
+
+    pub fn metadata(&self) -> &ToolMetadata {
+        &self.metadata
+    }
+
+    pub fn call(&self) -> Option<&C> {
+        self.call.as_ref()
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub fn into_parts(self) -> (RejectedToolSource, ToolMetadata, Option<C>, String) {
+        (self.source, self.metadata, self.call, self.reason)
+    }
+}
+
+impl<C> RejectedToolCall<C>
+where
+    C: ToolCallWrapper,
+{
+    pub fn from_call(source: RejectedToolSource, call: C, reason: impl Into<String>) -> Self {
+        Self {
+            source,
+            metadata: call.metadata().clone(),
+            call: Some(call),
+            reason: reason.into(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum ToolHookOutcome<C, H> {
     Handled(H),
     Unhandled(C),
+    Rejected(RejectedToolCall<C>),
 }
 
 pub trait IntoToolResult {
@@ -142,6 +214,16 @@ where
 {
     fn into_tool_result(self) -> Result<ToolResult, ToolResultError> {
         self.into_tool_result()
+    }
+}
+
+impl<C> IntoToolResult for RejectedToolCall<C> {
+    fn into_tool_result(self) -> Result<ToolResult, ToolResultError> {
+        let (_, metadata, _, reason) = self.into_parts();
+        let result = crate::conversation::RawJson::from_serializable(&format!(
+            "{REJECTED_TOOL_RESULT_PREFIX}{reason}"
+        ))?;
+        Ok(metadata.into_tool_result(result))
     }
 }
 

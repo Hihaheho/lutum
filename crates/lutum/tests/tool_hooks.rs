@@ -6,9 +6,10 @@ use lutum::{
     EventHandler, FinishReason, HandlerContext, HandlerDirective, Lutum, MockLlmAdapter,
     MockTextScenario, ModelInputItem, RawJson, RawTextTurnEvent, Session, SharedPoolBudgetManager,
     SharedPoolBudgetOptions, TextStepOutcomeWithTools, TextTurnEventWithTools,
-    TextTurnStateWithTools, ToolHookOutcome, ToolMetadata, ToolResult, ToolRoundPlan, Toolset,
-    Usage,
+    TextTurnStateWithTools, ToolDecision, ToolHookOutcome, ToolMetadata, ToolResult, ToolRoundPlan,
+    Toolset, Usage,
 };
+use lutum_trace::FieldValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -46,11 +47,11 @@ enum Tools {
 #[lutum::impl_hook(WeatherHook)]
 async fn hooked_forecast(
     metadata: &lutum::ToolMetadata,
-    input: &WeatherArgs,
-) -> Option<WeatherResult> {
+    input: WeatherArgs,
+) -> ToolDecision<WeatherArgs, WeatherResult> {
     let id = metadata.id.as_str().to_owned();
-    let city = input.city.clone();
-    Some(WeatherResult {
+    let city = input.city;
+    ToolDecision::Complete(WeatherResult {
         forecast: format!("hooked:{id}:{city}"),
     })
 }
@@ -59,10 +60,10 @@ async fn hooked_forecast(
 #[lutum::impl_hook(WeatherHook)]
 async fn weather_hook_plain(
     _metadata: &lutum::ToolMetadata,
-    input: &WeatherArgs,
-) -> Option<WeatherResult> {
-    let city = input.city.clone();
-    Some(WeatherResult {
+    input: WeatherArgs,
+) -> ToolDecision<WeatherArgs, WeatherResult> {
+    let city = input.city;
+    ToolDecision::Complete(WeatherResult {
         forecast: format!("hooked:{city}"),
     })
 }
@@ -71,10 +72,10 @@ async fn weather_hook_plain(
 #[lutum::impl_hook(WeatherHook)]
 async fn cached_weather_hook(
     _metadata: &lutum::ToolMetadata,
-    input: &WeatherArgs,
-) -> Option<WeatherResult> {
-    let city = input.city.clone();
-    Some(WeatherResult {
+    input: WeatherArgs,
+) -> ToolDecision<WeatherArgs, WeatherResult> {
+    let city = input.city;
+    ToolDecision::Complete(WeatherResult {
         forecast: format!("cached:{city}"),
     })
 }
@@ -83,21 +84,42 @@ async fn cached_weather_hook(
 #[lutum::impl_hook(WeatherHook)]
 async fn pass1_weather(
     _metadata: &lutum::ToolMetadata,
-    input: &WeatherArgs,
-) -> Option<WeatherResult> {
-    let city = input.city.clone();
-    Some(WeatherResult {
+    input: WeatherArgs,
+) -> ToolDecision<WeatherArgs, WeatherResult> {
+    let city = input.city;
+    ToolDecision::Complete(WeatherResult {
         forecast: format!("pass1:{city}"),
     })
 }
 
 /// Second-pass search hook for multi-pass chaining test.
 #[lutum::impl_hook(SearchHook)]
-async fn pass2_search(_metadata: &lutum::ToolMetadata, input: &SearchArgs) -> Option<SearchResult> {
-    let q = input.query.clone();
-    Some(SearchResult {
+async fn pass2_search(
+    _metadata: &lutum::ToolMetadata,
+    input: SearchArgs,
+) -> ToolDecision<SearchArgs, SearchResult> {
+    let q = input.query;
+    ToolDecision::Complete(SearchResult {
         hits: vec![format!("pass2:{q}")],
     })
+}
+
+#[lutum::impl_hook(WeatherHook)]
+async fn rewrite_weather(
+    _metadata: &lutum::ToolMetadata,
+    input: WeatherArgs,
+) -> ToolDecision<WeatherArgs, WeatherResult> {
+    ToolDecision::RunNormally(WeatherArgs {
+        city: format!("rewritten:{}", input.city),
+    })
+}
+
+#[lutum::impl_hook(SearchHook)]
+async fn reject_search(
+    _metadata: &lutum::ToolMetadata,
+    input: SearchArgs,
+) -> ToolDecision<SearchArgs, SearchResult> {
+    ToolDecision::Reject(format!("blocked query: {}", input.query))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,6 +140,7 @@ fn tool_call_hook_returns_unhandled_when_no_override_is_registered() {
         }
         ToolHookOutcome::Unhandled(other) => panic!("unexpected unhandled variant: {other:?}"),
         ToolHookOutcome::Handled(_) => panic!("hook should not have handled the call"),
+        ToolHookOutcome::Rejected(_) => panic!("hook should not have rejected the call"),
     }
 }
 
@@ -148,6 +171,50 @@ fn tool_call_hook_preserves_metadata_input_and_output_when_handled() {
         }
         ToolHookOutcome::Handled(other) => panic!("unexpected handled variant: {other:?}"),
         ToolHookOutcome::Unhandled(_) => panic!("hook should have handled the call"),
+        ToolHookOutcome::Rejected(_) => panic!("hook should not have rejected the call"),
+    }
+}
+
+#[test]
+fn tool_call_hook_can_rewrite_runtime_input_without_touching_metadata() {
+    let call = Tools::parse_tool_call(ToolMetadata::new(
+        "call-rewrite",
+        "weather",
+        RawJson::parse("{\"city\":\"Sapporo\"}").unwrap(),
+    ))
+    .unwrap();
+    let hooks = ToolsHooks::new().with_weather_hook(RewriteWeather);
+
+    match block_on(call.hook(&hooks)) {
+        ToolHookOutcome::Unhandled(ToolsCall::Weather(call)) => {
+            assert_eq!(call.input().city, "rewritten:Sapporo");
+            assert_eq!(call.metadata.arguments.get(), "{\"city\":\"Sapporo\"}");
+        }
+        other => panic!("expected rewritten unhandled call, got: {other:?}"),
+    }
+}
+
+#[test]
+fn tool_call_hook_can_reject_with_reason() {
+    let call = Tools::parse_tool_call(ToolMetadata::new(
+        "call-reject",
+        "search",
+        RawJson::parse("{\"query\":\"secret\"}").unwrap(),
+    ))
+    .unwrap();
+    let hooks = ToolsHooks::new().with_search_hook(RejectSearch);
+
+    match block_on(call.hook(&hooks)) {
+        ToolHookOutcome::Rejected(rejected) => {
+            assert_eq!(rejected.source(), lutum::RejectedToolSource::Hook);
+            assert_eq!(rejected.metadata().id.as_str(), "call-reject");
+            assert_eq!(rejected.reason(), "blocked query: secret");
+            match rejected.call() {
+                Some(ToolsCall::Search(call)) => assert_eq!(call.input().query, "secret"),
+                other => panic!("unexpected rejected call payload: {other:?}"),
+            }
+        }
+        other => panic!("expected rejected hook outcome, got: {other:?}"),
     }
 }
 
@@ -202,6 +269,9 @@ fn tool_round_commit_accepts_typed_handled_values() {
                     ToolHookOutcome::Unhandled(call) => {
                         panic!("tool hook unexpectedly returned unhandled: {call:?}")
                     }
+                    ToolHookOutcome::Rejected(call) => {
+                        panic!("tool hook unexpectedly returned rejected: {call:?}")
+                    }
                 })
                 .collect::<Vec<_>>();
             round.commit(&mut session, handled).unwrap();
@@ -230,6 +300,78 @@ fn tool_round_commit_accepts_typed_handled_values() {
     );
 }
 
+#[test]
+fn tool_round_plan_commit_preserves_original_arguments_after_rewrite() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-rewrite".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::ToolCallChunk {
+            id: "call-rewrite".into(),
+            name: "weather".into(),
+            arguments_json_delta: "{\"city\":\"Sapporo\"}".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-rewrite".into()),
+            finish_reason: FinishReason::ToolCall,
+            usage: Usage::zero(),
+        }),
+    ]));
+    let ctx = Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("rewrite weather input");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .collect(),
+    )
+    .unwrap();
+    let round = match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => round,
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+    };
+
+    let plan = block_on(round.apply_hooks(&ToolsHooks::new().with_weather_hook(RewriteWeather)));
+
+    let pending_results: Vec<_> = plan
+        .pending
+        .iter()
+        .map(|call| match call {
+            ToolsCall::Weather(call) => {
+                assert_eq!(call.input().city, "rewritten:Sapporo");
+                call.clone()
+                    .complete(WeatherResult {
+                        forecast: format!("executed:{}", call.input().city),
+                    })
+                    .unwrap()
+            }
+            other => panic!("unexpected pending variant: {other:?}"),
+        })
+        .collect();
+
+    plan.commit(&mut session, pending_results).unwrap();
+
+    let tool_result = session
+        .input()
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            ModelInputItem::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("tool result should be committed");
+    assert_eq!(tool_result.arguments.get(), "{\"city\":\"Sapporo\"}");
+    let weather_result: WeatherResult = tool_result.result.deserialize().unwrap();
+    assert_eq!(weather_result.forecast, "executed:rewritten:Sapporo");
+}
+
 fn make_two_tool_adapter() -> MockLlmAdapter {
     MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
         Ok(RawTextTurnEvent::Started {
@@ -254,7 +396,8 @@ fn make_two_tool_adapter() -> MockLlmAdapter {
     ]))
 }
 
-// apply_hooks moves hook-handled calls to `handled` and leaves the rest in `pending`.
+// apply_hooks moves hook-handled calls to `handled`, rejected calls to `rejected`,
+// and leaves the rest in `pending`.
 #[test]
 fn apply_hooks_splits_handled_and_pending() {
     let ctx = Lutum::new(
@@ -285,7 +428,7 @@ fn apply_hooks_splits_handled_and_pending() {
 
     assert_eq!(plan.handled.len(), 1, "weather should be handled");
     assert_eq!(plan.pending.len(), 1, "search should be pending");
-    assert_eq!(plan.policy_rejected.len(), 0);
+    assert_eq!(plan.rejected.len(), 0);
 
     match &plan.handled[0] {
         ToolsHandled::Weather(h) => assert_eq!(h.output().forecast, "cached:Kyoto"),
@@ -420,6 +563,73 @@ fn tool_round_plan_commit_merges_handled_and_pending_results() {
     assert_eq!(search_result.hits, vec!["ramen-shop"]);
 }
 
+#[test]
+fn tool_round_plan_commit_auto_commits_rejected_calls() {
+    let ctx = Lutum::new(
+        Arc::new(make_two_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("go");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
+            .collect(),
+    )
+    .unwrap();
+
+    let round = match outcome {
+        TextStepOutcomeWithTools::NeedsTools(r) => r,
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
+    };
+
+    let hooks = ToolsHooks::new().with_search_hook(RejectSearch);
+    let plan = block_on(round.apply_hooks(&hooks));
+
+    assert_eq!(plan.pending.len(), 1);
+    assert_eq!(plan.rejected.len(), 1);
+    assert_eq!(plan.rejected[0].source(), lutum::RejectedToolSource::Hook);
+    assert_eq!(plan.rejected[0].reason(), "blocked query: ramen");
+
+    let pending_results: Vec<_> = plan
+        .pending
+        .iter()
+        .map(|call| match call {
+            ToolsCall::Weather(c) => c
+                .clone()
+                .complete(WeatherResult {
+                    forecast: "sunny".into(),
+                })
+                .unwrap(),
+            other => panic!("unexpected pending call: {other:?}"),
+        })
+        .collect();
+    plan.commit(&mut session, pending_results).unwrap();
+
+    let tool_results: Vec<_> = session
+        .input()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            ModelInputItem::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 2);
+
+    let rejected_result = tool_results
+        .iter()
+        .find(|result| result.name.as_str() == "search")
+        .expect("search rejection result");
+    assert_eq!(
+        rejected_result.rejection_reason().as_deref(),
+        Some("blocked query: ramen")
+    );
+}
+
 // apply_hooks also accepts a closure directly via the blanket ToolHooks impl.
 #[test]
 fn apply_hooks_accepts_closure_via_blanket_impl() {
@@ -544,6 +754,76 @@ fn invalid_tool_call_is_rejected_and_reported() {
     }
 }
 
+#[test]
+fn invalid_tool_call_commit_auto_synthesizes_rejection_result() {
+    let ctx = Lutum::new(
+        Arc::new(make_disallowed_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("Search something.");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .collect(),
+    )
+    .unwrap();
+
+    match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            assert!(round.tool_calls.is_empty());
+            round
+                .commit(&mut session, Vec::<ToolResult>::new())
+                .unwrap();
+        }
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+    }
+
+    let rejected_result = session
+        .input()
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            ModelInputItem::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("policy rejection should be committed");
+    assert_eq!(
+        rejected_result.result.deserialize::<String>().unwrap(),
+        "__lutum_rejected__: tool `search` is not available in this round"
+    );
+    assert_eq!(
+        rejected_result.rejection_reason().as_deref(),
+        Some("tool `search` is not available in this round")
+    );
+}
+
+#[test]
+fn rejection_reason_helper_only_matches_reserved_prefix() {
+    let rejected = ToolResult::new(
+        "call-rejected",
+        "search",
+        RawJson::parse("{\"query\":\"secret\"}").unwrap(),
+        RawJson::from_serializable(&"__lutum_rejected__: blocked query: secret".to_string())
+            .unwrap(),
+    );
+    assert_eq!(
+        rejected.rejection_reason().as_deref(),
+        Some("blocked query: secret")
+    );
+
+    let normal = ToolResult::new(
+        "call-normal",
+        "search",
+        RawJson::parse("{\"query\":\"secret\"}").unwrap(),
+        RawJson::from_serializable(&"plain string output".to_string()).unwrap(),
+    );
+    assert_eq!(normal.rejection_reason(), None);
+}
+
 // Handler that records the names of InvalidToolCallChunk and InvalidToolCall events it sees.
 struct RecordInvalidEvents(Arc<Mutex<Vec<String>>>);
 
@@ -648,5 +928,64 @@ fn invalid_tool_events_are_visible_in_raw_stream() {
     assert!(
         has_invalid_call,
         "expected InvalidToolCall in stream, got: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn tool_hook_trace_records_rewrite_and_reject_decisions() {
+    let call = Tools::parse_tool_call(ToolMetadata::new(
+        "call-trace",
+        "search",
+        RawJson::parse("{\"query\":\"secret\"}").unwrap(),
+    ))
+    .unwrap();
+    let hooks = ToolsHooks::new().with_search_hook(RejectSearch);
+
+    let collected = lutum_trace::test::collect(async move {
+        let _ = call.hook(&hooks).await;
+    })
+    .await;
+
+    let event = collected
+        .trace
+        .events()
+        .iter()
+        .find(|event| event.message() == Some("tool hook decision"))
+        .expect("tool hook decision event");
+    assert_eq!(
+        event.field("decision"),
+        Some(&FieldValue::Str("reject".into()))
+    );
+    assert_eq!(
+        event.field("reason"),
+        Some(&FieldValue::Str("blocked query: secret".into()))
+    );
+
+    let rewrite_call = Tools::parse_tool_call(ToolMetadata::new(
+        "call-trace-rewrite",
+        "weather",
+        RawJson::parse("{\"city\":\"Nagoya\"}").unwrap(),
+    ))
+    .unwrap();
+    let rewrite_hooks = ToolsHooks::new().with_weather_hook(RewriteWeather);
+
+    let collected = lutum_trace::test::collect(async move {
+        let _ = rewrite_call.hook(&rewrite_hooks).await;
+    })
+    .await;
+
+    let event = collected
+        .trace
+        .events()
+        .iter()
+        .find(|event| event.message() == Some("tool hook decision"))
+        .expect("rewrite tool hook decision event");
+    assert_eq!(
+        event.field("decision"),
+        Some(&FieldValue::Str("run_normally".into()))
+    );
+    assert_eq!(
+        event.field("effective_input_json"),
+        Some(&FieldValue::Str("{\"city\":\"rewritten:Nagoya\"}".into()))
     );
 }

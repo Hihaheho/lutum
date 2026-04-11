@@ -16,8 +16,8 @@ pub use budget::{
 pub use conversation::{
     AssistantInputItem, AssistantTurn, AssistantTurnInputError, AssistantTurnItem,
     EmptyNonEmptyError, InputMessageRole, MessageContent, ModelInput, ModelInputItem,
-    ModelInputValidationError, NonEmpty, RawJson, ToolCallId, ToolMetadata, ToolName, ToolResult,
-    UncommittedAssistantTurn,
+    ModelInputValidationError, NonEmpty, REJECTED_TOOL_RESULT_PREFIX, RawJson, ToolCallId,
+    ToolMetadata, ToolName, ToolResult, UncommittedAssistantTurn,
 };
 pub use error::{AgentError, BoxError, NoToolsContractViolation};
 pub use extensions::RequestExtensions;
@@ -49,9 +49,10 @@ pub use reducer::{
 };
 pub use structured::StructuredOutput;
 pub use toolset::{
-    HandledTool, HookableToolset, IntoToolResult, NoToolSelector, NoTools, ToolAvailability,
-    ToolCallError, ToolCallWrapper, ToolConstraints, ToolDef, ToolExecutionError, ToolHookOutcome,
-    ToolHooks, ToolInput, ToolRequirement, ToolResultError, ToolSelector, Toolset,
+    HandledTool, HookableToolset, IntoToolResult, NoToolSelector, NoTools, RejectedToolCall,
+    RejectedToolSource, ToolAvailability, ToolCallError, ToolCallWrapper, ToolConstraints,
+    ToolDecision, ToolDef, ToolExecutionError, ToolHookOutcome, ToolHooks, ToolInput,
+    ToolRequirement, ToolResultError, ToolSelector, Toolset,
 };
 pub use transcript::{
     AssistantTurnView, CommittedTurn, ItemView, ToolCallItemView, ToolResultItemView, TurnItemIter,

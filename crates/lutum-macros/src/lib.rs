@@ -37,11 +37,47 @@ fn build_hook_kind(attrs: HookDefAttrs, macro_name: &str) -> syn::Result<HookKin
                 ));
             }
 
+            if let Some(custom) = &attrs.custom {
+                if mode_str == "always" {
+                    return Err(syn::Error::new(
+                        custom.span,
+                        format!(
+                            "#[{macro_name}(always)] does not support 'custom'; use 'fallback' mode"
+                        ),
+                    ));
+                }
+                if let Some(chain) = &attrs.chain {
+                    return Err(syn::Error::new(
+                        chain.span,
+                        format!(
+                            "#[{macro_name}(...)] 'custom' and 'chain' are mutually exclusive"
+                        ),
+                    ));
+                }
+                if let Some(aggregate) = &attrs.aggregate {
+                    return Err(syn::Error::new(
+                        aggregate.span,
+                        format!(
+                            "#[{macro_name}(...)] 'custom' and 'aggregate' are mutually exclusive"
+                        ),
+                    ));
+                }
+                if let Some(finalize) = &attrs.finalize {
+                    return Err(syn::Error::new(
+                        finalize.span,
+                        format!(
+                            "#[{macro_name}(...)] 'custom' and 'finalize' are mutually exclusive"
+                        ),
+                    ));
+                }
+            }
+
             let opts = HookOptions {
                 chain: attrs.chain.map(|chain| chain.value),
                 aggregate: attrs.aggregate.map(|aggregate| aggregate.value),
                 finalize: attrs.finalize.map(|finalize| finalize.value),
                 output: attrs.output.map(|output| syn::Type::Path(output.value)),
+                custom: attrs.custom.map(|custom| custom.value),
             };
             Ok(if mode_str == "always" {
                 HookKind::Always(opts)
@@ -54,11 +90,12 @@ fn build_hook_kind(attrs: HookDefAttrs, macro_name: &str) -> syn::Result<HookKin
                 || attrs.aggregate.is_some()
                 || attrs.finalize.is_some()
                 || attrs.output.is_some()
+                || attrs.custom.is_some()
             {
                 return Err(syn::Error::new_spanned(
                     attrs.mode,
                     format!(
-                        "#[{macro_name}(singleton)] does not support 'chain', 'aggregate', 'finalize', or 'output'"
+                        "#[{macro_name}(singleton)] does not support 'chain', 'aggregate', 'finalize', 'output', or 'custom'"
                     ),
                 ));
             }

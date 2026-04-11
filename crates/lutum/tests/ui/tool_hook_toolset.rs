@@ -1,5 +1,5 @@
 use futures::executor::block_on;
-use lutum::{RawJson, ToolHookOutcome, ToolMetadata, Toolset};
+use lutum::{RawJson, ToolDecision, ToolHookOutcome, ToolMetadata, Toolset};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -34,10 +34,10 @@ enum Tools {
 #[lutum::impl_hook(WeatherHook)]
 async fn hooked_forecast(
     _metadata: &lutum::ToolMetadata,
-    input: &WeatherArgs,
-) -> Option<WeatherResult> {
-    let city = input.city.clone();
-    Some(WeatherResult {
+    input: WeatherArgs,
+) -> ToolDecision<WeatherArgs, WeatherResult> {
+    let city = input.city;
+    ToolDecision::Complete(WeatherResult {
         forecast: format!("hooked:{city}"),
     })
 }
@@ -60,6 +60,7 @@ fn main() {
             }
             ToolHookOutcome::Handled(ToolsHandled::Search(_)) => unreachable!(),
             ToolHookOutcome::Unhandled(_) => unreachable!(),
+            ToolHookOutcome::Rejected(_) => unreachable!(),
         }
     });
 }

@@ -92,6 +92,7 @@ pub struct HookDefAttrs {
     pub aggregate: Option<HookAttrValue<syn::Path>>,
     pub finalize: Option<HookAttrValue<syn::Path>>,
     pub output: Option<HookAttrValue<syn::TypePath>>,
+    pub custom: Option<HookAttrValue<syn::Path>>,
 }
 
 impl syn::parse::Parse for HookDefAttrs {
@@ -101,6 +102,7 @@ impl syn::parse::Parse for HookDefAttrs {
         let mut aggregate = None;
         let mut finalize = None;
         let mut output = None;
+        let mut custom = None;
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
             let key: syn::Ident = input.parse()?;
@@ -134,11 +136,18 @@ impl syn::parse::Parse for HookDefAttrs {
                         span: key_span,
                     });
                 }
+                "custom" => {
+                    input.parse::<Token![=]>()?;
+                    custom = Some(HookAttrValue {
+                        value: input.parse::<syn::Path>()?,
+                        span: key_span,
+                    });
+                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown hook option '{other}'; expected 'chain', 'aggregate', 'finalize', or 'output'"
+                            "unknown hook option '{other}'; expected 'chain', 'aggregate', 'finalize', 'output', or 'custom'"
                         ),
                     ));
                 }
@@ -150,6 +159,7 @@ impl syn::parse::Parse for HookDefAttrs {
             aggregate,
             finalize,
             output,
+            custom,
         })
     }
 }

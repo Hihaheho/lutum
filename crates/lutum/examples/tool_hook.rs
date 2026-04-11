@@ -3,8 +3,8 @@ use std::sync::Arc;
 use futures::executor::block_on;
 use lutum::{
     FinishReason, MockLlmAdapter, MockTextScenario, ModelInputItem, RawTextTurnEvent, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcomeWithTools, ToolMetadata,
-    ToolRoundPlan, Usage,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextStepOutcomeWithTools, ToolDecision,
+    ToolMetadata, ToolRoundPlan, Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -56,12 +56,15 @@ fn execute_search(input: &SearchArgs) -> SearchResult {
 // The generated `CachedWeather` struct is placed in the same scope as
 // `ToolsHooks`, so it can be passed directly to `with_weather_hook`.
 #[lutum::impl_hook(WeatherHook)]
-async fn cached_weather(_metadata: &ToolMetadata, input: &WeatherArgs) -> Option<WeatherResult> {
+async fn cached_weather(
+    _metadata: &ToolMetadata,
+    input: WeatherArgs,
+) -> ToolDecision<WeatherArgs, WeatherResult> {
     match input.city.as_str() {
-        "Tokyo" => Some(WeatherResult {
+        "Tokyo" => ToolDecision::Complete(WeatherResult {
             forecast: "cached: 22C and clear".into(),
         }),
-        _ => None,
+        _ => ToolDecision::RunNormally(input),
     }
 }
 
