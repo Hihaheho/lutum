@@ -10,6 +10,8 @@ struct WeatherResult {
     forecast: String,
 }
 
+/// Get weather input.
+/// Includes the requested city.
 #[lutum::tool_input(name = "weather", output = WeatherResult)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct WeatherArgs {
@@ -49,6 +51,14 @@ fn tool_input_wrapper_builds_tool_result() {
     assert_eq!(
         RawToolsSelector::CurrentWeather.definition().name,
         "weather"
+    );
+    assert_eq!(
+        <WeatherArgs as lutum::ToolInput>::DESCRIPTION,
+        "Get weather input.\nIncludes the requested city."
+    );
+    assert_eq!(
+        RawToolsSelector::CurrentWeather.definition().description,
+        "Get weather input.\nIncludes the requested city."
     );
     assert_eq!(
         RawToolsSelector::try_from_name("weather"),
@@ -110,6 +120,15 @@ fn tool_input_wrapper_builds_tool_result() {
 
 #[test]
 fn tool_fn_wrapper_executes_with_skipped_args() {
+    assert_eq!(
+        <GetWeather as lutum::ToolInput>::DESCRIPTION,
+        "Get weather with application context."
+    );
+    assert_eq!(
+        FnToolsSelector::GetWeather.definition().description,
+        "Get weather with application context."
+    );
+
     let tool_call = FnTools::parse_tool_call(ToolMetadata::new(
         "call-2",
         "get_weather",
