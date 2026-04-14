@@ -318,3 +318,60 @@ pub struct ChatCompletion {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<CompletionUsage>,
 }
+
+/// A single SSE chunk from the Chat Completions streaming API.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChatStreamChunk {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub choices: Vec<ChatStreamChoice>,
+    #[serde(default)]
+    pub usage: Option<CompletionUsage>,
+}
+
+/// One choice in a streaming chunk.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChatStreamChoice {
+    pub index: usize,
+    pub delta: ChatStreamDelta,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
+/// The delta payload within a streaming choice.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChatStreamDelta {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub refusal: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ChatStreamToolCall>>,
+    /// Reasoning tokens emitted by some models (e.g. DeepSeek).
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+}
+
+/// A tool call delta within a streaming choice.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChatStreamToolCall {
+    pub index: usize,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(rename = "type", default)]
+    pub type_: Option<String>,
+    pub function: ChatStreamFunction,
+}
+
+/// The function portion of a tool call delta.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChatStreamFunction {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<String>,
+}

@@ -8,6 +8,8 @@ use std::{
 use async_stream::try_stream;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+#[cfg(target_family = "wasm")]
+use lutum_protocol::SendWrapper;
 use lutum_protocol::{
     AgentError, FinishReason,
     budget::Usage,
@@ -28,14 +30,19 @@ use lutum_protocol::{
 };
 use reqwest::{
     Client,
-    header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
+    header::{AUTHORIZATION, HeaderMap, HeaderValue},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(target_family = "wasm")]
-use lutum_protocol::SendWrapper;
 
 use crate::{
+    chat::{
+        AssistantContent, ChatAssistantMessage, ChatDeveloperMessage, ChatFunctionCallArgs,
+        ChatFunctionTool, ChatMessageFunctionToolCall, ChatMessageParam, ChatMessageToolCall,
+        ChatNamedFunctionToolChoice, ChatStreamChunk, ChatStreamOptions, ChatSystemMessage,
+        ChatTextContent, ChatToolChoice, ChatToolMessage, ChatUserContent, ChatUserMessage,
+        FunctionDefinition,
+    },
     completion::CompletionRequest,
     error::OpenAiError,
     responses::{
@@ -51,6 +58,7 @@ use crate::{
 pub trait FallbackSerializer: Send + Sync {
     fn apply_to_responses(&self, request: &mut crate::responses::ResponsesRequest);
     fn apply_to_completion(&self, request: &mut CompletionRequest);
+    fn apply_to_chat(&self, _request: &mut crate::chat::ChatCompletionRequest) {}
 }
 
 #[lutum_macros::hooks]
@@ -104,6 +112,7 @@ pub struct OpenAiAdapter {
     hooks: OpenAiHooks,
     fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
     sse_event_recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
+    use_chat_completions: bool,
 }
 
 type ByteStream =
@@ -124,7 +133,15 @@ impl OpenAiAdapter {
             hooks: OpenAiHooks::new(),
             fallback_serializer: None,
             sse_event_recovery_hook: None,
+            use_chat_completions: false,
         }
+    }
+
+    /// Switch `text_turn` to use the Chat Completions API (`/chat/completions`)
+    /// instead of the Responses API (`/responses`).
+    pub fn with_chat_completions(mut self) -> Self {
+        self.use_chat_completions = true;
+        self
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -190,7 +207,6 @@ impl OpenAiAdapter {
             AUTHORIZATION,
             HeaderValue::from_str(&bearer).map_err(OpenAiError::InvalidHeader)?,
         );
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(headers)
     }
 
@@ -208,6 +224,20 @@ impl OpenAiAdapter {
             serializer.apply_to_responses(&mut request);
         }
         Ok(request)
+    }
+
+    fn prepare_chat_request(
+        &self,
+        input: &ModelInput,
+        config: &AdapterTurnConfig,
+        model: &str,
+        reasoning_effort: Option<OpenAiReasoningEffort>,
+    ) -> Result<crate::chat::ChatCompletionRequest, OpenAiError> {
+        let mut body = build_chat_request(input, config, model, reasoning_effort)?;
+        if let Some(serializer) = self.fallback_serializer.as_ref() {
+            serializer.apply_to_chat(&mut body);
+        }
+        Ok(body)
     }
 
     fn prepare_completion_request(
@@ -240,30 +270,17 @@ impl OpenAiAdapter {
     {
         let url = format!("{}{}", self.base_url, path);
         let headers = self.request_headers()?;
-        let body_bytes = serde_json::to_vec(body)?;
         let client = self.client.clone();
         #[cfg(target_family = "wasm")]
         return SendWrapper::new(async move {
-            let response = client
-                .post(url)
-                .headers(headers)
-                .header(CONTENT_TYPE, "application/json")
-                .body(body_bytes)
-                .send()
-                .await?;
+            let response = client.post(url).headers(headers).json(body).send().await?;
             let response = error_for_status_with_body(response).await?;
             Ok(Box::pin(SendWrapper::new(response.bytes_stream())) as ByteStream)
         })
         .await;
         #[cfg(not(target_family = "wasm"))]
         {
-            let response = client
-                .post(url)
-                .headers(headers)
-                .header(CONTENT_TYPE, "application/json")
-                .body(body_bytes)
-                .send()
-                .await?;
+            let response = client.post(url).headers(headers).json(body).send().await?;
             let response = error_for_status_with_body(response).await?;
             Ok(Box::pin(response.bytes_stream()))
         }
@@ -276,7 +293,11 @@ impl OpenAiAdapter {
         #[cfg(target_family = "wasm")]
         return SendWrapper::new(async move {
             let response = client.get(url).headers(headers).send().await?;
-            error_for_status_with_body(response).await?.json::<Value>().await.map_err(Into::into)
+            error_for_status_with_body(response)
+                .await?
+                .json::<Value>()
+                .await
+                .map_err(Into::into)
         })
         .await;
         #[cfg(not(target_family = "wasm"))]
@@ -306,6 +327,19 @@ impl TurnAdapter for OpenAiAdapter {
             .hooks
             .resolve_reasoning_effort(turn.extensions.as_ref())
             .await;
+        if self.use_chat_completions {
+            let body = self
+                .prepare_chat_request(&input, &turn.config, model.as_ref(), reasoning_effort)
+                .map_err(AgentError::backend)?;
+            let stream = self
+                .send_streaming_json("/chat/completions", &body)
+                .await
+                .map_err(AgentError::backend)?;
+            return Ok(Box::pin(
+                map_chat_text_stream(stream, model.into())
+                    .map(|item| item.map_err(AgentError::backend)),
+            ) as ErasedTextTurnEventStream);
+        }
         let body = self
             .prepare_responses_request(&input, &turn.config, model.as_ref(), reasoning_effort, None)
             .map_err(AgentError::backend)?;
@@ -1017,6 +1051,24 @@ impl ToolCallTracker {
             },
         );
         Ok(Some(metadata))
+    }
+
+    /// Finalize all buffered tool calls. Used by the Chat Completions stream where
+    /// individual done events are not emitted — all tool calls complete together
+    /// when `finish_reason == "tool_calls"`.
+    fn finish_all(&mut self) -> Result<Vec<ToolMetadata>, OpenAiError> {
+        let keys: Vec<String> = self.buffers.keys().cloned().collect();
+        let mut results = Vec::new();
+        for key in keys {
+            let (id, name) = {
+                let buf = &self.buffers[&key];
+                (buf.id.clone(), buf.name.clone())
+            };
+            if let Some(meta) = self.finish(key, id, name, None)? {
+                results.push(meta);
+            }
+        }
+        Ok(results)
     }
 
     fn to_hints(&self) -> SseHints {
@@ -1838,6 +1890,420 @@ fn map_completion_finish_reason(reason: &str) -> FinishReason {
         "length" => FinishReason::Length,
         "content_filter" => FinishReason::ContentFilter,
         other => FinishReason::Unknown(other.to_string()),
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Chat Completions API support
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Build a `ChatCompletionRequest` from a `ModelInput` and turn config.
+fn build_chat_request(
+    input: &ModelInput,
+    config: &AdapterTurnConfig,
+    model: &str,
+    reasoning_effort: Option<OpenAiReasoningEffort>,
+) -> Result<crate::chat::ChatCompletionRequest, OpenAiError> {
+    let messages = convert_model_input_to_chat_messages(input)?;
+    let tools: Vec<crate::chat::ChatTool> = config
+        .tools
+        .iter()
+        .map(|tool| {
+            crate::chat::ChatTool::Function(ChatFunctionTool::new(FunctionDefinition {
+                name: tool.name.clone(),
+                description: Some(tool.description.clone()),
+                parameters: Some(tool.input_schema.clone()),
+                strict: None,
+            }))
+        })
+        .collect();
+    let tool_choice = if tools.is_empty() {
+        None
+    } else {
+        Some(match &config.tool_choice {
+            AdapterToolChoice::None => ChatToolChoice::None,
+            AdapterToolChoice::Auto => ChatToolChoice::Auto,
+            AdapterToolChoice::Required => ChatToolChoice::Required,
+            AdapterToolChoice::Specific(name) => {
+                ChatToolChoice::NamedFunction(ChatNamedFunctionToolChoice::new(name.clone()))
+            }
+        })
+    };
+    Ok(crate::chat::ChatCompletionRequest {
+        model: model.to_string(),
+        messages,
+        stream: Some(true),
+        stream_options: Some(ChatStreamOptions {
+            include_usage: Some(true),
+            include_obfuscation: None,
+        }),
+        temperature: config.generation.temperature.map(|t| t.get()),
+        max_completion_tokens: config.generation.max_output_tokens,
+        seed: config.generation.seed,
+        tools: if tools.is_empty() { None } else { Some(tools) },
+        tool_choice,
+        reasoning_effort,
+        top_p: None,
+        n: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        max_tokens: None,
+        logprobs: None,
+        top_logprobs: None,
+        stop: None,
+        parallel_tool_calls: None,
+        response_format: None,
+        store: None,
+        service_tier: None,
+        models: None,
+        user: None,
+        safety_identifier: None,
+        prompt_cache_key: None,
+    })
+}
+
+/// Convert a `ModelInput` to a list of `ChatMessageParam` for the Chat Completions API.
+fn convert_model_input_to_chat_messages(
+    input: &ModelInput,
+) -> Result<Vec<ChatMessageParam>, OpenAiError> {
+    let mut messages: Vec<ChatMessageParam> = Vec::new();
+    let mut pending_assistant: Option<ChatAssistantMessage> = None;
+
+    let flush_assistant = |pending: &mut Option<ChatAssistantMessage>,
+                           messages: &mut Vec<ChatMessageParam>| {
+        if let Some(msg) = pending.take() {
+            messages.push(ChatMessageParam::Assistant(msg));
+        }
+    };
+
+    for item in input.items() {
+        match item {
+            ModelInputItem::Message { role, content } => {
+                flush_assistant(&mut pending_assistant, &mut messages);
+                let text: String = content
+                    .iter()
+                    .map(|c| match c {
+                        MessageContent::Text(t) => t.as_str(),
+                    })
+                    .collect();
+                let msg = match role {
+                    InputMessageRole::System => ChatMessageParam::System(ChatSystemMessage {
+                        content: ChatTextContent::Text(text),
+                        name: None,
+                    }),
+                    InputMessageRole::Developer => {
+                        ChatMessageParam::Developer(ChatDeveloperMessage {
+                            content: ChatTextContent::Text(text),
+                            name: None,
+                        })
+                    }
+                    InputMessageRole::User => ChatMessageParam::User(ChatUserMessage {
+                        content: ChatUserContent::Text(text),
+                        name: None,
+                    }),
+                };
+                messages.push(msg);
+            }
+            ModelInputItem::Assistant(assistant_item) => {
+                match assistant_item {
+                    AssistantInputItem::Text(text) => {
+                        let msg = pending_assistant.get_or_insert_with(|| ChatAssistantMessage {
+                            content: None,
+                            refusal: None,
+                            audio: None,
+                            name: None,
+                            tool_calls: None,
+                            function_call: None,
+                        });
+                        let existing = msg.content.take();
+                        msg.content = Some(AssistantContent::Text(match existing {
+                            Some(AssistantContent::Text(t)) => format!("{t}{text}"),
+                            _ => text.clone(),
+                        }));
+                    }
+                    AssistantInputItem::Refusal(text) => {
+                        let msg = pending_assistant.get_or_insert_with(|| ChatAssistantMessage {
+                            content: None,
+                            refusal: None,
+                            audio: None,
+                            name: None,
+                            tool_calls: None,
+                            function_call: None,
+                        });
+                        msg.refusal = Some(text.clone());
+                    }
+                    AssistantInputItem::Reasoning(_) => {
+                        // Reasoning items are not sent in chat completions format.
+                    }
+                }
+            }
+            ModelInputItem::ToolResult(tool_result) => {
+                flush_assistant(&mut pending_assistant, &mut messages);
+                messages.push(ChatMessageParam::Tool(ChatToolMessage {
+                    content: ChatTextContent::Text(tool_result.result.get().to_string()),
+                    tool_call_id: tool_result.id.as_str().to_string(),
+                }));
+            }
+            ModelInputItem::Turn(committed_turn) => {
+                flush_assistant(&mut pending_assistant, &mut messages);
+                // Downcast to OpenAiCommittedTurn for direct access to typed items.
+                if let Some(openai_turn) = committed_turn
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<OpenAiCommittedTurn>()
+                {
+                    emit_openai_turn_as_chat_messages(openai_turn, &mut messages);
+                } else {
+                    emit_turn_view_as_chat_messages(committed_turn.as_ref(), &mut messages);
+                }
+            }
+        }
+    }
+    flush_assistant(&mut pending_assistant, &mut messages);
+    Ok(messages)
+}
+
+/// Convert an `OpenAiCommittedTurn` to one or more `ChatMessageParam` entries.
+///
+/// Text and tool calls are merged into a single assistant message. Reasoning
+/// items are silently dropped — the Chat Completions API does not accept them.
+fn emit_openai_turn_as_chat_messages(
+    turn: &OpenAiCommittedTurn,
+    messages: &mut Vec<ChatMessageParam>,
+) {
+    let mut text = String::new();
+    let mut tool_calls: Vec<ChatMessageToolCall> = Vec::new();
+
+    for item in &turn.items {
+        match item {
+            OpenAiTurnItem::Text { content } => text.push_str(content),
+            OpenAiTurnItem::Refusal { content } => text.push_str(content),
+            OpenAiTurnItem::Reasoning { .. } => {}
+            OpenAiTurnItem::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                tool_calls.push(ChatMessageToolCall::Function(ChatMessageFunctionToolCall {
+                    id: id.as_str().to_string(),
+                    type_: "function".to_string(),
+                    function: ChatFunctionCallArgs {
+                        name: name.as_str().to_string(),
+                        arguments: arguments.get().to_string(),
+                    },
+                }));
+            }
+        }
+    }
+
+    messages.push(ChatMessageParam::Assistant(ChatAssistantMessage {
+        content: if text.is_empty() {
+            None
+        } else {
+            Some(AssistantContent::Text(text))
+        },
+        refusal: None,
+        audio: None,
+        name: None,
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
+        function_call: None,
+    }));
+}
+
+/// Fallback: convert a generic `TurnView` to chat messages.
+fn emit_turn_view_as_chat_messages(turn: &dyn TurnView, messages: &mut Vec<ChatMessageParam>) {
+    let mut text = String::new();
+    let mut tool_calls: Vec<ChatMessageToolCall> = Vec::new();
+
+    for index in 0..turn.item_count() {
+        let Some(item) = turn.item_at(index) else {
+            continue;
+        };
+        if let Some(t) = item.as_text().or_else(|| item.as_refusal()) {
+            text.push_str(t);
+        } else if let Some(tc) = item.as_tool_call() {
+            tool_calls.push(ChatMessageToolCall::Function(ChatMessageFunctionToolCall {
+                id: tc.id.as_str().to_string(),
+                type_: "function".to_string(),
+                function: ChatFunctionCallArgs {
+                    name: tc.name.as_str().to_string(),
+                    arguments: tc.arguments.get().to_string(),
+                },
+            }));
+        }
+    }
+
+    messages.push(ChatMessageParam::Assistant(ChatAssistantMessage {
+        content: if text.is_empty() {
+            None
+        } else {
+            Some(AssistantContent::Text(text))
+        },
+        refusal: None,
+        audio: None,
+        name: None,
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
+        function_call: None,
+    }));
+}
+
+/// Map a Chat Completions SSE byte stream to `ErasedTextTurnEvent`.
+fn map_chat_text_stream<S>(
+    stream: S,
+    fallback_model: String,
+) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + Send + 'static
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    try_stream! {
+        let mut parser = SseParser::default();
+        let mut started = false;
+        let mut request_id = None::<String>;
+        let mut model = fallback_model;
+        let mut text_content = String::new();
+        let mut saw_tool_call = false;
+        let mut saw_refusal = false;
+        let mut tool_calls = ToolCallTracker::default();
+        let mut last_usage = Usage::zero();
+        futures::pin_mut!(stream);
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            for payload in parser.push(&chunk)? {
+                if payload == "[DONE]" {
+                    break;
+                }
+                let event = serde_json::from_str::<ChatStreamChunk>(&payload)?;
+                if !started {
+                    request_id = event.id.clone();
+                    if let Some(m) = event.model.as_ref() {
+                        model = m.clone();
+                    }
+                    started = true;
+                    yield ErasedTextTurnEvent::Started {
+                        request_id: request_id.clone(),
+                        model: model.clone(),
+                    };
+                }
+                if let Some(usage) = &event.usage {
+                    last_usage = parse_chat_usage(usage);
+                }
+                for choice in &event.choices {
+                    let delta = &choice.delta;
+                    if let Some(content) = &delta.content {
+                        if !content.is_empty() {
+                            text_content.push_str(content);
+                            yield ErasedTextTurnEvent::TextDelta { delta: content.clone() };
+                        }
+                    }
+                    if let Some(refusal) = &delta.refusal {
+                        if !refusal.is_empty() {
+                            saw_refusal = true;
+                            yield ErasedTextTurnEvent::RefusalDelta { delta: refusal.clone() };
+                        }
+                    }
+                    if let Some(reasoning) = &delta.reasoning_content {
+                        if !reasoning.is_empty() {
+                            yield ErasedTextTurnEvent::ReasoningDelta { delta: reasoning.clone() };
+                        }
+                    }
+                    for tc in delta.tool_calls.as_deref().unwrap_or(&[]) {
+                        let key = tc.index.to_string();
+                        if let (Some(id), Some(name)) =
+                            (tc.id.as_deref(), tc.function.name.as_deref())
+                        {
+                            tool_calls.observe_call(
+                                key.clone(),
+                                ToolCallId::from(id),
+                                ToolName::from(name),
+                            );
+                        }
+                        if let Some(args_delta) = tc.function.arguments.as_deref() {
+                            let dummy_id = tc
+                                .id
+                                .as_deref()
+                                .map(ToolCallId::from)
+                                .unwrap_or_else(|| ToolCallId::from(""));
+                            if let Some((id, name, delta)) = tool_calls.record_delta(
+                                key,
+                                dummy_id,
+                                tc.function.name.as_deref().map(ToolName::from),
+                                args_delta,
+                            ) {
+                                yield ErasedTextTurnEvent::ToolCallChunk {
+                                    id,
+                                    name,
+                                    arguments_json_delta: delta,
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Finalize all buffered tool calls (chat completions signals done via finish_reason,
+        // not per-call events).
+        for meta in tool_calls.finish_all()? {
+            saw_tool_call = true;
+            yield ErasedTextTurnEvent::ToolCallReady(meta.clone());
+        }
+
+        // Build committed turn.
+        let mut committed_items = Vec::new();
+        if !text_content.is_empty() {
+            committed_items.push(OpenAiTurnItem::Text { content: text_content });
+        }
+        for finalized in tool_calls.finalized.values() {
+            let arguments = RawJson::parse(finalized.arguments_json.clone())?;
+            committed_items.push(OpenAiTurnItem::ToolCall {
+                id: finalized.id.clone(),
+                name: finalized.name.clone(),
+                arguments,
+            });
+        }
+
+        let finish_reason = if saw_tool_call {
+            FinishReason::ToolCall
+        } else if saw_refusal {
+            FinishReason::ContentFilter
+        } else {
+            FinishReason::Stop
+        };
+
+        if started {
+            let committed_turn = Arc::new(OpenAiCommittedTurn {
+                request_id: request_id.clone(),
+                model: model.clone(),
+                items: committed_items,
+                finish_reason: finish_reason.clone(),
+                usage: last_usage,
+            });
+            yield ErasedTextTurnEvent::Completed {
+                request_id: request_id.clone(),
+                finish_reason,
+                usage: last_usage,
+                committed_turn,
+            };
+        }
+    }
+}
+
+fn parse_chat_usage(usage: &crate::chat::CompletionUsage) -> Usage {
+    Usage {
+        input_tokens: usage.prompt_tokens,
+        output_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+        cost_micros_usd: 0,
+        ..Usage::zero()
     }
 }
 
