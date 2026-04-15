@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::validator::{derive_preview_select, is_update_sql};
+use super::validator::{derive_preview_select, extract_update_table_and_where, is_update_sql};
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -213,66 +213,146 @@ impl SqliteDb {
     }
 
     /// Dry-run a write: execute inside a savepoint, capture changes(), then rollback.
-    /// For UPDATE statements also captures the after-state inside the savepoint so
-    /// the approval UI can show a before/after diff.
+    /// For UPDATE statements captures before/after states using rowid-based queries so
+    /// that diffs remain correct even when SET modifies columns used in the WHERE clause.
     pub fn dry_run_write(&self, sql: &str) -> Result<WritePreview, DbError> {
         let conn = self.conn.lock().unwrap();
         let is_update = is_update_sql(sql);
 
-        // Helper: run a SELECT and return QueryResult (conn already locked).
-        let run_select = |sel_sql: &str| -> Result<QueryResult, rusqlite::Error> {
-            let mut stmt = conn.prepare(sel_sql)?;
-            let columns: Vec<String> =
-                stmt.column_names().into_iter().map(String::from).collect();
-            let col_count = columns.len();
-            let rows: Vec<Vec<String>> = stmt
-                .query_map([], |row| {
-                    (0..col_count)
-                        .map(|i| row.get::<_, rusqlite::types::Value>(i).map(value_to_string))
-                        .collect()
-                })?
-                .collect::<Result<_, _>>()?;
-            Ok(QueryResult { columns, rows })
+        // Helper: run `SELECT rowid, * …`, strip the rowid column from the result,
+        // and return (QueryResult, collected rowids).
+        let run_rowid_select = |sel_sql: &str| -> (QueryResult, Vec<i64>) {
+            let inner = || -> Result<(QueryResult, Vec<i64>), rusqlite::Error> {
+                let mut stmt = conn.prepare(sel_sql)?;
+                let all_cols: Vec<String> =
+                    stmt.column_names().into_iter().map(String::from).collect();
+                // all_cols[0] is "rowid"; need at least one data column.
+                if all_cols.len() < 2 {
+                    return Ok((QueryResult::empty(), vec![]));
+                }
+                let col_count = all_cols.len();
+                let mut ids: Vec<i64> = Vec::new();
+                let mut rows: Vec<Vec<String>> = Vec::new();
+                let mut qr = stmt.query([])?;
+                while let Some(row) = qr.next()? {
+                    ids.push(row.get(0)?);
+                    rows.push(
+                        (1..col_count)
+                            .map(|i| {
+                                row.get::<_, rusqlite::types::Value>(i).map(value_to_string)
+                            })
+                            .collect::<Result<_, _>>()?,
+                    );
+                }
+                Ok((QueryResult { columns: all_cols[1..].to_vec(), rows }, ids))
+            };
+            inner().unwrap_or_else(|_| (QueryResult::empty(), vec![]))
         };
 
-        let preview_sel = derive_preview_select(sql);
-
-        conn.execute("SAVEPOINT sqlite_agent_dry_run", [])?;
-
-        let rows_affected: u64 = match conn.execute_batch(sql) {
-            Ok(_) => {
-                let n: i64 = conn
-                    .query_row("SELECT changes()", [], |r| r.get(0))
-                    .unwrap_or(0);
-                n.max(0) as u64
-            }
-            Err(_) => 0,
+        // Helper: plain SELECT (used for non-UPDATE paths).
+        let run_select = |sel_sql: &str| -> QueryResult {
+            let inner = || -> Result<QueryResult, rusqlite::Error> {
+                let mut stmt = conn.prepare(sel_sql)?;
+                let columns: Vec<String> =
+                    stmt.column_names().into_iter().map(String::from).collect();
+                let col_count = columns.len();
+                let rows: Vec<Vec<String>> = stmt
+                    .query_map([], |row| {
+                        (0..col_count)
+                            .map(|i| row.get::<_, rusqlite::types::Value>(i).map(value_to_string))
+                            .collect()
+                    })?
+                    .collect::<Result<_, _>>()?;
+                Ok(QueryResult { columns, rows })
+            };
+            inner().unwrap_or_else(|_| QueryResult::empty())
         };
 
-        // Capture after-state inside the savepoint (UPDATE only, and only when rows changed).
-        let sample_after = if is_update && rows_affected > 0 {
-            preview_sel
-                .as_deref()
-                .and_then(|sel| run_select(sel).ok())
+        if is_update {
+            let update_meta = extract_update_table_and_where(sql);
+
+            // Build `SELECT rowid, * FROM t WHERE … LIMIT 10` for the before-state.
+            let before_sel = update_meta.as_ref().map(|(table, where_clause)| {
+                match where_clause {
+                    Some(w) => format!("SELECT rowid, * FROM {table} WHERE {w} LIMIT 10"),
+                    None => format!("SELECT rowid, * FROM {table} LIMIT 10"),
+                }
+            });
+
+            // Capture before-state (outside savepoint = current data) and collect rowids.
+            let (sample_before, rowids) = match before_sel.as_deref() {
+                Some(sel) => run_rowid_select(sel),
+                None => (QueryResult::empty(), vec![]),
+            };
+
+            // Execute UPDATE inside savepoint.
+            conn.execute("SAVEPOINT sqlite_agent_dry_run", [])?;
+            let rows_affected: u64 = match conn.execute_batch(sql) {
+                Ok(_) => {
+                    let n: i64 = conn
+                        .query_row("SELECT changes()", [], |r| r.get(0))
+                        .unwrap_or(0);
+                    n.max(0) as u64
+                }
+                Err(_) => 0,
+            };
+
+            // Capture after-state by rowid (ORDER BY rowid matches before-state order).
+            // Using rowid IN (…) avoids the WHERE-column problem: even if SET changed
+            // a column that appeared in the original WHERE clause, the rowids are stable.
+            let sample_after = if rows_affected > 0 && !rowids.is_empty() {
+                let ids_str = rowids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let table = update_meta.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
+                let after_sel = format!(
+                    "SELECT rowid, * FROM {table} WHERE rowid IN ({ids_str}) ORDER BY rowid"
+                );
+                let (qr, _) = run_rowid_select(&after_sel);
+                if qr.columns.is_empty() { None } else { Some(qr) }
+            } else {
+                None
+            };
+
+            conn.execute("ROLLBACK TO SAVEPOINT sqlite_agent_dry_run", [])?;
+            conn.execute("RELEASE SAVEPOINT sqlite_agent_dry_run", [])?;
+
+            Ok(WritePreview {
+                sql: sql.to_string(),
+                rows_affected,
+                sample: sample_before,
+                sample_after,
+            })
         } else {
-            None
-        };
+            // Non-UPDATE (DELETE / INSERT): original behaviour.
+            let preview_sel = derive_preview_select(sql);
+            conn.execute("SAVEPOINT sqlite_agent_dry_run", [])?;
+            let rows_affected: u64 = match conn.execute_batch(sql) {
+                Ok(_) => {
+                    let n: i64 = conn
+                        .query_row("SELECT changes()", [], |r| r.get(0))
+                        .unwrap_or(0);
+                    n.max(0) as u64
+                }
+                Err(_) => 0,
+            };
+            conn.execute("ROLLBACK TO SAVEPOINT sqlite_agent_dry_run", [])?;
+            conn.execute("RELEASE SAVEPOINT sqlite_agent_dry_run", [])?;
 
-        conn.execute("ROLLBACK TO SAVEPOINT sqlite_agent_dry_run", [])?;
-        conn.execute("RELEASE SAVEPOINT sqlite_agent_dry_run", [])?;
+            let sample = match preview_sel.as_deref() {
+                Some(sel) => run_select(sel),
+                None => QueryResult::empty(),
+            };
 
-        // Capture before-state after rollback (current table state).
-        let sample = match preview_sel.as_deref() {
-            Some(sel_sql) => run_select(sel_sql).unwrap_or_else(|_| QueryResult::empty()),
-            None => QueryResult::empty(),
-        };
-
-        Ok(WritePreview {
-            sql: sql.to_string(),
-            rows_affected,
-            sample,
-            sample_after,
-        })
+            Ok(WritePreview {
+                sql: sql.to_string(),
+                rows_affected,
+                sample,
+                sample_after: None,
+            })
+        }
     }
 
     /// Execute a write statement (INSERT / UPDATE / DELETE). Always commits.

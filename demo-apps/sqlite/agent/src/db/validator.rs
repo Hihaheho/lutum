@@ -84,6 +84,24 @@ pub fn derive_preview_select(sql: &str) -> Option<String> {
     }
 }
 
+/// For an UPDATE statement, returns `(table_name, where_clause)`.
+/// Used to build rowid-based before/after preview queries.
+pub fn extract_update_table_and_where(sql: &str) -> Option<(String, Option<String>)> {
+    let mut stmts = Parser::parse_sql(&SQLiteDialect {}, sql).ok()?;
+    if stmts.len() != 1 {
+        return None;
+    }
+    match stmts.remove(0) {
+        Statement::Update {
+            table, selection, ..
+        } => Some((
+            table.relation.to_string(),
+            selection.map(|s| s.to_string()),
+        )),
+        _ => None,
+    }
+}
+
 /// Returns true when `sql` is a single UPDATE statement.
 /// Returns false on parse error or any other statement kind.
 pub fn is_update_sql(sql: &str) -> bool {
