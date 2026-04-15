@@ -1,7 +1,8 @@
 use lutum::{
-    CommitTurn, FinishReason, MockLlmAdapter, MockStructuredScenario, MockTextScenario, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcomeWithTools,
-    TextStepOutcomeWithTools, Usage,
+    AssistantTurnView, CommitTurn, EphemeralTurnView, FinishReason, MockLlmAdapter,
+    MockStructuredScenario, MockTextScenario, Session, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, StructuredStepOutcomeWithTools, TextStepOutcomeWithTools, TurnView,
+    Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -296,4 +297,85 @@ fn structured_tool_round_stays_explicit_until_commit() {
 
     assert_eq!(session.input().items().len(), before_len + 2);
     assert_eq!(session.list_turns().count(), 1);
+}
+
+#[test]
+fn ephemeral_turn_view_returns_ephemeral_true() {
+    let inner = Arc::new(AssistantTurnView::from_items(&[])) as lutum::CommittedTurn;
+    let ephemeral = EphemeralTurnView::new(inner.clone());
+    assert!(ephemeral.ephemeral(), "EphemeralTurnView::ephemeral() should be true");
+    assert!(!inner.ephemeral(), "plain CommittedTurn::ephemeral() should be false");
+}
+
+#[test]
+fn push_ephemeral_turn_not_in_session_input() {
+    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
+    let adapter = MockLlmAdapter::new();
+    let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
+    let mut session = Session::new(ctx);
+    session.push_user("Hello.");
+
+    let inner = Arc::new(AssistantTurnView::from_items(&[])) as lutum::CommittedTurn;
+    let before_input_len = session.input().items().len();
+    let before_turns = session.list_turns().count();
+
+    session.push_ephemeral_turn(inner);
+
+    // Ephemeral turn must NOT appear in session.input() or list_turns()
+    assert_eq!(
+        session.input().items().len(),
+        before_input_len,
+        "push_ephemeral_turn should not add to session.input()"
+    );
+    assert_eq!(
+        session.list_turns().count(),
+        before_turns,
+        "push_ephemeral_turn should not appear in list_turns()"
+    );
+}
+
+#[test]
+fn ephemeral_turn_is_cleared_after_collect() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-ephemeral-1".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "response".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-ephemeral-1".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 5,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
+    let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
+    let mut session = Session::new(ctx);
+    session.push_user("Hello.");
+
+    let ephemeral_turn = Arc::new(AssistantTurnView::from_items(&[])) as lutum::CommittedTurn;
+    session.push_ephemeral_turn(ephemeral_turn);
+
+    assert_eq!(session.list_turns().count(), 0);
+
+    // collect() — ephemeral turn goes into the snapshot sent to the model,
+    // then is cleared from the session. Only the new committed turn remains.
+    futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
+
+    assert_eq!(
+        session.list_turns().count(),
+        1,
+        "only the newly committed assistant turn should be in the session"
+    );
+    // The ephemeral turn is gone — if it had been persisted we'd see 2 turns.
+    assert_eq!(
+        session.input().items().len(),
+        2, // push_user + committed assistant turn
+        "ephemeral turn must not be persisted in session.input()"
+    );
 }

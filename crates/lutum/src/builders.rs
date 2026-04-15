@@ -42,7 +42,7 @@ impl<'a> TurnTarget<'a> {
         }
     }
 
-    fn input(&self) -> ModelInput {
+    fn input(&mut self) -> ModelInput {
         match self {
             Self::Lutum { input, .. } => input.clone(),
             Self::Session { session } => session.snapshot_input(),
@@ -153,7 +153,7 @@ impl<'a> TextTurn<'a> {
 
     pub async fn start(self) -> Result<PendingTextTurn, LutumError> {
         let TextTurn {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -181,7 +181,7 @@ impl<'a> TextTurn<'a> {
         H: EventHandler<lutum_protocol::TextTurnEvent, TextTurnCollectedState>,
     {
         let TextTurn {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -207,7 +207,7 @@ impl<'a> TextTurn<'a> {
         CollectError<Infallible, TextTurnReductionError, TextTurnCollectedState>,
     > {
         let TextTurn {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -233,7 +233,7 @@ impl<'a> TextTurn<'a> {
         CollectError<Infallible, TextTurnReductionError, TextTurnCollectedState>,
     > {
         let TextTurn {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -357,7 +357,7 @@ where
 
     pub async fn start(self) -> Result<PendingTextTurnWithTools<T>, LutumError> {
         let TextTurnWithTools {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -386,7 +386,7 @@ where
         H: EventHandler<lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
     {
         let TextTurnWithTools {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -424,7 +424,7 @@ where
         CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
     > {
         let TextTurnWithTools {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -549,7 +549,7 @@ where
 
     pub async fn start(self) -> Result<PendingStructuredTurn<O>, LutumError> {
         let StructuredTurn {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -577,7 +577,7 @@ where
         H: EventHandler<lutum_protocol::StructuredTurnEvent<O>, StructuredTurnCollectedState<O>>,
     {
         let StructuredTurn {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -603,7 +603,7 @@ where
         CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<O>>,
     > {
         let StructuredTurn {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -629,7 +629,7 @@ where
         CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<O>>,
     > {
         let StructuredTurn {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -758,7 +758,7 @@ where
 
     pub async fn start(self) -> Result<PendingStructuredTurnWithTools<T, O>, LutumError> {
         let StructuredTurnWithTools {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -790,7 +790,7 @@ where
             >,
     {
         let StructuredTurnWithTools {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
@@ -874,7 +874,7 @@ where
         >,
     > {
         let StructuredTurnWithTools {
-            target,
+            mut target,
             extensions,
             mut turn,
         } = self;
