@@ -573,6 +573,105 @@ fn render_query_table(f: &mut Frame, area: Rect, qr: &QueryResult) {
     f.render_widget(table, area);
 }
 
+fn render_diff_table(f: &mut Frame, area: Rect, before: &QueryResult, after: &QueryResult) {
+    if before.columns.is_empty() {
+        f.render_widget(
+            Paragraph::new("(no rows to preview)").style(Style::default().fg(Color::DarkGray)),
+            area,
+        );
+        return;
+    }
+
+    // Header: leading indicator column + data columns
+    let mut header_cells = vec![Cell::from(" ").style(Style::default().add_modifier(Modifier::BOLD))];
+    header_cells.extend(
+        before
+            .columns
+            .iter()
+            .map(|c| Cell::from(c.as_str()).style(Style::default().add_modifier(Modifier::BOLD))),
+    );
+    let header = Row::new(header_cells)
+        .style(Style::default().bg(Color::DarkGray))
+        .height(1);
+
+    let mut rows: Vec<Row> = Vec::new();
+
+    let row_count = before.rows.len().max(after.rows.len());
+    for i in 0..row_count {
+        match (before.rows.get(i), after.rows.get(i)) {
+            (Some(b), Some(a)) => {
+                let any_changed = b.iter().zip(a.iter()).any(|(bv, av)| bv != av);
+                if any_changed {
+                    // Before row: red bg on changed cells
+                    let before_cells: Vec<Cell> =
+                        std::iter::once(Cell::from("−").style(Style::default().fg(Color::Red)))
+                            .chain(b.iter().zip(a.iter()).map(|(bv, av)| {
+                                let cell = Cell::from(bv.as_str());
+                                if bv != av {
+                                    cell.style(Style::default().bg(Color::Red).fg(Color::White))
+                                } else {
+                                    cell
+                                }
+                            }))
+                            .collect();
+                    rows.push(Row::new(before_cells).height(1));
+
+                    // After row: green bg on changed cells
+                    let after_cells: Vec<Cell> =
+                        std::iter::once(Cell::from("+").style(Style::default().fg(Color::Green)))
+                            .chain(b.iter().zip(a.iter()).map(|(bv, av)| {
+                                let cell = Cell::from(av.as_str());
+                                if bv != av {
+                                    cell.style(Style::default().bg(Color::Green).fg(Color::Black))
+                                } else {
+                                    cell
+                                }
+                            }))
+                            .collect();
+                    rows.push(Row::new(after_cells).height(1));
+                } else {
+                    // Unchanged row
+                    let cells: Vec<Cell> = std::iter::once(Cell::from(" "))
+                        .chain(b.iter().map(|v| Cell::from(v.as_str())))
+                        .collect();
+                    rows.push(Row::new(cells).height(1));
+                }
+            }
+            (Some(b), None) => {
+                let cells: Vec<Cell> =
+                    std::iter::once(Cell::from("−").style(Style::default().fg(Color::Red)))
+                        .chain(b.iter().map(|v| {
+                            Cell::from(v.as_str())
+                                .style(Style::default().bg(Color::Red).fg(Color::White))
+                        }))
+                        .collect();
+                rows.push(Row::new(cells).height(1));
+            }
+            (None, Some(a)) => {
+                let cells: Vec<Cell> =
+                    std::iter::once(Cell::from("+").style(Style::default().fg(Color::Green)))
+                        .chain(a.iter().map(|v| {
+                            Cell::from(v.as_str())
+                                .style(Style::default().bg(Color::Green).fg(Color::Black))
+                        }))
+                        .collect();
+                rows.push(Row::new(cells).height(1));
+            }
+            (None, None) => {}
+        }
+    }
+
+    let col_count = before.columns.len().max(1);
+    let mut widths = vec![Constraint::Length(1)];
+    widths.extend(vec![Constraint::Ratio(1, col_count as u32); col_count]);
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default());
+
+    f.render_widget(table, area);
+}
+
 // ---------------------------------------------------------------------------
 // Input bar
 // ---------------------------------------------------------------------------
@@ -639,7 +738,9 @@ fn render_mode_request_modal(f: &mut Frame, area: Rect, reason: &str) {
 }
 
 fn render_approval_modal(f: &mut Frame, area: Rect, preview: &WritePreview) {
-    let modal_area = centered_modal(area, 70, 20);
+    let has_diff = preview.sample_after.is_some();
+    let modal_height = if has_diff { 30 } else { 20 };
+    let modal_area = centered_modal(area, 80, modal_height);
 
     f.render_widget(Clear, modal_area);
 
@@ -650,12 +751,15 @@ fn render_approval_modal(f: &mut Frame, area: Rect, preview: &WritePreview) {
     let inner = block.inner(modal_area);
     f.render_widget(block, modal_area);
 
+    let diff_label_height: u16 = if has_diff { 1 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // SQL + rows affected
-            Constraint::Min(0),    // sample table
-            Constraint::Length(1), // controls
+            Constraint::Length(2),                  // SQL + rows affected
+            Constraint::Length(diff_label_height),  // "− Before  + After" label (UPDATE only)
+            Constraint::Min(0),                     // sample / diff table
+            Constraint::Length(1),                  // controls
         ])
         .split(inner);
 
@@ -681,8 +785,28 @@ fn render_approval_modal(f: &mut Frame, area: Rect, preview: &WritePreview) {
     ]);
     f.render_widget(header, chunks[0]);
 
-    if !preview.sample.columns.is_empty() {
-        render_query_table(f, chunks[1], &preview.sample);
+    if has_diff {
+        let label = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "− Before  ",
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "+ After",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        f.render_widget(label, chunks[1]);
+    }
+
+    if let Some(ref after) = preview.sample_after {
+        render_diff_table(f, chunks[2], &preview.sample, after);
+    } else if !preview.sample.columns.is_empty() {
+        render_query_table(f, chunks[2], &preview.sample);
     }
 
     let controls = Paragraph::new(Line::from(vec![
@@ -694,5 +818,5 @@ fn render_approval_modal(f: &mut Frame, area: Rect, preview: &WritePreview) {
         Span::raw("   "),
         Span::styled("[Esc] Cancel", Style::default().fg(Color::DarkGray)),
     ]));
-    f.render_widget(controls, chunks[2]);
+    f.render_widget(controls, chunks[3]);
 }

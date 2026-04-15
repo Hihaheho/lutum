@@ -83,3 +83,15 @@ pub fn derive_preview_select(sql: &str) -> Option<String> {
         _ => None,
     }
 }
+
+/// Returns true when `sql` is a single UPDATE statement.
+/// Returns false on parse error or any other statement kind.
+pub fn is_update_sql(sql: &str) -> bool {
+    let Ok(mut stmts) = Parser::parse_sql(&SQLiteDialect {}, sql) else {
+        return false;
+    };
+    if stmts.len() != 1 {
+        return false;
+    }
+    matches!(stmts.remove(0), Statement::Update { .. })
+}

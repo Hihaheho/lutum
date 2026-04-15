@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::validator::derive_preview_select;
+use super::validator::{derive_preview_select, is_update_sql};
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -132,6 +132,8 @@ pub struct WritePreview {
     pub sql: String,
     pub rows_affected: u64,
     pub sample: QueryResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_after: Option<QueryResult>,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,9 +213,30 @@ impl SqliteDb {
     }
 
     /// Dry-run a write: execute inside a savepoint, capture changes(), then rollback.
-    /// Also returns a sample of rows that would be affected (via derived SELECT).
+    /// For UPDATE statements also captures the after-state inside the savepoint so
+    /// the approval UI can show a before/after diff.
     pub fn dry_run_write(&self, sql: &str) -> Result<WritePreview, DbError> {
         let conn = self.conn.lock().unwrap();
+        let is_update = is_update_sql(sql);
+
+        // Helper: run a SELECT and return QueryResult (conn already locked).
+        let run_select = |sel_sql: &str| -> Result<QueryResult, rusqlite::Error> {
+            let mut stmt = conn.prepare(sel_sql)?;
+            let columns: Vec<String> =
+                stmt.column_names().into_iter().map(String::from).collect();
+            let col_count = columns.len();
+            let rows: Vec<Vec<String>> = stmt
+                .query_map([], |row| {
+                    (0..col_count)
+                        .map(|i| row.get::<_, rusqlite::types::Value>(i).map(value_to_string))
+                        .collect()
+                })?
+                .collect::<Result<_, _>>()?;
+            Ok(QueryResult { columns, rows })
+        };
+
+        let preview_sel = derive_preview_select(sql);
+
         conn.execute("SAVEPOINT sqlite_agent_dry_run", [])?;
 
         let rows_affected: u64 = match conn.execute_batch(sql) {
@@ -226,25 +249,21 @@ impl SqliteDb {
             Err(_) => 0,
         };
 
+        // Capture after-state inside the savepoint (UPDATE only, and only when rows changed).
+        let sample_after = if is_update && rows_affected > 0 {
+            preview_sel
+                .as_deref()
+                .and_then(|sel| run_select(sel).ok())
+        } else {
+            None
+        };
+
         conn.execute("ROLLBACK TO SAVEPOINT sqlite_agent_dry_run", [])?;
         conn.execute("RELEASE SAVEPOINT sqlite_agent_dry_run", [])?;
 
-        // Best-effort: show sample rows that would be affected
-        let sample = match derive_preview_select(sql) {
-            Some(sel_sql) => {
-                let mut stmt = conn.prepare(&sel_sql)?;
-                let columns: Vec<String> =
-                    stmt.column_names().into_iter().map(String::from).collect();
-                let col_count = columns.len();
-                let rows: Vec<Vec<String>> = stmt
-                    .query_map([], |row| {
-                        (0..col_count)
-                            .map(|i| row.get::<_, rusqlite::types::Value>(i).map(value_to_string))
-                            .collect()
-                    })?
-                    .collect::<Result<_, _>>()?;
-                QueryResult { columns, rows }
-            }
+        // Capture before-state after rollback (current table state).
+        let sample = match preview_sel.as_deref() {
+            Some(sel_sql) => run_select(sel_sql).unwrap_or_else(|_| QueryResult::empty()),
             None => QueryResult::empty(),
         };
 
@@ -252,6 +271,7 @@ impl SqliteDb {
             sql: sql.to_string(),
             rows_affected,
             sample,
+            sample_after,
         })
     }
 
