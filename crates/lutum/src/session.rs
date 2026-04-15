@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use lutum_protocol::{
-    AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, FinishReason,
-    GenerationParams, HookableToolset, InputMessageRole, IntoToolResult, ModelInput,
+    AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, EphemeralTurnView,
+    FinishReason, GenerationParams, HookableToolset, InputMessageRole, IntoToolResult, ModelInput,
     ModelInputItem, RejectedToolCall, RejectedToolSource, RequestBudget, ToolHookOutcome,
     ToolHooks, ToolMetadata, ToolResult, ToolResultError, Toolset, TurnConfig, TurnView,
     UncommittedAssistantTurn,
@@ -52,6 +52,7 @@ pub struct Session {
     lutum: Lutum,
     input: ModelInput,
     defaults: SessionDefaults,
+    ephemeral_turns: Vec<CommittedTurn>,
 }
 
 impl Session {
@@ -60,6 +61,7 @@ impl Session {
             lutum,
             input: ModelInput::new(),
             defaults: SessionDefaults::default(),
+            ephemeral_turns: Vec::new(),
         }
     }
 
@@ -126,8 +128,23 @@ impl Session {
             .push(ModelInputItem::text(InputMessageRole::User, text));
     }
 
-    pub(crate) fn snapshot_input(&self) -> ModelInput {
-        self.input.clone()
+    /// Push a turn that will be included in the next model request but not
+    /// persisted to the session transcript.
+    ///
+    /// The turn is wrapped in [`EphemeralTurnView`] so that `turn.ephemeral()` returns `true`.
+    /// All accumulated ephemeral turns are flushed into the model-input snapshot when the next
+    /// turn is collected, then cleared from the session.
+    pub fn push_ephemeral_turn(&mut self, turn: CommittedTurn) {
+        let wrapped = std::sync::Arc::new(EphemeralTurnView::new(turn)) as CommittedTurn;
+        self.ephemeral_turns.push(wrapped);
+    }
+
+    pub(crate) fn snapshot_input(&mut self) -> ModelInput {
+        let mut snapshot = self.input.clone();
+        for turn in self.ephemeral_turns.drain(..) {
+            snapshot.push(ModelInputItem::Turn(turn));
+        }
+        snapshot
     }
 
     pub(crate) fn apply_defaults<T>(&self, turn: &mut TurnConfig<T>)

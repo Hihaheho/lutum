@@ -62,6 +62,12 @@ pub trait TurnView: fmt::Debug + Send + Sync {
 
     /// Returns this turn as `Any` for adapter-specific downcasting.
     fn as_any(&self) -> &dyn Any;
+
+    /// Returns `true` if this turn is ephemeral (included in the next model request
+    /// but not persisted to the session transcript). Defaults to `false`.
+    fn ephemeral(&self) -> bool {
+        false
+    }
 }
 
 impl dyn TurnView {
@@ -219,3 +225,44 @@ impl ItemView for CoreAssistantItemView {
 /// Using `Arc` allows `Session` (which is `Clone`) to share committed turns
 /// cheaply across branch sessions without copying.
 pub type CommittedTurn = Arc<dyn TurnView + Send + Sync>;
+
+// ── ephemeral turn wrapper ────────────────────────────────────────────────────
+
+/// A wrapper that marks an inner [`CommittedTurn`] as ephemeral.
+///
+/// Ephemeral turns are included in the model input for a single request but are
+/// not persisted back to the session after the turn completes.
+///
+/// Create one via [`Session::push_ephemeral_turn`], which wraps automatically.
+#[derive(Debug)]
+pub struct EphemeralTurnView {
+    inner: CommittedTurn,
+}
+
+impl EphemeralTurnView {
+    pub fn new(inner: CommittedTurn) -> Self {
+        Self { inner }
+    }
+}
+
+impl TurnView for EphemeralTurnView {
+    fn role(&self) -> TurnRole {
+        self.inner.role()
+    }
+
+    fn item_count(&self) -> usize {
+        self.inner.item_count()
+    }
+
+    fn item_at(&self, index: usize) -> Option<&dyn ItemView> {
+        self.inner.item_at(index)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn ephemeral(&self) -> bool {
+        true
+    }
+}

@@ -64,6 +64,6 @@ pub use toolset::{
     ToolRequirement, ToolResultError, ToolSelector, Toolset,
 };
 pub use transcript::{
-    AssistantTurnView, CommittedTurn, ItemView, ToolCallItemView, ToolResultItemView, TurnItemIter,
-    TurnRole, TurnView,
+    AssistantTurnView, CommittedTurn, EphemeralTurnView, ItemView, ToolCallItemView,
+    ToolResultItemView, TurnItemIter, TurnRole, TurnView,
 };
