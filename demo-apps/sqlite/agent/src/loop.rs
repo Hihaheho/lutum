@@ -76,9 +76,18 @@ impl<E: std::error::Error + 'static> From<AgentLoopError<E>> for AgentError {
 ///
 /// Use this instead of calling `Session::new` directly when you want the
 /// [`AgentHooks::system_prompt`] hook to control the system prompt.
-pub async fn init_session(llm: Lutum, hooks: &AgentHooks) -> Session {
+///
+/// If `started_at` is `Some`, the RFC 3339 timestamp is appended to the system
+/// prompt as `"This session is started at <timestamp>."`. Since WASM cannot
+/// read the system clock, the caller (e.g. the JavaScript host) is responsible
+/// for supplying the current time.
+pub async fn init_session(llm: Lutum, hooks: &AgentHooks, started_at: Option<&str>) -> Session {
     let mut session = Session::new(llm);
-    session.push_system(hooks.system_prompt().await);
+    let mut prompt = hooks.system_prompt().await;
+    if let Some(t) = started_at {
+        prompt.push_str(&format!("\n\nThis session is started at {t}."));
+    }
+    session.push_system(prompt);
     session
 }
 
