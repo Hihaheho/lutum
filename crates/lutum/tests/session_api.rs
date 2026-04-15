@@ -308,7 +308,7 @@ fn ephemeral_turn_view_returns_ephemeral_true() {
 }
 
 #[test]
-fn push_ephemeral_turn_not_in_session_input() {
+fn push_ephemeral_turn_visible_in_input_but_not_in_list_turns() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let adapter = MockLlmAdapter::new();
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
@@ -321,12 +321,13 @@ fn push_ephemeral_turn_not_in_session_input() {
 
     session.push_ephemeral_turn(inner);
 
-    // Ephemeral turn must NOT appear in session.input() or list_turns()
+    // Ephemeral turn IS visible in session.input() so callers can see what will be sent.
     assert_eq!(
         session.input().items().len(),
-        before_input_len,
-        "push_ephemeral_turn should not add to session.input()"
+        before_input_len + 1,
+        "push_ephemeral_turn should add to session.input()"
     );
+    // But it is excluded from list_turns() because it is not a committed turn.
     assert_eq!(
         session.list_turns().count(),
         before_turns,

@@ -52,7 +52,6 @@ pub struct Session {
     lutum: Lutum,
     input: ModelInput,
     defaults: SessionDefaults,
-    ephemeral_turns: Vec<CommittedTurn>,
 }
 
 impl Session {
@@ -61,7 +60,6 @@ impl Session {
             lutum,
             input: ModelInput::new(),
             defaults: SessionDefaults::default(),
-            ephemeral_turns: Vec::new(),
         }
     }
 
@@ -131,19 +129,18 @@ impl Session {
     /// Push a turn that will be included in the next model request but not
     /// persisted to the session transcript.
     ///
-    /// The turn is wrapped in [`EphemeralTurnView`] so that `turn.ephemeral()` returns `true`.
-    /// All accumulated ephemeral turns are flushed into the model-input snapshot when the next
-    /// turn is collected, then cleared from the session.
+    /// The turn is added to `session.input()` as an ephemeral item (visible via
+    /// [`input`](Self::input) but excluded from [`list_turns`](Self::list_turns)).
+    /// When the next turn is collected, the ephemeral items are automatically removed
+    /// from the session before the new committed turn is appended.
     pub fn push_ephemeral_turn(&mut self, turn: CommittedTurn) {
         let wrapped = std::sync::Arc::new(EphemeralTurnView::new(turn)) as CommittedTurn;
-        self.ephemeral_turns.push(wrapped);
+        self.input.push(ModelInputItem::Turn(wrapped));
     }
 
     pub(crate) fn snapshot_input(&mut self) -> ModelInput {
-        let mut snapshot = self.input.clone();
-        for turn in self.ephemeral_turns.drain(..) {
-            snapshot.push(ModelInputItem::Turn(turn));
-        }
+        let snapshot = self.input.clone();
+        self.input.remove_ephemeral_turns();
         snapshot
     }
 
@@ -154,10 +151,15 @@ impl Session {
         self.defaults.apply(turn);
     }
 
-    /// Returns committed turns stored directly in the ordered `ModelInput`.
+    /// Returns committed (non-ephemeral) turns stored in the ordered `ModelInput`.
+    ///
+    /// Ephemeral turns pushed via [`push_ephemeral_turn`](Self::push_ephemeral_turn) are
+    /// visible in [`input`](Self::input) but excluded here.
     pub fn list_turns(&self) -> impl Iterator<Item = &dyn TurnView> {
         self.input.items().iter().filter_map(|item| match item {
-            ModelInputItem::Turn(turn) => Some(turn.as_ref() as &dyn TurnView),
+            ModelInputItem::Turn(turn) if !turn.ephemeral() => {
+                Some(turn.as_ref() as &dyn TurnView)
+            }
             _ => None,
         })
     }

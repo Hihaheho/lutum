@@ -67,6 +67,20 @@ impl ModelInput {
         self
     }
 
+    /// Remove all ephemeral turns from the input.
+    ///
+    /// Called by [`Session`] after a turn's input snapshot has been taken, so that ephemeral
+    /// turns are not persisted to the session transcript.
+    pub fn remove_ephemeral_turns(&mut self) {
+        self.items.retain(|item| {
+            if let ModelInputItem::Turn(turn) = item {
+                !turn.ephemeral()
+            } else {
+                true
+            }
+        });
+    }
+
     pub fn validate(&self) -> Result<(), ModelInputValidationError> {
         if self.items.is_empty() {
             return Err(ModelInputValidationError::Empty);
