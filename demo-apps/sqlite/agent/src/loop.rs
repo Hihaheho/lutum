@@ -11,7 +11,7 @@ use crate::{
         QueryResult, SchemaInfo, SqliteDb, WritePreview, validate_sql_safety,
     },
     hooks::{AgentHooks, TransactionMode, WriteDecision},
-    tools::{SqlTools, SqlToolsCall, SqlToolsSelector},
+    tools::{ShowTableArgs, SqlTools, SqlToolsCall, SqlToolsSelector},
 };
 
 /// A single SQL execution recorded during an agent turn.
@@ -135,7 +135,7 @@ pub async fn run_turn(
 
 fn tool_selectors_for_mode(mode: TransactionMode) -> Vec<SqlToolsSelector> {
     use SqlToolsSelector::*;
-    let read_tools = [ListDatabases, CreateDatabase, GetSchema, Select];
+    let read_tools = [ListDatabases, CreateDatabase, GetSchema, Select, ShowTable];
     match mode {
         TransactionMode::ReadOnly => {
             let mut v = vec![RequestWritableMode];
@@ -346,6 +346,39 @@ async fn dispatch_tool(
                 rows_affected: None,
             });
             Ok(c.complete(result).unwrap())
+        }
+
+        // ── Show table ─────────────────────────────────────────────────────
+        SqlToolsCall::ShowTable(c) => {
+            let input = c.input().clone();
+            match input {
+                ShowTableArgs::SelectQuery { db_id, sql } => {
+                    tracing::debug!(%db_id, %sql, "tool: show_table/select_query");
+                    let Some(db) = registry.get(&db_id) else {
+                        return Ok(c
+                            .complete(error_query(&format!("unknown db_id: '{db_id}'")))
+                            .unwrap());
+                    };
+                    if let Err(e) = validate_sql_safety(&sql) {
+                        return Ok(c.complete(error_query(&e.to_string())).unwrap());
+                    }
+                    match db.execute_read(&sql) {
+                        Ok(qr) => {
+                            sql_history.lock().await.push(SqlHistoryEntry {
+                                sql,
+                                result: qr.clone(),
+                                rows_affected: None,
+                            });
+                            Ok(c.complete(qr).unwrap())
+                        }
+                        Err(e) => Ok(c.complete(error_query(&e.to_string())).unwrap()),
+                    }
+                }
+                ShowTableArgs::Csv { headers, rows } => {
+                    tracing::debug!("tool: show_table/csv");
+                    Ok(c.complete(QueryResult { columns: headers, rows }).unwrap())
+                }
+            }
         }
     }
 }

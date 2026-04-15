@@ -112,6 +112,28 @@ pub struct CreateIndexArgs {
     pub sql: String,
 }
 
+/// Display tabular data to the user as an interactive table.
+/// Use this tool instead of Markdown tables whenever presenting rows of data.
+#[lutum::tool_input(name = "show_table", output = QueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ShowTableArgs {
+    /// Execute a SELECT query and display its result as a table.
+    SelectQuery {
+        /// The database to query. Use `list_databases` to see available ids.
+        db_id: String,
+        /// A valid SQLite SELECT statement.
+        sql: String,
+    },
+    /// Display a table from explicit column headers and row data.
+    Csv {
+        /// Column headers.
+        headers: Vec<String>,
+        /// Row data — one inner Vec per row; all values as strings.
+        rows: Vec<Vec<String>>,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Toolset enum
 // ---------------------------------------------------------------------------
@@ -129,4 +151,5 @@ pub enum SqlTools {
     CreateTable(CreateTableArgs),
     AlterTable(AlterTableArgs),
     CreateIndex(CreateIndexArgs),
+    ShowTable(ShowTableArgs),
 }

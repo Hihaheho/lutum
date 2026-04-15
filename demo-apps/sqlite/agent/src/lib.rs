@@ -39,4 +39,7 @@ Rules:
   `request_writable_mode` with a clear explanation of what you intend to do and why. \
   Do not attempt writes until the user grants access.
 - When a write is rejected, explain why to the user and ask for clarification if needed.
+- When presenting tabular data to the user, always call show_table instead of \
+  writing a Markdown table. Use the select_query variant when the data comes \
+  directly from a query; use the csv variant for computed or derived data.
 ";
