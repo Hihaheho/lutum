@@ -7,7 +7,7 @@ use crate::{Collected, Eval, Objective, PureEval, ScoreEvalError, Scored};
 
 type ScoredResult<R, EE, OE> = Result<Scored<R>, ScoreEvalError<EE, OE>>;
 
-#[async_trait(?Send)]
+#[async_trait]
 pub trait PureEvalExt: PureEval + Sized {
     fn lift(self) -> LiftPure<Self> {
         LiftPure { eval: self }
@@ -66,7 +66,7 @@ pub trait PureEvalExt: PureEval + Sized {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl<T> PureEvalExt for T where T: PureEval + Sized {}
 
 pub struct LiftPure<E> {
@@ -93,7 +93,7 @@ where
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 pub trait EvalExt: Eval + Sized {
     fn map_report<F>(self, map: F) -> MapReport<Self, F> {
         MapReport { eval: self, map }
@@ -158,7 +158,7 @@ pub trait EvalExt: Eval + Sized {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl<T> EvalExt for T where T: Eval + Sized {}
 
 pub struct PureScoredBy<'a, E, O> {
