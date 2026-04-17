@@ -554,13 +554,20 @@ fn build_responses_request(
         AdapterToolChoice::Required | AdapterToolChoice::Specific(_) => false,
         AdapterToolChoice::None | AdapterToolChoice::Auto => true,
     };
-    let tool_choice = match &config.tool_choice {
-        AdapterToolChoice::Required => Some(ToolChoice::Required),
-        AdapterToolChoice::None => Some(ToolChoice::None),
-        AdapterToolChoice::Specific(name) => {
-            Some(ToolChoice::Function(FunctionToolChoice::new(name.clone())))
+    // When the tool list is empty, omit tool_choice entirely — some backends
+    // (e.g. Harmony) reject any tool_choice value other than "auto", and
+    // setting tool_choice when there are no tools is meaningless anyway.
+    let tool_choice = if tools.is_empty() {
+        None
+    } else {
+        match &config.tool_choice {
+            AdapterToolChoice::Required => Some(ToolChoice::Required),
+            AdapterToolChoice::None => Some(ToolChoice::None),
+            AdapterToolChoice::Specific(name) => {
+                Some(ToolChoice::Function(FunctionToolChoice::new(name.clone())))
+            }
+            AdapterToolChoice::Auto => None,
         }
-        AdapterToolChoice::Auto => None,
     };
 
     Ok(crate::responses::ResponsesRequest {
