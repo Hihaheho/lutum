@@ -1749,18 +1749,35 @@ where
     } = config.tools;
 
     // Validate: require_tool(x) must be in the available set when availability is restricted.
-    if let ToolRequirement::Specific(ref selector) = requirement
-        && let ToolAvailability::Only(ref only) = available
-        && !only.contains(selector)
-    {
-        return Err(AgentError::InvalidToolConstraints {
-            tool: selector.name().to_string(),
-        });
+    if let ToolRequirement::Specific(ref selector) = requirement {
+        let in_available = match &available {
+            ToolAvailability::All => true,
+            ToolAvailability::Default => T::default_selectors().contains(selector),
+            ToolAvailability::Only(only) => only.contains(selector),
+            ToolAvailability::DefaultPlus(extra) => {
+                T::default_selectors().contains(selector) || extra.contains(selector)
+            }
+        };
+        if !in_available {
+            return Err(AgentError::InvalidToolConstraints {
+                tool: selector.name().to_string(),
+            });
+        }
     }
 
     let tool_defs = match &available {
         ToolAvailability::All => T::definitions().iter().collect::<Vec<_>>(),
+        ToolAvailability::Default => T::definitions_for(T::default_selectors()),
         ToolAvailability::Only(selectors) => T::definitions_for(selectors.iter().copied()),
+        ToolAvailability::DefaultPlus(extra) => {
+            let mut selectors = T::default_selectors();
+            for s in extra {
+                if !selectors.contains(s) {
+                    selectors.push(*s);
+                }
+            }
+            T::definitions_for(selectors)
+        }
     };
 
     // When the resolved tool list is empty, tools are effectively disabled.
@@ -1901,7 +1918,12 @@ fn is_tool_name_allowed<T: Toolset>(
 ) -> bool {
     match availability {
         ToolAvailability::All => true,
+        ToolAvailability::Default => T::default_selectors().iter().any(|s| s.name() == name),
         ToolAvailability::Only(selectors) => selectors.iter().any(|s| s.name() == name),
+        ToolAvailability::DefaultPlus(extra) => {
+            T::default_selectors().iter().any(|s| s.name() == name)
+                || extra.iter().any(|s| s.name() == name)
+        }
     }
 }
 

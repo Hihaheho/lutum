@@ -22,7 +22,7 @@ use std::{convert::Infallible, future::Future, marker::PhantomData};
 
 use thiserror::Error;
 
-use lutum_protocol::{ToolResult, Toolset, budget::Usage};
+use lutum_protocol::{ToolAvailability, ToolResult, Toolset, budget::Usage};
 
 use crate::{
     HandlerContext, HandlerDirective, Session, TextStepOutcomeWithTools, TextTurnEventWithTools,
@@ -85,7 +85,7 @@ pub struct AgentLoop<'s, T: Toolset> {
     session: &'s mut Session,
     max_rounds: usize,
     on_text_delta: Option<Box<dyn Fn(String) + Send + Sync>>,
-    available: Option<Vec<T::Selector>>,
+    available: Option<ToolAvailability<T::Selector>>,
     _tools: PhantomData<T>,
 }
 
@@ -124,9 +124,18 @@ where
         self
     }
 
-    /// Restrict the available tools to a subset of the toolset for this loop.
+    /// Restrict the available tools to exactly the listed selectors for every
+    /// turn in this loop.
     pub fn available_tools(mut self, selectors: Vec<T::Selector>) -> Self {
-        self.available = Some(selectors);
+        self.available = Some(ToolAvailability::Only(selectors));
+        self
+    }
+
+    /// Expose the default-on toolset *plus* the listed selectors on every
+    /// turn in this loop. Use this to temporarily re-enable variants marked
+    /// `#[tool(off)]` / `#[toolset(off)]` (e.g. a loaded "skill").
+    pub fn available_tools_default_plus(mut self, selectors: Vec<T::Selector>) -> Self {
+        self.available = Some(ToolAvailability::DefaultPlus(selectors));
         self
     }
 
@@ -163,8 +172,17 @@ where
             let cb = on_text_delta.clone();
 
             let mut turn = session.text_turn().tools::<T>();
-            if let Some(ref selectors) = available {
-                turn = turn.available_tools(selectors.iter().cloned());
+            if let Some(ref availability) = available {
+                turn = match availability {
+                    ToolAvailability::All => turn,
+                    ToolAvailability::Default => turn.available_tools_default_plus([]),
+                    ToolAvailability::Only(selectors) => {
+                        turn.available_tools(selectors.iter().copied())
+                    }
+                    ToolAvailability::DefaultPlus(selectors) => {
+                        turn.available_tools_default_plus(selectors.iter().copied())
+                    }
+                };
             }
 
             let outcome = turn

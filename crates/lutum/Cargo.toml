@@ -96,3 +96,6 @@ name = "completion"
 
 [[example]]
 name = "trace_dump"
+
+[[example]]
+name = "skill"

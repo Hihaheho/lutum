@@ -344,13 +344,39 @@ pub trait Toolset: Send + Sync + 'static {
             .collect()
     }
 
+    /// Selectors that are **on by default** — that is, all selectors except
+    /// those marked with `#[tool(off)]` or `#[toolset(off)]` in the
+    /// `#[derive(Toolset)]` macro. Used by [`ToolAvailability::Default`] and
+    /// [`ToolAvailability::DefaultPlus`] to expand the effective toolset.
+    ///
+    /// The default implementation returns every selector reported by
+    /// [`ToolSelector::all`], which matches the behaviour of toolsets that do
+    /// not mark any variants as off-by-default.
+    fn default_selectors() -> Vec<Self::Selector> {
+        Self::Selector::all().to_vec()
+    }
+
     fn parse_tool_call(metadata: ToolMetadata) -> Result<Self::ToolCall, ToolCallError>;
 }
 
+/// Policy describing which tools the model is allowed to call on a turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolAvailability<S> {
+    /// Every tool in the toolset is available — including variants marked
+    /// `#[tool(off)]` / `#[toolset(off)]`.
     All,
+    /// Only tools that are on by default are available (see
+    /// [`Toolset::default_selectors`]). Variants marked off-by-default are
+    /// hidden unless explicitly re-enabled via [`ToolAvailability::DefaultPlus`]
+    /// or [`ToolAvailability::Only`].
+    Default,
+    /// Only the listed selectors are available. This is an explicit whitelist
+    /// that ignores default-on/off status.
     Only(Vec<S>),
+    /// The union of [`ToolAvailability::Default`] and the listed selectors.
+    /// Typical use: re-enable a specific skill's tools while keeping the rest
+    /// of the default-on set intact.
+    DefaultPlus(Vec<S>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -374,7 +400,11 @@ pub struct ToolConstraints<T: Toolset> {
 impl<T: Toolset> Default for ToolConstraints<T> {
     fn default() -> Self {
         Self {
-            available: ToolAvailability::All,
+            // Default-off variants (`#[tool(off)]` / `#[toolset(off)]`) stay
+            // hidden unless the caller explicitly opts into `All`, `Only`, or
+            // `DefaultPlus`. For toolsets with no off-by-default variants this
+            // behaves identically to the old `All` default.
+            available: ToolAvailability::Default,
             requirement: ToolRequirement::Optional,
             description_overrides: Vec::new(),
         }

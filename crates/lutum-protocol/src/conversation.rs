@@ -24,6 +24,10 @@ impl ModelInput {
         &self.items
     }
 
+    pub fn items_mut(&mut self) -> &mut Vec<ModelInputItem> {
+        &mut self.items
+    }
+
     pub fn into_items(self) -> Vec<ModelInputItem> {
         self.items
     }
@@ -67,17 +71,15 @@ impl ModelInput {
         self
     }
 
-    /// Remove all ephemeral turns from the input.
+    /// Remove ephemeral turns from the input.
     ///
-    /// Called by [`Session`] after a turn's input snapshot has been taken, so that ephemeral
-    /// turns are not persisted to the session transcript.
+    /// An item is an ephemeral turn if it is a [`ModelInputItem::Turn`] whose view reports
+    /// `ephemeral() == true` (e.g. an `EphemeralTurnView`). Non-turn ephemerality is tracked
+    /// by `Session` itself and stripped there; this method only handles the turn case.
     pub fn remove_ephemeral_turns(&mut self) {
-        self.items.retain(|item| {
-            if let ModelInputItem::Turn(turn) = item {
-                !turn.ephemeral()
-            } else {
-                true
-            }
+        self.items.retain(|item| match item {
+            ModelInputItem::Turn(turn) => !turn.ephemeral(),
+            _ => true,
         });
     }
 
