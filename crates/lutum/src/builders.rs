@@ -320,6 +320,19 @@ where
         self
     }
 
+    /// Expose the default-on toolset *plus* the listed selectors on this turn.
+    /// This is the typical way to temporarily re-enable variants marked
+    /// `#[tool(off)]` / `#[toolset(off)]` (e.g. a loaded "skill") without
+    /// having to enumerate the rest of the default set.
+    pub fn available_tools_default_plus(
+        mut self,
+        selectors: impl IntoIterator<Item = T::Selector>,
+    ) -> Self {
+        self.turn.config.tools.available =
+            ToolAvailability::DefaultPlus(selectors.into_iter().collect());
+        self
+    }
+
     pub fn require_any_tool(mut self) -> Self {
         self.turn.config.tools.requirement = ToolRequirement::AtLeastOne;
         self
@@ -718,6 +731,19 @@ where
 
     pub fn available_tools(mut self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
         self.turn.config.tools.available = ToolAvailability::Only(selectors.into_iter().collect());
+        self
+    }
+
+    /// Expose the default-on toolset *plus* the listed selectors on this turn.
+    /// This is the typical way to temporarily re-enable variants marked
+    /// `#[tool(off)]` / `#[toolset(off)]` (e.g. a loaded "skill") without
+    /// having to enumerate the rest of the default set.
+    pub fn available_tools_default_plus(
+        mut self,
+        selectors: impl IntoIterator<Item = T::Selector>,
+    ) -> Self {
+        self.turn.config.tools.available =
+            ToolAvailability::DefaultPlus(selectors.into_iter().collect());
         self
     }
 

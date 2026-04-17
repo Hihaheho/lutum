@@ -67,17 +67,17 @@ impl ModelInput {
         self
     }
 
-    /// Remove all ephemeral turns from the input.
+    /// Remove all ephemeral items from the input.
     ///
     /// Called by [`Session`] after a turn's input snapshot has been taken, so that ephemeral
-    /// turns are not persisted to the session transcript.
-    pub fn remove_ephemeral_turns(&mut self) {
-        self.items.retain(|item| {
-            if let ModelInputItem::Turn(turn) = item {
-                !turn.ephemeral()
-            } else {
-                true
-            }
+    /// items are not persisted to the session transcript. An item is ephemeral if it is
+    /// wrapped in [`ModelInputItem::Ephemeral`], or (for legacy back-compat) if it is a
+    /// [`ModelInputItem::Turn`] whose view reports `ephemeral() == true`.
+    pub fn remove_ephemerals(&mut self) {
+        self.items.retain(|item| match item {
+            ModelInputItem::Ephemeral(_) => false,
+            ModelInputItem::Turn(turn) => !turn.ephemeral(),
+            _ => true,
         });
     }
 
@@ -88,7 +88,11 @@ impl ModelInput {
 
         let mut tool_results = std::collections::BTreeSet::new();
         for item in &self.items {
-            if let ModelInputItem::ToolResult(tool_result) = item
+            let inner = match item {
+                ModelInputItem::Ephemeral(inner) => inner.as_ref(),
+                other => other,
+            };
+            if let ModelInputItem::ToolResult(tool_result) = inner
                 && !tool_results.insert(tool_result.id.clone())
             {
                 return Err(ModelInputValidationError::DuplicateToolResultId {
@@ -116,6 +120,11 @@ pub enum ModelInputItem {
     Assistant(AssistantInputItem),
     ToolResult(ToolResult),
     Turn(CommittedTurn),
+    /// A wrapper marking the inner item as ephemeral: it is included when the
+    /// next request is compiled, then stripped from the session before any
+    /// committed turn is appended. The inner item is serialized to the wire
+    /// format identically to its unwrapped form.
+    Ephemeral(Box<ModelInputItem>),
 }
 
 impl ModelInputItem {
@@ -161,6 +170,32 @@ impl ModelInputItem {
         result: RawJson,
     ) -> Self {
         Self::ToolResult(ToolResult::new(id, name, arguments, result))
+    }
+
+    /// Wrap this item so it is stripped before the next commit.
+    pub fn ephemeral(self) -> Self {
+        match self {
+            Self::Ephemeral(_) => self,
+            other => Self::Ephemeral(Box::new(other)),
+        }
+    }
+
+    /// Returns `true` if this item is wrapped in [`ModelInputItem::Ephemeral`]
+    /// or is an ephemeral turn view.
+    pub fn is_ephemeral(&self) -> bool {
+        match self {
+            Self::Ephemeral(_) => true,
+            Self::Turn(turn) => turn.ephemeral(),
+            _ => false,
+        }
+    }
+
+    /// Peel a single `Ephemeral` wrapper, if present.
+    pub fn unwrap_ephemeral(&self) -> &ModelInputItem {
+        match self {
+            Self::Ephemeral(inner) => inner.as_ref(),
+            other => other,
+        }
     }
 }
 

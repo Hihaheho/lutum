@@ -626,6 +626,8 @@ fn convert_model_input(input: &ModelInput) -> Result<Vec<InputItem>, OpenAiError
     let mut replayed_tool_call_ids = BTreeSet::new();
 
     for item in input.items() {
+        // Ephemeral wrappers serialize identically to their inner item.
+        let item = item.unwrap_ephemeral();
         match item {
             ModelInputItem::Message { role, content } => {
                 flush_assistant_message(&mut assistant_message_content, &mut items);
@@ -660,6 +662,9 @@ fn convert_model_input(input: &ModelInput) -> Result<Vec<InputItem>, OpenAiError
                         &mut replayed_tool_call_ids,
                     )?;
                 }
+            }
+            ModelInputItem::Ephemeral(_) => {
+                unreachable!("ephemeral wrappers are not nested");
             }
         }
     }
@@ -1977,6 +1982,8 @@ fn convert_model_input_to_chat_messages(
     };
 
     for item in input.items() {
+        // Ephemeral wrappers serialize identically to their inner item.
+        let item = item.unwrap_ephemeral();
         match item {
             ModelInputItem::Message { role, content } => {
                 flush_assistant(&mut pending_assistant, &mut messages);
@@ -2056,6 +2063,9 @@ fn convert_model_input_to_chat_messages(
                 } else {
                     emit_turn_view_as_chat_messages(committed_turn.as_ref(), &mut messages);
                 }
+            }
+            ModelInputItem::Ephemeral(_) => {
+                unreachable!("ephemeral wrappers are not nested");
             }
         }
     }

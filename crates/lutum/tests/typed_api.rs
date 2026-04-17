@@ -185,11 +185,10 @@ fn selector_plans_round_trip_and_drive_tool_constraints() {
         description_overrides: Vec::new(),
     };
     let selected = match &constraints.available {
-        ToolAvailability::Only(selectors) => selectors
-            .iter()
-            .map(|selector| selector.name())
-            .collect::<Vec<_>>(),
-        ToolAvailability::All => vec![],
+        ToolAvailability::Only(selectors) | ToolAvailability::DefaultPlus(selectors) => {
+            selectors.iter().map(|selector| selector.name()).collect::<Vec<_>>()
+        }
+        ToolAvailability::All | ToolAvailability::Default => vec![],
     };
 
     assert_eq!(selected, vec!["weather"]);

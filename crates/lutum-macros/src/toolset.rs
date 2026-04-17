@@ -21,6 +21,28 @@ fn has_toolset_attr(variant: &Variant) -> bool {
     variant.attrs.iter().any(|attr| attr.path().is_ident("toolset"))
 }
 
+/// True iff the variant is marked default-off via `#[toolset(off)]` (nested)
+/// or `#[tool(off)]` (regular). Any other shape of the attribute is accepted
+/// silently to stay forward-compatible with future keys.
+fn is_default_off(variant: &Variant) -> bool {
+    variant.attrs.iter().any(|attr| {
+        if !(attr.path().is_ident("toolset") || attr.path().is_ident("tool")) {
+            return false;
+        }
+        let mut off = false;
+        // `#[toolset]` (no args) — not off. `#[toolset(off)]` — off.
+        // Errors in parse_nested_meta don't propagate here; we only care about
+        // recognizing `off`. Unknown keys are ignored.
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("off") {
+                off = true;
+            }
+            Ok(())
+        });
+        off
+    })
+}
+
 pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     let enum_ident = input.ident.clone();
     let vis = input.vis.clone();
@@ -58,6 +80,9 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     // Selector::all() — only used when has_nested; otherwise `&'static [Self]` slice.
     let mut selector_all_push: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut selector_all_static = Vec::new(); // for non-nested case
+    // default_selectors() — like selector_all_push / selector_all_static but
+    // excludes variants annotated with `#[tool(off)]` or `#[toolset(off)]`.
+    let mut default_selectors_push: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut selector_expected_names = Vec::new();
     let mut handled_into_tool_result_arms = Vec::new();
     let mut handled_from_impls = Vec::new();
@@ -76,6 +101,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     for variant in variants.into_iter() {
         let variant_ident = variant.ident.clone();
         let method_ident = format_ident!("{}", variant_ident.to_string().to_snake_case());
+        let variant_default_off = is_default_off(&variant);
 
         let input_ty = match &variant.fields {
             Fields::Unnamed(FieldsUnnamed { unnamed, .. }) if unnamed.len() == 1 => {
@@ -176,6 +202,10 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                 selector_try_from_arms.push(quote! { #tool_name => Some(Self::#variant_ident) });
                 selector_all_static.push(quote! { Self::#variant_ident });
                 selector_all_push.push(quote! { __v.push(Self::#variant_ident); });
+                if !variant_default_off {
+                    default_selectors_push
+                        .push(quote! { __v.push(#selector_enum_ident::#variant_ident); });
+                }
                 selector_expected_names.push(tool_name.clone());
 
                 parse_arms.push(quote! {
@@ -364,6 +394,17 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                         __v.push(Self::#variant_ident(__s));
                     }
                 });
+                // default_selectors: a nested toolset marked `#[toolset(off)]`
+                // is hidden until explicitly re-enabled, so we skip it entirely.
+                // Otherwise, pass through the inner toolset's own default set
+                // (which itself respects `#[tool(off)]` / `#[toolset(off)]`).
+                if !variant_default_off {
+                    default_selectors_push.push(quote! {
+                        for __s in <#toolset_ty as ::lutum::Toolset>::default_selectors() {
+                            __v.push(#selector_enum_ident::#variant_ident(__s));
+                        }
+                    });
+                }
 
                 // parse_tool_call — nested tries happen AFTER the regular match, not inside it
                 nested_parse_fallbacks.push(quote! {
@@ -771,6 +812,12 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
 
             fn definitions() -> &'static [::lutum::ToolDef] {
                 #defs_body
+            }
+
+            fn default_selectors() -> ::std::vec::Vec<Self::Selector> {
+                let mut __v: ::std::vec::Vec<#selector_enum_ident> = ::std::vec::Vec::new();
+                #(#default_selectors_push)*
+                __v
             }
 
             fn parse_tool_call(

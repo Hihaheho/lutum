@@ -152,7 +152,7 @@ pub fn impl_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_hook_impl(item_fn, slot_path).into()
 }
 
-#[proc_macro_derive(Toolset, attributes(toolset))]
+#[proc_macro_derive(Toolset, attributes(toolset, tool))]
 pub fn derive_toolset(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand_toolset(input).into()

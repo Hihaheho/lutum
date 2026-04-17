@@ -126,21 +126,44 @@ impl Session {
             .push(ModelInputItem::text(InputMessageRole::User, text));
     }
 
-    /// Push a turn that will be included in the next model request but not
-    /// persisted to the session transcript.
+    /// Push an arbitrary item that will be included in the next model request
+    /// but not persisted to the session transcript.
     ///
-    /// The turn is added to `session.input()` as an ephemeral item (visible via
-    /// [`input`](Self::input) but excluded from [`list_turns`](Self::list_turns)).
-    /// When the next turn is collected, the ephemeral items are automatically removed
-    /// from the session before the new committed turn is appended.
+    /// The item is wrapped in [`ModelInputItem::Ephemeral`]. When the next turn
+    /// is collected, ephemeral items are automatically stripped before the new
+    /// committed turn is appended.
+    pub fn push_ephemeral(&mut self, item: impl Into<ModelInputItem>) {
+        self.input.push(item.into().ephemeral());
+    }
+
+    /// Push an ephemeral system message (stripped before commit).
+    pub fn push_ephemeral_system(&mut self, text: impl Into<String>) {
+        self.push_ephemeral(ModelInputItem::text(InputMessageRole::System, text));
+    }
+
+    /// Push an ephemeral developer message (stripped before commit).
+    pub fn push_ephemeral_developer(&mut self, text: impl Into<String>) {
+        self.push_ephemeral(ModelInputItem::text(InputMessageRole::Developer, text));
+    }
+
+    /// Push an ephemeral user message (stripped before commit).
+    pub fn push_ephemeral_user(&mut self, text: impl Into<String>) {
+        self.push_ephemeral(ModelInputItem::text(InputMessageRole::User, text));
+    }
+
+    /// Push an ephemeral committed turn. The turn's wire-format items are
+    /// included in the next request but the turn itself is stripped before the
+    /// next commit. Use [`push_ephemeral`](Self::push_ephemeral) for non-turn
+    /// items (system / developer / user messages, tool results).
     pub fn push_ephemeral_turn(&mut self, turn: CommittedTurn) {
         let wrapped = std::sync::Arc::new(EphemeralTurnView::new(turn)) as CommittedTurn;
-        self.input.push(ModelInputItem::Turn(wrapped));
+        self.input
+            .push(ModelInputItem::Turn(wrapped).ephemeral());
     }
 
     pub(crate) fn snapshot_input(&mut self) -> ModelInput {
         let snapshot = self.input.clone();
-        self.input.remove_ephemeral_turns();
+        self.input.remove_ephemerals();
         snapshot
     }
 
