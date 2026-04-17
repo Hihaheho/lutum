@@ -5,9 +5,9 @@ use thiserror::Error;
 use tracing::{Instrument, Span, field};
 
 use lutum_protocol::{
-    AgentError, CommittedTurn, NoTools, NoToolsContractViolation,
+    AgentError, AssistantInputItem, CommittedTurn, NoTools, NoToolsContractViolation,
     budget::{BudgetLease, BudgetManager, Remaining, Usage, UsageEstimate},
-    conversation::ModelInput,
+    conversation::{MessageContent, ModelInput, ModelInputItem},
     extensions::RequestExtensions,
     llm::{
         AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
@@ -424,6 +424,7 @@ impl Lutum {
             .reserve(&extensions, &estimate, turn.config.budget)?;
         let extensions = Arc::new(extensions);
         let span = turn_span("text_turn", estimate);
+        log_input_transcript(&span, &input);
         let stream = match self
             .turns
             .text_turn(input, erase_text_turn(turn, Arc::clone(&extensions))?)
@@ -468,6 +469,7 @@ impl Lutum {
         let availability = turn.config.tools.available.clone();
         let extensions = Arc::new(extensions);
         let span = turn_span("text_turn", estimate);
+        log_input_transcript(&span, &input);
         let stream = match self
             .turns
             .text_turn(input, erase_text_turn(turn, Arc::clone(&extensions))?)
@@ -677,6 +679,9 @@ impl PendingTextTurn {
                         });
                     }
                     record_request_id(&self.span, self.reducer.state().request_id.as_deref());
+                    if let TextTurnEvent::Completed { committed_turn, .. } = &event {
+                        log_output_turn(&self.span, committed_turn);
+                    }
                     if let Some(usage) = completed_usage_from_text(&event) {
                         if let Err(source) = finalize_budget(
                             &mut self.owned_lease,
@@ -837,6 +842,9 @@ where
                         });
                     }
                     record_request_id(&self.span, self.reducer.state().request_id.as_deref());
+                    if let TextTurnEventWithTools::Completed { committed_turn, .. } = &event {
+                        log_output_turn(&self.span, committed_turn);
+                    }
                     if let Some(usage) = completed_usage_from_text_with_tools(&event) {
                         if let Err(source) = finalize_budget(
                             &mut self.owned_lease,
@@ -2171,6 +2179,104 @@ fn turn_span(kind: &'static str, estimate: UsageEstimate) -> Span {
         estimate_cost_micros_usd = estimate.cost_micros_usd,
         finish_reason = field::Empty
     )
+}
+
+fn format_turn_items(iter: lutum_protocol::transcript::TurnItemIter<'_>, buf: &mut String) {
+    use std::fmt::Write as _;
+    for item in iter {
+        if let Some(t) = item.as_text() {
+            buf.push_str(t);
+            buf.push('\n');
+        }
+        if let Some(t) = item.as_reasoning() {
+            buf.push_str("<reasoning>");
+            buf.push_str(t);
+            buf.push_str("</reasoning>\n");
+        }
+        if let Some(tc) = item.as_tool_call() {
+            writeln!(
+                buf,
+                "<tool_call name={}>{}</tool_call>",
+                tc.name,
+                tc.arguments.get()
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn log_input_transcript(span: &Span, input: &ModelInput) {
+    if !tracing::enabled!(target: "lutum", tracing::Level::DEBUG) {
+        return;
+    }
+    use lutum_protocol::transcript::TurnItemIter;
+    use std::fmt::Write as _;
+    let mut buf = String::new();
+    for item in input.items() {
+        match item {
+            ModelInputItem::Message { role, content } => {
+                writeln!(buf, "[{role:?}]").unwrap();
+                for c in content.iter() {
+                    match c {
+                        MessageContent::Text(t) => buf.push_str(t),
+                    }
+                }
+                buf.push('\n');
+            }
+            ModelInputItem::Assistant(a) => {
+                buf.push_str("[assistant]\n");
+                match a {
+                    AssistantInputItem::Text(t) => {
+                        buf.push_str(t);
+                        buf.push('\n');
+                    }
+                    AssistantInputItem::Reasoning(t) => {
+                        buf.push_str("<reasoning>");
+                        buf.push_str(t);
+                        buf.push_str("</reasoning>\n");
+                    }
+                    AssistantInputItem::Refusal(t) => {
+                        buf.push_str("<refusal>");
+                        buf.push_str(t);
+                        buf.push_str("</refusal>\n");
+                    }
+                }
+            }
+            ModelInputItem::ToolResult(tr) => {
+                write!(buf, "[tool_result name={}]\n{}\n", tr.name, tr.result.get()).unwrap();
+            }
+            ModelInputItem::Turn(committed) => {
+                writeln!(buf, "[{:?}]", committed.role()).unwrap();
+                format_turn_items(TurnItemIter::new(committed.as_ref()), &mut buf);
+            }
+        }
+        buf.push('\n');
+    }
+    span.in_scope(|| {
+        tracing::event!(
+            target: "lutum",
+            tracing::Level::DEBUG,
+            transcript = %buf,
+            "llm_input_transcript"
+        );
+    });
+}
+
+fn log_output_turn(span: &Span, committed: &CommittedTurn) {
+    if !tracing::enabled!(target: "lutum", tracing::Level::DEBUG) {
+        return;
+    }
+    use lutum_protocol::transcript::TurnItemIter;
+    let mut buf = String::new();
+    format_turn_items(TurnItemIter::new(committed.as_ref()), &mut buf);
+    span.in_scope(|| {
+        tracing::event!(
+            target: "lutum",
+            tracing::Level::DEBUG,
+            output = %buf,
+            "llm_output"
+        );
+    });
 }
 
 fn record_request_id(span: &Span, request_id: Option<&str>) {
