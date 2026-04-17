@@ -129,9 +129,6 @@ pub fn snapshot(input: &ModelInput) -> Result<Vec<ClaudeModelInputItem>, Snapsho
         .items()
         .iter()
         .enumerate()
-        // Ephemeral items are by definition transient: they are stripped
-        // before the next commit, so they are not persisted in snapshots.
-        .filter(|(_, item)| !matches!(item, ModelInputItem::Ephemeral(_)))
         .map(|(index, item)| match item {
             ModelInputItem::Message { role, content } => Ok(ClaudeModelInputItem::Message {
                 role: *role,
@@ -147,7 +144,6 @@ pub fn snapshot(input: &ModelInput) -> Result<Vec<ClaudeModelInputItem>, Snapsho
                 .downcast_ref::<ClaudeCommittedTurn>()
                 .map(|t| ClaudeModelInputItem::Turn(t.clone()))
                 .ok_or(SnapshotError { index }),
-            ModelInputItem::Ephemeral(_) => unreachable!("filtered above"),
         })
         .collect()
 }

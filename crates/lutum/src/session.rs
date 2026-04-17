@@ -51,6 +51,16 @@ impl SessionDefaults {
 pub struct Session {
     lutum: Lutum,
     input: ModelInput,
+    /// Indices into `input.items()` that were pushed as ephemeral (non-turn).
+    ///
+    /// Ephemerality is tracked out-of-band so that `ModelInput` stays a pure transport domain:
+    /// adapters never see an ephemerality marker and cannot forget to unwrap one. Indices are
+    /// stable because the Session only ever appends items between snapshots; the indices are
+    /// applied and cleared atomically in [`Session::snapshot_input`].
+    ///
+    /// Turn-level ephemerality continues to be expressed via `EphemeralTurnView` and is handled
+    /// by [`ModelInput::remove_ephemeral_turns`].
+    ephemeral_indices: Vec<usize>,
     defaults: SessionDefaults,
 }
 
@@ -59,6 +69,7 @@ impl Session {
         Self {
             lutum,
             input: ModelInput::new(),
+            ephemeral_indices: Vec::new(),
             defaults: SessionDefaults::default(),
         }
     }
@@ -129,11 +140,13 @@ impl Session {
     /// Push an arbitrary item that will be included in the next model request
     /// but not persisted to the session transcript.
     ///
-    /// The item is wrapped in [`ModelInputItem::Ephemeral`]. When the next turn
-    /// is collected, ephemeral items are automatically stripped before the new
-    /// committed turn is appended.
+    /// The item is stored inline in the session's `ModelInput`, with its position tracked in
+    /// `ephemeral_indices`. When the next turn is collected, tracked items are stripped before
+    /// the new committed turn is appended.
     pub fn push_ephemeral(&mut self, item: impl Into<ModelInputItem>) {
-        self.input.push(item.into().ephemeral());
+        let index = self.input.items().len();
+        self.input.push(item.into());
+        self.ephemeral_indices.push(index);
     }
 
     /// Push an ephemeral system message (stripped before commit).
@@ -157,14 +170,29 @@ impl Session {
     /// items (system / developer / user messages, tool results).
     pub fn push_ephemeral_turn(&mut self, turn: CommittedTurn) {
         let wrapped = std::sync::Arc::new(EphemeralTurnView::new(turn)) as CommittedTurn;
-        self.input
-            .push(ModelInputItem::Turn(wrapped).ephemeral());
+        self.input.push(ModelInputItem::Turn(wrapped));
     }
 
     pub(crate) fn snapshot_input(&mut self) -> ModelInput {
         let snapshot = self.input.clone();
-        self.input.remove_ephemerals();
+        self.strip_ephemerals();
         snapshot
+    }
+
+    fn strip_ephemerals(&mut self) {
+        // Session-tracked ephemerals (non-turn). Drain in reverse so each removal
+        // leaves earlier indices valid.
+        let mut indices = std::mem::take(&mut self.ephemeral_indices);
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        indices.dedup();
+        let items = self.input.items_mut();
+        for index in indices {
+            if index < items.len() {
+                items.remove(index);
+            }
+        }
+        // Turn-level ephemerals carried by `EphemeralTurnView`.
+        self.input.remove_ephemeral_turns();
     }
 
     pub(crate) fn apply_defaults<T>(&self, turn: &mut TurnConfig<T>)

@@ -598,8 +598,6 @@ fn compile_model_input(input: &ModelInput) -> Result<CompiledClaudeConversation,
     let mut prev_was_tool_turn = false;
 
     for item in input.items() {
-        // Ephemeral wrappers serialize identically to their inner item.
-        let item = item.unwrap_ephemeral();
         match item {
             ModelInputItem::Message { role, content } => {
                 emit_message(role, content.iter(), &mut compiled)?;
@@ -636,11 +634,6 @@ fn compile_model_input(input: &ModelInput) -> Result<CompiledClaudeConversation,
                     emit_turn_from_view(turn.as_ref(), &mut compiled)?;
                 }
                 prev_was_tool_turn = has_tool_calls;
-            }
-            ModelInputItem::Ephemeral(_) => {
-                // `unwrap_ephemeral` only peels one layer; nested ephemerals
-                // are not constructed (see `ModelInputItem::ephemeral`).
-                unreachable!("ephemeral wrappers are not nested");
             }
         }
     }
