@@ -41,7 +41,7 @@ use crate::{
         ChatFunctionTool, ChatMessageFunctionToolCall, ChatMessageParam, ChatMessageToolCall,
         ChatNamedFunctionToolChoice, ChatStreamChunk, ChatStreamOptions, ChatSystemMessage,
         ChatTextContent, ChatToolChoice, ChatToolMessage, ChatUserContent, ChatUserMessage,
-        FunctionDefinition,
+        FunctionDefinition, JsonSchemaConfig, ResponseFormat,
     },
     completion::CompletionRequest,
     error::OpenAiError,
@@ -366,6 +366,29 @@ impl TurnAdapter for OpenAiAdapter {
             .hooks
             .resolve_reasoning_effort(turn.extensions.as_ref())
             .await;
+
+        if self.use_chat_completions {
+            let mut body = self
+                .prepare_chat_request(&input, &turn.config, model.as_ref(), reasoning_effort)
+                .map_err(AgentError::backend)?;
+            body.response_format = Some(ResponseFormat::JsonSchema {
+                json_schema: JsonSchemaConfig {
+                    name: turn.output.schema_name.clone(),
+                    description: None,
+                    schema: Some(turn.output.schema.clone()),
+                    strict: Some(true),
+                },
+            });
+            let stream = self
+                .send_streaming_json("/chat/completions", &body)
+                .await
+                .map_err(AgentError::backend)?;
+            return Ok(Box::pin(
+                map_chat_structured_stream(stream, model.into())
+                    .map(|item| item.map_err(AgentError::backend)),
+            ) as ErasedStructuredTurnEventStream);
+        }
+
         let text_format = Some(TextFormat::JsonSchema {
             name: turn.output.schema_name.clone(),
             schema: turn.output.schema.clone(),
@@ -2296,6 +2319,108 @@ where
             });
             yield ErasedTextTurnEvent::Completed {
                 request_id: request_id.clone(),
+                finish_reason,
+                usage: last_usage,
+                committed_turn,
+            };
+        }
+    }
+}
+
+/// Map a Chat Completions SSE byte stream to `ErasedStructuredTurnEvent`.
+///
+/// Used when `use_chat_completions` is true and the request carries a
+/// `response_format: json_schema` — the model streams JSON as plain content
+/// deltas, which we relay as `StructuredOutputChunk` and finalize as
+/// `StructuredOutputReady`.
+fn map_chat_structured_stream<S>(
+    stream: S,
+    fallback_model: String,
+) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, OpenAiError>> + Send + 'static
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    try_stream! {
+        let mut parser = SseParser::default();
+        let mut started = false;
+        let mut request_id = None::<String>;
+        let mut model = fallback_model;
+        let mut json_buffer = String::new();
+        let mut last_usage = Usage::zero();
+        let mut saw_refusal = false;
+        futures::pin_mut!(stream);
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            for payload in parser.push(&chunk)? {
+                if payload == "[DONE]" {
+                    break;
+                }
+                let event = serde_json::from_str::<ChatStreamChunk>(&payload)?;
+                if !started {
+                    request_id = event.id.clone();
+                    if let Some(m) = event.model.as_ref() {
+                        model = m.clone();
+                    }
+                    started = true;
+                    yield ErasedStructuredTurnEvent::Started {
+                        request_id: request_id.clone(),
+                        model: model.clone(),
+                    };
+                }
+                if let Some(usage) = &event.usage {
+                    last_usage = parse_chat_usage(usage);
+                }
+                for choice in &event.choices {
+                    let delta = &choice.delta;
+                    if let Some(content) = &delta.content {
+                        if !content.is_empty() {
+                            json_buffer.push_str(content);
+                            yield ErasedStructuredTurnEvent::StructuredOutputChunk {
+                                json_delta: content.clone(),
+                            };
+                        }
+                    }
+                    if let Some(refusal) = &delta.refusal {
+                        if !refusal.is_empty() {
+                            saw_refusal = true;
+                            yield ErasedStructuredTurnEvent::RefusalDelta {
+                                delta: refusal.clone(),
+                            };
+                        }
+                    }
+                    if let Some(reasoning) = &delta.reasoning_content {
+                        if !reasoning.is_empty() {
+                            yield ErasedStructuredTurnEvent::ReasoningDelta {
+                                delta: reasoning.clone(),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        if started {
+            let finish_reason = if saw_refusal {
+                FinishReason::ContentFilter
+            } else {
+                FinishReason::Stop
+            };
+
+            if !json_buffer.is_empty() {
+                let raw = RawJson::parse(json_buffer)?;
+                yield ErasedStructuredTurnEvent::StructuredOutputReady(raw);
+            }
+
+            let committed_turn = Arc::new(OpenAiCommittedTurn {
+                request_id: request_id.clone(),
+                model: model.clone(),
+                items: vec![],
+                finish_reason: finish_reason.clone(),
+                usage: last_usage,
+            });
+            yield ErasedStructuredTurnEvent::Completed {
+                request_id,
                 finish_reason,
                 usage: last_usage,
                 committed_turn,
