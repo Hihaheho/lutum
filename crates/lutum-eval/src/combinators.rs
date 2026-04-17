@@ -49,7 +49,7 @@ pub trait PureEvalExt: PureEval + Sized {
 
     async fn run_future<F>(&self, future: F) -> Result<Self::Report, Self::Error>
     where
-        F: Future<Output = Self::Artifact>,
+        F: Future<Output = Self::Artifact> + Send,
     {
         let collected = lutum_trace::capture(future).await;
         self.run_collected(&collected)
@@ -140,8 +140,8 @@ pub trait EvalExt: Eval + Sized {
         future: F,
     ) -> Result<Self::Report, Self::Error>
     where
-        Self::Artifact: Sync,
-        F: Future<Output = Self::Artifact>,
+        Self::Artifact: Send + Sync,
+        F: Future<Output = Self::Artifact> + Send,
     {
         let collected = lutum_trace::capture(future).await;
         self.run_collected(ctx, &collected).await
@@ -202,7 +202,7 @@ pub struct ScoredBy<'a, E, O> {
 
 impl<'a, E, O> ScoredBy<'a, E, O>
 where
-    E: Eval,
+    E: Eval + Sync,
     O: Objective<E::Report>,
 {
     pub async fn run_collected(
