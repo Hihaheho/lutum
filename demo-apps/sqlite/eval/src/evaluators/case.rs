@@ -8,9 +8,7 @@ use sqlite_agent::{QueryResult, SqliteDb, TurnOutput};
 use crate::{
     cases::TestCase,
     evaluators::{
-        CaseScore, SqlCheckInput,
-        consistency::ConsistencyEval,
-        sql_syntax::SqlSyntaxCheck,
+        CaseScore, SqlCheckInput, consistency::ConsistencyEval, sql_syntax::SqlSyntaxCheck,
         table_scan::TableScanCheck,
     },
 };
@@ -77,8 +75,18 @@ impl Eval for CaseEval {
             .map(|e| e.result.clone());
 
         let mut score = CaseScore::default();
-        apply_expectations(&mut score, &self.case, &artifact.tool_results, last_result.as_ref());
-        apply_select_checks(&mut score, Arc::clone(&artifact.db), &artifact.tool_results, last_result.as_ref());
+        apply_case_expectations(
+            &mut score,
+            &self.case,
+            &artifact.tool_results,
+            last_result.as_ref(),
+        );
+        apply_select_checks(
+            &mut score,
+            Arc::clone(&artifact.db),
+            &artifact.tool_results,
+            last_result.as_ref(),
+        );
 
         if let Some(judge) = &self.judge {
             match ConsistencyEval.evaluate(judge, trace, output).await {
@@ -95,17 +103,16 @@ impl Eval for CaseEval {
 // Helpers (moved from runner.rs)
 // ---------------------------------------------------------------------------
 
-fn apply_expectations(
+pub(crate) fn apply_case_expectations(
     score: &mut CaseScore,
     case: &TestCase,
     tool_results: &[ToolResult],
     last_result: Option<&QueryResult>,
 ) {
-    score.expected_tool_ok = case.expect_tool.as_ref().map(|expected| {
-        tool_results
-            .iter()
-            .any(|tr| tr.name.as_str() == expected)
-    });
+    score.expected_tool_ok = case
+        .expect_tool
+        .as_ref()
+        .map(|expected| tool_results.iter().any(|tr| tr.name.as_str() == expected));
     score.expected_row_count_ok = case.expect_rows.map(|expected| {
         last_result
             .map(|qr| qr.row_count() == expected)
@@ -128,7 +135,10 @@ fn apply_select_checks(
         return;
     };
     let input = SqlCheckInput { db, sql };
-    let empty = TraceSnapshot { roots: vec![], root_events: vec![] };
+    let empty = TraceSnapshot {
+        roots: vec![],
+        root_events: vec![],
+    };
     score.sql_syntax_ok = Some(SqlSyntaxCheck.evaluate(&empty, &input).unwrap());
     score.no_large_scan = Some(TableScanCheck.evaluate(&empty, &input).unwrap());
 }

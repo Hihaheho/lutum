@@ -23,3 +23,6 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 anyhow       = "1"
 toml         = "0.8"
 clap         = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+lutum-trace = { workspace = true }

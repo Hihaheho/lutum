@@ -380,7 +380,13 @@ pub fn expand_slot(
 
     let inner_dispatch = match (&kind, &chain_companion_tokens, &aggregate_companion_tokens) {
         // Pipeline dispatch — custom replaces the entire loop with an owned-input threading loop.
-        (HookKind::Fallback(HookOptions { custom: Some(_), .. }), _, _) => {
+        (
+            HookKind::Fallback(HookOptions {
+                custom: Some(_), ..
+            }),
+            _,
+            _,
+        ) => {
             // Identify the single owned (non-reference) arg and collect the reference args.
             let mut owned_var: Option<&syn::Ident> = None;
             let mut ref_vars: Vec<&syn::Ident> = Vec::new();
@@ -391,8 +397,9 @@ pub fn expand_slot(
                     owned_var = Some(var);
                 }
             }
-            let owned_var = owned_var
-                .expect("custom pipeline hook must have exactly one owned (non-reference) argument");
+            let owned_var = owned_var.expect(
+                "custom pipeline hook must have exactly one owned (non-reference) argument",
+            );
             let ref_var_tokens: Vec<proc_macro2::TokenStream> =
                 ref_vars.iter().map(|v| quote! { #v }).collect();
             quote! {

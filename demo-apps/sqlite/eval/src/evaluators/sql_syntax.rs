@@ -13,7 +13,11 @@ impl PureEval for SqlSyntaxCheck {
     type Report = bool;
     type Error = Infallible;
 
-    fn evaluate(&self, _trace: &TraceSnapshot, artifact: &SqlCheckInput) -> Result<bool, Infallible> {
+    fn evaluate(
+        &self,
+        _trace: &TraceSnapshot,
+        artifact: &SqlCheckInput,
+    ) -> Result<bool, Infallible> {
         Ok(artifact.db.check_syntax(&artifact.sql).is_ok())
     }
 }

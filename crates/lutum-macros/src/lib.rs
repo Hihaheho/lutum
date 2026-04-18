@@ -49,9 +49,7 @@ fn build_hook_kind(attrs: HookDefAttrs, macro_name: &str) -> syn::Result<HookKin
                 if let Some(chain) = &attrs.chain {
                     return Err(syn::Error::new(
                         chain.span,
-                        format!(
-                            "#[{macro_name}(...)] 'custom' and 'chain' are mutually exclusive"
-                        ),
+                        format!("#[{macro_name}(...)] 'custom' and 'chain' are mutually exclusive"),
                     ));
                 }
                 if let Some(aggregate) = &attrs.aggregate {

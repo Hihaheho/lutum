@@ -102,7 +102,8 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
             .iter()
             .map(|(fid, fty)| quote! { #fid: #fty })
             .collect();
-        let param_names: Vec<&syn::Ident> = nested_hooks_entries.iter().map(|(fid, _)| fid).collect();
+        let param_names: Vec<&syn::Ident> =
+            nested_hooks_entries.iter().map(|(fid, _)| fid).collect();
         quote! {
             pub fn new(#(#params,)*) -> Self {
                 Self {

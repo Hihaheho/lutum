@@ -11,11 +11,17 @@ use anyhow::Context;
 use async_trait::async_trait;
 use lutum::{Lutum, ModelInputItem, Session, ToolResult};
 use lutum_eval::EvalExt as _;
-use sqlite_agent::{AgentConfig, AgentHooks, DbRegistry, SqliteDb, TransactionMode, WriteDecision, WritePreview, run_turn};
+use sqlite_agent::{
+    AgentConfig, AgentHooks, DbRegistry, SqliteDb, TransactionMode, WriteDecision, WritePreview,
+    run_turn,
+};
 
 use crate::{
     cases::TestCase,
-    evaluators::{CaseScore, case::{CaseArtifact, CaseEval}},
+    evaluators::{
+        CaseScore,
+        case::{CaseArtifact, CaseEval},
+    },
 };
 
 static CASE_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -192,7 +198,15 @@ pub async fn run_case(
 
     CaseEval::new(case.clone(), judge_llm.cloned())
         .run_future(main_llm, async move {
-            let output = run_turn(&mut session, &registry, &hooks, &config, case.prompt.clone(), None).await;
+            let output = run_turn(
+                &mut session,
+                &registry,
+                &hooks,
+                &config,
+                case.prompt.clone(),
+                None,
+            )
+            .await;
             CaseArtifact {
                 tool_results: executed_tool_results(&session),
                 output: output.map_err(anyhow::Error::from),
@@ -204,14 +218,26 @@ pub async fn run_case(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
 
     use lutum::{
         FinishReason, Lutum, MockLlmAdapter, MockTextScenario, RawJson, RawTextTurnEvent,
         SharedPoolBudgetManager, SharedPoolBudgetOptions, ToolCallId, ToolName, Usage,
     };
+    use sqlite_agent::QueryResult;
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
+    use crate::evaluators::case::apply_case_expectations;
+
+    fn install_trace_capture_layer() {
+        static TEST_SUBSCRIBER: OnceLock<()> = OnceLock::new();
+        TEST_SUBSCRIBER.get_or_init(|| {
+            let subscriber = tracing_subscriber::registry().with(lutum_trace::layer());
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("test capture layer global subscriber should install once");
+        });
+    }
 
     fn test_usage(total_tokens: u64) -> Usage {
         Usage {
@@ -346,6 +372,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_case_isolates_database_mutations_between_cases() {
+        install_trace_capture_layer();
+
         let seed_root = unique_temp_dir("sqlite-agent-eval-seed").expect("seed root");
         let seed_db_path = seed_root.join("seed.db");
         let seed_db = SqliteDb::open(&seed_db_path).expect("open seed db");

@@ -1,6 +1,8 @@
 /// Integration tests for `#[toolset]`-annotated nested toolset variants in `#[derive(Toolset)]`.
 use futures::executor::block_on;
-use lutum::{RawJson, ToolCallError, ToolCallWrapper, ToolDecision, ToolHookOutcome, ToolMetadata, Toolset};
+use lutum::{
+    RawJson, ToolCallError, ToolCallWrapper, ToolDecision, ToolHookOutcome, ToolMetadata, Toolset,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -243,7 +245,10 @@ fn hook_dispatch_to_nested_complete() {
 
     let outcome = block_on(call.hook(&outer_hooks));
     assert!(
-        matches!(outcome, ToolHookOutcome::Handled(OuterToolsHandled::Inner(_))),
+        matches!(
+            outcome,
+            ToolHookOutcome::Handled(OuterToolsHandled::Inner(_))
+        ),
         "expected Handled(Inner(...)), got: {outcome:?}"
     );
 }
@@ -259,7 +264,10 @@ fn hook_dispatch_to_nested_run_normally() {
 
     let outcome = block_on(call.hook(&outer_hooks));
     assert!(
-        matches!(outcome, ToolHookOutcome::Unhandled(OuterToolsCall::Inner(_))),
+        matches!(
+            outcome,
+            ToolHookOutcome::Unhandled(OuterToolsCall::Inner(_))
+        ),
         "expected Unhandled(Inner(...)), got: {outcome:?}"
     );
 }
@@ -286,7 +294,11 @@ fn description_overrides_from_nested_hooks() {
         .register_weather_description_hook(InnerWeatherDesc);
 
     let overrides = block_on(outer_hooks.description_overrides());
-    assert_eq!(overrides.len(), 1, "expected 1 override, got: {overrides:?}");
+    assert_eq!(
+        overrides.len(),
+        1,
+        "expected 1 override, got: {overrides:?}"
+    );
     let (sel, desc) = &overrides[0];
     assert!(
         matches!(sel, OuterToolsSelector::Inner(_)),

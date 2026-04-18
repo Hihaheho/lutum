@@ -95,9 +95,21 @@ struct Db;
 impl Db {
     fn get_user(id: u32) -> Option<UserRecord> {
         let users = [
-            UserRecord { id: 1, name: "Alice".into(), role: "admin".into() },
-            UserRecord { id: 2, name: "Bob".into(),   role: "user".into()  },
-            UserRecord { id: 3, name: "Carol".into(), role: "user".into()  },
+            UserRecord {
+                id: 1,
+                name: "Alice".into(),
+                role: "admin".into(),
+            },
+            UserRecord {
+                id: 2,
+                name: "Bob".into(),
+                role: "user".into(),
+            },
+            UserRecord {
+                id: 3,
+                name: "Carol".into(),
+                role: "user".into(),
+            },
         ];
         users.into_iter().find(|u| u.id == id)
     }
@@ -105,16 +117,20 @@ impl Db {
     fn get_orders(user_id: u32) -> OrderList {
         let all = [
             (1u32, 101u32, 12_000u32),
-            (3, 102,  9_000),
+            (3, 102, 9_000),
             (2, 103, 35_000),
-            (1, 104,  8_000),
+            (1, 104, 8_000),
             (3, 105, 21_000),
-            (2, 106,  5_000),
+            (2, 106, 5_000),
         ];
         OrderList {
-            orders: all.iter()
+            orders: all
+                .iter()
                 .filter(|(uid, _, _)| *uid == user_id)
-                .map(|(_, order_id, amount_cents)| OrderRecord { order_id: *order_id, amount_cents: *amount_cents })
+                .map(|(_, order_id, amount_cents)| OrderRecord {
+                    order_id: *order_id,
+                    amount_cents: *amount_cents,
+                })
                 .collect(),
         }
     }
@@ -153,8 +169,7 @@ async fn cached_alice(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let endpoint =
-        std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
+    let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model_name = std::env::var("MODEL").unwrap_or_else(|_| "gemma4:e2b".into());
 
@@ -174,9 +189,7 @@ async fn main() -> anyhow::Result<()> {
          - calc(expression): evaluates arithmetic (sum of amounts, etc.)\n\
          User IDs in the database are 1, 2, and 3.",
     );
-    session.push_user(
-        "What is the total amount (in dollars) of all orders placed by user ID 2?",
-    );
+    session.push_user("What is the total amount (in dollars) of all orders placed by user ID 2?");
 
     // Build hooks: AppToolsHooks::new(DataToolsHooks::new())
     // Register a cache hook on the nested `data` field.

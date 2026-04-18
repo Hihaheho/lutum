@@ -43,20 +43,57 @@ struct Order {
 }
 
 const USERS: [User; 4] = [
-    User { id: 1, name: "Alice" },
+    User {
+        id: 1,
+        name: "Alice",
+    },
     User { id: 2, name: "Bob" },
-    User { id: 3, name: "Carol" },
-    User { id: 4, name: "Diana" },
+    User {
+        id: 3,
+        name: "Carol",
+    },
+    User {
+        id: 4,
+        name: "Diana",
+    },
 ];
 
 const ORDERS: [Order; 7] = [
-    Order { order_id: 101, user_id: 1, amount_cents: 12_000 },
-    Order { order_id: 102, user_id: 3, amount_cents:  9_000 },
-    Order { order_id: 103, user_id: 2, amount_cents: 35_000 },
-    Order { order_id: 104, user_id: 1, amount_cents:  8_000 },
-    Order { order_id: 105, user_id: 4, amount_cents: 21_000 },
-    Order { order_id: 106, user_id: 2, amount_cents:  5_000 },
-    Order { order_id: 107, user_id: 4, amount_cents: 18_000 },
+    Order {
+        order_id: 101,
+        user_id: 1,
+        amount_cents: 12_000,
+    },
+    Order {
+        order_id: 102,
+        user_id: 3,
+        amount_cents: 9_000,
+    },
+    Order {
+        order_id: 103,
+        user_id: 2,
+        amount_cents: 35_000,
+    },
+    Order {
+        order_id: 104,
+        user_id: 1,
+        amount_cents: 8_000,
+    },
+    Order {
+        order_id: 105,
+        user_id: 4,
+        amount_cents: 21_000,
+    },
+    Order {
+        order_id: 106,
+        user_id: 2,
+        amount_cents: 5_000,
+    },
+    Order {
+        order_id: 107,
+        user_id: 4,
+        amount_cents: 18_000,
+    },
 ];
 
 // ── Tool definitions ──────────────────────────────────────────────────────────

@@ -14,7 +14,6 @@ pub struct SqlCheckInput {
     pub sql: String,
 }
 
-
 /// Aggregated scores for one test case run.
 #[derive(Debug, Clone, Default)]
 pub struct CaseScore {

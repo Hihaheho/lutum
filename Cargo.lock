@@ -2022,6 +2022,7 @@ dependencies = [
  "lutum",
  "lutum-claude",
  "lutum-eval",
+ "lutum-trace",
  "schemars",
  "serde",
  "serde_json",

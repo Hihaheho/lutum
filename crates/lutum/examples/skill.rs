@@ -145,8 +145,7 @@ const SKILLS: &[SkillDef] = &[
     SkillDef {
         name: "code_review",
         summary: "lint + diff summarisation tools, with a reviewer's rubric",
-        body:
-            "You are now in code-review mode. When producing the final answer, \
+        body: "You are now in code-review mode. When producing the final answer, \
              structure it as: (1) blocking issues, (2) non-blocking suggestions, \
              (3) praise. Keep each bullet under 140 characters.",
         selectors: || {
@@ -159,8 +158,7 @@ const SKILLS: &[SkillDef] = &[
     SkillDef {
         name: "web",
         summary: "fetch arbitrary URLs and read their body as plain text",
-        body:
-            "You are now in web-research mode. Always cite the URL you fetched \
+        body: "You are now in web-research mode. Always cite the URL you fetched \
              next to any claim that depends on its content.",
         selectors: || vec![AppToolsSelector::Web(WebToolsSelector::FetchUrl)],
     },
@@ -176,7 +174,11 @@ fn render_load_catalogue(loaded: &BTreeSet<String>) -> String {
          Exactly one name per call. Available skills:\n",
     );
     for s in SKILLS {
-        let status = if loaded.contains(s.name) { " (loaded)" } else { "" };
+        let status = if loaded.contains(s.name) {
+            " (loaded)"
+        } else {
+            ""
+        };
         out.push_str(&format!("- {}{}: {}\n", s.name, status, s.summary));
     }
     out
@@ -227,9 +229,7 @@ fn script_text_turn(id: &str, text: &str) -> MockTextScenario {
             request_id: Some(id.into()),
             model: "mock-reviewer".into(),
         }),
-        Ok(RawTextTurnEvent::TextDelta {
-            delta: text.into(),
-        }),
+        Ok(RawTextTurnEvent::TextDelta { delta: text.into() }),
         Ok(RawTextTurnEvent::Completed {
             request_id: Some(id.into()),
             finish_reason: FinishReason::Stop,
@@ -275,7 +275,9 @@ fn diff_summary() -> Report {
 }
 
 fn fetch_url(url: &str) -> Page {
-    Page { text: format!("<fetched body for {url}>") }
+    Page {
+        text: format!("<fetched body for {url}>"),
+    }
 }
 
 // ── Loop ──────────────────────────────────────────────────────────────────
@@ -300,10 +302,8 @@ async fn run() -> anyhow::Result<()> {
         //    auto-stripped before the next commit.
         for name in &loaded {
             if let Some(skill) = find_skill(name) {
-                session.push_ephemeral_developer(format!(
-                    "# skill: {}\n{}",
-                    skill.name, skill.body
-                ));
+                session
+                    .push_ephemeral_developer(format!("# skill: {}\n{}", skill.name, skill.body));
             }
         }
 
@@ -320,7 +320,10 @@ async fn run() -> anyhow::Result<()> {
             .tools::<AppTools>()
             .available_tools_default_plus(extra_selectors)
             .describe_tool(AppToolsSelector::LoadSkill, render_load_catalogue(&loaded))
-            .describe_tool(AppToolsSelector::UnloadSkill, render_unload_catalogue(&loaded))
+            .describe_tool(
+                AppToolsSelector::UnloadSkill,
+                render_unload_catalogue(&loaded),
+            )
             .collect()
             .await?;
 
@@ -348,8 +351,7 @@ async fn run() -> anyhow::Result<()> {
                     let name = c.input().name.clone();
                     let ack = if find_skill(&name).is_some() {
                         loaded.insert(name.clone());
-                        post_round_markers
-                            .push(format!("[system] skill `{name}` loaded"));
+                        post_round_markers.push(format!("[system] skill `{name}` loaded"));
                         SkillAck {
                             ok: true,
                             message: format!("skill `{name}` is now available"),
@@ -367,8 +369,7 @@ async fn run() -> anyhow::Result<()> {
                     let name = c.input().name.clone();
                     let removed = loaded.remove(&name);
                     if removed {
-                        post_round_markers
-                            .push(format!("[system] skill `{name}` unloaded"));
+                        post_round_markers.push(format!("[system] skill `{name}` unloaded"));
                     }
                     println!("[step {step}] unload_skill({name}) → ok={removed}");
                     results.push(c.complete(SkillAck {

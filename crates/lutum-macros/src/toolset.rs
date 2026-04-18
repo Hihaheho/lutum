@@ -18,7 +18,10 @@ enum VariantKind {
 }
 
 fn has_toolset_attr(variant: &Variant) -> bool {
-    variant.attrs.iter().any(|attr| attr.path().is_ident("toolset"))
+    variant
+        .attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("toolset"))
 }
 
 /// True iff the variant is marked default-off via `#[toolset(off)]` (nested)
@@ -349,8 +352,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                     #variant_ident(<#toolset_ty as ::lutum::Toolset>::Selector)
                 });
 
-                metadata_arms
-                    .push(quote! { Self::#variant_ident(inner) => inner.metadata() });
+                metadata_arms.push(quote! { Self::#variant_ident(inner) => inner.metadata() });
                 handled_metadata_arms
                     .push(quote! { Self::#variant_ident(inner) => inner.metadata() });
                 call_selector_arms.push(quote! {

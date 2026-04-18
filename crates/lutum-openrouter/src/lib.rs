@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
-use lutum_protocol::{AgentError, OperationKind, UsageRecoveryAdapter, budget::Usage};
 #[cfg(target_family = "wasm")]
 use lutum_protocol::SendWrapper;
+use lutum_protocol::{AgentError, OperationKind, UsageRecoveryAdapter, budget::Usage};
 
 pub const OPENAI_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const ANTHROPIC_BASE_URL: &str = "https://openrouter.ai/api";

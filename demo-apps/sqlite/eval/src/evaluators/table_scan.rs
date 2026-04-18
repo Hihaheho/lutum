@@ -16,7 +16,11 @@ impl PureEval for TableScanCheck {
     type Report = bool;
     type Error = Infallible;
 
-    fn evaluate(&self, _trace: &TraceSnapshot, artifact: &SqlCheckInput) -> Result<bool, Infallible> {
+    fn evaluate(
+        &self,
+        _trace: &TraceSnapshot,
+        artifact: &SqlCheckInput,
+    ) -> Result<bool, Infallible> {
         let Ok(plan) = artifact.db.explain_query_plan(&artifact.sql) else {
             return Ok(true); // can't judge, assume ok
         };
