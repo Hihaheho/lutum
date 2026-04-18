@@ -13,7 +13,7 @@ use crate::{
         StructuredTurnEventWithTools, TextTurnEvent, TextTurnEventWithTools,
     },
     structured::StructuredOutput,
-    toolset::{ToolCallWrapper, Toolset},
+    toolset::{ContinueSuggestionReason, RecoverableToolCallIssue, ToolCallWrapper, Toolset},
     transcript::CommittedTurn,
 };
 
@@ -171,7 +171,8 @@ pub struct TextTurnStateWithTools<T: Toolset> {
     pub model: String,
     pub assistant_turn: Vec<AssistantTurnItem>,
     pub tool_calls: Vec<T::ToolCall>,
-    pub invalid_tool_calls: Vec<ToolMetadata>,
+    pub recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
+    pub continue_suggestion: Option<ContinueSuggestionReason>,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
     pub committed_turn: Option<CommittedTurn>,
@@ -187,7 +188,8 @@ where
             model: String::new(),
             assistant_turn: Vec::new(),
             tool_calls: Vec::new(),
-            invalid_tool_calls: Vec::new(),
+            recoverable_tool_call_issues: Vec::new(),
+            continue_suggestion: None,
             finish_reason: None,
             usage: None,
             committed_turn: None,
@@ -205,7 +207,8 @@ where
             model: self.model.clone(),
             assistant_turn: self.assistant_turn.clone(),
             tool_calls: self.tool_calls.clone(),
-            invalid_tool_calls: self.invalid_tool_calls.clone(),
+            recoverable_tool_call_issues: self.recoverable_tool_call_issues.clone(),
+            continue_suggestion: self.continue_suggestion,
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
             committed_turn: self.committed_turn.clone(),
@@ -223,7 +226,8 @@ where
             && self.model == other.model
             && self.assistant_turn == other.assistant_turn
             && self.tool_calls == other.tool_calls
-            && self.invalid_tool_calls == other.invalid_tool_calls
+            && self.recoverable_tool_call_issues == other.recoverable_tool_call_issues
+            && self.continue_suggestion == other.continue_suggestion
             && self.finish_reason == other.finish_reason
             && self.usage == other.usage
             && committed_turn_option_eq(&self.committed_turn, &other.committed_turn)
@@ -268,15 +272,12 @@ where
                 push_tool_call(&mut self.assistant_turn, &mut self.tool_calls, tool_call);
             }
             TextTurnEventWithTools::InvalidToolCallChunk { .. } => {}
-            TextTurnEventWithTools::InvalidToolCall(metadata) => {
+            TextTurnEventWithTools::ToolCallIssue(issue) => {
                 // Add to assistant_turn so the committed turn stays consistent for commit
-                // validation, but do NOT add to tool_calls — put in invalid_tool_calls instead.
-                self.assistant_turn.push(AssistantTurnItem::ToolCall {
-                    id: metadata.id.clone(),
-                    name: metadata.name.clone(),
-                    arguments: metadata.arguments.clone(),
-                });
-                self.invalid_tool_calls.push(metadata.clone());
+                // validation, but do NOT add to tool_calls — collect in recoverable issues.
+                push_untyped_tool_call(&mut self.assistant_turn, &issue.metadata);
+                self.recoverable_tool_call_issues.push(issue.clone());
+                self.continue_suggestion = Some(ContinueSuggestionReason::RecoverableToolCallIssue);
             }
             TextTurnEventWithTools::Completed {
                 request_id,
@@ -311,7 +312,8 @@ where
             model: self.model,
             turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
             tool_calls: self.tool_calls,
-            invalid_tool_calls: self.invalid_tool_calls,
+            recoverable_tool_call_issues: self.recoverable_tool_call_issues,
+            continue_suggestion: self.continue_suggestion,
             finish_reason,
             usage,
         })
@@ -331,9 +333,10 @@ pub struct TextTurnResultWithTools<T: Toolset> {
     pub model: String,
     pub assistant_turn: AssistantTurn,
     pub tool_calls: Vec<T::ToolCall>,
-    /// Tool calls that were rejected because the tool name was not in the availability set.
-    /// These are collected from both stream-event level and post-assembly validation.
-    pub invalid_tool_calls: Vec<ToolMetadata>,
+    /// Tool calls that were present in the transcript but could not be executed normally.
+    /// Availability failures and typed-parse failures are both normalized here.
+    pub recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
+    pub continue_suggestion: Option<ContinueSuggestionReason>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
 }
@@ -355,7 +358,8 @@ pub struct StagedTextTurnResultWithTools<T: Toolset> {
     pub model: String,
     pub turn: UncommittedAssistantTurn,
     pub tool_calls: Vec<T::ToolCall>,
-    pub invalid_tool_calls: Vec<ToolMetadata>,
+    pub recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
+    pub continue_suggestion: Option<ContinueSuggestionReason>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
 }
@@ -524,7 +528,8 @@ pub struct StructuredTurnStateWithTools<T: Toolset, O: StructuredOutput> {
     pub model: String,
     pub assistant_turn: Vec<AssistantTurnItem>,
     pub tool_calls: Vec<T::ToolCall>,
-    pub invalid_tool_calls: Vec<ToolMetadata>,
+    pub recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
+    pub continue_suggestion: Option<ContinueSuggestionReason>,
     pub structured: Option<O>,
     pub refusal: Option<String>,
     pub finish_reason: Option<FinishReason>,
@@ -543,7 +548,8 @@ where
             model: String::new(),
             assistant_turn: Vec::new(),
             tool_calls: Vec::new(),
-            invalid_tool_calls: Vec::new(),
+            recoverable_tool_call_issues: Vec::new(),
+            continue_suggestion: None,
             structured: None,
             refusal: None,
             finish_reason: None,
@@ -564,7 +570,8 @@ where
             model: self.model.clone(),
             assistant_turn: self.assistant_turn.clone(),
             tool_calls: self.tool_calls.clone(),
-            invalid_tool_calls: self.invalid_tool_calls.clone(),
+            recoverable_tool_call_issues: self.recoverable_tool_call_issues.clone(),
+            continue_suggestion: self.continue_suggestion,
             structured: self.structured.clone(),
             refusal: self.refusal.clone(),
             finish_reason: self.finish_reason.clone(),
@@ -585,7 +592,8 @@ where
             && self.model == other.model
             && self.assistant_turn == other.assistant_turn
             && self.tool_calls == other.tool_calls
-            && self.invalid_tool_calls == other.invalid_tool_calls
+            && self.recoverable_tool_call_issues == other.recoverable_tool_call_issues
+            && self.continue_suggestion == other.continue_suggestion
             && self.structured == other.structured
             && self.refusal == other.refusal
             && self.finish_reason == other.finish_reason
@@ -645,13 +653,10 @@ where
                 push_tool_call(&mut self.assistant_turn, &mut self.tool_calls, tool_call);
             }
             StructuredTurnEventWithTools::InvalidToolCallChunk { .. } => {}
-            StructuredTurnEventWithTools::InvalidToolCall(metadata) => {
-                self.assistant_turn.push(AssistantTurnItem::ToolCall {
-                    id: metadata.id.clone(),
-                    name: metadata.name.clone(),
-                    arguments: metadata.arguments.clone(),
-                });
-                self.invalid_tool_calls.push(metadata.clone());
+            StructuredTurnEventWithTools::ToolCallIssue(issue) => {
+                push_untyped_tool_call(&mut self.assistant_turn, &issue.metadata);
+                self.recoverable_tool_call_issues.push(issue.clone());
+                self.continue_suggestion = Some(ContinueSuggestionReason::RecoverableToolCallIssue);
             }
             StructuredTurnEventWithTools::Completed {
                 request_id,
@@ -695,7 +700,8 @@ where
             model: self.model,
             turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
             tool_calls: self.tool_calls,
-            invalid_tool_calls: self.invalid_tool_calls,
+            recoverable_tool_call_issues: self.recoverable_tool_call_issues,
+            continue_suggestion: self.continue_suggestion,
             semantic,
             finish_reason,
             usage,
@@ -733,8 +739,10 @@ pub struct StructuredTurnResultWithTools<T: Toolset, O: StructuredOutput> {
     pub model: String,
     pub assistant_turn: AssistantTurn,
     pub tool_calls: Vec<T::ToolCall>,
-    /// Tool calls that were rejected because the tool name was not in the availability set.
-    pub invalid_tool_calls: Vec<ToolMetadata>,
+    /// Tool calls that were present in the transcript but could not be executed normally.
+    /// Availability failures and typed-parse failures are both normalized here.
+    pub recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
+    pub continue_suggestion: Option<ContinueSuggestionReason>,
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
@@ -748,7 +756,8 @@ pub struct StagedStructuredTurnResultWithTools<T: Toolset, O: StructuredOutput> 
     pub model: String,
     pub turn: UncommittedAssistantTurn,
     pub tool_calls: Vec<T::ToolCall>,
-    pub invalid_tool_calls: Vec<ToolMetadata>,
+    pub recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
+    pub continue_suggestion: Option<ContinueSuggestionReason>,
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
@@ -1279,6 +1288,14 @@ where
         arguments: metadata.arguments.clone(),
     });
     tool_calls.push(tool_call.clone());
+}
+
+fn push_untyped_tool_call(assistant: &mut Vec<AssistantTurnItem>, metadata: &ToolMetadata) {
+    assistant.push(AssistantTurnItem::ToolCall {
+        id: metadata.id.clone(),
+        name: metadata.name.clone(),
+        arguments: metadata.arguments.clone(),
+    });
 }
 
 fn assistant_text(items: &[AssistantTurnItem]) -> String {

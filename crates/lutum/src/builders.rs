@@ -855,7 +855,8 @@ where
                 partial,
             }) => {
                 // The model used tool calls without structured output — recover as NeedsTools.
-                if !partial.state.tool_calls.is_empty()
+                if (!partial.state.tool_calls.is_empty()
+                    || !partial.state.recoverable_tool_call_issues.is_empty())
                     && let (
                         Some(committed_turn),
                         Some(finish_reason),
@@ -869,10 +870,14 @@ where
                     )
                 {
                     let tool_calls = partial.state.tool_calls.clone();
+                    let recoverable_tool_call_issues =
+                        partial.state.recoverable_tool_call_issues.clone();
                     let outcome = StructuredStepOutcomeWithTools::from_partial(
                         assistant_turn,
                         committed_turn,
                         tool_calls,
+                        recoverable_tool_call_issues,
+                        partial.state.continue_suggestion,
                         partial.state.request_id.clone(),
                         partial.state.model.clone(),
                         finish_reason,
@@ -939,7 +944,8 @@ where
                 partial,
             }) => {
                 // The model used tool calls without structured output — recover as NeedsTools.
-                if !partial.state.tool_calls.is_empty()
+                if (!partial.state.tool_calls.is_empty()
+                    || !partial.state.recoverable_tool_call_issues.is_empty())
                     && let (
                         Some(committed_turn),
                         Some(finish_reason),
@@ -953,10 +959,14 @@ where
                     )
                 {
                     let tool_calls = partial.state.tool_calls.clone();
+                    let recoverable_tool_call_issues =
+                        partial.state.recoverable_tool_call_issues.clone();
                     let outcome = StructuredStepOutcomeWithTools::from_partial(
                         assistant_turn,
                         committed_turn,
                         tool_calls,
+                        recoverable_tool_call_issues,
+                        partial.state.continue_suggestion,
                         partial.state.request_id.clone(),
                         partial.state.model.clone(),
                         finish_reason,

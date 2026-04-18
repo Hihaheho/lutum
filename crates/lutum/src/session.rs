@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lutum_protocol::{
-    AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn, EphemeralTurnView,
-    FinishReason, GenerationParams, HookableToolset, InputMessageRole, IntoToolResult, ModelInput,
-    ModelInputItem, RejectedToolCall, RejectedToolSource, RequestBudget, ToolHookOutcome,
-    ToolHooks, ToolMetadata, ToolResult, ToolResultError, Toolset, TurnConfig, TurnView,
-    UncommittedAssistantTurn,
+    AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn,
+    ContinueSuggestionReason, EphemeralTurnView, FinishReason, GenerationParams, HookableToolset,
+    InputMessageRole, IntoToolResult, ModelInput, ModelInputItem, REJECTED_TOOL_RESULT_PREFIX,
+    RawJson, RecoverableToolCallIssue, RejectedToolCall, RequestBudget, ToolHookOutcome, ToolHooks,
+    ToolResult, ToolResultError, Toolset, TurnConfig, TurnView, UncommittedAssistantTurn,
     budget::Usage,
     reducer::{
         StagedStructuredTurnResultWithTools, StagedTextTurnResultWithTools,
@@ -208,9 +208,7 @@ impl Session {
     /// visible in [`input`](Self::input) but excluded here.
     pub fn list_turns(&self) -> impl Iterator<Item = &dyn TurnView> {
         self.input.items().iter().filter_map(|item| match item {
-            ModelInputItem::Turn(turn) if !turn.ephemeral() => {
-                Some(turn.as_ref() as &dyn TurnView)
-            }
+            ModelInputItem::Turn(turn) if !turn.ephemeral() => Some(turn.as_ref() as &dyn TurnView),
             _ => None,
         })
     }
@@ -239,12 +237,13 @@ pub struct UncommittedToolRound<T: Toolset> {
     pub request_id: Option<String>,
     pub model: String,
     pub tool_calls: Vec<T::ToolCall>,
-    /// Tool calls that were rejected because the tool name was not in the availability set.
-    /// These are NOT executed. `commit()` auto-synthesizes standard rejection results for them.
-    /// Inspect them when you want to customize logging or recovery behavior before commit.
-    pub invalid_tool_calls: Vec<ToolMetadata>,
+    /// Tool calls that were present in the transcript but could not be executed normally.
+    /// If `commit()` does not receive an explicit `ToolResult` for one of these ids, Lutum
+    /// auto-synthesizes a standard rejection result for it.
+    recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    continue_suggestion: Option<ContinueSuggestionReason>,
     turn: UncommittedAssistantTurn,
 }
 
@@ -270,6 +269,14 @@ where
 {
     pub fn tool_count(&self) -> usize {
         self.tool_calls.len()
+    }
+
+    pub fn continue_suggestion(&self) -> Option<ContinueSuggestionReason> {
+        self.continue_suggestion
+    }
+
+    pub fn recoverable_tool_call_issues(&self) -> &[RecoverableToolCallIssue] {
+        &self.recoverable_tool_call_issues
     }
 
     /// Validate that there is exactly one tool call. Non-consuming.
@@ -300,8 +307,9 @@ where
     /// prefer [`commit`](Self::commit).
     ///
     /// Returns an error if the tool results don't match the assistant turn's tool calls (missing,
-    /// extra, or mismatched id/name/arguments). Availability-policy rejects are committed
-    /// automatically as standard rejection results.
+    /// extra, or mismatched id/name/arguments). Recoverable tool-call issues are committed as
+    /// standard rejection results unless `tool_results` already contains an explicit result for
+    /// the same tool-call id.
     pub fn commit_into<I, R>(
         self,
         input: &mut ModelInput,
@@ -316,15 +324,16 @@ where
             .into_iter()
             .map(IntoToolResult::into_tool_result)
             .collect::<Result<Vec<_>, _>>()?;
-        let rejected_results = self
-            .invalid_tool_calls
+        let provided_result_ids = tool_result_ids(&tool_results);
+        let auto_rejected_issue_results = self
+            .recoverable_tool_call_issues
             .into_iter()
-            .map(rejected_policy_tool_call::<T>)
-            .map(IntoToolResult::into_tool_result)
+            .filter(|issue| !provided_result_ids.contains(&issue.metadata.id))
+            .map(recoverable_tool_call_issue_result)
             .collect::<Result<Vec<_>, _>>()?;
         let ordered_tool_results = validate_and_order_tool_results(
             &self.turn,
-            tool_results.into_iter().chain(rejected_results),
+            tool_results.into_iter().chain(auto_rejected_issue_results),
         )?;
         self.turn.commit_into(input);
         for tool_result in ordered_tool_results {
@@ -336,8 +345,9 @@ where
     /// Validate `tool_results`, then commit the assistant turn and all tool results to the session.
     ///
     /// Returns an error if the tool results don't match the assistant turn's tool calls (missing,
-    /// extra, or mismatched id/name/arguments). Availability-policy rejects are committed
-    /// automatically as standard rejection results.
+    /// extra, or mismatched id/name/arguments). Recoverable tool-call issues are committed as
+    /// standard rejection results unless `tool_results` already contains an explicit result for
+    /// the same tool-call id.
     pub fn commit<I, R>(
         self,
         session: &mut Session,
@@ -374,11 +384,9 @@ where
             usage: self.usage,
             pending: Vec::new(),
             handled: Vec::new(),
-            rejected: self
-                .invalid_tool_calls
-                .into_iter()
-                .map(rejected_policy_tool_call::<T>)
-                .collect(),
+            rejected: Vec::new(),
+            recoverable_tool_call_issues: self.recoverable_tool_call_issues,
+            continue_suggestion: self.continue_suggestion,
             turn: self.turn,
         };
         for call in self.tool_calls {
@@ -408,8 +416,13 @@ pub struct ToolRoundPlan<T: HookableToolset> {
     pub pending: Vec<T::ToolCall>,
     /// Tool calls already handled by a hook — results are committed automatically.
     pub handled: Vec<T::HandledCall>,
-    /// Tool calls rejected by hooks or availability policy — committed automatically.
+    /// Tool calls rejected by hooks — committed automatically.
     pub rejected: Vec<RejectedToolCall<T::ToolCall>>,
+    /// Tool calls that were present in the transcript but could not be executed normally.
+    /// If `commit()` does not receive an explicit `ToolResult` for one of these ids, Lutum
+    /// auto-synthesizes a standard rejection result for it.
+    recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
+    continue_suggestion: Option<ContinueSuggestionReason>,
     turn: UncommittedAssistantTurn,
 }
 
@@ -443,10 +456,20 @@ impl<T: HookableToolset> ToolRoundPlan<T> {
         &self.rejected
     }
 
+    pub fn continue_suggestion(&self) -> Option<ContinueSuggestionReason> {
+        self.continue_suggestion
+    }
+
+    pub fn recoverable_tool_call_issues(&self) -> &[RecoverableToolCallIssue] {
+        &self.recoverable_tool_call_issues
+    }
+
     /// Commit the assistant turn and all tool results to the session.
     ///
     /// `pending_results` must contain one result for each call in [`pending_calls`](Self::pending_calls).
-    /// Results for hook-handled and rejected calls are supplied automatically.
+    /// Results for hook-handled and rejected calls are supplied automatically. Recoverable
+    /// tool-call issues are auto-rejected unless `pending_results` already contains an explicit
+    /// `ToolResult` for the same tool-call id.
     pub fn commit<I, R>(
         self,
         session: &mut Session,
@@ -470,9 +493,17 @@ impl<T: HookableToolset> ToolRoundPlan<T> {
             .into_iter()
             .map(IntoToolResult::into_tool_result)
             .collect::<Result<Vec<_>, _>>()?;
+        let provided_result_ids = tool_result_ids(&pending_results);
+        let auto_rejected_issue_results = self
+            .recoverable_tool_call_issues
+            .into_iter()
+            .filter(|issue| !provided_result_ids.contains(&issue.metadata.id))
+            .map(recoverable_tool_call_issue_result)
+            .collect::<Result<Vec<_>, _>>()?;
         let all_results = handled_results
             .into_iter()
             .chain(rejected_results)
+            .chain(auto_rejected_issue_results)
             .chain(pending_results);
         let ordered = validate_and_order_tool_results(&self.turn, all_results)?;
         self.turn.commit_into(session.input_mut());
@@ -486,22 +517,19 @@ impl<T: HookableToolset> ToolRoundPlan<T> {
     pub fn discard(self) {}
 }
 
-fn policy_rejection_reason(metadata: &ToolMetadata) -> String {
-    format!(
-        "tool `{}` is not available in this round",
-        metadata.name.as_str()
-    )
+fn tool_result_ids(tool_results: &[ToolResult]) -> BTreeSet<lutum_protocol::ToolCallId> {
+    tool_results
+        .iter()
+        .map(|tool_result| tool_result.id.clone())
+        .collect()
 }
 
-fn rejected_policy_tool_call<T>(metadata: ToolMetadata) -> RejectedToolCall<T::ToolCall>
-where
-    T: Toolset,
-{
-    let reason = policy_rejection_reason(&metadata);
-    match T::parse_tool_call(metadata.clone()) {
-        Ok(call) => RejectedToolCall::from_call(RejectedToolSource::Policy, call, reason),
-        Err(_) => RejectedToolCall::from_metadata(RejectedToolSource::Policy, metadata, reason),
-    }
+fn recoverable_tool_call_issue_result(
+    issue: RecoverableToolCallIssue,
+) -> Result<ToolResult, ToolResultError> {
+    let reason = issue.rejection_reason();
+    let result = RawJson::from_serializable(&format!("{REJECTED_TOOL_RESULT_PREFIX}{reason}"))?;
+    Ok(issue.metadata.into_tool_result(result))
 }
 
 fn validate_and_order_tool_results(
@@ -575,14 +603,15 @@ where
         session: Option<&mut ModelInput>,
     ) -> Self {
         if staged.finish_reason == FinishReason::ToolCall
-            && (!staged.tool_calls.is_empty() || !staged.invalid_tool_calls.is_empty())
+            && (!staged.tool_calls.is_empty() || !staged.recoverable_tool_call_issues.is_empty())
         {
             let StagedTextTurnResultWithTools {
                 request_id,
                 model,
                 turn,
                 tool_calls,
-                invalid_tool_calls,
+                recoverable_tool_call_issues,
+                continue_suggestion,
                 finish_reason,
                 usage,
             } = staged;
@@ -591,9 +620,10 @@ where
                 model,
                 turn,
                 tool_calls,
-                invalid_tool_calls,
+                recoverable_tool_call_issues,
                 finish_reason,
                 usage,
+                continue_suggestion,
             })
         } else {
             let StagedTextTurnResultWithTools {
@@ -601,7 +631,8 @@ where
                 model,
                 turn,
                 tool_calls,
-                invalid_tool_calls,
+                recoverable_tool_call_issues,
+                continue_suggestion,
                 finish_reason,
                 usage,
             } = staged;
@@ -616,7 +647,8 @@ where
                 model,
                 assistant_turn,
                 tool_calls,
-                invalid_tool_calls,
+                recoverable_tool_call_issues,
+                continue_suggestion,
                 finish_reason,
                 usage,
             })
@@ -643,14 +675,15 @@ where
         session: Option<&mut ModelInput>,
     ) -> Self {
         if staged.finish_reason == FinishReason::ToolCall
-            && (!staged.tool_calls.is_empty() || !staged.invalid_tool_calls.is_empty())
+            && (!staged.tool_calls.is_empty() || !staged.recoverable_tool_call_issues.is_empty())
         {
             let StagedStructuredTurnResultWithTools {
                 request_id,
                 model,
                 turn,
                 tool_calls,
-                invalid_tool_calls,
+                recoverable_tool_call_issues,
+                continue_suggestion,
                 semantic: _,
                 finish_reason,
                 usage,
@@ -660,9 +693,10 @@ where
                 model,
                 turn,
                 tool_calls,
-                invalid_tool_calls,
+                recoverable_tool_call_issues,
                 finish_reason,
                 usage,
+                continue_suggestion,
             })
         } else {
             let StagedStructuredTurnResultWithTools {
@@ -670,7 +704,8 @@ where
                 model,
                 turn,
                 tool_calls,
-                invalid_tool_calls,
+                recoverable_tool_call_issues,
+                continue_suggestion,
                 semantic,
                 finish_reason,
                 usage,
@@ -686,7 +721,8 @@ where
                 model,
                 assistant_turn,
                 tool_calls,
-                invalid_tool_calls,
+                recoverable_tool_call_issues,
+                continue_suggestion,
                 semantic,
                 finish_reason,
                 usage,
@@ -698,6 +734,8 @@ where
         assistant_turn: AssistantTurn,
         committed_turn: CommittedTurn,
         tool_calls: Vec<T::ToolCall>,
+        recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
+        continue_suggestion: Option<ContinueSuggestionReason>,
         request_id: Option<String>,
         model: String,
         finish_reason: FinishReason,
@@ -708,9 +746,10 @@ where
             model,
             turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
             tool_calls,
-            invalid_tool_calls: Vec::new(),
+            recoverable_tool_call_issues,
             finish_reason,
             usage,
+            continue_suggestion,
         })
     }
 }

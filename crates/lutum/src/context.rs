@@ -33,7 +33,10 @@ use lutum_protocol::{
         TextTurnReducerWithTools, TextTurnReductionError, TextTurnState, TextTurnStateWithTools,
     },
     structured::StructuredOutput,
-    toolset::{ToolAvailability, ToolConstraints, ToolRequirement, ToolSelector, Toolset},
+    toolset::{
+        RecoverableToolCallIssue, ToolAvailability, ToolConstraints, ToolRequirement, ToolSelector,
+        Toolset,
+    },
 };
 
 use crate::hooks::LutumHooks;
@@ -1916,6 +1919,10 @@ fn is_tool_name_allowed<T: Toolset>(
     name: &str,
     availability: &ToolAvailability<T::Selector>,
 ) -> bool {
+    // This is only the outer availability-policy gate for the current round.
+    // With `ToolAvailability::All`, names are not restricted here, so a name may still fail the
+    // inner toolset parse step and become `UnknownTool` instead of `NotAvailable`. `NoTools`
+    // intentionally lands on that inner path.
     match availability {
         ToolAvailability::All => true,
         ToolAvailability::Default => T::default_selectors().iter().any(|s| s.name() == name),
@@ -1968,10 +1975,18 @@ where
         // Level 2 validation: check tool name after assembly, before parse_tool_call.
         ErasedTextTurnEvent::ToolCallReady(metadata) => {
             if is_tool_name_allowed::<T>(metadata.name.as_str(), availability) {
-                let tool_call = T::parse_tool_call(metadata)?;
-                Ok(TextTurnEventWithTools::ToolCallReady(tool_call))
+                let original_metadata = metadata.clone();
+                match T::parse_tool_call(metadata) {
+                    Ok(tool_call) => Ok(TextTurnEventWithTools::ToolCallReady(tool_call)),
+                    // All current toolset parse errors are model-authored and recoverable here.
+                    Err(error) => Ok(TextTurnEventWithTools::ToolCallIssue(
+                        RecoverableToolCallIssue::from_tool_call_error(original_metadata, error),
+                    )),
+                }
             } else {
-                Ok(TextTurnEventWithTools::InvalidToolCall(metadata))
+                Ok(TextTurnEventWithTools::ToolCallIssue(
+                    RecoverableToolCallIssue::not_available(metadata),
+                ))
             }
         }
         ErasedTextTurnEvent::Completed {
@@ -2087,10 +2102,18 @@ where
         // Level 2 validation: check tool name after assembly, before parse_tool_call.
         ErasedStructuredTurnEvent::ToolCallReady(metadata) => {
             if is_tool_name_allowed::<T>(metadata.name.as_str(), availability) {
-                let tool_call = T::parse_tool_call(metadata)?;
-                Ok(StructuredTurnEventWithTools::ToolCallReady(tool_call))
+                let original_metadata = metadata.clone();
+                match T::parse_tool_call(metadata) {
+                    Ok(tool_call) => Ok(StructuredTurnEventWithTools::ToolCallReady(tool_call)),
+                    // All current toolset parse errors are model-authored and recoverable here.
+                    Err(error) => Ok(StructuredTurnEventWithTools::ToolCallIssue(
+                        RecoverableToolCallIssue::from_tool_call_error(original_metadata, error),
+                    )),
+                }
             } else {
-                Ok(StructuredTurnEventWithTools::InvalidToolCall(metadata))
+                Ok(StructuredTurnEventWithTools::ToolCallIssue(
+                    RecoverableToolCallIssue::not_available(metadata),
+                ))
             }
         }
         ErasedStructuredTurnEvent::Completed {

@@ -59,6 +59,71 @@ pub enum ToolCallError {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContinueSuggestionReason {
+    RecoverableToolCallIssue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoverableToolCallIssueReason {
+    NotAvailable,
+    UnknownTool,
+    InvalidArguments,
+}
+
+impl RecoverableToolCallIssueReason {
+    pub fn from_tool_call_error(error: ToolCallError) -> Self {
+        match error {
+            ToolCallError::UnknownTool { .. } => Self::UnknownTool,
+            ToolCallError::Deserialize { .. } => Self::InvalidArguments,
+        }
+    }
+
+    pub fn rejection_reason(&self, metadata: &ToolMetadata) -> String {
+        match self {
+            Self::NotAvailable => format!(
+                "tool `{}` is not available in this round",
+                metadata.name.as_str()
+            ),
+            Self::UnknownTool => format!(
+                "tool `{}` is not recognized in this toolset or round",
+                metadata.name.as_str()
+            ),
+            Self::InvalidArguments => format!(
+                "tool `{}` arguments did not match the expected schema",
+                metadata.name.as_str()
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverableToolCallIssue {
+    pub metadata: ToolMetadata,
+    pub reason: RecoverableToolCallIssueReason,
+}
+
+impl RecoverableToolCallIssue {
+    pub fn new(metadata: ToolMetadata, reason: RecoverableToolCallIssueReason) -> Self {
+        Self { metadata, reason }
+    }
+
+    pub fn not_available(metadata: ToolMetadata) -> Self {
+        Self::new(metadata, RecoverableToolCallIssueReason::NotAvailable)
+    }
+
+    pub fn from_tool_call_error(metadata: ToolMetadata, error: ToolCallError) -> Self {
+        Self {
+            metadata,
+            reason: RecoverableToolCallIssueReason::from_tool_call_error(error),
+        }
+    }
+
+    pub fn rejection_reason(&self) -> String {
+        self.reason.rejection_reason(&self.metadata)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ToolResultError {
     #[error("tool metadata for `{actual}` does not match expected tool `{expected}`")]

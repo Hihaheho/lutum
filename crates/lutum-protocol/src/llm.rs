@@ -8,7 +8,7 @@ use crate::{
     budget::{RequestBudget, Usage},
     conversation::{ModelInput, RawJson, ToolMetadata},
     structured::StructuredOutput,
-    toolset::{NoTools, ToolConstraints, Toolset},
+    toolset::{NoTools, RecoverableToolCallIssue, ToolConstraints, Toolset},
     transcript::CommittedTurn,
 };
 
@@ -457,9 +457,9 @@ pub enum TextTurnEventWithTools<T: Toolset> {
         name: crate::conversation::ToolName,
         arguments_json_delta: String,
     },
-    /// A fully assembled tool call that was rejected because the tool name is not in the available
-    /// set. Emitted after assembly but before `parse_tool_call` (Level 2 validation).
-    InvalidToolCall(crate::conversation::ToolMetadata),
+    /// A fully assembled tool call issue, emitted after assembly. Availability-policy failures
+    /// and parse failures are both normalized into this recoverable issue path.
+    ToolCallIssue(RecoverableToolCallIssue),
     Completed {
         request_id: Option<String>,
         finish_reason: FinishReason,
@@ -521,9 +521,9 @@ pub enum StructuredTurnEventWithTools<T: Toolset, O: StructuredOutput> {
         name: crate::conversation::ToolName,
         arguments_json_delta: String,
     },
-    /// A fully assembled tool call that was rejected because the tool name is not in the available
-    /// set. Emitted after assembly but before `parse_tool_call` (Level 2 validation).
-    InvalidToolCall(crate::conversation::ToolMetadata),
+    /// A fully assembled tool call issue, emitted after assembly. Availability-policy failures
+    /// and parse failures are both normalized into this recoverable issue path.
+    ToolCallIssue(RecoverableToolCallIssue),
     Completed {
         request_id: Option<String>,
         finish_reason: FinishReason,

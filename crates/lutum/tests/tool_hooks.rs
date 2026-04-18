@@ -696,9 +696,71 @@ fn make_disallowed_tool_adapter() -> MockLlmAdapter {
     ]))
 }
 
+fn make_bad_weather_tool_adapter() -> MockLlmAdapter {
+    MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(RawTextTurnEvent::Started {
+            request_id: Some("req-parse".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(RawTextTurnEvent::ToolCallChunk {
+            id: "call-weather-bad".into(),
+            name: "weather".into(),
+            arguments_json_delta: "{}".into(),
+        }),
+        Ok(RawTextTurnEvent::Completed {
+            request_id: Some("req-parse".into()),
+            finish_reason: FinishReason::ToolCall,
+            usage: Usage::zero(),
+        }),
+    ]))
+}
+
+fn make_mixed_parse_failure_adapter() -> MockLlmAdapter {
+    MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(RawTextTurnEvent::Started {
+            request_id: Some("req-mixed-parse".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(RawTextTurnEvent::ToolCallChunk {
+            id: "call-weather-ok".into(),
+            name: "weather".into(),
+            arguments_json_delta: "{\"city\":\"Tokyo\"}".into(),
+        }),
+        Ok(RawTextTurnEvent::ToolCallChunk {
+            id: "call-search-bad".into(),
+            name: "search".into(),
+            arguments_json_delta: "{}".into(),
+        }),
+        Ok(RawTextTurnEvent::Completed {
+            request_id: Some("req-mixed-parse".into()),
+            finish_reason: FinishReason::ToolCall,
+            usage: Usage::zero(),
+        }),
+    ]))
+}
+
+fn make_unknown_tool_adapter() -> MockLlmAdapter {
+    MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(RawTextTurnEvent::Started {
+            request_id: Some("req-unknown-tool".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(RawTextTurnEvent::ToolCallChunk {
+            id: "call-unknown".into(),
+            name: "search".into(),
+            arguments_json_delta: "{\"query\":\"ramen\"}".into(),
+        }),
+        Ok(RawTextTurnEvent::Completed {
+            request_id: Some("req-unknown-tool".into()),
+            finish_reason: FinishReason::ToolCall,
+            usage: Usage::zero(),
+        }),
+    ]))
+}
+
 // Regression test for tool policy bypass:
 // LLM が availability 制限外のツールを返した場合、tool_calls には届かず
-// invalid_tool_calls に収集されることを確認する。
+// recoverable_tool_call_issues に集約されることを確認する。
 #[test]
 fn invalid_tool_call_is_rejected_and_reported() {
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
@@ -744,12 +806,26 @@ fn invalid_tool_call_is_rejected_and_reported() {
                 "no valid tool calls should reach user code, got: {:?}",
                 round.tool_calls,
             );
-            // 不正な tool call は invalid_tool_calls に収集される
-            assert_eq!(round.invalid_tool_calls.len(), 1);
-            assert_eq!(round.invalid_tool_calls[0].name.as_str(), "search");
+            // 不正な tool call は recoverable_tool_call_issues に集約される
+            assert_eq!(round.recoverable_tool_call_issues().len(), 1);
+            assert_eq!(
+                round.recoverable_tool_call_issues()[0]
+                    .metadata
+                    .name
+                    .as_str(),
+                "search"
+            );
+            assert_eq!(
+                round.recoverable_tool_call_issues()[0].reason,
+                lutum::RecoverableToolCallIssueReason::NotAvailable
+            );
+            assert_eq!(
+                round.continue_suggestion(),
+                Some(lutum::ContinueSuggestionReason::RecoverableToolCallIssue)
+            );
         }
         TextStepOutcomeWithTools::Finished(_) => {
-            panic!("expected NeedsTools (with invalid_tool_calls) but got Finished");
+            panic!("expected NeedsTools (with recoverable issues) but got Finished");
         }
     }
 }
@@ -802,6 +878,311 @@ fn invalid_tool_call_commit_auto_synthesizes_rejection_result() {
 }
 
 #[test]
+fn recoverable_tool_call_issue_result_overrides_auto_rejection() {
+    let ctx = Lutum::new(
+        Arc::new(make_disallowed_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("Search something.");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .collect(),
+    )
+    .unwrap();
+
+    match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            let metadata = round.recoverable_tool_call_issues()[0].metadata.clone();
+            let result = metadata.into_tool_result(
+                RawJson::from_serializable(&"manual override".to_string()).unwrap(),
+            );
+            round.commit(&mut session, vec![result]).unwrap();
+        }
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+    }
+
+    let tool_result = session
+        .input()
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            ModelInputItem::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("manual result should be committed");
+    assert_eq!(
+        tool_result.result.deserialize::<String>().unwrap(),
+        "manual override"
+    );
+    assert_eq!(tool_result.rejection_reason(), None);
+}
+
+#[test]
+fn parse_failure_issue_result_overrides_auto_rejection() {
+    let ctx = Lutum::new(
+        Arc::new(make_bad_weather_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("Get the weather.");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .collect(),
+    )
+    .unwrap();
+
+    match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            let metadata = round.recoverable_tool_call_issues()[0].metadata.clone();
+            let result = metadata.into_tool_result(
+                RawJson::from_serializable(&WeatherResult {
+                    forecast: "manual".into(),
+                })
+                .unwrap(),
+            );
+            round.commit(&mut session, vec![result]).unwrap();
+        }
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+    }
+
+    let tool_result = session
+        .input()
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            ModelInputItem::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("manual result should be committed");
+    assert_eq!(tool_result.name.as_str(), "weather");
+    assert_eq!(tool_result.rejection_reason(), None);
+    assert_eq!(
+        tool_result.result.deserialize::<WeatherResult>().unwrap(),
+        WeatherResult {
+            forecast: "manual".into(),
+        }
+    );
+}
+
+#[test]
+fn tool_call_parse_failure_is_recovered_and_suggests_continue() {
+    let ctx = Lutum::new(
+        Arc::new(make_bad_weather_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("Get the weather.");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .collect(),
+    )
+    .unwrap();
+
+    match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            assert!(round.tool_calls.is_empty());
+            assert_eq!(round.recoverable_tool_call_issues().len(), 1);
+            assert_eq!(
+                round.continue_suggestion(),
+                Some(lutum::ContinueSuggestionReason::RecoverableToolCallIssue)
+            );
+            assert_eq!(
+                round.recoverable_tool_call_issues()[0].reason,
+                lutum::RecoverableToolCallIssueReason::InvalidArguments
+            );
+            assert_eq!(
+                round.recoverable_tool_call_issues()[0]
+                    .metadata
+                    .name
+                    .as_str(),
+                "weather"
+            );
+        }
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+    }
+}
+
+#[test]
+fn mixed_valid_and_parse_failed_tool_calls_still_expose_valid_calls() {
+    let ctx = Lutum::new(
+        Arc::new(make_mixed_parse_failure_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("Get weather and then search.");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
+            .collect(),
+    )
+    .unwrap();
+
+    match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            assert_eq!(round.tool_calls.len(), 1);
+            assert!(matches!(
+                &round.tool_calls[0],
+                ToolsCall::Weather(call) if call.input.city.as_str() == "Tokyo"
+            ));
+            assert_eq!(round.recoverable_tool_call_issues().len(), 1);
+            assert_eq!(
+                round.continue_suggestion(),
+                Some(lutum::ContinueSuggestionReason::RecoverableToolCallIssue)
+            );
+
+            let results = round
+                .tool_calls
+                .iter()
+                .cloned()
+                .map(|call| match call {
+                    ToolsCall::Weather(call) => call
+                        .complete(WeatherResult {
+                            forecast: "sunny".into(),
+                        })
+                        .unwrap(),
+                    ToolsCall::Search(_) => panic!("unexpected search call"),
+                })
+                .collect::<Vec<_>>();
+            round.commit(&mut session, results).unwrap();
+        }
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+    }
+
+    let tool_results: Vec<_> = session
+        .input()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            ModelInputItem::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 2);
+    assert!(
+        tool_results
+            .iter()
+            .any(|result| result.name.as_str() == "weather")
+    );
+    assert!(tool_results.iter().any(|result| {
+        result.name.as_str() == "search"
+            && result
+                .rejection_reason()
+                .as_deref()
+                .is_some_and(|reason| reason.contains("did not match the expected schema"))
+    }));
+}
+
+#[test]
+fn tool_call_parse_failure_commit_auto_synthesizes_rejection_result() {
+    let ctx = Lutum::new(
+        Arc::new(make_bad_weather_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("Get the weather.");
+
+    let outcome = block_on(
+        session
+            .text_turn()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .collect(),
+    )
+    .unwrap();
+
+    match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            round
+                .commit(&mut session, Vec::<ToolResult>::new())
+                .unwrap();
+        }
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+    }
+
+    let rejected_result = session
+        .input()
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            ModelInputItem::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("parse failure rejection should be committed");
+    assert_eq!(rejected_result.name.as_str(), "weather");
+    assert!(
+        rejected_result
+            .rejection_reason()
+            .as_deref()
+            .is_some_and(|reason| reason.contains("did not match the expected schema"))
+    );
+}
+
+#[test]
+fn unknown_tool_parse_failure_is_recovered() {
+    let ctx = Lutum::new(
+        Arc::new(make_unknown_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new(ctx);
+    session.push_user("Search for ramen.");
+
+    // `NoTools` uses `ToolAvailability::All`, so `search` is not rejected by the outer
+    // availability gate and instead becomes `UnknownTool` at the toolset-parse layer.
+    let outcome = block_on(session.text_turn().tools::<lutum::NoTools>().collect()).unwrap();
+
+    match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            assert!(round.tool_calls.is_empty());
+            assert_eq!(round.recoverable_tool_call_issues().len(), 1);
+            assert_eq!(
+                round.recoverable_tool_call_issues()[0].reason,
+                lutum::RecoverableToolCallIssueReason::UnknownTool
+            );
+            assert_eq!(
+                round.continue_suggestion(),
+                Some(lutum::ContinueSuggestionReason::RecoverableToolCallIssue)
+            );
+            round
+                .commit(&mut session, Vec::<ToolResult>::new())
+                .unwrap();
+        }
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+    }
+
+    let rejected_result = session
+        .input()
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            ModelInputItem::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("unknown tool rejection should be committed");
+    assert!(
+        rejected_result
+            .rejection_reason()
+            .as_deref()
+            .is_some_and(|reason| reason.contains("not recognized in this toolset or round"))
+    );
+}
+
+#[test]
 fn rejection_reason_helper_only_matches_reserved_prefix() {
     let rejected = ToolResult::new(
         "call-rejected",
@@ -824,7 +1205,7 @@ fn rejection_reason_helper_only_matches_reserved_prefix() {
     assert_eq!(normal.rejection_reason(), None);
 }
 
-// Handler that records the names of InvalidToolCallChunk and InvalidToolCall events it sees.
+// Handler that records the names of InvalidToolCallChunk and ToolCallIssue events it sees.
 struct RecordInvalidEvents(Arc<Mutex<Vec<String>>>);
 
 #[async_trait]
@@ -842,11 +1223,11 @@ impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
             TextTurnEventWithTools::InvalidToolCallChunk { name, .. } => {
                 self.0.lock().unwrap().push(format!("chunk:{}", name));
             }
-            TextTurnEventWithTools::InvalidToolCall(metadata) => {
+            TextTurnEventWithTools::ToolCallIssue(issue) => {
                 self.0
                     .lock()
                     .unwrap()
-                    .push(format!("call:{}", metadata.name));
+                    .push(format!("call:{}:{:?}", issue.metadata.name, issue.reason));
             }
             _ => {}
         }
@@ -854,7 +1235,30 @@ impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
     }
 }
 
-// Verify that InvalidToolCallChunk and InvalidToolCall events reach the collect_with handler.
+struct RecordParseFailureEvents(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
+    for RecordParseFailureEvents
+{
+    type Error = std::convert::Infallible;
+
+    async fn on_event(
+        &mut self,
+        event: &TextTurnEventWithTools<Tools>,
+        _cx: &HandlerContext<TextTurnStateWithTools<Tools>>,
+    ) -> Result<HandlerDirective, Self::Error> {
+        if let TextTurnEventWithTools::ToolCallIssue(issue) = event {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("parse:{}:{:?}", issue.metadata.name, issue.reason));
+        }
+        Ok(HandlerDirective::Continue)
+    }
+}
+
+// Verify that InvalidToolCallChunk and ToolCallIssue events reach the collect_with handler.
 #[test]
 fn invalid_tool_events_are_visible_in_collect_with_handler() {
     let ctx = Lutum::new(
@@ -881,14 +1285,17 @@ fn invalid_tool_events_are_visible_in_collect_with_handler() {
         seen.contains(&"chunk:search".to_string()),
         "expected InvalidToolCallChunk for 'search', got: {seen:?}",
     );
-    // Level 2: InvalidToolCall fired after full assembly
+    // Level 2: ToolCallIssue fired after full assembly
     assert!(
-        seen.contains(&"call:search".to_string()),
-        "expected InvalidToolCall for 'search', got: {seen:?}",
+        seen.contains(&format!(
+            "call:search:{:?}",
+            lutum::RecoverableToolCallIssueReason::NotAvailable
+        )),
+        "expected ToolCallIssue for 'search', got: {seen:?}",
     );
 }
 
-// Verify that InvalidToolCallChunk and InvalidToolCall events appear in the raw event stream
+// Verify that InvalidToolCallChunk and ToolCallIssue events appear in the raw event stream
 // when consuming via into_stream() without collect/collect_with.
 #[test]
 fn invalid_tool_events_are_visible_in_raw_stream() {
@@ -917,7 +1324,9 @@ fn invalid_tool_events_are_visible_in_raw_stream() {
     let has_invalid_call = events.iter().any(|r| {
         matches!(
             r,
-            Ok(TextTurnEventWithTools::InvalidToolCall(meta)) if meta.name.as_str() == "search"
+            Ok(TextTurnEventWithTools::ToolCallIssue(issue))
+                if issue.metadata.name.as_str() == "search"
+                    && issue.reason == lutum::RecoverableToolCallIssueReason::NotAvailable
         )
     });
 
@@ -927,7 +1336,70 @@ fn invalid_tool_events_are_visible_in_raw_stream() {
     );
     assert!(
         has_invalid_call,
-        "expected InvalidToolCall in stream, got: {events:?}"
+        "expected ToolCallIssue in stream, got: {events:?}"
+    );
+}
+
+#[test]
+fn parse_failure_events_are_visible_in_collect_with_handler() {
+    let ctx = Lutum::new(
+        Arc::new(make_bad_weather_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let handler = RecordParseFailureEvents(Arc::clone(&recorded));
+
+    let pending = block_on(
+        ctx.text_turn(vec![ModelInputItem::text(lutum::InputMessageRole::User, "go")].into())
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .start(),
+    )
+    .unwrap();
+
+    let staged = block_on(pending.collect_with(handler)).unwrap();
+    staged.turn.discard();
+
+    let seen = recorded.lock().unwrap();
+    assert!(
+        seen.contains(&format!(
+            "parse:weather:{:?}",
+            lutum::RecoverableToolCallIssueReason::InvalidArguments
+        )),
+        "expected ToolCallIssue for 'weather', got: {seen:?}",
+    );
+}
+
+#[test]
+fn parse_failure_events_are_visible_in_raw_stream() {
+    let ctx = Lutum::new(
+        Arc::new(make_bad_weather_tool_adapter()),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+
+    let pending = block_on(
+        ctx.text_turn(vec![ModelInputItem::text(lutum::InputMessageRole::User, "go")].into())
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .start(),
+    )
+    .unwrap();
+
+    let stream = pending.into_stream();
+    let events: Vec<_> = block_on(stream.collect());
+
+    let has_parse_failure = events.iter().any(|result| {
+        matches!(
+            result,
+            Ok(TextTurnEventWithTools::ToolCallIssue(issue))
+                if issue.metadata.name.as_str() == "weather"
+                    && issue.reason == lutum::RecoverableToolCallIssueReason::InvalidArguments
+        )
+    });
+
+    assert!(
+        has_parse_failure,
+        "expected ToolCallIssue in stream, got: {events:?}"
     );
 }
 

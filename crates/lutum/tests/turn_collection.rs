@@ -501,7 +501,7 @@ fn adapter_error_uses_recovered_usage_when_available() {
 }
 
 #[test]
-fn tool_call_deserialize_error_surfaces_as_execution_error() {
+fn tool_call_deserialize_error_is_collected_as_recoverable_failure() {
     let budget = test_budget();
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
         Ok(lutum::mock::RawTextTurnEvent::Started {
@@ -516,6 +516,11 @@ fn tool_call_deserialize_error_surfaces_as_execution_error() {
             name: "weather".into(),
             arguments_json_delta: "{}".into(),
         }),
+        Ok(lutum::mock::RawTextTurnEvent::Completed {
+            request_id: Some("req-bad-tool".into()),
+            finish_reason: FinishReason::ToolCall,
+            usage: Usage::zero(),
+        }),
     ]));
     let ctx = Lutum::new(Arc::new(adapter), budget.clone());
     let pending = block_on(
@@ -528,25 +533,27 @@ fn tool_call_deserialize_error_surfaces_as_execution_error() {
     )
     .unwrap();
 
-    let err = block_on(pending.collect()).unwrap_err();
+    let result = block_on(pending.collect()).unwrap();
 
-    match err {
-        CollectError::Execution { source, partial } => {
-            assert!(matches!(
-                source,
-                lutum::AgentError::ToolCall(lutum::ToolCallError::Deserialize { ref name, .. })
-                    if name == "weather"
-            ));
-            assert_eq!(partial.request_id.as_deref(), Some("req-bad-tool"));
-            assert!(matches!(
-                partial.assistant_turn.as_slice(),
-                [AssistantTurnItem::Text(text)] if text == "looking up "
-            ));
-            assert!(partial.tool_calls.is_empty());
-            assert!(partial.finish_reason.is_none());
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    assert_eq!(result.request_id.as_deref(), Some("req-bad-tool"));
+    assert_eq!(result.assistant_text(), "looking up ");
+    assert!(result.tool_calls.is_empty());
+    assert_eq!(result.recoverable_tool_call_issues.len(), 1);
+    assert_eq!(
+        result.continue_suggestion,
+        Some(lutum::ContinueSuggestionReason::RecoverableToolCallIssue)
+    );
+    assert_eq!(
+        result.recoverable_tool_call_issues[0].reason,
+        lutum::RecoverableToolCallIssueReason::InvalidArguments
+    );
+    assert_eq!(
+        result.recoverable_tool_call_issues[0]
+            .metadata
+            .name
+            .as_str(),
+        "weather"
+    );
 
     assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
 }

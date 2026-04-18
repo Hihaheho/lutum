@@ -58,7 +58,8 @@ pub use reducer::{
 };
 pub use structured::StructuredOutput;
 pub use toolset::{
-    HandledTool, HookableToolset, IntoToolResult, NoToolSelector, NoTools, RejectedToolCall,
+    ContinueSuggestionReason, HandledTool, HookableToolset, IntoToolResult, NoToolSelector,
+    NoTools, RecoverableToolCallIssue, RecoverableToolCallIssueReason, RejectedToolCall,
     RejectedToolSource, ToolAvailability, ToolCallError, ToolCallWrapper, ToolConstraints,
     ToolDecision, ToolDef, ToolExecutionError, ToolHookOutcome, ToolHooks, ToolInput,
     ToolRequirement, ToolResultError, ToolSelector, Toolset,

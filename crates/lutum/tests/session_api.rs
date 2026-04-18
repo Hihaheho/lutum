@@ -300,11 +300,78 @@ fn structured_tool_round_stays_explicit_until_commit() {
 }
 
 #[test]
+fn structured_tool_parse_failure_recovers_as_tool_round() {
+    let adapter =
+        MockLlmAdapter::new().with_structured_scenario(MockStructuredScenario::events(vec![
+            Ok(lutum::RawStructuredTurnEvent::Started {
+                request_id: Some("req-session-parse".into()),
+                model: "gpt-4.1-mini".into(),
+            }),
+            Ok(lutum::RawStructuredTurnEvent::ToolCallChunk {
+                id: "call-bad".into(),
+                name: "weather".into(),
+                arguments_json_delta: "{}".into(),
+            }),
+            Ok(lutum::RawStructuredTurnEvent::Completed {
+                request_id: Some("req-session-parse".into()),
+                finish_reason: FinishReason::ToolCall,
+                usage: Usage {
+                    total_tokens: 6,
+                    ..Usage::zero()
+                },
+            }),
+        ]));
+    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
+    let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
+    let mut session = Session::new(ctx);
+    session.push_user("Plan with a recoverable tool failure.");
+    let before_len = session.input().items().len();
+    let before_turns = session.list_turns().count();
+
+    let outcome = futures::executor::block_on(async {
+        session
+            .structured_turn::<Summary>()
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .collect()
+            .await
+            .unwrap()
+    });
+
+    assert_eq!(session.input().items().len(), before_len);
+    assert_eq!(session.list_turns().count(), before_turns);
+
+    match outcome {
+        StructuredStepOutcomeWithTools::NeedsTools(round) => {
+            assert!(round.tool_calls.is_empty());
+            assert_eq!(round.recoverable_tool_call_issues().len(), 1);
+            assert_eq!(
+                round.continue_suggestion(),
+                Some(lutum::ContinueSuggestionReason::RecoverableToolCallIssue)
+            );
+            round
+                .commit(&mut session, Vec::<lutum::ToolResult>::new())
+                .unwrap();
+        }
+        StructuredStepOutcomeWithTools::Finished(_) => unreachable!(),
+    }
+
+    assert_eq!(session.input().items().len(), before_len + 2);
+    assert_eq!(session.list_turns().count(), 1);
+}
+
+#[test]
 fn ephemeral_turn_view_returns_ephemeral_true() {
     let inner = Arc::new(AssistantTurnView::from_items(&[])) as lutum::CommittedTurn;
     let ephemeral = EphemeralTurnView::new(inner.clone());
-    assert!(ephemeral.ephemeral(), "EphemeralTurnView::ephemeral() should be true");
-    assert!(!inner.ephemeral(), "plain CommittedTurn::ephemeral() should be false");
+    assert!(
+        ephemeral.ephemeral(),
+        "EphemeralTurnView::ephemeral() should be true"
+    );
+    assert!(
+        !inner.ephemeral(),
+        "plain CommittedTurn::ephemeral() should be false"
+    );
 }
 
 #[test]
