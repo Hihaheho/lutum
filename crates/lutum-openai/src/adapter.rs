@@ -2211,7 +2211,8 @@ where
                 if payload == "[DONE]" {
                     break;
                 }
-                let event = serde_json::from_str::<ChatStreamChunk>(&payload)?;
+                let event = serde_json::from_str::<ChatStreamChunk>(&payload)
+                    .map_err(|err| sse_decode_error(&payload, err))?;
                 if !started {
                     request_id = event.id.clone();
                     if let Some(m) = event.model.as_ref() {
@@ -2356,7 +2357,8 @@ where
                 if payload == "[DONE]" {
                     break;
                 }
-                let event = serde_json::from_str::<ChatStreamChunk>(&payload)?;
+                let event = serde_json::from_str::<ChatStreamChunk>(&payload)
+                    .map_err(|err| sse_decode_error(&payload, err))?;
                 if !started {
                     request_id = event.id.clone();
                     if let Some(m) = event.model.as_ref() {

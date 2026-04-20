@@ -326,6 +326,7 @@ pub struct ChatStreamChunk {
     pub id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
     pub choices: Vec<ChatStreamChoice>,
     #[serde(default)]
     pub usage: Option<CompletionUsage>,
