@@ -1557,9 +1557,15 @@ where
                     SseEvent::ResponseInProgress(_)
                     | SseEvent::ResponseContentPartAdded(_)
                     | SseEvent::ResponseContentPartDone(_)
-                    | SseEvent::ResponseReasoningSummaryTextDone(_)
-                    | SseEvent::Unknown => {}
+                    | SseEvent::ResponseReasoningSummaryTextDone(_) => {}
                     SseEvent::ResponseCreated(_) => {}
+                    SseEvent::Unknown(value) => {
+                        Err(OpenAiError::Sse {
+                            message: format!(
+                                "received unrecognized SSE event type: {value}"
+                            ),
+                        })?
+                    }
                 }
             }
         }
@@ -1779,9 +1785,15 @@ where
                     SseEvent::ResponseInProgress(_)
                     | SseEvent::ResponseContentPartAdded(_)
                     | SseEvent::ResponseContentPartDone(_)
-                    | SseEvent::ResponseReasoningSummaryTextDone(_)
-                    | SseEvent::Unknown => {}
+                    | SseEvent::ResponseReasoningSummaryTextDone(_) => {}
                     SseEvent::ResponseCreated(_) => {}
+                    SseEvent::Unknown(value) => {
+                        Err(OpenAiError::Sse {
+                            message: format!(
+                                "received unrecognized SSE event type: {value}"
+                            ),
+                        })?
+                    }
                 }
             }
         }
@@ -2246,7 +2258,7 @@ where
                             yield ErasedTextTurnEvent::RefusalDelta { delta: refusal.clone() };
                         }
                     }
-                    if let Some(reasoning) = &delta.reasoning_content {
+                    for reasoning in [&delta.reasoning_content, &delta.thinking_content].into_iter().flatten() {
                         if !reasoning.is_empty() {
                             yield ErasedTextTurnEvent::ReasoningDelta { delta: reasoning.clone() };
                         }
@@ -2396,7 +2408,7 @@ where
                             };
                         }
                     }
-                    if let Some(reasoning) = &delta.reasoning_content {
+                    for reasoning in [&delta.reasoning_content, &delta.thinking_content].into_iter().flatten() {
                         if !reasoning.is_empty() {
                             yield ErasedStructuredTurnEvent::ReasoningDelta {
                                 delta: reasoning.clone(),

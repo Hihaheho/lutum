@@ -352,9 +352,12 @@ pub struct ChatStreamDelta {
     pub refusal: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ChatStreamToolCall>>,
-    /// Reasoning tokens emitted by some models (e.g. DeepSeek).
+    /// Reasoning tokens emitted by some models (e.g. DeepSeek, Qwen via reasoning_content).
     #[serde(default)]
     pub reasoning_content: Option<String>,
+    /// Thinking tokens emitted by some models (e.g. Qwen via thinking_content).
+    #[serde(default)]
+    pub thinking_content: Option<String>,
 }
 
 /// A tool call delta within a streaming choice.

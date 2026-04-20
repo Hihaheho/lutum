@@ -24,8 +24,7 @@ use crate::responses::{MessageRole, OutputTextContent, SummaryText};
 /// assert_eq!(serde_json::to_value(&event).unwrap(), json);
 /// assert_eq!(serde_json::from_value::<SseEvent>(json).unwrap(), event);
 /// ```
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(from = "SseEventWire", into = "SseEventWire")]
+#[derive(Clone, Debug)]
 pub enum SseEvent {
     ResponseCreated(ResponseCreatedEvent),
     ResponseInProgress(ResponseInProgressEvent),
@@ -42,7 +41,7 @@ pub enum SseEvent {
     ResponseFunctionCallArgumentsDelta(ResponseFunctionCallArgumentsDeltaEvent),
     ResponseFunctionCallArgumentsDone(ResponseFunctionCallArgumentsDoneEvent),
     ResponseCompleted(ResponseCompletedEvent),
-    Unknown,
+    Unknown(serde_json::Value),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -323,7 +322,9 @@ impl From<SseEventWire> for SseEvent {
                 sequence_number,
                 event_type: Default::default(),
             }),
-            SseEventWire::Unknown => Self::Unknown,
+            // Unreachable via the custom Deserialize impl, which handles Unknown
+            // before calling From. Only reachable if someone calls From directly.
+            SseEventWire::Unknown => Self::Unknown(serde_json::Value::Null),
             SseEventWire::ReasoningDelta { delta, item_id } => {
                 Self::ResponseReasoningDelta(ResponseReasoningDeltaEvent {
                     delta,
@@ -474,7 +475,7 @@ impl From<SseEvent> for SseEventWire {
                 text,
                 sequence_number,
             },
-            SseEvent::Unknown => Self::Unknown,
+            SseEvent::Unknown(_) => Self::Unknown, // Value is lost on Into; Unknown round-trips as unit
             SseEvent::ResponseReasoningDelta(ResponseReasoningDeltaEvent {
                 delta,
                 item_id,
@@ -520,6 +521,34 @@ impl From<SseEvent> for SseEventWire {
             SseEvent::ResponseCompleted(ResponseCompletedEvent { response, .. }) => {
                 Self::Completed { response }
             }
+        }
+    }
+}
+
+impl PartialEq for SseEvent {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Unknown(a), Self::Unknown(b)) => a == b,
+            _ => {
+                serde_json::to_string(self).ok() == serde_json::to_string(other).ok()
+            }
+        }
+    }
+}
+
+impl serde::Serialize for SseEvent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SseEventWire::from(self.clone()).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SseEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match serde_json::from_value::<SseEventWire>(value.clone()) {
+            Ok(SseEventWire::Unknown) => Ok(Self::Unknown(value)),
+            Ok(wire) => Ok(Self::from(wire)),
+            Err(e) => Err(serde::de::Error::custom(e)),
         }
     }
 }
