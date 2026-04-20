@@ -1,3 +1,5 @@
+use tracing::trace;
+
 use crate::error::OpenAiError;
 
 #[derive(Default)]
@@ -21,7 +23,9 @@ impl SseParser {
             }
             if line.is_empty() {
                 if !self.data_lines.is_empty() {
-                    frames.push(self.data_lines.join("\n"));
+                    let payload = self.data_lines.join("\n");
+                    trace!(payload, "openai sse payload");
+                    frames.push(payload);
                     self.data_lines.clear();
                 }
                 continue;
