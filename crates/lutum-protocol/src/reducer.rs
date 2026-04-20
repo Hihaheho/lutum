@@ -25,6 +25,7 @@ pub struct TextTurnState {
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
     pub committed_turn: Option<CommittedTurn>,
+    pub event_count: u32,
 }
 
 impl Clone for TextTurnState {
@@ -36,6 +37,7 @@ impl Clone for TextTurnState {
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
             committed_turn: self.committed_turn.clone(),
+            event_count: self.event_count,
         }
     }
 }
@@ -65,6 +67,7 @@ impl TextTurnState {
         if self.finish_reason.is_some() {
             return Err(TextTurnReductionError::AlreadyCompleted);
         }
+        self.event_count += 1;
 
         match event {
             TextTurnEvent::Started { request_id, model } => {
@@ -114,8 +117,14 @@ impl TextTurnState {
         let committed_turn = self
             .committed_turn
             .ok_or(TextTurnReductionError::Incomplete)?;
-        let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
-            .map_err(|_| TextTurnReductionError::EmptyAssistantOutput)?;
+        let assistant_turn = AssistantTurn::from_items(self.assistant_turn).map_err(|_| {
+            TextTurnReductionError::EmptyAssistantOutput {
+                model: self.model.clone(),
+                request_id: self.request_id.clone(),
+                finish_reason: finish_reason.clone(),
+                event_count: self.event_count,
+            }
+        })?;
         Ok(StagedTextTurnResult {
             request_id: self.request_id,
             model: self.model,
@@ -176,6 +185,7 @@ pub struct TextTurnStateWithTools<T: Toolset> {
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
     pub committed_turn: Option<CommittedTurn>,
+    pub event_count: u32,
 }
 
 impl<T> Default for TextTurnStateWithTools<T>
@@ -193,6 +203,7 @@ where
             finish_reason: None,
             usage: None,
             committed_turn: None,
+            event_count: 0,
         }
     }
 }
@@ -212,6 +223,7 @@ where
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
             committed_turn: self.committed_turn.clone(),
+            event_count: self.event_count,
         }
     }
 }
@@ -252,6 +264,7 @@ where
         if self.finish_reason.is_some() {
             return Err(TextTurnReductionError::AlreadyCompleted);
         }
+        self.event_count += 1;
 
         match event {
             TextTurnEventWithTools::Started { request_id, model } => {
@@ -305,8 +318,14 @@ where
         let committed_turn = self
             .committed_turn
             .ok_or(TextTurnReductionError::Incomplete)?;
-        let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
-            .map_err(|_| TextTurnReductionError::EmptyAssistantOutput)?;
+        let assistant_turn = AssistantTurn::from_items(self.assistant_turn).map_err(|_| {
+            TextTurnReductionError::EmptyAssistantOutput {
+                model: self.model.clone(),
+                request_id: self.request_id.clone(),
+                finish_reason: finish_reason.clone(),
+                event_count: self.event_count,
+            }
+        })?;
         Ok(StagedTextTurnResultWithTools {
             request_id: self.request_id,
             model: self.model,
@@ -383,6 +402,7 @@ pub struct StructuredTurnState<O: StructuredOutput> {
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
     pub committed_turn: Option<CommittedTurn>,
+    pub event_count: u32,
 }
 
 impl<O> Default for StructuredTurnState<O>
@@ -399,6 +419,7 @@ where
             finish_reason: None,
             usage: None,
             committed_turn: None,
+            event_count: 0,
         }
     }
 }
@@ -417,6 +438,7 @@ where
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
             committed_turn: self.committed_turn.clone(),
+            event_count: self.event_count,
         }
     }
 }
@@ -450,6 +472,7 @@ where
         if self.finish_reason.is_some() {
             return Err(StructuredTurnReductionError::AlreadyCompleted);
         }
+        self.event_count += 1;
 
         match event {
             StructuredTurnEvent::Started { request_id, model } => {
@@ -502,8 +525,14 @@ where
         let committed_turn = self
             .committed_turn
             .ok_or(StructuredTurnReductionError::Incomplete)?;
-        let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
-            .map_err(|_| StructuredTurnReductionError::EmptyAssistantOutput)?;
+        let assistant_turn = AssistantTurn::from_items(self.assistant_turn).map_err(|_| {
+            StructuredTurnReductionError::EmptyAssistantOutput {
+                model: self.model.clone(),
+                request_id: self.request_id.clone(),
+                finish_reason: finish_reason.clone(),
+                event_count: self.event_count,
+            }
+        })?;
         let semantic = match (self.structured, self.refusal) {
             (Some(value), None) => StructuredTurnOutcome::Structured(value),
             (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
@@ -535,6 +564,7 @@ pub struct StructuredTurnStateWithTools<T: Toolset, O: StructuredOutput> {
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
     pub committed_turn: Option<CommittedTurn>,
+    pub event_count: u32,
 }
 
 impl<T, O> Default for StructuredTurnStateWithTools<T, O>
@@ -555,6 +585,7 @@ where
             finish_reason: None,
             usage: None,
             committed_turn: None,
+            event_count: 0,
         }
     }
 }
@@ -577,6 +608,7 @@ where
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
             committed_turn: self.committed_turn.clone(),
+            event_count: self.event_count,
         }
     }
 }
@@ -622,6 +654,7 @@ where
         if self.finish_reason.is_some() {
             return Err(StructuredTurnReductionError::AlreadyCompleted);
         }
+        self.event_count += 1;
 
         match event {
             StructuredTurnEventWithTools::Started { request_id, model } => {
@@ -686,8 +719,14 @@ where
         let committed_turn = self
             .committed_turn
             .ok_or(StructuredTurnReductionError::Incomplete)?;
-        let assistant_turn = AssistantTurn::from_items(self.assistant_turn)
-            .map_err(|_| StructuredTurnReductionError::EmptyAssistantOutput)?;
+        let assistant_turn = AssistantTurn::from_items(self.assistant_turn).map_err(|_| {
+            StructuredTurnReductionError::EmptyAssistantOutput {
+                model: self.model.clone(),
+                request_id: self.request_id.clone(),
+                finish_reason: finish_reason.clone(),
+                event_count: self.event_count,
+            }
+        })?;
         let semantic = match (self.structured, self.refusal) {
             (Some(value), None) => StructuredTurnOutcome::Structured(value),
             (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
@@ -938,8 +977,13 @@ pub struct StructuredCompletionResult<O: StructuredOutput> {
 pub enum TextTurnReductionError {
     #[error("turn already completed")]
     AlreadyCompleted,
-    #[error("completed turn produced no assistant items")]
-    EmptyAssistantOutput,
+    #[error("completed turn produced no assistant items (model={model}, request_id={request_id:?}, finish_reason={finish_reason:?}, event_count={event_count})")]
+    EmptyAssistantOutput {
+        model: String,
+        request_id: Option<String>,
+        finish_reason: FinishReason,
+        event_count: u32,
+    },
     #[error("turn has not completed yet")]
     Incomplete,
 }
@@ -950,8 +994,13 @@ pub enum StructuredTurnReductionError {
     AlreadyCompleted,
     #[error("structured output appeared more than once")]
     DuplicateStructuredOutput,
-    #[error("completed turn produced no assistant items")]
-    EmptyAssistantOutput,
+    #[error("completed turn produced no assistant items (model={model}, request_id={request_id:?}, finish_reason={finish_reason:?}, event_count={event_count})")]
+    EmptyAssistantOutput {
+        model: String,
+        request_id: Option<String>,
+        finish_reason: FinishReason,
+        event_count: u32,
+    },
     #[error("turn has not completed yet")]
     Incomplete,
     #[error("turn completed without structured output or refusal")]

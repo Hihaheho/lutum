@@ -1031,7 +1031,12 @@ impl ToolCallTracker {
             });
 
         let Some(resolved_name) = resolved_name else {
-            return Ok(None);
+            return Err(OpenAiError::Sse {
+                message: format!(
+                    "tool call completion for `{}` has no resolvable name",
+                    resolved_id.as_str()
+                ),
+            });
         };
 
         if let Some(existing) = self.finalized.get(&key) {
