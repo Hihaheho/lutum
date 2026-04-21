@@ -1133,6 +1133,7 @@ dependencies = [
  "lutum",
  "lutum-macros",
  "lutum-protocol",
+ "lutum-trace",
  "reqwest",
  "serde",
  "serde_json",
@@ -1181,6 +1182,7 @@ dependencies = [
  "lutum",
  "lutum-macros",
  "lutum-protocol",
+ "lutum-trace",
  "monostate",
  "reqwest",
  "schemars",
@@ -1216,12 +1218,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
 name = "lutum-trace"
 version = "0.1.0"
 dependencies = [
+ "lutum-protocol",
  "tokio",
  "tracing",
  "tracing-subscriber",

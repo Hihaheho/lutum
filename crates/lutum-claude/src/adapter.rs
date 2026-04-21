@@ -22,6 +22,7 @@ use lutum_protocol::{
         ErasedTextTurnEventStream, FinishReason, ModelName, OperationKind, TurnAdapter,
         UsageRecoveryAdapter,
     },
+    telemetry::{ParseErrorStage, RawTelemetryEmitter},
     transcript::{ToolResultItemView, TurnRole, TurnView},
 };
 use reqwest::{
@@ -117,6 +118,22 @@ pub trait ClaudeHooks {
         default: Option<u32>,
     ) -> Option<u32> {
         default
+    }
+}
+
+fn serialize_raw_body<T: Serialize>(body: &T) -> Result<String, ClaudeError> {
+    serde_json::to_string(body).map_err(ClaudeError::Json)
+}
+
+fn emit_claude_parse_error(
+    raw: Option<&RawTelemetryEmitter>,
+    request_id: Option<&str>,
+    stage: ParseErrorStage,
+    payload: &str,
+    error: &impl std::fmt::Display,
+) {
+    if let Some(raw) = raw {
+        raw.emit_parse_error(request_id, stage, payload, &error.to_string());
     }
 }
 
@@ -305,6 +322,8 @@ impl TurnAdapter for ClaudeAdapter {
         input: ModelInput,
         turn: AdapterTextTurn,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
+        let raw =
+            RawTelemetryEmitter::new(turn.extensions.as_ref(), "claude", "messages", "text_turn");
         let model = self
             .hooks
             .select_claude_model(turn.extensions.as_ref(), self.default_model.clone())
@@ -324,12 +343,18 @@ impl TurnAdapter for ClaudeAdapter {
                 true,
             )
             .map_err(AgentError::backend)?;
+        if let Some(raw) = raw.as_ref() {
+            raw.emit_request(
+                None,
+                &serialize_raw_body(&body).map_err(AgentError::backend)?,
+            );
+        }
         let stream = self
             .send_streaming_json("/v1/messages", &body)
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
-            map_text_stream(stream, model.into(), Arc::clone(&self.usage_cache))
+            map_text_stream(stream, model.into(), Arc::clone(&self.usage_cache), raw)
                 .map(|item| item.map_err(AgentError::backend)),
         ) as ErasedTextTurnEventStream)
     }
@@ -339,6 +364,12 @@ impl TurnAdapter for ClaudeAdapter {
         input: ModelInput,
         turn: AdapterStructuredTurn,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
+        let raw = RawTelemetryEmitter::new(
+            turn.extensions.as_ref(),
+            "claude",
+            "messages",
+            "structured_turn",
+        );
         let model = self
             .hooks
             .select_claude_model(turn.extensions.as_ref(), self.default_model.clone())
@@ -361,12 +392,18 @@ impl TurnAdapter for ClaudeAdapter {
                 true,
             )
             .map_err(AgentError::backend)?;
+        if let Some(raw) = raw.as_ref() {
+            raw.emit_request(
+                None,
+                &serialize_raw_body(&body).map_err(AgentError::backend)?,
+            );
+        }
         let stream = self
             .send_streaming_json("/v1/messages", &body)
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
-            map_structured_stream(stream, model.into(), Arc::clone(&self.usage_cache))
+            map_structured_stream(stream, model.into(), Arc::clone(&self.usage_cache), raw)
                 .map(|item| item.map_err(AgentError::backend)),
         ) as ErasedStructuredTurnEventStream)
     }
@@ -882,6 +919,7 @@ fn map_text_stream<S>(
     stream: S,
     fallback_model: String,
     usage_cache: UsageCache,
+    raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<ErasedTextTurnEvent, ClaudeError>> + Send + 'static
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -896,12 +934,34 @@ where
         let mut cache_read_tokens = 0u64;
         let mut stop_reason = None::<String>;
         let mut blocks = BTreeMap::<usize, ContentBlockState>::new();
+        let mut raw_sequence = 0_u64;
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             for frame in parser.push(&chunk)? {
-                let event = parse_sse_event(&frame.event, &frame.data)?;
+                raw_sequence += 1;
+                if let Some(raw) = raw.as_ref() {
+                    raw.emit_stream_event(
+                        request_id.as_deref(),
+                        raw_sequence,
+                        &frame.data,
+                        frame.event.as_deref(),
+                    );
+                }
+                let event = match parse_sse_event(&frame.event, &frame.data) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        emit_claude_parse_error(
+                            raw.as_ref(),
+                            request_id.as_deref(),
+                            ParseErrorStage::SseParse,
+                            &frame.data,
+                            &err,
+                        );
+                        Err(err)?
+                    }
+                };
 
                 if matches!(event, SseEvent::Ping(_)) {
                     trace!("ignoring Claude ping event");
@@ -1035,6 +1095,7 @@ fn map_structured_stream<S>(
     stream: S,
     fallback_model: String,
     usage_cache: UsageCache,
+    raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, ClaudeError>> + Send + 'static
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -1051,12 +1112,34 @@ where
         let mut blocks = BTreeMap::<usize, ContentBlockState>::new();
         let mut structured_buffer = String::new();
         let mut emitted_ready = false;
+        let mut raw_sequence = 0_u64;
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             for frame in parser.push(&chunk)? {
-                let event = parse_sse_event(&frame.event, &frame.data)?;
+                raw_sequence += 1;
+                if let Some(raw) = raw.as_ref() {
+                    raw.emit_stream_event(
+                        request_id.as_deref(),
+                        raw_sequence,
+                        &frame.data,
+                        frame.event.as_deref(),
+                    );
+                }
+                let event = match parse_sse_event(&frame.event, &frame.data) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        emit_claude_parse_error(
+                            raw.as_ref(),
+                            request_id.as_deref(),
+                            ParseErrorStage::SseParse,
+                            &frame.data,
+                            &err,
+                        );
+                        Err(err)?
+                    }
+                };
 
                 if matches!(event, SseEvent::Ping(_)) {
                     trace!("ignoring Claude ping event");
@@ -1158,8 +1241,19 @@ where
                     SseEvent::MessageStop(_) => {
                         if !emitted_ready && !structured_buffer.trim().is_empty() {
                             emitted_ready = true;
-                            let value = RawJson::parse(structured_buffer.clone())
-                                .map_err(ClaudeError::StructuredOutput)?;
+                            let value = match RawJson::parse(structured_buffer.clone()) {
+                                Ok(value) => value,
+                                Err(err) => {
+                                    emit_claude_parse_error(
+                                        raw.as_ref(),
+                                        request_id.as_deref(),
+                                        ParseErrorStage::StructuredOutputParse,
+                                        &structured_buffer,
+                                        &err,
+                                    );
+                                    Err(ClaudeError::StructuredOutput(err))?
+                                }
+                            };
                             yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
                         }
 
@@ -1375,9 +1469,10 @@ mod tests {
 
     use lutum_protocol::{
         AdapterToolChoice, AdapterTurnConfig, ErasedTextTurnEvent, GenerationParams, ModelInput,
-        ModelInputItem, ModelName, OperationKind, RequestExtensions, UsageRecoveryAdapter,
-        budget::Usage,
+        ModelInputItem, ModelName, OperationKind, ParseErrorStage, RawTelemetryConfig,
+        RequestExtensions, UsageRecoveryAdapter, budget::Usage,
     };
+    use lutum_trace::RawTraceEntry;
 
     use super::*;
 
@@ -1395,6 +1490,12 @@ mod tests {
         _default: ModelName,
     ) -> ModelName {
         ModelName::new("claude-haiku-4-5").unwrap()
+    }
+
+    fn raw_extensions() -> RequestExtensions {
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(RawTelemetryConfig::all());
+        extensions
     }
 
     #[test]
@@ -1425,6 +1526,7 @@ mod tests {
                 futures::stream::iter(payloads),
                 "claude-sonnet-override".to_string(),
                 Arc::new(Mutex::new(HashMap::new())),
+                None,
             )
             .collect::<Vec<_>>()
             .await
@@ -1500,6 +1602,7 @@ mod tests {
                 futures::stream::iter(payloads),
                 "fallback-model".to_string(),
                 Arc::clone(&adapter.usage_cache),
+                None,
             )
             .collect::<Vec<_>>()
             .await
@@ -1554,6 +1657,7 @@ mod tests {
                 futures::stream::iter(payloads),
                 "fallback-model".to_string(),
                 Arc::clone(&adapter.usage_cache),
+                None,
             )
             .collect::<Vec<_>>()
             .await
@@ -1580,5 +1684,146 @@ mod tests {
             block_on(adapter.recover_usage(OperationKind::TextTurn, "msg_done")).unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn raw_trace_captures_request_and_frame_payloads() {
+        let adapter = ClaudeAdapter::new("test-key");
+        let input = ModelInput::from_items(vec![ModelInputItem::text(
+            lutum_protocol::InputMessageRole::User,
+            "hello",
+        )]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let request = adapter
+            .prepare_messages_request(&input, &config, "claude-sonnet", None, None, true)
+            .unwrap();
+        let request_body = serialize_raw_body(&request).unwrap();
+
+        let collected = lutum_trace::test::collect_raw(async move {
+            let extensions = raw_extensions();
+            let raw = RawTelemetryEmitter::new(&extensions, "claude", "messages", "text_turn");
+            raw.unwrap().emit_request(None, &request_body);
+            map_text_stream(
+                futures::stream::iter(vec![
+                    Ok(Bytes::from(
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_raw\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                    )),
+                    Ok(Bytes::from(
+                        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                    )),
+                ]),
+                "claude-sonnet".to_string(),
+                Arc::new(Mutex::new(HashMap::new())),
+                raw,
+            )
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        })
+        .await;
+
+        assert!(matches!(
+            collected.raw.entries.first(),
+            Some(RawTraceEntry::Request { provider, api, operation, body, .. })
+                if provider == "claude"
+                    && api == "messages"
+                    && operation == "text_turn"
+                    && body.contains("\"model\":\"claude-sonnet\"")
+        ));
+        assert!(collected.raw.entries.iter().any(|entry| matches!(
+            entry,
+            RawTraceEntry::StreamEvent { request_id, event_name, payload, .. }
+                if request_id.as_deref() == Some("msg_raw")
+                    && event_name.as_deref() == Some("message_stop")
+                    && payload.contains("\"type\":\"message_stop\"")
+        )));
+    }
+
+    #[tokio::test]
+    async fn raw_trace_captures_sse_parse_errors() {
+        let collected = lutum_trace::test::collect_raw(async {
+            let extensions = raw_extensions();
+            let raw = RawTelemetryEmitter::new(&extensions, "claude", "messages", "text_turn");
+            map_text_stream(
+                futures::stream::iter(vec![Ok(Bytes::from(
+                    "event: content_block_delta\ndata: not-json\n\n",
+                ))]),
+                "claude-sonnet".to_string(),
+                Arc::new(Mutex::new(HashMap::new())),
+                raw,
+            )
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .await;
+
+        assert!(collected.output.is_err());
+        assert!(matches!(
+            collected.raw.entries.as_slice(),
+            [
+                RawTraceEntry::StreamEvent { payload, event_name, .. },
+                RawTraceEntry::ParseError { stage, payload: error_payload, .. },
+            ] if payload == "not-json"
+                && event_name.as_deref() == Some("content_block_delta")
+                && *stage == ParseErrorStage::SseParse
+                && error_payload == "not-json"
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_trace_captures_structured_output_parse_errors() {
+        let collected = lutum_trace::test::collect_raw(async {
+            let extensions = raw_extensions();
+            let raw =
+                RawTelemetryEmitter::new(&extensions, "claude", "messages", "structured_turn");
+            map_structured_stream(
+                futures::stream::iter(vec![
+                    Ok(Bytes::from(
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_structured_bad\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                    )),
+                    Ok(Bytes::from(
+                        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                    )),
+                    Ok(Bytes::from(
+                        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"{\"}}\n\n",
+                    )),
+                    Ok(Bytes::from(
+                        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                    )),
+                    Ok(Bytes::from(
+                        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                    )),
+                ]),
+                "claude-sonnet".to_string(),
+                Arc::new(Mutex::new(HashMap::new())),
+                raw,
+            )
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .await;
+
+        assert!(collected.output.is_err());
+        assert!(collected.raw.entries.iter().any(|entry| matches!(
+            entry,
+            RawTraceEntry::ParseError {
+                request_id,
+                stage,
+                payload,
+                ..
+            } if request_id.as_deref() == Some("msg_structured_bad")
+                && *stage == ParseErrorStage::StructuredOutputParse
+                && payload == "{"
+        )));
     }
 }

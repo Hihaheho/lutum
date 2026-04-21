@@ -33,6 +33,7 @@ use lutum_protocol::{
         TextTurnReducerWithTools, TextTurnReductionError, TextTurnState, TextTurnStateWithTools,
     },
     structured::StructuredOutput,
+    telemetry::{CollectErrorKind, emit_collect_error},
     toolset::{
         RecoverableToolCallIssue, ToolAvailability, ToolConstraints, ToolRequirement, ToolSelector,
         Toolset,
@@ -676,6 +677,14 @@ impl PendingTextTurn {
             match item {
                 Ok(event) => {
                     if let Err(source) = self.reducer.apply(&event) {
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::TextTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Reduction,
+                            summarize_text_state(self.reducer.state()),
+                            source.to_string(),
+                        );
                         return Err(CollectError::Reduction {
                             source,
                             partial: self.reducer.state().clone(),
@@ -692,22 +701,51 @@ impl PendingTextTurn {
                             self.reducer.state().request_id.as_deref(),
                             usage,
                         ) {
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_text_state(self.reducer.state()),
+                                source.to_string(),
+                            );
                             return Err(CollectError::Execution {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
                         }
                         if let Err(source) = self.call_handler(&mut handler, &event).await {
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_text_state(self.reducer.state()),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
+                                ),
+                            );
                             return Err(CollectError::Handler {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
                         }
                         let partial = self.reducer.state().clone();
-                        return self
-                            .reducer
-                            .into_result()
-                            .map_err(|source| CollectError::Reduction { source, partial });
+                        return match self.reducer.into_result() {
+                            Ok(result) => Ok(result),
+                            Err(source) => {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    partial.request_id.as_deref(),
+                                    CollectErrorKind::Reduction,
+                                    summarize_text_state(&partial),
+                                    source.to_string(),
+                                );
+                                Err(CollectError::Reduction { source, partial })
+                            }
+                        };
                     }
 
                     match self.call_handler(&mut handler, &event).await {
@@ -722,6 +760,14 @@ impl PendingTextTurn {
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_text_state(&partial),
+                                    source.to_string(),
+                                );
                                 return Err(CollectError::Execution { source, partial });
                             }
                             return Err(CollectError::Stopped {
@@ -738,11 +784,30 @@ impl PendingTextTurn {
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_text_state(&partial),
+                                    execution_source.to_string(),
+                                );
                                 return Err(CollectError::Execution {
                                     source: execution_source,
                                     partial,
                                 });
                             }
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_text_state(self.reducer.state()),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
+                                ),
+                            );
                             return Err(CollectError::Handler {
                                 source,
                                 partial: self.reducer.into_state(),
@@ -760,11 +825,27 @@ impl PendingTextTurn {
                     )
                     .await
                     {
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::TextTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_text_state(&partial),
+                            execution_source.to_string(),
+                        );
                         return Err(CollectError::Execution {
                             source: execution_source,
                             partial,
                         });
                     }
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::TextTurn,
+                        self.reducer.state().request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_text_state(&partial),
+                        source.to_string(),
+                    );
                     return Err(CollectError::Execution {
                         source,
                         partial: self.reducer.into_state(),
@@ -782,8 +863,24 @@ impl PendingTextTurn {
         )
         .await
         {
+            emit_raw_collect_error(
+                self.extensions.as_ref(),
+                OperationKind::TextTurn,
+                self.reducer.state().request_id.as_deref(),
+                CollectErrorKind::Execution,
+                summarize_text_state(&partial),
+                source.to_string(),
+            );
             return Err(CollectError::Execution { source, partial });
         }
+        emit_raw_collect_error(
+            self.extensions.as_ref(),
+            OperationKind::TextTurn,
+            self.reducer.state().request_id.as_deref(),
+            CollectErrorKind::UnexpectedEof,
+            summarize_text_state(self.reducer.state()),
+            "stream ended before completion".to_string(),
+        );
         Err(CollectError::UnexpectedEof {
             partial: self.reducer.into_state(),
         })
@@ -839,6 +936,14 @@ where
             match item {
                 Ok(event) => {
                     if let Err(source) = self.reducer.apply(&event) {
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::TextTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Reduction,
+                            summarize_text_state_with_tools(self.reducer.state()),
+                            source.to_string(),
+                        );
                         return Err(CollectError::Reduction {
                             source,
                             partial: self.reducer.state().clone(),
@@ -855,22 +960,51 @@ where
                             self.reducer.state().request_id.as_deref(),
                             usage,
                         ) {
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_text_state_with_tools(self.reducer.state()),
+                                source.to_string(),
+                            );
                             return Err(CollectError::Execution {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
                         }
                         if let Err(source) = self.call_handler(&mut handler, &event).await {
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_text_state_with_tools(self.reducer.state()),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
+                                ),
+                            );
                             return Err(CollectError::Handler {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
                         }
                         let partial = self.reducer.state().clone();
-                        return self
-                            .reducer
-                            .into_result()
-                            .map_err(|source| CollectError::Reduction { source, partial });
+                        return match self.reducer.into_result() {
+                            Ok(result) => Ok(result),
+                            Err(source) => {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    partial.request_id.as_deref(),
+                                    CollectErrorKind::Reduction,
+                                    summarize_text_state_with_tools(&partial),
+                                    source.to_string(),
+                                );
+                                Err(CollectError::Reduction { source, partial })
+                            }
+                        };
                     }
 
                     match self.call_handler(&mut handler, &event).await {
@@ -885,6 +1019,14 @@ where
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_text_state_with_tools(&partial),
+                                    source.to_string(),
+                                );
                                 return Err(CollectError::Execution { source, partial });
                             }
                             return Err(CollectError::Stopped {
@@ -901,11 +1043,30 @@ where
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_text_state_with_tools(&partial),
+                                    execution_source.to_string(),
+                                );
                                 return Err(CollectError::Execution {
                                     source: execution_source,
                                     partial,
                                 });
                             }
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_text_state_with_tools(self.reducer.state()),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
+                                ),
+                            );
                             return Err(CollectError::Handler {
                                 source,
                                 partial: self.reducer.into_state(),
@@ -923,11 +1084,27 @@ where
                     )
                     .await
                     {
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::TextTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_text_state_with_tools(&partial),
+                            execution_source.to_string(),
+                        );
                         return Err(CollectError::Execution {
                             source: execution_source,
                             partial,
                         });
                     }
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::TextTurn,
+                        self.reducer.state().request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_text_state_with_tools(&partial),
+                        source.to_string(),
+                    );
                     return Err(CollectError::Execution {
                         source,
                         partial: self.reducer.into_state(),
@@ -945,8 +1122,24 @@ where
         )
         .await
         {
+            emit_raw_collect_error(
+                self.extensions.as_ref(),
+                OperationKind::TextTurn,
+                self.reducer.state().request_id.as_deref(),
+                CollectErrorKind::Execution,
+                summarize_text_state_with_tools(&partial),
+                source.to_string(),
+            );
             return Err(CollectError::Execution { source, partial });
         }
+        emit_raw_collect_error(
+            self.extensions.as_ref(),
+            OperationKind::TextTurn,
+            self.reducer.state().request_id.as_deref(),
+            CollectErrorKind::UnexpectedEof,
+            summarize_text_state_with_tools(self.reducer.state()),
+            "stream ended before completion".to_string(),
+        );
         Err(CollectError::UnexpectedEof {
             partial: self.reducer.into_state(),
         })
@@ -1004,12 +1197,17 @@ where
             match item {
                 Ok(event) => {
                     if let Err(source) = self.reducer.apply(&event) {
-                        return Err(CollectError::Reduction {
-                            source,
-                            partial: StructuredTurnPartial::from_state(
-                                self.reducer.state().clone(),
-                            ),
-                        });
+                        let partial =
+                            StructuredTurnPartial::from_state(self.reducer.state().clone());
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::StructuredTurn,
+                            partial.state.request_id.as_deref(),
+                            CollectErrorKind::Reduction,
+                            summarize_structured_partial(&partial),
+                            source.to_string(),
+                        );
+                        return Err(CollectError::Reduction { source, partial });
                     }
                     record_request_id(&self.span, self.reducer.state().request_id.as_deref());
                     if let Some(usage) = completed_usage_from_structured(&event) {
@@ -1019,34 +1217,55 @@ where
                             self.reducer.state().request_id.as_deref(),
                             usage,
                         ) {
-                            return Err(CollectError::Execution {
-                                source,
-                                partial: StructuredTurnPartial::from_state(
-                                    self.reducer.state().clone(),
-                                ),
-                            });
+                            let partial =
+                                StructuredTurnPartial::from_state(self.reducer.state().clone());
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::StructuredTurn,
+                                partial.state.request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_structured_partial(&partial),
+                                source.to_string(),
+                            );
+                            return Err(CollectError::Execution { source, partial });
                         }
                         if let Err(source) = self.call_handler(&mut handler, &event).await {
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: StructuredTurnPartial::from_state(
-                                    self.reducer.state().clone(),
+                            let partial =
+                                StructuredTurnPartial::from_state(self.reducer.state().clone());
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::StructuredTurn,
+                                partial.state.request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_structured_partial(&partial),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
                                 ),
-                            });
+                            );
+                            return Err(CollectError::Handler { source, partial });
                         }
                         let partial =
                             StructuredTurnPartial::from_state(self.reducer.state().clone());
-                        return self
-                            .reducer
-                            .into_result()
-                            .map_err(|(source, committed_turn)| {
+                        return match self.reducer.into_result() {
+                            Ok(result) => Ok(result),
+                            Err((source, committed_turn)) => {
                                 let partial = if let Some(committed_turn) = committed_turn {
                                     partial.with_committed_turn(committed_turn)
                                 } else {
                                     partial
                                 };
-                                CollectError::Reduction { source, partial }
-                            });
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Reduction,
+                                    summarize_structured_partial(&partial),
+                                    source.to_string(),
+                                );
+                                Err(CollectError::Reduction { source, partial })
+                            }
+                        };
                     }
 
                     match self.call_handler(&mut handler, &event).await {
@@ -1062,6 +1281,14 @@ where
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_structured_partial(&partial),
+                                    source.to_string(),
+                                );
                                 return Err(CollectError::Execution { source, partial });
                             }
                             return Err(CollectError::Stopped {
@@ -1081,11 +1308,31 @@ where
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_structured_partial(&partial),
+                                    execution_source.to_string(),
+                                );
                                 return Err(CollectError::Execution {
                                     source: execution_source,
                                     partial,
                                 });
                             }
+                            let request_id = partial.state.request_id.clone();
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::StructuredTurn,
+                                request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_structured_partial(&partial),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
+                                ),
+                            );
                             return Err(CollectError::Handler {
                                 source,
                                 partial: StructuredTurnPartial::from_state(
@@ -1105,11 +1352,27 @@ where
                     )
                     .await
                     {
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::StructuredTurn,
+                            partial.state.request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_structured_partial(&partial),
+                            execution_source.to_string(),
+                        );
                         return Err(CollectError::Execution {
                             source: execution_source,
                             partial,
                         });
                     }
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::StructuredTurn,
+                        partial.state.request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_structured_partial(&partial),
+                        source.to_string(),
+                    );
                     return Err(CollectError::Execution {
                         source,
                         partial: StructuredTurnPartial::from_state(self.reducer.into_state()),
@@ -1127,8 +1390,24 @@ where
         )
         .await
         {
+            emit_raw_collect_error(
+                self.extensions.as_ref(),
+                OperationKind::StructuredTurn,
+                partial.state.request_id.as_deref(),
+                CollectErrorKind::Execution,
+                summarize_structured_partial(&partial),
+                source.to_string(),
+            );
             return Err(CollectError::Execution { source, partial });
         }
+        emit_raw_collect_error(
+            self.extensions.as_ref(),
+            OperationKind::StructuredTurn,
+            partial.state.request_id.as_deref(),
+            CollectErrorKind::UnexpectedEof,
+            summarize_structured_partial(&partial),
+            "stream ended before completion".to_string(),
+        );
         Err(CollectError::UnexpectedEof {
             partial: StructuredTurnPartial::from_state(self.reducer.into_state()),
         })
@@ -1187,12 +1466,18 @@ where
             match item {
                 Ok(event) => {
                     if let Err(source) = self.reducer.apply(&event) {
-                        return Err(CollectError::Reduction {
-                            source,
-                            partial: StructuredTurnPartialWithTools::from_state(
-                                self.reducer.state().clone(),
-                            ),
-                        });
+                        let partial = StructuredTurnPartialWithTools::from_state(
+                            self.reducer.state().clone(),
+                        );
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::StructuredTurn,
+                            partial.state.request_id.as_deref(),
+                            CollectErrorKind::Reduction,
+                            summarize_structured_partial_with_tools(&partial),
+                            source.to_string(),
+                        );
+                        return Err(CollectError::Reduction { source, partial });
                     }
                     record_request_id(&self.span, self.reducer.state().request_id.as_deref());
                     if let Some(usage) = completed_usage_from_structured_with_tools(&event) {
@@ -1202,35 +1487,58 @@ where
                             self.reducer.state().request_id.as_deref(),
                             usage,
                         ) {
-                            return Err(CollectError::Execution {
-                                source,
-                                partial: StructuredTurnPartialWithTools::from_state(
-                                    self.reducer.state().clone(),
-                                ),
-                            });
+                            let partial = StructuredTurnPartialWithTools::from_state(
+                                self.reducer.state().clone(),
+                            );
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::StructuredTurn,
+                                partial.state.request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_structured_partial_with_tools(&partial),
+                                source.to_string(),
+                            );
+                            return Err(CollectError::Execution { source, partial });
                         }
                         if let Err(source) = self.call_handler(&mut handler, &event).await {
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: StructuredTurnPartialWithTools::from_state(
-                                    self.reducer.state().clone(),
+                            let partial = StructuredTurnPartialWithTools::from_state(
+                                self.reducer.state().clone(),
+                            );
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::StructuredTurn,
+                                partial.state.request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_structured_partial_with_tools(&partial),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
                                 ),
-                            });
+                            );
+                            return Err(CollectError::Handler { source, partial });
                         }
                         let partial = StructuredTurnPartialWithTools::from_state(
                             self.reducer.state().clone(),
                         );
-                        return self
-                            .reducer
-                            .into_result()
-                            .map_err(|(source, committed_turn)| {
+                        return match self.reducer.into_result() {
+                            Ok(result) => Ok(result),
+                            Err((source, committed_turn)) => {
                                 let partial = if let Some(committed_turn) = committed_turn {
                                     partial.with_committed_turn(committed_turn)
                                 } else {
                                     partial
                                 };
-                                CollectError::Reduction { source, partial }
-                            });
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Reduction,
+                                    summarize_structured_partial_with_tools(&partial),
+                                    source.to_string(),
+                                );
+                                Err(CollectError::Reduction { source, partial })
+                            }
+                        };
                     }
 
                     match self.call_handler(&mut handler, &event).await {
@@ -1247,6 +1555,14 @@ where
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_structured_partial_with_tools(&partial),
+                                    source.to_string(),
+                                );
                                 return Err(CollectError::Execution { source, partial });
                             }
                             return Err(CollectError::Stopped {
@@ -1267,11 +1583,31 @@ where
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_structured_partial_with_tools(&partial),
+                                    execution_source.to_string(),
+                                );
                                 return Err(CollectError::Execution {
                                     source: execution_source,
                                     partial,
                                 });
                             }
+                            let request_id = partial.state.request_id.clone();
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::StructuredTurn,
+                                request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_structured_partial_with_tools(&partial),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
+                                ),
+                            );
                             return Err(CollectError::Handler {
                                 source,
                                 partial: StructuredTurnPartialWithTools::from_state(
@@ -1292,11 +1628,27 @@ where
                     )
                     .await
                     {
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::StructuredTurn,
+                            partial.state.request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_structured_partial_with_tools(&partial),
+                            execution_source.to_string(),
+                        );
                         return Err(CollectError::Execution {
                             source: execution_source,
                             partial,
                         });
                     }
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::StructuredTurn,
+                        partial.state.request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_structured_partial_with_tools(&partial),
+                        source.to_string(),
+                    );
                     return Err(CollectError::Execution {
                         source,
                         partial: StructuredTurnPartialWithTools::from_state(
@@ -1316,8 +1668,24 @@ where
         )
         .await
         {
+            emit_raw_collect_error(
+                self.extensions.as_ref(),
+                OperationKind::StructuredTurn,
+                partial.state.request_id.as_deref(),
+                CollectErrorKind::Execution,
+                summarize_structured_partial_with_tools(&partial),
+                source.to_string(),
+            );
             return Err(CollectError::Execution { source, partial });
         }
+        emit_raw_collect_error(
+            self.extensions.as_ref(),
+            OperationKind::StructuredTurn,
+            partial.state.request_id.as_deref(),
+            CollectErrorKind::UnexpectedEof,
+            summarize_structured_partial_with_tools(&partial),
+            "stream ended before completion".to_string(),
+        );
         Err(CollectError::UnexpectedEof {
             partial: StructuredTurnPartialWithTools::from_state(self.reducer.into_state()),
         })
@@ -1376,6 +1744,14 @@ impl PendingCompletion {
             match item {
                 Ok(event) => {
                     if let Err(source) = self.reducer.apply(&event) {
+                        emit_raw_collect_error(
+                            &self.extensions,
+                            OperationKind::Completion,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Reduction,
+                            summarize_completion_state(self.reducer.state()),
+                            source.to_string(),
+                        );
                         return Err(CollectError::Reduction {
                             source,
                             partial: self.reducer.state().clone(),
@@ -1389,22 +1765,51 @@ impl PendingCompletion {
                             self.reducer.state().request_id.as_deref(),
                             usage,
                         ) {
+                            emit_raw_collect_error(
+                                &self.extensions,
+                                OperationKind::Completion,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_completion_state(self.reducer.state()),
+                                source.to_string(),
+                            );
                             return Err(CollectError::Execution {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
                         }
                         if let Err(source) = self.call_handler(&mut handler, &event).await {
+                            emit_raw_collect_error(
+                                &self.extensions,
+                                OperationKind::Completion,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_completion_state(self.reducer.state()),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
+                                ),
+                            );
                             return Err(CollectError::Handler {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
                         }
                         let partial = self.reducer.state().clone();
-                        return self
-                            .reducer
-                            .into_result()
-                            .map_err(|source| CollectError::Reduction { source, partial });
+                        return match self.reducer.into_result() {
+                            Ok(result) => Ok(result),
+                            Err(source) => {
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::Completion,
+                                    partial.request_id.as_deref(),
+                                    CollectErrorKind::Reduction,
+                                    summarize_completion_state(&partial),
+                                    source.to_string(),
+                                );
+                                Err(CollectError::Reduction { source, partial })
+                            }
+                        };
                     }
 
                     match self.call_handler(&mut handler, &event).await {
@@ -1419,6 +1824,14 @@ impl PendingCompletion {
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::Completion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_completion_state(&partial),
+                                    source.to_string(),
+                                );
                                 return Err(CollectError::Execution { source, partial });
                             }
                             return Err(CollectError::Stopped {
@@ -1435,11 +1848,30 @@ impl PendingCompletion {
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::Completion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_completion_state(&partial),
+                                    execution_source.to_string(),
+                                );
                                 return Err(CollectError::Execution {
                                     source: execution_source,
                                     partial,
                                 });
                             }
+                            emit_raw_collect_error(
+                                &self.extensions,
+                                OperationKind::Completion,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_completion_state(self.reducer.state()),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
+                                ),
+                            );
                             return Err(CollectError::Handler {
                                 source,
                                 partial: self.reducer.into_state(),
@@ -1457,11 +1889,27 @@ impl PendingCompletion {
                     )
                     .await
                     {
+                        emit_raw_collect_error(
+                            &self.extensions,
+                            OperationKind::Completion,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_completion_state(&partial),
+                            execution_source.to_string(),
+                        );
                         return Err(CollectError::Execution {
                             source: execution_source,
                             partial,
                         });
                     }
+                    emit_raw_collect_error(
+                        &self.extensions,
+                        OperationKind::Completion,
+                        self.reducer.state().request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_completion_state(&partial),
+                        source.to_string(),
+                    );
                     return Err(CollectError::Execution {
                         source,
                         partial: self.reducer.into_state(),
@@ -1479,8 +1927,24 @@ impl PendingCompletion {
         )
         .await
         {
+            emit_raw_collect_error(
+                &self.extensions,
+                OperationKind::Completion,
+                self.reducer.state().request_id.as_deref(),
+                CollectErrorKind::Execution,
+                summarize_completion_state(&partial),
+                source.to_string(),
+            );
             return Err(CollectError::Execution { source, partial });
         }
+        emit_raw_collect_error(
+            &self.extensions,
+            OperationKind::Completion,
+            self.reducer.state().request_id.as_deref(),
+            CollectErrorKind::UnexpectedEof,
+            summarize_completion_state(self.reducer.state()),
+            "stream ended before completion".to_string(),
+        );
         Err(CollectError::UnexpectedEof {
             partial: self.reducer.into_state(),
         })
@@ -1538,6 +2002,14 @@ where
             match item {
                 Ok(event) => {
                     if let Err(source) = self.reducer.apply(&event) {
+                        emit_raw_collect_error(
+                            &self.extensions,
+                            OperationKind::StructuredCompletion,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Reduction,
+                            summarize_structured_completion_state(self.reducer.state()),
+                            source.to_string(),
+                        );
                         return Err(CollectError::Reduction {
                             source,
                             partial: self.reducer.state().clone(),
@@ -1551,22 +2023,51 @@ where
                             self.reducer.state().request_id.as_deref(),
                             usage,
                         ) {
+                            emit_raw_collect_error(
+                                &self.extensions,
+                                OperationKind::StructuredCompletion,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_structured_completion_state(self.reducer.state()),
+                                source.to_string(),
+                            );
                             return Err(CollectError::Execution {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
                         }
                         if let Err(source) = self.call_handler(&mut handler, &event).await {
+                            emit_raw_collect_error(
+                                &self.extensions,
+                                OperationKind::StructuredCompletion,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_structured_completion_state(self.reducer.state()),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
+                                ),
+                            );
                             return Err(CollectError::Handler {
                                 source,
                                 partial: self.reducer.state().clone(),
                             });
                         }
                         let partial = self.reducer.state().clone();
-                        return self
-                            .reducer
-                            .into_result()
-                            .map_err(|source| CollectError::Reduction { source, partial });
+                        return match self.reducer.into_result() {
+                            Ok(result) => Ok(result),
+                            Err(source) => {
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::StructuredCompletion,
+                                    partial.request_id.as_deref(),
+                                    CollectErrorKind::Reduction,
+                                    summarize_structured_completion_state(&partial),
+                                    source.to_string(),
+                                );
+                                Err(CollectError::Reduction { source, partial })
+                            }
+                        };
                     }
 
                     match self.call_handler(&mut handler, &event).await {
@@ -1581,6 +2082,14 @@ where
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::StructuredCompletion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_structured_completion_state(&partial),
+                                    source.to_string(),
+                                );
                                 return Err(CollectError::Execution { source, partial });
                             }
                             return Err(CollectError::Stopped {
@@ -1597,11 +2106,30 @@ where
                             )
                             .await
                             {
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::StructuredCompletion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_structured_completion_state(&partial),
+                                    execution_source.to_string(),
+                                );
                                 return Err(CollectError::Execution {
                                     source: execution_source,
                                     partial,
                                 });
                             }
+                            emit_raw_collect_error(
+                                &self.extensions,
+                                OperationKind::StructuredCompletion,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Handler,
+                                summarize_structured_completion_state(self.reducer.state()),
+                                format!(
+                                    "handler error type={}",
+                                    std::any::type_name_of_val(&source)
+                                ),
+                            );
                             return Err(CollectError::Handler {
                                 source,
                                 partial: self.reducer.into_state(),
@@ -1619,11 +2147,27 @@ where
                     )
                     .await
                     {
+                        emit_raw_collect_error(
+                            &self.extensions,
+                            OperationKind::StructuredCompletion,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_structured_completion_state(&partial),
+                            execution_source.to_string(),
+                        );
                         return Err(CollectError::Execution {
                             source: execution_source,
                             partial,
                         });
                     }
+                    emit_raw_collect_error(
+                        &self.extensions,
+                        OperationKind::StructuredCompletion,
+                        self.reducer.state().request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_structured_completion_state(&partial),
+                        source.to_string(),
+                    );
                     return Err(CollectError::Execution {
                         source,
                         partial: self.reducer.into_state(),
@@ -1641,8 +2185,24 @@ where
         )
         .await
         {
+            emit_raw_collect_error(
+                &self.extensions,
+                OperationKind::StructuredCompletion,
+                self.reducer.state().request_id.as_deref(),
+                CollectErrorKind::Execution,
+                summarize_structured_completion_state(&partial),
+                source.to_string(),
+            );
             return Err(CollectError::Execution { source, partial });
         }
+        emit_raw_collect_error(
+            &self.extensions,
+            OperationKind::StructuredCompletion,
+            self.reducer.state().request_id.as_deref(),
+            CollectErrorKind::UnexpectedEof,
+            summarize_structured_completion_state(self.reducer.state()),
+            "stream ended before completion".to_string(),
+        );
         Err(CollectError::UnexpectedEof {
             partial: self.reducer.into_state(),
         })
@@ -2223,6 +2783,120 @@ fn turn_span(kind: &'static str, estimate: UsageEstimate) -> Span {
         estimate_tokens = estimate.total_tokens,
         estimate_cost_micros_usd = estimate.cost_micros_usd,
         finish_reason = field::Empty
+    )
+}
+
+fn emit_raw_collect_error(
+    extensions: &RequestExtensions,
+    operation_kind: OperationKind,
+    request_id: Option<&str>,
+    kind: CollectErrorKind,
+    partial_summary: String,
+    error: String,
+) {
+    emit_collect_error(
+        extensions,
+        operation_kind,
+        request_id,
+        kind,
+        &partial_summary,
+        &error,
+    );
+}
+
+fn summarize_text_state(state: &TextTurnState) -> String {
+    format!(
+        "request_id={:?}, model={}, assistant_items={}, finish_reason={:?}, usage_present={}, committed_turn={}",
+        state.request_id,
+        state.model,
+        state.assistant_turn.len(),
+        state.finish_reason,
+        state.usage.is_some(),
+        state.committed_turn.is_some(),
+    )
+}
+
+fn summarize_text_state_with_tools<T>(state: &TextTurnStateWithTools<T>) -> String
+where
+    T: Toolset,
+{
+    format!(
+        "request_id={:?}, model={}, assistant_items={}, tool_calls={}, issues={}, continue_suggestion={:?}, finish_reason={:?}, usage_present={}, committed_turn={}",
+        state.request_id,
+        state.model,
+        state.assistant_turn.len(),
+        state.tool_calls.len(),
+        state.recoverable_tool_call_issues.len(),
+        state.continue_suggestion,
+        state.finish_reason,
+        state.usage.is_some(),
+        state.committed_turn.is_some(),
+    )
+}
+
+fn summarize_structured_partial<O>(partial: &StructuredTurnPartial<O>) -> String
+where
+    O: StructuredOutput,
+{
+    format!(
+        "request_id={:?}, model={}, assistant_items={}, structured_present={}, refusal_present={}, finish_reason={:?}, usage_present={}, committed_turn={}",
+        partial.state.request_id,
+        partial.state.model,
+        partial.state.assistant_turn.len(),
+        partial.state.structured.is_some(),
+        partial.state.refusal.is_some(),
+        partial.state.finish_reason,
+        partial.state.usage.is_some(),
+        partial.committed_turn.is_some(),
+    )
+}
+
+fn summarize_structured_partial_with_tools<T, O>(
+    partial: &StructuredTurnPartialWithTools<T, O>,
+) -> String
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    format!(
+        "request_id={:?}, model={}, assistant_items={}, tool_calls={}, issues={}, continue_suggestion={:?}, structured_present={}, refusal_present={}, finish_reason={:?}, usage_present={}, committed_turn={}",
+        partial.state.request_id,
+        partial.state.model,
+        partial.state.assistant_turn.len(),
+        partial.state.tool_calls.len(),
+        partial.state.recoverable_tool_call_issues.len(),
+        partial.state.continue_suggestion,
+        partial.state.structured.is_some(),
+        partial.state.refusal.is_some(),
+        partial.state.finish_reason,
+        partial.state.usage.is_some(),
+        partial.committed_turn.is_some(),
+    )
+}
+
+fn summarize_completion_state(state: &CompletionTurnState) -> String {
+    format!(
+        "request_id={:?}, model={}, text_len={}, finish_reason={:?}, usage_present={}",
+        state.request_id,
+        state.model,
+        state.text.len(),
+        state.finish_reason,
+        state.usage.is_some(),
+    )
+}
+
+fn summarize_structured_completion_state<O>(state: &StructuredCompletionState<O>) -> String
+where
+    O: StructuredOutput,
+{
+    format!(
+        "request_id={:?}, model={}, structured_present={}, refusal_present={}, finish_reason={:?}, usage_present={}",
+        state.request_id,
+        state.model,
+        state.structured.is_some(),
+        state.refusal.is_some(),
+        state.finish_reason,
+        state.usage.is_some(),
     )
 }
 

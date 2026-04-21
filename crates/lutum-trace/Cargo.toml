@@ -8,6 +8,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+lutum-protocol.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

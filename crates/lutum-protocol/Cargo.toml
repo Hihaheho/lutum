@@ -16,6 +16,7 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 send_wrapper = { version = "0.6", features = ["futures"] }

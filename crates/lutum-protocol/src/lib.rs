@@ -15,6 +15,7 @@ pub mod hooks;
 pub mod llm;
 pub mod reducer;
 pub mod structured;
+pub mod telemetry;
 pub mod toolset;
 pub mod transcript;
 
@@ -57,6 +58,14 @@ pub use reducer::{
     TextTurnStateWithTools, assistant_json, find_tool_call_arguments,
 };
 pub use structured::StructuredOutput;
+pub use telemetry::{
+    CollectErrorKind, ParseErrorStage, RAW_FIELD_API, RAW_FIELD_COLLECT_KIND, RAW_FIELD_ERROR,
+    RAW_FIELD_EVENT_NAME, RAW_FIELD_KIND, RAW_FIELD_OPERATION, RAW_FIELD_PARTIAL_SUMMARY,
+    RAW_FIELD_PAYLOAD, RAW_FIELD_PROVIDER, RAW_FIELD_REQUEST_ID, RAW_FIELD_SEQUENCE,
+    RAW_FIELD_STAGE, RAW_KIND_COLLECT_ERROR, RAW_KIND_PARSE_ERROR, RAW_KIND_REQUEST,
+    RAW_KIND_STREAM_EVENT, RAW_TELEMETRY_TARGET, RawTelemetryConfig, RawTelemetryEmitter,
+    emit_collect_error, operation_kind_name,
+};
 pub use toolset::{
     ContinueSuggestionReason, HandledTool, HookableToolset, IntoToolResult, NoToolSelector,
     NoTools, RecoverableToolCallIssue, RecoverableToolCallIssueReason, RejectedToolCall,

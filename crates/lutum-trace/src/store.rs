@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use tracing::field::{Field, Visit};
 
+use crate::raw::RawTraceEntry;
 use crate::snapshot::{EventRecord, FieldValue, TraceEvent};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +30,8 @@ pub(crate) enum CaptureRecord {
 
 pub(crate) struct CaptureLog {
     pub(crate) records: Mutex<Vec<CaptureRecord>>,
+    pub(crate) raw_entries: Mutex<Vec<RawTraceEntry>>,
+    pub(crate) capture_raw: bool,
     pub(crate) event_sink: Option<Arc<dyn Fn(TraceEvent) + Send + Sync>>,
 }
 

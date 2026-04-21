@@ -26,6 +26,7 @@ use lutum_protocol::{
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
         ErasedTextTurnEventStream, ModelName, OperationKind, TurnAdapter, UsageRecoveryAdapter,
     },
+    telemetry::{ParseErrorStage, RawTelemetryEmitter},
     transcript::{TurnRole, TurnView},
 };
 use reqwest::{
@@ -73,6 +74,22 @@ pub trait OpenAiHooks {
         _extensions: &RequestExtensions,
     ) -> Option<OpenAiReasoningEffort> {
         None
+    }
+}
+
+fn serialize_raw_body<T: Serialize>(body: &T) -> Result<String, OpenAiError> {
+    serde_json::to_string(body).map_err(OpenAiError::Json)
+}
+
+fn emit_openai_parse_error(
+    raw: Option<&RawTelemetryEmitter>,
+    request_id: Option<&str>,
+    stage: ParseErrorStage,
+    payload: &str,
+    error: &impl std::fmt::Display,
+) {
+    if let Some(raw) = raw {
+        raw.emit_parse_error(request_id, stage, payload, &error.to_string());
     }
 }
 
@@ -319,6 +336,14 @@ impl TurnAdapter for OpenAiAdapter {
         input: ModelInput,
         turn: AdapterTextTurn,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
+        let raw_responses =
+            RawTelemetryEmitter::new(turn.extensions.as_ref(), "openai", "responses", "text_turn");
+        let raw_chat = RawTelemetryEmitter::new(
+            turn.extensions.as_ref(),
+            "openai",
+            "chat_completions",
+            "text_turn",
+        );
         let model = self
             .hooks
             .select_openai_model(turn.extensions.as_ref(), self.default_model.clone())
@@ -331,25 +356,42 @@ impl TurnAdapter for OpenAiAdapter {
             let body = self
                 .prepare_chat_request(&input, &turn.config, model.as_ref(), reasoning_effort)
                 .map_err(AgentError::backend)?;
+            if let Some(raw) = raw_chat.as_ref() {
+                raw.emit_request(
+                    None,
+                    &serialize_raw_body(&body).map_err(AgentError::backend)?,
+                );
+            }
             let stream = self
                 .send_streaming_json("/chat/completions", &body)
                 .await
                 .map_err(AgentError::backend)?;
             return Ok(Box::pin(
-                map_chat_text_stream(stream, model.into())
+                map_chat_text_stream(stream, model.into(), raw_chat)
                     .map(|item| item.map_err(AgentError::backend)),
             ) as ErasedTextTurnEventStream);
         }
         let body = self
             .prepare_responses_request(&input, &turn.config, model.as_ref(), reasoning_effort, None)
             .map_err(AgentError::backend)?;
+        if let Some(raw) = raw_responses.as_ref() {
+            raw.emit_request(
+                None,
+                &serialize_raw_body(&body).map_err(AgentError::backend)?,
+            );
+        }
         let stream = self
             .send_streaming_json("/responses", &body)
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
-            map_text_stream(stream, model.into(), self.sse_event_recovery_hook.clone())
-                .map(|item| item.map_err(AgentError::backend)),
+            map_text_stream(
+                stream,
+                model.into(),
+                self.sse_event_recovery_hook.clone(),
+                raw_responses,
+            )
+            .map(|item| item.map_err(AgentError::backend)),
         ) as ErasedTextTurnEventStream)
     }
 
@@ -358,6 +400,18 @@ impl TurnAdapter for OpenAiAdapter {
         input: ModelInput,
         turn: AdapterStructuredTurn,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
+        let raw_responses = RawTelemetryEmitter::new(
+            turn.extensions.as_ref(),
+            "openai",
+            "responses",
+            "structured_turn",
+        );
+        let raw_chat = RawTelemetryEmitter::new(
+            turn.extensions.as_ref(),
+            "openai",
+            "chat_completions",
+            "structured_turn",
+        );
         let model = self
             .hooks
             .select_openai_model(turn.extensions.as_ref(), self.default_model.clone())
@@ -379,12 +433,18 @@ impl TurnAdapter for OpenAiAdapter {
                     strict: Some(true),
                 },
             });
+            if let Some(raw) = raw_chat.as_ref() {
+                raw.emit_request(
+                    None,
+                    &serialize_raw_body(&body).map_err(AgentError::backend)?,
+                );
+            }
             let stream = self
                 .send_streaming_json("/chat/completions", &body)
                 .await
                 .map_err(AgentError::backend)?;
             return Ok(Box::pin(
-                map_chat_structured_stream(stream, model.into())
+                map_chat_structured_stream(stream, model.into(), raw_chat)
                     .map(|item| item.map_err(AgentError::backend)),
             ) as ErasedStructuredTurnEventStream);
         }
@@ -404,13 +464,24 @@ impl TurnAdapter for OpenAiAdapter {
                 text_format,
             )
             .map_err(AgentError::backend)?;
+        if let Some(raw) = raw_responses.as_ref() {
+            raw.emit_request(
+                None,
+                &serialize_raw_body(&body).map_err(AgentError::backend)?,
+            );
+        }
         let stream = self
             .send_streaming_json("/responses", &body)
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
-            map_structured_stream(stream, model.into(), self.sse_event_recovery_hook.clone())
-                .map(|item| item.map_err(AgentError::backend)),
+            map_structured_stream(
+                stream,
+                model.into(),
+                self.sse_event_recovery_hook.clone(),
+                raw_responses,
+            )
+            .map(|item| item.map_err(AgentError::backend)),
         ) as ErasedStructuredTurnEventStream)
     }
 }
@@ -422,17 +493,24 @@ impl CompletionAdapter for OpenAiAdapter {
         request: ProtocolCompletionRequest,
         extensions: &RequestExtensions,
     ) -> Result<CompletionEventStream, AgentError> {
+        let raw = RawTelemetryEmitter::new(extensions, "openai", "completions", "completion");
         let model = self
             .hooks
             .select_openai_model(extensions, self.default_model.clone())
             .await;
         let body = self.prepare_completion_request(&request, model.as_ref());
+        if let Some(raw) = raw.as_ref() {
+            raw.emit_request(
+                None,
+                &serialize_raw_body(&body).map_err(AgentError::backend)?,
+            );
+        }
         let stream = self
             .send_streaming_json("/completions", &body)
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
-            map_completion_stream(stream, model.into())
+            map_completion_stream(stream, model.into(), raw)
                 .map(|item| item.map_err(AgentError::backend)),
         ) as CompletionEventStream)
     }
@@ -442,18 +520,30 @@ impl CompletionAdapter for OpenAiAdapter {
         request: AdapterStructuredCompletionRequest,
         extensions: &RequestExtensions,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
+        let raw =
+            RawTelemetryEmitter::new(extensions, "openai", "responses", "structured_completion");
         let model = self
             .hooks
             .select_openai_model(extensions, self.default_model.clone())
             .await;
         let body = self.prepare_structured_completion_request(&request, model.as_ref());
+        if let Some(raw) = raw.as_ref() {
+            raw.emit_request(
+                None,
+                &serialize_raw_body(&body).map_err(AgentError::backend)?,
+            );
+        }
         let stream = self
             .send_streaming_json("/responses", &body)
             .await
             .map_err(AgentError::backend)?;
-        let stream =
-            map_structured_stream(stream, model.into(), self.sse_event_recovery_hook.clone())
-                .map(|item| item.map_err(AgentError::backend));
+        let stream = map_structured_stream(
+            stream,
+            model.into(),
+            self.sse_event_recovery_hook.clone(),
+            raw,
+        )
+        .map(|item| item.map_err(AgentError::backend));
         Ok(
             Box::pin(stream.map(|item| item.and_then(map_erased_structured_completion_event)))
                 as ErasedStructuredCompletionEventStream,
@@ -1361,6 +1451,7 @@ fn map_text_stream<S>(
     stream: S,
     fallback_model: String,
     recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
+    raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + Send + 'static
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -1375,6 +1466,7 @@ where
         let mut tool_calls = ToolCallTracker::default();
         let mut pending_item = None::<BufferedTurnItem>;
         let mut committed_items = Vec::<OpenAiTurnItem>::new();
+        let mut raw_sequence = 0_u64;
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -1383,7 +1475,23 @@ where
                 if payload == "[DONE]" {
                     break;
                 }
-                let event = decode_sse_event(&payload, recovery_hook.as_ref(), &tool_calls)?;
+                raw_sequence += 1;
+                if let Some(raw) = raw.as_ref() {
+                    raw.emit_stream_event(request_id.as_deref(), raw_sequence, &payload, None);
+                }
+                let event = match decode_sse_event(&payload, recovery_hook.as_ref(), &tool_calls) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        emit_openai_parse_error(
+                            raw.as_ref(),
+                            request_id.as_deref(),
+                            ParseErrorStage::SseDecode,
+                            &payload,
+                            &err,
+                        );
+                        Err(err)?
+                    }
+                };
                 if let SseEvent::ResponseCreated(created) = &event {
                     request_id = Some(created.response.id.clone());
                     if let Some(event_model) = created.response.model.as_ref() {
@@ -1576,6 +1684,7 @@ fn map_structured_stream<S>(
     stream: S,
     fallback_model: String,
     recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
+    raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, OpenAiError>> + Send + 'static
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -1592,6 +1701,7 @@ where
         let mut emitted_ready = false;
         let mut pending_item = None::<BufferedTurnItem>;
         let mut committed_items = Vec::<OpenAiTurnItem>::new();
+        let mut raw_sequence = 0_u64;
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -1600,7 +1710,23 @@ where
                 if payload == "[DONE]" {
                     break;
                 }
-                let event = decode_sse_event(&payload, recovery_hook.as_ref(), &tool_calls)?;
+                raw_sequence += 1;
+                if let Some(raw) = raw.as_ref() {
+                    raw.emit_stream_event(request_id.as_deref(), raw_sequence, &payload, None);
+                }
+                let event = match decode_sse_event(&payload, recovery_hook.as_ref(), &tool_calls) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        emit_openai_parse_error(
+                            raw.as_ref(),
+                            request_id.as_deref(),
+                            ParseErrorStage::SseDecode,
+                            &payload,
+                            &err,
+                        );
+                        Err(err)?
+                    }
+                };
                 if let SseEvent::ResponseCreated(created) = &event {
                     request_id = Some(created.response.id.clone());
                     if let Some(event_model) = created.response.model.as_ref() {
@@ -1647,9 +1773,23 @@ where
                             &event.item_id,
                             &event.text,
                         );
-                        if let Some(value) =
-                            maybe_parse_structured_output(&structured_buffer, &mut emitted_ready)?
-                        {
+                        let value = match maybe_parse_structured_output(
+                            &structured_buffer,
+                            &mut emitted_ready,
+                        ) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                emit_openai_parse_error(
+                                    raw.as_ref(),
+                                    request_id.as_deref(),
+                                    ParseErrorStage::StructuredOutputParse,
+                                    &structured_buffer,
+                                    &err,
+                                );
+                                Err(err)?
+                            }
+                        };
+                        if let Some(value) = value {
                             yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
                         }
                     }
@@ -1747,9 +1887,23 @@ where
                     }
                     SseEvent::ResponseCompleted(event) => {
                         request_id = Some(event.response.id.clone());
-                        if let Some(value) =
-                            maybe_parse_structured_output(&structured_buffer, &mut emitted_ready)?
-                        {
+                        let value = match maybe_parse_structured_output(
+                            &structured_buffer,
+                            &mut emitted_ready,
+                        ) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                emit_openai_parse_error(
+                                    raw.as_ref(),
+                                    request_id.as_deref(),
+                                    ParseErrorStage::StructuredOutputParse,
+                                    &structured_buffer,
+                                    &err,
+                                );
+                                Err(err)?
+                            }
+                        };
+                        if let Some(value) = value {
                             yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
                         }
                         flush_buffered_content(&mut pending_item, &mut committed_items);
@@ -1831,6 +1985,7 @@ struct CompletionUsage {
 fn map_completion_stream<S>(
     stream: S,
     fallback_model: String,
+    raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<CompletionEvent, OpenAiError>> + Send + 'static
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -1842,6 +1997,7 @@ where
         let mut model = fallback_model;
         let mut last_usage = Usage::zero();
         let mut finished = false;
+        let mut raw_sequence = 0_u64;
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -1858,7 +2014,23 @@ where
                     finished = true;
                     break;
                 }
-                let event = serde_json::from_str::<CompletionChunk>(&payload)?;
+                raw_sequence += 1;
+                if let Some(raw) = raw.as_ref() {
+                    raw.emit_stream_event(request_id.as_deref(), raw_sequence, &payload, None);
+                }
+                let event = match serde_json::from_str::<CompletionChunk>(&payload) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        emit_openai_parse_error(
+                            raw.as_ref(),
+                            request_id.as_deref(),
+                            ParseErrorStage::CompletionChunkDecode,
+                            &payload,
+                            &err,
+                        );
+                        Err(OpenAiError::Json(err))?
+                    }
+                };
                 if !started {
                     request_id = event.id.clone();
                     if let Some(event_model) = event.model.clone() {
@@ -2206,6 +2378,7 @@ fn emit_turn_view_as_chat_messages(turn: &dyn TurnView, messages: &mut Vec<ChatM
 fn map_chat_text_stream<S>(
     stream: S,
     fallback_model: String,
+    raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + Send + 'static
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -2220,6 +2393,7 @@ where
         let mut saw_refusal = false;
         let mut tool_calls = ToolCallTracker::default();
         let mut last_usage = Usage::zero();
+        let mut raw_sequence = 0_u64;
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -2228,8 +2402,23 @@ where
                 if payload == "[DONE]" {
                     break;
                 }
-                let event = serde_json::from_str::<ChatStreamChunk>(&payload)
-                    .map_err(|err| sse_decode_error(&payload, err))?;
+                raw_sequence += 1;
+                if let Some(raw) = raw.as_ref() {
+                    raw.emit_stream_event(request_id.as_deref(), raw_sequence, &payload, None);
+                }
+                let event = match serde_json::from_str::<ChatStreamChunk>(&payload) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        emit_openai_parse_error(
+                            raw.as_ref(),
+                            request_id.as_deref(),
+                            ParseErrorStage::ChatChunkDecode,
+                            &payload,
+                            &err,
+                        );
+                        Err(sse_decode_error(&payload, err))?
+                    }
+                };
                 if !started {
                     request_id = event.id.clone();
                     if let Some(m) = event.model.as_ref() {
@@ -2311,7 +2500,19 @@ where
             committed_items.push(OpenAiTurnItem::Text { content: text_content });
         }
         for finalized in tool_calls.finalized.values() {
-            let arguments = RawJson::parse(finalized.arguments_json.clone())?;
+            let arguments = match RawJson::parse(finalized.arguments_json.clone()) {
+                Ok(arguments) => arguments,
+                Err(err) => {
+                    emit_openai_parse_error(
+                        raw.as_ref(),
+                        request_id.as_deref(),
+                        ParseErrorStage::ToolCallArgumentsParse,
+                        &finalized.arguments_json,
+                        &err,
+                    );
+                    Err(OpenAiError::Json(err))?
+                }
+            };
             committed_items.push(OpenAiTurnItem::ToolCall {
                 id: finalized.id.clone(),
                 name: finalized.name.clone(),
@@ -2354,6 +2555,7 @@ where
 fn map_chat_structured_stream<S>(
     stream: S,
     fallback_model: String,
+    raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, OpenAiError>> + Send + 'static
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -2366,6 +2568,7 @@ where
         let mut json_buffer = String::new();
         let mut last_usage = Usage::zero();
         let mut saw_refusal = false;
+        let mut raw_sequence = 0_u64;
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -2374,8 +2577,23 @@ where
                 if payload == "[DONE]" {
                     break;
                 }
-                let event = serde_json::from_str::<ChatStreamChunk>(&payload)
-                    .map_err(|err| sse_decode_error(&payload, err))?;
+                raw_sequence += 1;
+                if let Some(raw) = raw.as_ref() {
+                    raw.emit_stream_event(request_id.as_deref(), raw_sequence, &payload, None);
+                }
+                let event = match serde_json::from_str::<ChatStreamChunk>(&payload) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        emit_openai_parse_error(
+                            raw.as_ref(),
+                            request_id.as_deref(),
+                            ParseErrorStage::ChatChunkDecode,
+                            &payload,
+                            &err,
+                        );
+                        Err(sse_decode_error(&payload, err))?
+                    }
+                };
                 if !started {
                     request_id = event.id.clone();
                     if let Some(m) = event.model.as_ref() {
@@ -2427,8 +2645,20 @@ where
             };
 
             if !json_buffer.is_empty() {
-                let raw = RawJson::parse(json_buffer)?;
-                yield ErasedStructuredTurnEvent::StructuredOutputReady(raw);
+                let raw_json = match RawJson::parse(json_buffer.clone()) {
+                    Ok(raw_json) => raw_json,
+                    Err(err) => {
+                        emit_openai_parse_error(
+                            raw.as_ref(),
+                            request_id.as_deref(),
+                            ParseErrorStage::StructuredOutputParse,
+                            &json_buffer,
+                            &err,
+                        );
+                        Err(OpenAiError::Json(err))?
+                    }
+                };
+                yield ErasedStructuredTurnEvent::StructuredOutputReady(raw_json);
             }
 
             let committed_turn = Arc::new(OpenAiCommittedTurn {
@@ -2470,9 +2700,10 @@ mod tests {
     use lutum_protocol::{
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
         AssistantTurnItem, AssistantTurnView, ErasedStructuredTurnEvent, ErasedTextTurnEvent,
-        GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName,
-        RequestExtensions, ToolResult,
+        GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ParseErrorStage,
+        RawTelemetryConfig, RequestExtensions, ToolResult,
     };
+    use lutum_trace::RawTraceEntry;
 
     use super::*;
 
@@ -2484,6 +2715,12 @@ mod tests {
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
     struct Summary {
         answer: String,
+    }
+
+    fn raw_extensions() -> RequestExtensions {
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(RawTelemetryConfig::all());
+        extensions
     }
 
     struct TaggingFallbackSerializer;
@@ -2536,6 +2773,7 @@ mod tests {
             map_text_stream(
                 futures::stream::iter(payloads),
                 "gpt-4.1-override".to_string(),
+                None,
                 None,
             )
             .collect::<Vec<_>>()
@@ -2740,9 +2978,14 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
-                .collect::<Vec<_>>()
-                .await
+            map_text_stream(
+                futures::stream::iter(payloads),
+                "gpt-4.1".into(),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -2783,9 +3026,14 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_structured_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
-                .collect::<Vec<_>>()
-                .await
+            map_structured_stream(
+                futures::stream::iter(payloads),
+                "gpt-4.1".into(),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -2829,9 +3077,14 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
-                .collect::<Vec<_>>()
-                .await
+            map_text_stream(
+                futures::stream::iter(payloads),
+                "gpt-4.1".into(),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -2874,9 +3127,14 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
-                .collect::<Vec<_>>()
-                .await
+            map_text_stream(
+                futures::stream::iter(payloads),
+                "gpt-4.1".into(),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -2988,6 +3246,7 @@ mod tests {
                 futures::stream::iter(payloads),
                 "gpt-4.1".into(),
                 Some(Arc::new(TestRecoveryHook)),
+                None,
             )
             .collect::<Vec<_>>()
             .await
@@ -3031,9 +3290,14 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_text_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
-                .collect::<Vec<_>>()
-                .await
+            map_text_stream(
+                futures::stream::iter(payloads),
+                "gpt-4.1".into(),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -3075,9 +3339,14 @@ mod tests {
         ];
 
         let events = block_on(async {
-            map_structured_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
-                .collect::<Vec<_>>()
-                .await
+            map_structured_stream(
+                futures::stream::iter(payloads),
+                "gpt-4.1".into(),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -3117,6 +3386,7 @@ mod tests {
             map_completion_stream(
                 futures::stream::iter(payloads),
                 "gpt-3.5-turbo-instruct".into(),
+                None,
             )
             .collect::<Vec<_>>()
             .await
@@ -3144,5 +3414,135 @@ mod tests {
         .unwrap();
         let item = serde_json::from_value::<FunctionCallItem>(value).unwrap();
         assert_eq!(item.arguments, "{\"city\":\"Tokyo\"}".to_string());
+    }
+
+    #[tokio::test]
+    async fn raw_trace_captures_request_and_stream_payloads() {
+        let adapter = OpenAiAdapter::new("test-key");
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let request = adapter
+            .prepare_responses_request(&input, &config, "gpt-4.1", None, None)
+            .unwrap();
+        let request_body = serialize_raw_body(&request).unwrap();
+
+        let collected = lutum_trace::test::collect_raw(async move {
+            let extensions = raw_extensions();
+            let raw = RawTelemetryEmitter::new(&extensions, "openai", "responses", "text_turn");
+            raw.unwrap().emit_request(None, &request_body);
+            map_text_stream(
+                futures::stream::iter(vec![
+                    Ok(Bytes::from(
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_telemetry\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
+                    )),
+                    Ok(Bytes::from(
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_telemetry\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+                    )),
+                ]),
+                "gpt-4.1".into(),
+                None,
+                raw,
+            )
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        })
+        .await;
+
+        assert!(matches!(
+            collected.raw.entries.first(),
+            Some(RawTraceEntry::Request { provider, api, operation, body, .. })
+                if provider == "openai"
+                    && api == "responses"
+                    && operation == "text_turn"
+                    && body.contains("\"model\":\"gpt-4.1\"")
+        ));
+        assert!(collected.raw.entries.iter().any(|entry| matches!(
+            entry,
+            RawTraceEntry::StreamEvent { request_id, sequence, payload, .. }
+                if request_id.as_deref() == Some("resp_telemetry")
+                    && *sequence == 2
+                    && payload.contains("\"response.completed\"")
+        )));
+    }
+
+    #[tokio::test]
+    async fn raw_trace_captures_sse_decode_errors() {
+        let collected = lutum_trace::test::collect_raw(async {
+            let extensions = raw_extensions();
+            let raw = RawTelemetryEmitter::new(&extensions, "openai", "responses", "text_turn");
+            map_text_stream(
+                futures::stream::iter(vec![Ok(Bytes::from("data: not-json\n\n"))]),
+                "gpt-4.1".into(),
+                None,
+                raw,
+            )
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .await;
+
+        assert!(collected.output.is_err());
+        assert!(matches!(
+            collected.raw.entries.as_slice(),
+            [
+                RawTraceEntry::StreamEvent { payload, .. },
+                RawTraceEntry::ParseError { stage, payload: error_payload, .. },
+            ] if payload == "not-json"
+                && *stage == ParseErrorStage::SseDecode
+                && error_payload == "not-json"
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_trace_captures_structured_output_parse_errors() {
+        let collected = lutum_trace::test::collect_raw(async {
+            let extensions = raw_extensions();
+            let raw =
+                RawTelemetryEmitter::new(&extensions, "openai", "responses", "structured_turn");
+            map_structured_stream(
+                futures::stream::iter(vec![
+                    Ok(Bytes::from(
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_structured_bad\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
+                    )),
+                    Ok(Bytes::from(
+                        "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"{\"}\n\n",
+                    )),
+                    Ok(Bytes::from(
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_structured_bad\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+                    )),
+                ]),
+                "gpt-4.1".into(),
+                None,
+                raw,
+            )
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .await;
+
+        assert!(collected.output.is_err());
+        assert!(collected.raw.entries.iter().any(|entry| matches!(
+            entry,
+            RawTraceEntry::ParseError {
+                request_id,
+                stage,
+                payload,
+                ..
+            } if request_id.as_deref() == Some("resp_structured_bad")
+                && *stage == ParseErrorStage::StructuredOutputParse
+                && payload == "{"
+        )));
     }
 }

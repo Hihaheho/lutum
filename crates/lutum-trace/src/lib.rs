@@ -1,5 +1,6 @@
 mod filter;
 mod layer;
+mod raw;
 mod snapshot;
 mod store;
 
@@ -14,6 +15,7 @@ use tracing::Instrument as _;
 
 pub use crate::filter::LUTUM_CAPTURE_FIELD;
 pub use crate::layer::{CaptureLayer, layer};
+pub use crate::raw::{RawTraceEntry, RawTraceSnapshot};
 pub use crate::snapshot::{
     EventRecord, FieldValue, SpanNode, TraceEvent, TraceSnapshot, TraceSpanId,
 };
@@ -31,11 +33,17 @@ pub struct Collected<T> {
     pub trace: TraceSnapshot,
 }
 
+pub struct CollectedRaw<T> {
+    pub output: T,
+    pub trace: TraceSnapshot,
+    pub raw: RawTraceSnapshot,
+}
+
 pub async fn capture<F, T>(future: F) -> Collected<T>
 where
     F: Future<Output = T>,
 {
-    capture_inner(future, None).await
+    capture_inner(future, None, false).await.into_collected()
 }
 
 pub async fn capture_with_events<F, T, E>(future: F, emit: E) -> Collected<T>
@@ -43,12 +51,25 @@ where
     F: Future<Output = T>,
     E: Fn(TraceEvent) + Send + Sync + 'static,
 {
-    capture_inner(future, Some(Arc::new(emit))).await
+    capture_inner(future, Some(Arc::new(emit)), false)
+        .await
+        .into_collected()
+}
+
+pub async fn capture_raw<F, T>(future: F) -> CollectedRaw<T>
+where
+    F: Future<Output = T>,
+{
+    capture_inner(future, None, true).await
 }
 
 type EventSink = Arc<dyn Fn(TraceEvent) + Send + Sync>;
 
-async fn capture_inner<F, T>(future: F, sink: Option<EventSink>) -> Collected<T>
+async fn capture_inner<F, T>(
+    future: F,
+    sink: Option<EventSink>,
+    capture_raw: bool,
+) -> CollectedRaw<T>
 where
     F: Future<Output = T>,
 {
@@ -61,6 +82,8 @@ where
     let capture_id = alloc_capture_id();
     let log = Arc::new(CaptureLog {
         records: Mutex::new(Vec::new()),
+        raw_entries: Mutex::new(Vec::new()),
+        capture_raw,
         event_sink: sink,
     });
     register_capture(capture_id, Arc::clone(&log));
@@ -76,8 +99,25 @@ where
 
     let records = log.records.lock().unwrap_or_else(|err| err.into_inner());
     let trace = build_snapshot(&records);
+    drop(records);
+    let raw_entries = log
+        .raw_entries
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let raw = RawTraceSnapshot {
+        entries: raw_entries.clone(),
+    };
 
-    Collected { output, trace }
+    CollectedRaw { output, trace, raw }
+}
+
+impl<T> CollectedRaw<T> {
+    fn into_collected(self) -> Collected<T> {
+        Collected {
+            output: self.output,
+            trace: self.trace,
+        }
+    }
 }
 
 #[cfg(test)]

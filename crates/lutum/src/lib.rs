@@ -40,6 +40,10 @@ pub mod structured {
     pub use lutum_protocol::structured::*;
 }
 
+pub mod telemetry {
+    pub use lutum_protocol::telemetry::*;
+}
+
 pub mod toolset {
     pub use lutum_protocol::toolset::*;
 }
@@ -75,9 +79,14 @@ pub use lutum_protocol::{
     ErasedTextTurnEventStream, FinishReason, GenerationParams, HandledTool, HookableToolset,
     InputMessageRole, IntoToolResult, ItemView, MessageContent, ModelInput, ModelInputItem,
     ModelInputValidationError, ModelName, ModelNameError, NoToolSelector, NoTools, NonEmpty,
-    OperationKind, REJECTED_TOOL_RESULT_PREFIX, RawJson, RecoverableToolCallIssue,
-    RecoverableToolCallIssueReason, RejectedToolCall, RejectedToolSource, Remaining, RequestBudget,
-    RequestExtensions, SharedPoolBudgetError, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    CollectErrorKind, OperationKind, ParseErrorStage, RAW_FIELD_API, RAW_FIELD_COLLECT_KIND, RAW_FIELD_ERROR, RAW_FIELD_EVENT_NAME,
+    RAW_FIELD_KIND, RAW_FIELD_OPERATION, RAW_FIELD_PARTIAL_SUMMARY, RAW_FIELD_PAYLOAD,
+    RAW_FIELD_PROVIDER, RAW_FIELD_REQUEST_ID, RAW_FIELD_SEQUENCE, RAW_FIELD_STAGE,
+    RAW_KIND_COLLECT_ERROR, RAW_KIND_PARSE_ERROR, RAW_KIND_REQUEST, RAW_KIND_STREAM_EVENT,
+    RAW_TELEMETRY_TARGET, REJECTED_TOOL_RESULT_PREFIX, RawJson, RawTelemetryConfig,
+    RawTelemetryEmitter, RecoverableToolCallIssue, RecoverableToolCallIssueReason,
+    RejectedToolCall, RejectedToolSource, Remaining, RequestBudget, RequestExtensions,
+    SharedPoolBudgetError, SharedPoolBudgetManager, SharedPoolBudgetOptions,
     StagedStructuredTurnResult, StagedStructuredTurnResultWithTools, StagedTextTurnResult,
     StagedTextTurnResultWithTools, StructuredCompletionEvent, StructuredCompletionEventStream,
     StructuredCompletionReducer, StructuredCompletionReductionError, StructuredCompletionRequest,

@@ -1,7 +1,8 @@
 use tracing::{Instrument, field};
 use tracing_subscriber::layer::SubscriberExt as _;
 
-use lutum_trace::FieldValue;
+use lutum_protocol::ParseErrorStage;
+use lutum_trace::{FieldValue, RawTraceEntry};
 
 #[tokio::test]
 async fn basic_tree() {
@@ -226,4 +227,88 @@ async fn cross_task_capture() {
                 .iter()
                 .any(|event| event.message() == Some("from spawned task"))
     );
+}
+
+async fn emit_trace_with_raw() {
+    let root = tracing::info_span!(target: "lutum", "raw_parent", answer = 7_u64);
+    let _root = root.enter();
+    tracing::info!(target: "lutum", "visible trace event");
+    tracing::trace!(
+        target: lutum_protocol::RAW_TELEMETRY_TARGET,
+        provider = "openai",
+        api = "responses",
+        operation = "text_turn",
+        kind = lutum_protocol::RAW_KIND_REQUEST,
+        request_id = "req-raw",
+        payload = "{\"input\":\"hello\"}",
+    );
+}
+
+#[tokio::test]
+async fn capture_raw_preserves_normal_trace_and_collects_raw_entries() {
+    let baseline = lutum_trace::test::collect(async { emit_trace_with_raw().await }).await;
+    let collected = lutum_trace::test::collect_raw(async { emit_trace_with_raw().await }).await;
+
+    assert_eq!(collected.trace, baseline.trace);
+    assert_eq!(
+        collected.raw.entries,
+        vec![RawTraceEntry::Request {
+            provider: "openai".to_string(),
+            api: "responses".to_string(),
+            operation: "text_turn".to_string(),
+            request_id: Some("req-raw".to_string()),
+            body: "{\"input\":\"hello\"}".to_string(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn capture_raw_keeps_entries_in_emission_order() {
+    let collected = lutum_trace::test::collect_raw(async {
+        tracing::trace!(
+            target: lutum_protocol::RAW_TELEMETRY_TARGET,
+            provider = "claude",
+            api = "messages",
+            operation = "structured_turn",
+            kind = lutum_protocol::RAW_KIND_REQUEST,
+            request_id = "req-order",
+            payload = "{\"model\":\"claude\"}",
+        );
+        tracing::trace!(
+            target: lutum_protocol::RAW_TELEMETRY_TARGET,
+            provider = "claude",
+            api = "messages",
+            operation = "structured_turn",
+            kind = lutum_protocol::RAW_KIND_STREAM_EVENT,
+            request_id = "req-order",
+            sequence = 1_u64,
+            event_name = "content_block_delta",
+            payload = "{\"type\":\"content_block_delta\"}",
+        );
+        tracing::trace!(
+            target: lutum_protocol::RAW_TELEMETRY_TARGET,
+            provider = "claude",
+            api = "messages",
+            operation = "structured_turn",
+            kind = lutum_protocol::RAW_KIND_PARSE_ERROR,
+            request_id = "req-order",
+            stage = "structured_output_parse",
+            payload = "{",
+            error = "expected value",
+        );
+    })
+    .await;
+
+    assert!(matches!(
+        collected.raw.entries.as_slice(),
+        [
+            RawTraceEntry::Request { request_id, .. },
+            RawTraceEntry::StreamEvent { sequence, event_name, .. },
+            RawTraceEntry::ParseError { stage, payload, .. },
+        ] if request_id.as_deref() == Some("req-order")
+            && *sequence == 1
+            && event_name.as_deref() == Some("content_block_delta")
+            && *stage == ParseErrorStage::StructuredOutputParse
+            && payload == "{"
+    ));
 }

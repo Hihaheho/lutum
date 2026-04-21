@@ -12,6 +12,7 @@ use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 use crate::{
     filter::{event_interesting, should_mark_span},
+    raw::parse_raw_entry,
     snapshot::{EventRecord, TraceEvent, TraceSpanId},
     store::{CaptureLog, CaptureRecord, FieldVisitor},
 };
@@ -160,6 +161,13 @@ fn push_record(log: &CaptureLog, record: CaptureRecord) {
         .push(record);
 }
 
+fn push_raw_entry(log: &CaptureLog, entry: crate::RawTraceEntry) {
+    log.raw_entries
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(entry);
+}
+
 impl<S> Layer<S> for CaptureLayer
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
@@ -285,6 +293,26 @@ where
         let Some(log) = find_log_for_scope(&ctx, parent_id) else {
             return;
         };
+
+        if event.metadata().target() == lutum_protocol::RAW_TELEMETRY_TARGET {
+            if !log.capture_raw {
+                return;
+            }
+
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            let (fields, message) = visitor.into_parts();
+            let record = EventRecord {
+                target: event.metadata().target().to_string(),
+                level: event.metadata().level().to_string(),
+                message,
+                fields,
+            };
+            if let Some(entry) = parse_raw_entry(&record) {
+                push_raw_entry(&log, entry);
+            }
+            return;
+        }
 
         let parent_span_id = span_has_recorded_capture(&ctx, parent_id);
         if parent_span_id.is_none() && !event_interesting(event) {
