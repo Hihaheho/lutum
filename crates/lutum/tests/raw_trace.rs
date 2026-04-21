@@ -83,11 +83,9 @@ fn capture_raw_records_execution_collect_errors() {
     ]));
 
     let collected = block_on(lutum_trace::test::collect_raw(async move {
-        let ctx = Lutum::new(Arc::new(adapter), test_budget());
-        ctx.text_turn(input())
-            .ext(RawTelemetryConfig::all())
-            .collect()
-            .await
+        let ctx =
+            Lutum::new(Arc::new(adapter), test_budget()).with_extension(RawTelemetryConfig::all());
+        ctx.text_turn(input()).collect().await
     }));
 
     assert!(matches!(
@@ -119,11 +117,9 @@ fn capture_raw_records_reduction_collect_errors() {
     ]));
 
     let collected = block_on(lutum_trace::test::collect_raw(async move {
-        let ctx = Lutum::new(Arc::new(adapter), test_budget());
-        ctx.text_turn(input())
-            .ext(RawTelemetryConfig::all())
-            .collect()
-            .await
+        let ctx =
+            Lutum::new(Arc::new(adapter), test_budget()).with_extension(RawTelemetryConfig::all());
+        ctx.text_turn(input()).collect().await
     }));
 
     assert!(matches!(
@@ -150,13 +146,9 @@ fn capture_raw_records_handler_collect_errors() {
     ]));
 
     let collected = block_on(lutum_trace::test::collect_raw(async move {
-        let ctx = Lutum::new(Arc::new(adapter), test_budget());
-        let pending = ctx
-            .text_turn(input())
-            .ext(RawTelemetryConfig::all())
-            .start()
-            .await
-            .unwrap();
+        let ctx =
+            Lutum::new(Arc::new(adapter), test_budget()).with_extension(RawTelemetryConfig::all());
+        let pending = ctx.text_turn(input()).start().await.unwrap();
         pending.collect_with(FailOnTextDelta).await
     }));
 
@@ -181,11 +173,9 @@ fn capture_raw_records_unexpected_eof_collect_errors() {
     )]));
 
     let collected = block_on(lutum_trace::test::collect_raw(async move {
-        let ctx = Lutum::new(Arc::new(adapter), test_budget());
-        ctx.text_turn(input())
-            .ext(RawTelemetryConfig::all())
-            .collect()
-            .await
+        let ctx =
+            Lutum::new(Arc::new(adapter), test_budget()).with_extension(RawTelemetryConfig::all());
+        ctx.text_turn(input()).collect().await
     }));
 
     assert!(matches!(
@@ -197,4 +187,29 @@ fn capture_raw_records_unexpected_eof_collect_errors() {
         CollectErrorKind::UnexpectedEof,
         Some("req-eof"),
     );
+}
+
+#[test]
+fn request_extensions_can_disable_lutum_default_raw_telemetry() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![Ok(
+        RawTextTurnEvent::Started {
+            request_id: Some("req-disabled".into()),
+            model: "gpt-4.1".into(),
+        },
+    )]));
+
+    let collected = block_on(lutum_trace::test::collect_raw(async move {
+        let ctx =
+            Lutum::new(Arc::new(adapter), test_budget()).with_extension(RawTelemetryConfig::all());
+        ctx.text_turn(input())
+            .ext(RawTelemetryConfig::none())
+            .collect()
+            .await
+    }));
+
+    assert!(matches!(
+        collected.output,
+        Err(CollectError::UnexpectedEof { .. })
+    ));
+    assert!(collected.raw.entries.is_empty());
 }

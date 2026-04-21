@@ -77,6 +77,7 @@ pub struct Lutum {
     completion: Arc<dyn CompletionAdapter>,
     recovery: Arc<dyn UsageRecoveryAdapter>,
     hooks: Arc<LutumHooks>,
+    default_extensions: Arc<RequestExtensions>,
 }
 
 impl Lutum {
@@ -101,6 +102,7 @@ impl Lutum {
             completion: Arc::new(UnsupportedCompletionAdapter),
             recovery: adapter,
             hooks: Arc::new(hooks),
+            default_extensions: Arc::new(RequestExtensions::new()),
         }
     }
 
@@ -126,11 +128,31 @@ impl Lutum {
             completion,
             recovery,
             hooks: Arc::new(hooks),
+            default_extensions: Arc::new(RequestExtensions::new()),
         }
     }
 
     pub fn budget(&self) -> &dyn BudgetManager {
         self.budget.as_ref()
+    }
+
+    pub fn with_extension<T>(self, extension: T) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(extension);
+        self.with_extensions(extensions)
+    }
+
+    pub fn with_extensions(mut self, mut extensions: RequestExtensions) -> Self {
+        extensions.push_fallback(Arc::clone(&self.default_extensions));
+        self.default_extensions = Arc::new(extensions);
+        self
+    }
+
+    pub fn default_extensions(&self) -> &RequestExtensions {
+        self.default_extensions.as_ref()
     }
 
     pub fn text_turn(&self, input: ModelInput) -> crate::builders::TextTurn<'_> {
@@ -164,6 +186,11 @@ impl Lutum {
         kind: OperationKind,
     ) -> UsageEstimate {
         self.hooks.resolve_usage_estimate(extensions, kind).await
+    }
+
+    fn apply_default_extensions(&self, mut extensions: RequestExtensions) -> RequestExtensions {
+        extensions.push_fallback(Arc::clone(&self.default_extensions));
+        extensions
     }
 }
 
@@ -420,6 +447,7 @@ impl Lutum {
         turn: ProtocolTextTurn<NoTools>,
     ) -> Result<PendingTextTurn, LutumError> {
         input.validate()?;
+        let extensions = self.apply_default_extensions(extensions);
         let estimate = self
             .resolve_usage_estimate(&extensions, OperationKind::TextTurn)
             .await;
@@ -463,6 +491,7 @@ impl Lutum {
         T: Toolset,
     {
         input.validate()?;
+        let extensions = self.apply_default_extensions(extensions);
         let estimate = self
             .resolve_usage_estimate(&extensions, OperationKind::TextTurn)
             .await;
@@ -508,6 +537,7 @@ impl Lutum {
         O: StructuredOutput,
     {
         input.validate()?;
+        let extensions = self.apply_default_extensions(extensions);
         let estimate = self
             .resolve_usage_estimate(&extensions, OperationKind::StructuredTurn)
             .await;
@@ -551,6 +581,7 @@ impl Lutum {
         O: StructuredOutput,
     {
         input.validate()?;
+        let extensions = self.apply_default_extensions(extensions);
         let estimate = self
             .resolve_usage_estimate(&extensions, OperationKind::StructuredTurn)
             .await;
@@ -590,6 +621,7 @@ impl Lutum {
         extensions: RequestExtensions,
         request: CompletionRequest,
     ) -> Result<PendingCompletion, LutumError> {
+        let extensions = self.apply_default_extensions(extensions);
         let estimate = self
             .resolve_usage_estimate(&extensions, OperationKind::Completion)
             .await;
@@ -625,6 +657,7 @@ impl Lutum {
     where
         O: StructuredOutput,
     {
+        let extensions = self.apply_default_extensions(extensions);
         let estimate = self
             .resolve_usage_estimate(&extensions, OperationKind::StructuredCompletion)
             .await;

@@ -102,18 +102,14 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let llm = Lutum::new(Arc::new(adapter), budget);
+    let llm = Lutum::new(Arc::new(adapter), budget).with_extension(RawTelemetryConfig::all());
 
     let collected = lutum_trace::capture_raw(async {
         let mut session = Session::new(llm.clone());
         session.push_system("You are a concise Rust explainer. Answer in one short paragraph.");
         session.push_user("Explain Rust ownership in plain language.");
 
-        let result = session
-            .text_turn()
-            .ext(RawTelemetryConfig::all())
-            .collect()
-            .await?;
+        let result = session.text_turn().collect().await?;
 
         anyhow::Ok::<String>(result.assistant_text())
     })

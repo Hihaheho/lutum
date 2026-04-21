@@ -466,6 +466,22 @@ impl ResolveUsageEstimate for RecordOperationKinds {
     }
 }
 
+struct RecordExtensionEstimate {
+    seen: Arc<Mutex<Vec<u64>>>,
+}
+
+#[async_trait]
+impl ResolveUsageEstimate for RecordExtensionEstimate {
+    async fn call(&self, extensions: &RequestExtensions, _kind: OperationKind) -> UsageEstimate {
+        let total_tokens = extensions
+            .get::<UsageEstimate>()
+            .map(|estimate| estimate.total_tokens)
+            .unwrap_or(0);
+        self.seen.lock().unwrap().push(total_tokens);
+        UsageEstimate::zero()
+    }
+}
+
 #[test]
 fn singleton_hook_uses_default_when_unregistered() {
     let hooks = TestHooks::new();
@@ -688,6 +704,50 @@ fn resolve_usage_estimate_registered_override_wins_over_default_extensions_looku
             ..UsageEstimate::zero()
         }
     );
+}
+
+#[tokio::test]
+async fn context_entrypoints_read_lutum_default_extensions_in_resolve_usage_estimate() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = full_context(LutumHooks::new().with_resolve_usage_estimate(
+        RecordExtensionEstimate {
+            seen: Arc::clone(&seen),
+        },
+    ))
+    .with_extension(UsageEstimate {
+        total_tokens: 42,
+        ..UsageEstimate::zero()
+    });
+
+    let _pending = ctx.text_turn(input()).start().await.unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![42]);
+}
+
+#[tokio::test]
+async fn request_extensions_override_lutum_default_extensions_in_resolve_usage_estimate() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = full_context(LutumHooks::new().with_resolve_usage_estimate(
+        RecordExtensionEstimate {
+            seen: Arc::clone(&seen),
+        },
+    ))
+    .with_extension(UsageEstimate {
+        total_tokens: 42,
+        ..UsageEstimate::zero()
+    });
+
+    let _pending = ctx
+        .text_turn(input())
+        .ext(UsageEstimate {
+            total_tokens: 7,
+            ..UsageEstimate::zero()
+        })
+        .start()
+        .await
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![7]);
 }
 
 #[test]
