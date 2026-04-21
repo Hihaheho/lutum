@@ -14,11 +14,14 @@ pub const RAW_FIELD_STAGE: &str = "stage";
 pub const RAW_FIELD_ERROR: &str = "error";
 pub const RAW_FIELD_PARTIAL_SUMMARY: &str = "partial_summary";
 pub const RAW_FIELD_COLLECT_KIND: &str = "collect_kind";
+pub const RAW_FIELD_REQUEST_ERROR_KIND: &str = "request_error_kind";
+pub const RAW_FIELD_STATUS: &str = "status";
 
 pub const RAW_KIND_REQUEST: &str = "request";
 pub const RAW_KIND_STREAM_EVENT: &str = "stream_event";
 pub const RAW_KIND_PARSE_ERROR: &str = "parse_error";
 pub const RAW_KIND_COLLECT_ERROR: &str = "collect_error";
+pub const RAW_KIND_REQUEST_ERROR: &str = "request_error";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParseErrorStage {
@@ -79,6 +82,29 @@ impl CollectErrorKind {
             "execution" => Some(Self::Execution),
             "handler" => Some(Self::Handler),
             "unexpected_eof" => Some(Self::UnexpectedEof),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestErrorKind {
+    Transport,
+    HttpStatus,
+}
+
+impl RequestErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::HttpStatus => "http_status",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "transport" => Some(Self::Transport),
+            "http_status" => Some(Self::HttpStatus),
             _ => None,
         }
     }
@@ -202,6 +228,33 @@ impl RawTelemetryEmitter {
             error = error,
         );
     }
+
+    pub fn emit_request_error(
+        &self,
+        request_id: Option<&str>,
+        request_error_kind: RequestErrorKind,
+        status: Option<u16>,
+        payload: Option<&str>,
+        error: &str,
+    ) {
+        if !self.config.request {
+            return;
+        }
+
+        tracing::event!(
+            target: RAW_TELEMETRY_TARGET,
+            tracing::Level::TRACE,
+            provider = self.provider,
+            api = self.api,
+            operation = self.operation,
+            kind = RAW_KIND_REQUEST_ERROR,
+            request_id = request_id.unwrap_or(""),
+            request_error_kind = request_error_kind.as_str(),
+            status = status.unwrap_or(0_u16),
+            payload = payload.unwrap_or(""),
+            error = error,
+        );
+    }
 }
 
 pub fn emit_collect_error(
@@ -212,12 +265,32 @@ pub fn emit_collect_error(
     partial_summary: &str,
     error: &str,
 ) {
-    let Some(config) = extensions.get::<RawTelemetryConfig>() else {
-        return;
-    };
-    if !config.collect_errors
-        || !tracing::enabled!(target: RAW_TELEMETRY_TARGET, tracing::Level::TRACE)
-    {
+    emit_collect_error_enabled(
+        raw_collect_errors_enabled(extensions),
+        operation_kind,
+        request_id,
+        collect_kind,
+        partial_summary,
+        error,
+    );
+}
+
+pub fn raw_collect_errors_enabled(extensions: &RequestExtensions) -> bool {
+    extensions
+        .get::<RawTelemetryConfig>()
+        .is_some_and(|config| config.collect_errors)
+        && tracing::enabled!(target: RAW_TELEMETRY_TARGET, tracing::Level::TRACE)
+}
+
+pub fn emit_collect_error_enabled(
+    enabled: bool,
+    operation_kind: OperationKind,
+    request_id: Option<&str>,
+    collect_kind: CollectErrorKind,
+    partial_summary: &str,
+    error: &str,
+) {
+    if !enabled {
         return;
     }
 

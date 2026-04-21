@@ -61,10 +61,12 @@ pub use structured::StructuredOutput;
 pub use telemetry::{
     CollectErrorKind, ParseErrorStage, RAW_FIELD_API, RAW_FIELD_COLLECT_KIND, RAW_FIELD_ERROR,
     RAW_FIELD_EVENT_NAME, RAW_FIELD_KIND, RAW_FIELD_OPERATION, RAW_FIELD_PARTIAL_SUMMARY,
-    RAW_FIELD_PAYLOAD, RAW_FIELD_PROVIDER, RAW_FIELD_REQUEST_ID, RAW_FIELD_SEQUENCE,
-    RAW_FIELD_STAGE, RAW_KIND_COLLECT_ERROR, RAW_KIND_PARSE_ERROR, RAW_KIND_REQUEST,
-    RAW_KIND_STREAM_EVENT, RAW_TELEMETRY_TARGET, RawTelemetryConfig, RawTelemetryEmitter,
-    emit_collect_error, operation_kind_name,
+    RAW_FIELD_PAYLOAD, RAW_FIELD_PROVIDER, RAW_FIELD_REQUEST_ERROR_KIND, RAW_FIELD_REQUEST_ID,
+    RAW_FIELD_SEQUENCE, RAW_FIELD_STAGE, RAW_FIELD_STATUS, RAW_KIND_COLLECT_ERROR,
+    RAW_KIND_PARSE_ERROR, RAW_KIND_REQUEST, RAW_KIND_REQUEST_ERROR, RAW_KIND_STREAM_EVENT,
+    RAW_TELEMETRY_TARGET, RawTelemetryConfig, RawTelemetryEmitter, RequestErrorKind,
+    emit_collect_error, emit_collect_error_enabled, operation_kind_name,
+    raw_collect_errors_enabled,
 };
 pub use toolset::{
     ContinueSuggestionReason, HandledTool, HookableToolset, IntoToolResult, NoToolSelector,

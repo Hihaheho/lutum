@@ -33,7 +33,9 @@ use lutum_protocol::{
         TextTurnReducerWithTools, TextTurnReductionError, TextTurnState, TextTurnStateWithTools,
     },
     structured::StructuredOutput,
-    telemetry::{CollectErrorKind, emit_collect_error},
+    telemetry::{
+        CollectErrorKind, RawTelemetryConfig, emit_collect_error, raw_collect_errors_enabled,
+    },
     toolset::{
         RecoverableToolCallIssue, ToolAvailability, ToolConstraints, ToolRequirement, ToolSelector,
         Toolset,
@@ -191,6 +193,14 @@ impl Lutum {
     fn apply_default_extensions(&self, mut extensions: RequestExtensions) -> RequestExtensions {
         extensions.push_fallback(Arc::clone(&self.default_extensions));
         extensions
+    }
+
+    pub(crate) fn raw_collect_errors_enabled(&self, extensions: &RequestExtensions) -> bool {
+        if extensions.contains::<RawTelemetryConfig>() {
+            raw_collect_errors_enabled(extensions)
+        } else {
+            raw_collect_errors_enabled(&self.default_extensions)
+        }
     }
 }
 

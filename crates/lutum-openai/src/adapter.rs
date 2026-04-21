@@ -26,7 +26,7 @@ use lutum_protocol::{
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
         ErasedTextTurnEventStream, ModelName, OperationKind, TurnAdapter, UsageRecoveryAdapter,
     },
-    telemetry::{ParseErrorStage, RawTelemetryEmitter},
+    telemetry::{ParseErrorStage, RawTelemetryEmitter, RequestErrorKind},
     transcript::{TurnRole, TurnView},
 };
 use reqwest::{
@@ -90,6 +90,25 @@ fn emit_openai_parse_error(
 ) {
     if let Some(raw) = raw {
         raw.emit_parse_error(request_id, stage, payload, &error.to_string());
+    }
+}
+
+fn emit_openai_request_error(
+    raw: Option<&RawTelemetryEmitter>,
+    request_id: Option<&str>,
+    request_error_kind: RequestErrorKind,
+    status: Option<reqwest::StatusCode>,
+    payload: Option<&str>,
+    error: &impl std::fmt::Display,
+) {
+    if let Some(raw) = raw {
+        raw.emit_request_error(
+            request_id,
+            request_error_kind,
+            status.map(|status| status.as_u16()),
+            payload,
+            &error.to_string(),
+        );
     }
 }
 
@@ -281,7 +300,12 @@ impl OpenAiAdapter {
         body
     }
 
-    async fn send_streaming_json<T>(&self, path: &str, body: &T) -> Result<ByteStream, OpenAiError>
+    async fn send_streaming_json<T>(
+        &self,
+        path: &str,
+        body: &T,
+        raw: Option<&RawTelemetryEmitter>,
+    ) -> Result<ByteStream, OpenAiError>
     where
         T: Serialize + ?Sized,
     {
@@ -290,15 +314,43 @@ impl OpenAiAdapter {
         let client = self.client.clone();
         #[cfg(target_family = "wasm")]
         return SendWrapper::new(async move {
-            let response = client.post(url).headers(headers).json(body).send().await?;
-            let response = error_for_status_with_body(response).await?;
+            let response = match client.post(url).headers(headers).json(body).send().await {
+                Ok(response) => response,
+                Err(source) => {
+                    let error = OpenAiError::Request(source);
+                    emit_openai_request_error(
+                        raw,
+                        None,
+                        RequestErrorKind::Transport,
+                        None,
+                        None,
+                        &error,
+                    );
+                    return Err(error);
+                }
+            };
+            let response = error_for_status_with_body(raw, response).await?;
             Ok(Box::pin(SendWrapper::new(response.bytes_stream())) as ByteStream)
         })
         .await;
         #[cfg(not(target_family = "wasm"))]
         {
-            let response = client.post(url).headers(headers).json(body).send().await?;
-            let response = error_for_status_with_body(response).await?;
+            let response = match client.post(url).headers(headers).json(body).send().await {
+                Ok(response) => response,
+                Err(source) => {
+                    let error = OpenAiError::Request(source);
+                    emit_openai_request_error(
+                        raw,
+                        None,
+                        RequestErrorKind::Transport,
+                        None,
+                        None,
+                        &error,
+                    );
+                    return Err(error);
+                }
+            };
+            let response = error_for_status_with_body(raw, response).await?;
             Ok(Box::pin(response.bytes_stream()))
         }
     }
@@ -310,7 +362,7 @@ impl OpenAiAdapter {
         #[cfg(target_family = "wasm")]
         return SendWrapper::new(async move {
             let response = client.get(url).headers(headers).send().await?;
-            error_for_status_with_body(response)
+            error_for_status_with_body(None, response)
                 .await?
                 .json::<Value>()
                 .await
@@ -320,7 +372,7 @@ impl OpenAiAdapter {
         #[cfg(not(target_family = "wasm"))]
         {
             let response = client.get(url).headers(headers).send().await?;
-            error_for_status_with_body(response)
+            error_for_status_with_body(None, response)
                 .await?
                 .json::<Value>()
                 .await
@@ -363,7 +415,7 @@ impl TurnAdapter for OpenAiAdapter {
                 );
             }
             let stream = self
-                .send_streaming_json("/chat/completions", &body)
+                .send_streaming_json("/chat/completions", &body, raw_chat.as_ref())
                 .await
                 .map_err(AgentError::backend)?;
             return Ok(Box::pin(
@@ -381,7 +433,7 @@ impl TurnAdapter for OpenAiAdapter {
             );
         }
         let stream = self
-            .send_streaming_json("/responses", &body)
+            .send_streaming_json("/responses", &body, raw_responses.as_ref())
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
@@ -440,7 +492,7 @@ impl TurnAdapter for OpenAiAdapter {
                 );
             }
             let stream = self
-                .send_streaming_json("/chat/completions", &body)
+                .send_streaming_json("/chat/completions", &body, raw_chat.as_ref())
                 .await
                 .map_err(AgentError::backend)?;
             return Ok(Box::pin(
@@ -471,7 +523,7 @@ impl TurnAdapter for OpenAiAdapter {
             );
         }
         let stream = self
-            .send_streaming_json("/responses", &body)
+            .send_streaming_json("/responses", &body, raw_responses.as_ref())
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
@@ -506,7 +558,7 @@ impl CompletionAdapter for OpenAiAdapter {
             );
         }
         let stream = self
-            .send_streaming_json("/completions", &body)
+            .send_streaming_json("/completions", &body, raw.as_ref())
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
@@ -534,7 +586,7 @@ impl CompletionAdapter for OpenAiAdapter {
             );
         }
         let stream = self
-            .send_streaming_json("/responses", &body)
+            .send_streaming_json("/responses", &body, raw.as_ref())
             .await
             .map_err(AgentError::backend)?;
         let stream = map_structured_stream(
@@ -719,6 +771,7 @@ fn build_completion_request(request: &ProtocolCompletionRequest, model: &str) ->
 }
 
 async fn error_for_status_with_body(
+    raw: Option<&RawTelemetryEmitter>,
     response: reqwest::Response,
 ) -> Result<reqwest::Response, OpenAiError> {
     let status = response.status();
@@ -735,9 +788,18 @@ async fn error_for_status_with_body(
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
         })
-        .unwrap_or(body);
+        .unwrap_or_else(|| body.clone());
 
-    Err(OpenAiError::HttpStatus { status, message })
+    let error = OpenAiError::HttpStatus { status, message };
+    emit_openai_request_error(
+        raw,
+        None,
+        RequestErrorKind::HttpStatus,
+        Some(status),
+        Some(&body),
+        &error,
+    );
+    Err(error)
 }
 
 fn convert_model_input(input: &ModelInput) -> Result<Vec<InputItem>, OpenAiError> {
@@ -2701,7 +2763,7 @@ mod tests {
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
         AssistantTurnItem, AssistantTurnView, ErasedStructuredTurnEvent, ErasedTextTurnEvent,
         GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ParseErrorStage,
-        RawTelemetryConfig, RequestExtensions, ToolResult,
+        RawTelemetryConfig, RequestErrorKind, RequestExtensions, ToolResult,
     };
     use lutum_trace::RawTraceEntry;
 
@@ -3471,6 +3533,46 @@ mod tests {
                     && *sequence == 2
                     && payload.contains("\"response.completed\"")
         )));
+    }
+
+    #[tokio::test]
+    async fn raw_trace_captures_transport_request_errors() {
+        let collected = lutum_trace::test::collect_raw(async {
+            let extensions = raw_extensions();
+            let raw = RawTelemetryEmitter::new(&extensions, "openai", "responses", "text_turn");
+            emit_openai_request_error(
+                raw.as_ref(),
+                None,
+                RequestErrorKind::Transport,
+                None,
+                None,
+                &"error sending request for url (https://openrouter.ai/api/v1/responses)",
+            );
+        })
+        .await;
+
+        assert!(matches!(
+            collected.raw.entries.as_slice(),
+            [
+                RawTraceEntry::RequestError {
+                    provider,
+                    api,
+                    operation,
+                    request_id,
+                    kind,
+                    status,
+                    payload,
+                    error,
+                },
+            ] if provider == "openai"
+                && api == "responses"
+                && operation == "text_turn"
+                && request_id.is_none()
+                && *kind == RequestErrorKind::Transport
+                && status.is_none()
+                && payload.is_none()
+                && error.contains("error sending request for url")
+        ));
     }
 
     #[tokio::test]

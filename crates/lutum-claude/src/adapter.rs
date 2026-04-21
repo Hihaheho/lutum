@@ -22,7 +22,7 @@ use lutum_protocol::{
         ErasedTextTurnEventStream, FinishReason, ModelName, OperationKind, TurnAdapter,
         UsageRecoveryAdapter,
     },
-    telemetry::{ParseErrorStage, RawTelemetryEmitter},
+    telemetry::{ParseErrorStage, RawTelemetryEmitter, RequestErrorKind},
     transcript::{ToolResultItemView, TurnRole, TurnView},
 };
 use reqwest::{
@@ -134,6 +134,25 @@ fn emit_claude_parse_error(
 ) {
     if let Some(raw) = raw {
         raw.emit_parse_error(request_id, stage, payload, &error.to_string());
+    }
+}
+
+fn emit_claude_request_error(
+    raw: Option<&RawTelemetryEmitter>,
+    request_id: Option<&str>,
+    request_error_kind: RequestErrorKind,
+    status: Option<reqwest::StatusCode>,
+    payload: Option<&str>,
+    error: &impl std::fmt::Display,
+) {
+    if let Some(raw) = raw {
+        raw.emit_request_error(
+            request_id,
+            request_error_kind,
+            status.map(|status| status.as_u16()),
+            payload,
+            &error.to_string(),
+        );
     }
 }
 
@@ -299,18 +318,38 @@ impl ClaudeAdapter {
         Ok(request)
     }
 
-    async fn send_streaming_json<T>(&self, path: &str, body: &T) -> Result<ByteStream, ClaudeError>
+    async fn send_streaming_json<T>(
+        &self,
+        path: &str,
+        body: &T,
+        raw: Option<&RawTelemetryEmitter>,
+    ) -> Result<ByteStream, ClaudeError>
     where
         T: Serialize + ?Sized,
     {
-        let response = self
+        let response = match self
             .client
             .post(format!("{}{}", self.base_url, path))
             .headers(self.request_headers()?)
             .json(body)
             .send()
-            .await?;
-        let response = error_for_status_with_body(response).await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(source) => {
+                let error = ClaudeError::Request(source);
+                emit_claude_request_error(
+                    raw,
+                    None,
+                    RequestErrorKind::Transport,
+                    None,
+                    None,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        let response = error_for_status_with_body(raw, response).await?;
         Ok(Box::pin(response.bytes_stream()))
     }
 }
@@ -350,7 +389,7 @@ impl TurnAdapter for ClaudeAdapter {
             );
         }
         let stream = self
-            .send_streaming_json("/v1/messages", &body)
+            .send_streaming_json("/v1/messages", &body, raw.as_ref())
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
@@ -399,7 +438,7 @@ impl TurnAdapter for ClaudeAdapter {
             );
         }
         let stream = self
-            .send_streaming_json("/v1/messages", &body)
+            .send_streaming_json("/v1/messages", &body, raw.as_ref())
             .await
             .map_err(AgentError::backend)?;
         Ok(Box::pin(
@@ -1350,6 +1389,7 @@ fn normalize_base_url(url: impl Into<String>) -> Arc<str> {
 }
 
 async fn error_for_status_with_body(
+    raw: Option<&RawTelemetryEmitter>,
     response: reqwest::Response,
 ) -> Result<reqwest::Response, ClaudeError> {
     let status = response.status();
@@ -1366,9 +1406,18 @@ async fn error_for_status_with_body(
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
         })
-        .unwrap_or(body);
+        .unwrap_or_else(|| body.clone());
 
-    Err(ClaudeError::HttpStatus { status, message })
+    let error = ClaudeError::HttpStatus { status, message };
+    emit_claude_request_error(
+        raw,
+        None,
+        RequestErrorKind::HttpStatus,
+        Some(status),
+        Some(&body),
+        &error,
+    );
+    Err(error)
 }
 
 fn parse_sse_event(event: &Option<String>, data: &str) -> Result<SseEvent, ClaudeError> {
@@ -1470,7 +1519,7 @@ mod tests {
     use lutum_protocol::{
         AdapterToolChoice, AdapterTurnConfig, ErasedTextTurnEvent, GenerationParams, ModelInput,
         ModelInputItem, ModelName, OperationKind, ParseErrorStage, RawTelemetryConfig,
-        RequestExtensions, UsageRecoveryAdapter, budget::Usage,
+        RequestErrorKind, RequestExtensions, UsageRecoveryAdapter, budget::Usage,
     };
     use lutum_trace::RawTraceEntry;
 
@@ -1743,6 +1792,50 @@ mod tests {
                     && event_name.as_deref() == Some("message_stop")
                     && payload.contains("\"type\":\"message_stop\"")
         )));
+    }
+
+    #[tokio::test]
+    async fn raw_trace_captures_http_status_request_errors() {
+        let collected = lutum_trace::test::collect_raw(async {
+            let extensions = raw_extensions();
+            let raw = RawTelemetryEmitter::new(&extensions, "claude", "messages", "text_turn");
+            let error = ClaudeError::HttpStatus {
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                message: "upstream overloaded".into(),
+            };
+            emit_claude_request_error(
+                raw.as_ref(),
+                None,
+                RequestErrorKind::HttpStatus,
+                Some(reqwest::StatusCode::BAD_GATEWAY),
+                Some("{\"error\":{\"message\":\"upstream overloaded\"}}"),
+                &error,
+            );
+        })
+        .await;
+
+        assert!(matches!(
+            collected.raw.entries.as_slice(),
+            [
+                RawTraceEntry::RequestError {
+                    provider,
+                    api,
+                    operation,
+                    request_id,
+                    kind,
+                    status,
+                    payload,
+                    error,
+                },
+            ] if provider == "claude"
+                && api == "messages"
+                && operation == "text_turn"
+                && request_id.is_none()
+                && *kind == RequestErrorKind::HttpStatus
+                && *status == Some(reqwest::StatusCode::BAD_GATEWAY.as_u16())
+                && payload.as_deref() == Some("{\"error\":{\"message\":\"upstream overloaded\"}}")
+                && error.contains("request failed with status")
+        ));
     }
 
     #[tokio::test]

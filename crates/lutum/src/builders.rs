@@ -1,8 +1,10 @@
 use std::convert::Infallible;
 
 use lutum_protocol::{
-    AssistantTurn, NoTools, RequestBudget, RequestExtensions, UncommittedAssistantTurn,
+    AssistantTurn, CollectErrorKind, NoTools, OperationKind, RequestBudget, RequestExtensions,
+    UncommittedAssistantTurn,
     conversation::ModelInput,
+    emit_collect_error_enabled,
     llm::{
         CompletionEventStream, CompletionOptions, CompletionRequest, GenerationParams,
         StructuredCompletionEventStream, StructuredCompletionRequest,
@@ -65,6 +67,21 @@ impl<'a> TurnTarget<'a> {
             Self::Session { session } => turn.commit_into(session.input_mut()),
         }
     }
+}
+
+fn emit_pre_stream_collect_error(
+    enabled: bool,
+    operation_kind: OperationKind,
+    error: &impl std::fmt::Display,
+) {
+    emit_collect_error_enabled(
+        enabled,
+        operation_kind,
+        None,
+        CollectErrorKind::Execution,
+        "request_id=None, stream_started=false",
+        &error.to_string(),
+    );
 }
 
 pub struct TextTurn<'a> {
@@ -189,12 +206,20 @@ impl<'a> TextTurn<'a> {
         let lutum = target.lutum_owned();
         let input = target.input();
         drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_text_turn(extensions, input, turn).await {
             Ok(pending) => pending.collect_with(handler).await,
-            Err(source) => Err(CollectError::Execution {
-                source,
-                partial: TextTurnCollectedState::default(),
-            }),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnCollectedState::default(),
+                })
+            }
         }
     }
 
@@ -215,12 +240,20 @@ impl<'a> TextTurn<'a> {
         let lutum = target.lutum_owned();
         let input = target.input();
         drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_text_turn(extensions, input, turn).await {
             Ok(pending) => pending.collect().await,
-            Err(source) => Err(CollectError::Execution {
-                source,
-                partial: TextTurnCollectedState::default(),
-            }),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnCollectedState::default(),
+                })
+            }
         }
     }
 
@@ -240,12 +273,18 @@ impl<'a> TextTurn<'a> {
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum.run_text_turn(extensions, input, turn).await {
             Ok(pending) => match pending.collect().await {
                 Ok(s) => s,
                 Err(e) => return Err(e),
             },
             Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
                 return Err(CollectError::Execution {
                     source,
                     partial: TextTurnCollectedState::default(),
@@ -406,6 +445,7 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum
             .run_text_turn_with_tools(extensions, input, turn)
             .await
@@ -415,6 +455,11 @@ where
                 Err(e) => return Err(e),
             },
             Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
                 return Err(CollectError::Execution {
                     source,
                     partial: TextTurnStateWithTools::default(),
@@ -444,6 +489,7 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum
             .run_text_turn_with_tools(extensions, input, turn)
             .await
@@ -453,6 +499,11 @@ where
                 Err(e) => return Err(e),
             },
             Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
                 return Err(CollectError::Execution {
                     source,
                     partial: TextTurnStateWithTools::default(),
@@ -598,12 +649,22 @@ where
         let lutum = target.lutum_owned();
         let input = target.input();
         drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_structured_turn(extensions, input, turn).await {
             Ok(pending) => pending.collect_with(handler).await,
-            Err(source) => Err(CollectError::Execution {
-                source,
-                partial: StructuredTurnPartial::from_state(StructuredTurnCollectedState::default()),
-            }),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: StructuredTurnPartial::from_state(
+                        StructuredTurnCollectedState::default(),
+                    ),
+                })
+            }
         }
     }
 
@@ -624,12 +685,22 @@ where
         let lutum = target.lutum_owned();
         let input = target.input();
         drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_structured_turn(extensions, input, turn).await {
             Ok(pending) => pending.collect().await,
-            Err(source) => Err(CollectError::Execution {
-                source,
-                partial: StructuredTurnPartial::from_state(StructuredTurnCollectedState::default()),
-            }),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: StructuredTurnPartial::from_state(
+                        StructuredTurnCollectedState::default(),
+                    ),
+                })
+            }
         }
     }
 
@@ -649,12 +720,18 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum.run_structured_turn(extensions, input, turn).await {
             Ok(pending) => match pending.collect().await {
                 Ok(s) => s,
                 Err(e) => return Err(e),
             },
             Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredTurn,
+                    &source,
+                );
                 return Err(CollectError::Execution {
                     source,
                     partial: StructuredTurnPartial::from_state(
@@ -823,12 +900,18 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let pending = match lutum
             .run_structured_turn_with_tools(extensions, input, turn)
             .await
         {
             Ok(p) => p,
             Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredTurn,
+                    &source,
+                );
                 return Err(CollectError::Execution {
                     source,
                     partial: StructuredTurnPartialWithTools::from_state(
@@ -912,12 +995,18 @@ where
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input();
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let pending = match lutum
             .run_structured_turn_with_tools(extensions, input, turn)
             .await
         {
             Ok(p) => p,
             Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredTurn,
+                    &source,
+                );
                 return Err(CollectError::Execution {
                     source,
                     partial: StructuredTurnPartialWithTools::from_state(
@@ -1052,12 +1141,20 @@ impl<'a> Completion<'a> {
     where
         H: EventHandler<lutum_protocol::CompletionEvent, CompletionTurnState>,
     {
+        let raw_collect_errors_enabled = self.lutum.raw_collect_errors_enabled(&self.extensions);
         match self.start().await {
             Ok(pending) => pending.collect_with(handler).await,
-            Err(source) => Err(CollectError::Execution {
-                source,
-                partial: CompletionTurnState::default(),
-            }),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::Completion,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: CompletionTurnState::default(),
+                })
+            }
         }
     }
 
@@ -1067,12 +1164,20 @@ impl<'a> Completion<'a> {
         CompletionTurnResult,
         CollectError<Infallible, CompletionReductionError, CompletionTurnState>,
     > {
+        let raw_collect_errors_enabled = self.lutum.raw_collect_errors_enabled(&self.extensions);
         match self.start().await {
             Ok(pending) => pending.collect().await,
-            Err(source) => Err(CollectError::Execution {
-                source,
-                partial: CompletionTurnState::default(),
-            }),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::Completion,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: CompletionTurnState::default(),
+                })
+            }
         }
     }
 }
@@ -1161,12 +1266,20 @@ where
     where
         H: EventHandler<lutum_protocol::StructuredCompletionEvent<O>, StructuredCompletionState<O>>,
     {
+        let raw_collect_errors_enabled = self.lutum.raw_collect_errors_enabled(&self.extensions);
         match self.start().await {
             Ok(pending) => pending.collect_with(handler).await,
-            Err(source) => Err(CollectError::Execution {
-                source,
-                partial: StructuredCompletionState::default(),
-            }),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredCompletion,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: StructuredCompletionState::default(),
+                })
+            }
         }
     }
 
@@ -1176,12 +1289,20 @@ where
         StructuredCompletionResult<O>,
         CollectError<Infallible, StructuredCompletionReductionError, StructuredCompletionState<O>>,
     > {
+        let raw_collect_errors_enabled = self.lutum.raw_collect_errors_enabled(&self.extensions);
         match self.start().await {
             Ok(pending) => pending.collect().await,
-            Err(source) => Err(CollectError::Execution {
-                source,
-                partial: StructuredCompletionState::default(),
-            }),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredCompletion,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: StructuredCompletionState::default(),
+                })
+            }
         }
     }
 }

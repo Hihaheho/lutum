@@ -1,4 +1,4 @@
-use lutum_protocol::{CollectErrorKind, OperationKind, ParseErrorStage};
+use lutum_protocol::{CollectErrorKind, OperationKind, ParseErrorStage, RequestErrorKind};
 
 use crate::snapshot::{EventRecord, FieldValue};
 
@@ -27,6 +27,16 @@ pub enum RawTraceEntry {
         request_id: Option<String>,
         stage: ParseErrorStage,
         payload: String,
+        error: String,
+    },
+    RequestError {
+        provider: String,
+        api: String,
+        operation: String,
+        request_id: Option<String>,
+        kind: RequestErrorKind,
+        status: Option<u16>,
+        payload: Option<String>,
         error: String,
     },
     CollectError {
@@ -72,6 +82,19 @@ pub(crate) fn parse_raw_entry(record: &EventRecord) -> Option<RawTraceEntry> {
             payload: field_str(record, lutum_protocol::RAW_FIELD_PAYLOAD)?.to_string(),
             error: field_str(record, lutum_protocol::RAW_FIELD_ERROR)?.to_string(),
         }),
+        lutum_protocol::RAW_KIND_REQUEST_ERROR => Some(RawTraceEntry::RequestError {
+            provider: field_str(record, lutum_protocol::RAW_FIELD_PROVIDER)?.to_string(),
+            api: field_str(record, lutum_protocol::RAW_FIELD_API)?.to_string(),
+            operation: field_str(record, lutum_protocol::RAW_FIELD_OPERATION)?.to_string(),
+            request_id: optional_field_str(record, lutum_protocol::RAW_FIELD_REQUEST_ID),
+            kind: RequestErrorKind::from_str(field_str(
+                record,
+                lutum_protocol::RAW_FIELD_REQUEST_ERROR_KIND,
+            )?)?,
+            status: optional_field_u16(record, lutum_protocol::RAW_FIELD_STATUS),
+            payload: optional_field_str(record, lutum_protocol::RAW_FIELD_PAYLOAD),
+            error: field_str(record, lutum_protocol::RAW_FIELD_ERROR)?.to_string(),
+        }),
         lutum_protocol::RAW_KIND_COLLECT_ERROR => Some(RawTraceEntry::CollectError {
             operation_kind: operation_kind_from_str(field_str(
                 record,
@@ -109,6 +132,12 @@ fn field_u64(record: &EventRecord, key: &str) -> Option<u64> {
         FieldValue::I64(value) if *value >= 0 => Some(*value as u64),
         _ => None,
     }
+}
+
+fn optional_field_u16(record: &EventRecord, key: &str) -> Option<u16> {
+    field_u64(record, key)
+        .filter(|value| *value > 0 && *value <= u16::MAX as u64)
+        .map(|value| value as u16)
 }
 
 fn operation_kind_from_str(s: &str) -> Option<OperationKind> {

@@ -100,6 +100,32 @@ fn capture_raw_records_execution_collect_errors() {
 }
 
 #[test]
+fn capture_raw_records_pre_stream_execution_collect_errors() {
+    let collected = block_on(lutum_trace::test::collect_raw(async move {
+        let ctx = Lutum::new(Arc::new(MockLlmAdapter::new()), test_budget())
+            .with_extension(RawTelemetryConfig::all());
+        ctx.text_turn(input()).collect().await
+    }));
+
+    assert!(matches!(
+        collected.output,
+        Err(CollectError::Execution { .. })
+    ));
+    assert_collect_error(&collected.raw.entries, CollectErrorKind::Execution, None);
+    match &collected.raw.entries[0] {
+        RawTraceEntry::CollectError {
+            partial_summary,
+            error,
+            ..
+        } => {
+            assert!(partial_summary.contains("stream_started=false"));
+            assert!(error.contains("no mock text scenario configured"));
+        }
+        other => panic!("expected collect error entry, got {other:?}"),
+    }
+}
+
+#[test]
 fn capture_raw_records_reduction_collect_errors() {
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
         Ok(RawTextTurnEvent::Started {
