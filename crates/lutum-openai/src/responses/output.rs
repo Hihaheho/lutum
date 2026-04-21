@@ -4,7 +4,7 @@ use monostate::MustBe;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::responses::{MessageRole, OutputTextContent, SummaryText};
+use crate::responses::{MessageRole, OutputTextContent, ReasoningText, SummaryText};
 
 /// ```
 /// use lutum_openai::responses::SseEvent;
@@ -36,6 +36,8 @@ pub enum SseEvent {
     ResponseOutputItemDone(ResponseOutputItemDoneEvent),
     ResponseReasoningSummaryTextDelta(ResponseReasoningSummaryTextDeltaEvent),
     ResponseReasoningSummaryTextDone(ResponseReasoningSummaryTextDoneEvent),
+    ResponseReasoningTextDelta(ResponseReasoningTextDeltaEvent),
+    ResponseReasoningTextDone(ResponseReasoningTextDoneEvent),
     ResponseReasoningDelta(ResponseReasoningDeltaEvent),
     ResponseRefusalDelta(ResponseRefusalDeltaEvent),
     ResponseFunctionCallArgumentsDelta(ResponseFunctionCallArgumentsDeltaEvent),
@@ -76,7 +78,7 @@ pub enum ResponseOutputItem {
         id: Option<String>,
         summary: Vec<SummaryText>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        content: Option<Vec<Value>>,
+        content: Option<Vec<ReasoningText>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_content: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,6 +175,24 @@ enum SseEventWire {
         summary_index: usize,
         text: String,
         sequence_number: u64,
+    },
+    #[serde(rename = "response.reasoning_text.delta")]
+    ReasoningTextDelta {
+        item_id: String,
+        output_index: usize,
+        content_index: usize,
+        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sequence_number: Option<u64>,
+    },
+    #[serde(rename = "response.reasoning_text.done")]
+    ReasoningTextDone {
+        item_id: String,
+        output_index: usize,
+        content_index: usize,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sequence_number: Option<u64>,
     },
     #[serde(rename = "response.reasoning.delta")]
     ReasoningDelta {
@@ -318,6 +338,34 @@ impl From<SseEventWire> for SseEvent {
                 item_id,
                 output_index,
                 summary_index,
+                text,
+                sequence_number,
+                event_type: Default::default(),
+            }),
+            SseEventWire::ReasoningTextDelta {
+                item_id,
+                output_index,
+                content_index,
+                delta,
+                sequence_number,
+            } => Self::ResponseReasoningTextDelta(ResponseReasoningTextDeltaEvent {
+                item_id,
+                output_index,
+                content_index,
+                delta,
+                sequence_number,
+                event_type: Default::default(),
+            }),
+            SseEventWire::ReasoningTextDone {
+                item_id,
+                output_index,
+                content_index,
+                text,
+                sequence_number,
+            } => Self::ResponseReasoningTextDone(ResponseReasoningTextDoneEvent {
+                item_id,
+                output_index,
+                content_index,
                 text,
                 sequence_number,
                 event_type: Default::default(),
@@ -472,6 +520,34 @@ impl From<SseEvent> for SseEventWire {
                 item_id,
                 output_index,
                 summary_index,
+                text,
+                sequence_number,
+            },
+            SseEvent::ResponseReasoningTextDelta(ResponseReasoningTextDeltaEvent {
+                item_id,
+                output_index,
+                content_index,
+                delta,
+                sequence_number,
+                ..
+            }) => Self::ReasoningTextDelta {
+                item_id,
+                output_index,
+                content_index,
+                delta,
+                sequence_number,
+            },
+            SseEvent::ResponseReasoningTextDone(ResponseReasoningTextDoneEvent {
+                item_id,
+                output_index,
+                content_index,
+                text,
+                sequence_number,
+                ..
+            }) => Self::ReasoningTextDone {
+                item_id,
+                output_index,
+                content_index,
                 text,
                 sequence_number,
             },
@@ -917,6 +993,68 @@ pub struct ResponseReasoningSummaryTextDoneEvent {
 }
 
 /// ```
+/// use lutum_openai::responses::ResponseReasoningTextDeltaEvent;
+/// use serde_json::Value;
+///
+/// let json = serde_json::from_str::<Value>(
+///     r#"{
+///       "type": "response.reasoning_text.delta",
+///       "item_id": "rs_1",
+///       "output_index": 0,
+///       "content_index": 0,
+///       "delta": "thinking",
+///       "sequence_number": 4
+///     }"#,
+/// )
+/// .unwrap();
+/// let event = serde_json::from_value::<ResponseReasoningTextDeltaEvent>(json.clone()).unwrap();
+/// assert_eq!(serde_json::to_value(&event).unwrap(), json);
+/// assert_eq!(serde_json::from_value::<ResponseReasoningTextDeltaEvent>(json).unwrap(), event);
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResponseReasoningTextDeltaEvent {
+    pub item_id: String,
+    pub output_index: usize,
+    pub content_index: usize,
+    pub delta: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+    #[serde(rename = "type")]
+    pub event_type: MustBe!("response.reasoning_text.delta"),
+}
+
+/// ```
+/// use lutum_openai::responses::ResponseReasoningTextDoneEvent;
+/// use serde_json::Value;
+///
+/// let json = serde_json::from_str::<Value>(
+///     r#"{
+///       "type": "response.reasoning_text.done",
+///       "item_id": "rs_1",
+///       "output_index": 0,
+///       "content_index": 0,
+///       "text": "thinking",
+///       "sequence_number": 5
+///     }"#,
+/// )
+/// .unwrap();
+/// let event = serde_json::from_value::<ResponseReasoningTextDoneEvent>(json.clone()).unwrap();
+/// assert_eq!(serde_json::to_value(&event).unwrap(), json);
+/// assert_eq!(serde_json::from_value::<ResponseReasoningTextDoneEvent>(json).unwrap(), event);
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResponseReasoningTextDoneEvent {
+    pub item_id: String,
+    pub output_index: usize,
+    pub content_index: usize,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+    #[serde(rename = "type")]
+    pub event_type: MustBe!("response.reasoning_text.done"),
+}
+
+/// ```
 /// use lutum_openai::responses::ResponseReasoningDeltaEvent;
 /// use serde_json::Value;
 ///
@@ -1093,7 +1231,7 @@ pub struct ResponseCompletedEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::ResponseContentPartAddedEvent;
+    use super::{ResponseContentPartAddedEvent, ResponseOutputItem};
 
     #[test]
     fn response_content_part_added_allows_missing_annotations() {
@@ -1113,5 +1251,25 @@ mod tests {
         assert!(event.part.annotations.is_empty());
         assert_eq!(event.part.item_type, "reasoning_text");
         assert_eq!(event.part.text, "");
+    }
+
+    #[test]
+    fn response_output_reasoning_content_uses_reasoning_text_items() {
+        let json = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [],
+            "content": [
+                {
+                    "type": "reasoning_text",
+                    "text": "Need to count rows first."
+                }
+            ],
+            "status": "completed"
+        });
+
+        let item = serde_json::from_value::<ResponseOutputItem>(json.clone()).unwrap();
+
+        assert_eq!(serde_json::to_value(&item).unwrap(), json);
     }
 }

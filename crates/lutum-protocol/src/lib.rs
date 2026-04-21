@@ -29,17 +29,19 @@ pub use conversation::{
     ModelInputValidationError, NonEmpty, REJECTED_TOOL_RESULT_PREFIX, RawJson, ToolCallId,
     ToolMetadata, ToolName, ToolResult, UncommittedAssistantTurn,
 };
-pub use error::{AgentError, BoxError, NoToolsContractViolation};
+pub use error::{
+    AgentError, BoxError, NoToolsContractViolation, RequestFailure, RequestFailureKind,
+};
 pub use extensions::RequestExtensions;
 pub use hooks::{HookReentrancyError, Stateful};
 pub use llm::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
-    AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig,
+    AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, BackoffPolicy,
     CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionOptions,
     CompletionRequest, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
     ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
     ErasedTextTurnEventStream, FinishReason, GenerationParams, ModelName, ModelNameError,
-    OperationKind, StructuredCompletionEvent, StructuredCompletionEventStream,
+    OperationKind, RetryPolicy, StructuredCompletionEvent, StructuredCompletionEventStream,
     StructuredCompletionRequest, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
     StructuredTurnEventStream, StructuredTurnEventStreamWithTools, StructuredTurnEventWithTools,
     Temperature, TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream,

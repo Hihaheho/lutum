@@ -250,7 +250,7 @@ fn recorded_events_reduce_to_same_result_as_collect() {
 }
 
 #[test]
-fn handler_stop_returns_partial_including_triggering_event_and_releases_budget() {
+fn handler_stop_returns_partial_including_triggering_event_and_accounts_budget() {
     let budget = test_budget();
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
         Ok(lutum::mock::RawTextTurnEvent::Started {
@@ -283,7 +283,7 @@ fn handler_stop_returns_partial_including_triggering_event_and_releases_budget()
         other => panic!("unexpected error: {other:?}"),
     }
 
-    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 90);
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn recovery_failure_does_not_replace_stopped_error() {
         other => panic!("unexpected error: {other:?}"),
     }
 
-    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 90);
 }
 
 #[test]
@@ -387,7 +387,7 @@ fn recovery_failure_does_not_replace_handler_error() {
         other => panic!("unexpected error: {other:?}"),
     }
 
-    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 90);
 }
 
 #[test]
@@ -436,7 +436,7 @@ fn recovery_failure_does_not_replace_unexpected_eof() {
         other => panic!("unexpected error: {other:?}"),
     }
 
-    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 90);
 }
 
 #[test]
@@ -606,7 +606,7 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
         other => panic!("unexpected error: {other:?}"),
     }
 
-    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 100);
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 90);
 }
 
 #[test]

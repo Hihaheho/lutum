@@ -1,4 +1,4 @@
-use std::{fmt, marker::PhantomData, pin::Pin, sync::Arc};
+use std::{fmt, marker::PhantomData, pin::Pin, sync::Arc, time::Duration};
 
 use bon::Builder;
 use futures::Stream;
@@ -7,6 +7,7 @@ use crate::{
     AgentError,
     budget::{RequestBudget, Usage},
     conversation::{ModelInput, RawJson, ToolMetadata},
+    error::RequestFailureKind,
     structured::StructuredOutput,
     toolset::{NoTools, RecoverableToolCallIssue, ToolConstraints, Toolset},
     transcript::CommittedTurn,
@@ -406,11 +407,94 @@ pub struct CompletionOptions {
     pub stop: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackoffPolicy {
+    pub initial_delay: Duration,
+    pub max_delay: Duration,
+    pub multiplier: f64,
+    pub jitter_factor: f64,
+}
+
+impl Default for BackoffPolicy {
+    fn default() -> Self {
+        Self {
+            initial_delay: Duration::from_millis(250),
+            max_delay: Duration::from_secs(8),
+            multiplier: 2.0,
+            jitter_factor: 0.1,
+        }
+    }
+}
+
+impl BackoffPolicy {
+    pub fn delay_for_retry(&self, next_attempt: u32) -> Duration {
+        let retry_index = next_attempt.saturating_sub(2) as i32;
+        let base_secs = (self.initial_delay.as_secs_f64()
+            * self.multiplier.max(1.0).powi(retry_index))
+        .min(self.max_delay.as_secs_f64());
+        let jitter = if self.jitter_factor <= 0.0 {
+            0.0
+        } else {
+            let mut seed = next_attempt as u64;
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let normalized = (seed as f64 / u64::MAX as f64) * 2.0 - 1.0;
+            normalized * self.jitter_factor
+        };
+        Duration::from_secs_f64(
+            (base_secs * (1.0 + jitter)).clamp(0.0, self.max_delay.as_secs_f64()),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub backoff: BackoffPolicy,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 1,
+            backoff: BackoffPolicy::default(),
+        }
+    }
+}
+
+impl RetryPolicy {
+    pub const fn disabled() -> Self {
+        Self {
+            max_attempts: 1,
+            backoff: BackoffPolicy {
+                initial_delay: Duration::from_millis(250),
+                max_delay: Duration::from_secs(8),
+                multiplier: 2.0,
+                jitter_factor: 0.1,
+            },
+        }
+    }
+
+    pub fn allows_retry(&self, current_attempt: u32, kind: RequestFailureKind) -> bool {
+        kind == RequestFailureKind::Server && current_attempt < self.max_attempts
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum TextTurnEvent {
     Started {
         request_id: Option<String>,
         model: String,
+    },
+    WillRetry {
+        attempt: u32,
+        after: Duration,
+        kind: RequestFailureKind,
+        status: Option<u16>,
+        request_id: Option<String>,
+        accounted_usage: Usage,
+        cumulative_usage: Usage,
     },
     TextDelta {
         delta: String,
@@ -434,6 +518,15 @@ pub enum TextTurnEventWithTools<T: Toolset> {
     Started {
         request_id: Option<String>,
         model: String,
+    },
+    WillRetry {
+        attempt: u32,
+        after: Duration,
+        kind: RequestFailureKind,
+        status: Option<u16>,
+        request_id: Option<String>,
+        accounted_usage: Usage,
+        cumulative_usage: Usage,
     },
     TextDelta {
         delta: String,
@@ -474,6 +567,15 @@ pub enum StructuredTurnEvent<O: StructuredOutput> {
         request_id: Option<String>,
         model: String,
     },
+    WillRetry {
+        attempt: u32,
+        after: Duration,
+        kind: RequestFailureKind,
+        status: Option<u16>,
+        request_id: Option<String>,
+        accounted_usage: Usage,
+        cumulative_usage: Usage,
+    },
     StructuredOutputChunk {
         json_delta: String,
     },
@@ -497,6 +599,15 @@ pub enum StructuredTurnEventWithTools<T: Toolset, O: StructuredOutput> {
     Started {
         request_id: Option<String>,
         model: String,
+    },
+    WillRetry {
+        attempt: u32,
+        after: Duration,
+        kind: RequestFailureKind,
+        status: Option<u16>,
+        request_id: Option<String>,
+        accounted_usage: Usage,
+        cumulative_usage: Usage,
     },
     StructuredOutputChunk {
         json_delta: String,
@@ -604,6 +715,34 @@ impl PartialEq for TextTurnEvent {
                     model: rhs_model,
                 },
             ) => lhs_request_id == rhs_request_id && lhs_model == rhs_model,
+            (
+                Self::WillRetry {
+                    attempt: lhs_attempt,
+                    after: lhs_after,
+                    kind: lhs_kind,
+                    status: lhs_status,
+                    request_id: lhs_request_id,
+                    accounted_usage: lhs_accounted_usage,
+                    cumulative_usage: lhs_cumulative_usage,
+                },
+                Self::WillRetry {
+                    attempt: rhs_attempt,
+                    after: rhs_after,
+                    kind: rhs_kind,
+                    status: rhs_status,
+                    request_id: rhs_request_id,
+                    accounted_usage: rhs_accounted_usage,
+                    cumulative_usage: rhs_cumulative_usage,
+                },
+            ) => {
+                lhs_attempt == rhs_attempt
+                    && lhs_after == rhs_after
+                    && lhs_kind == rhs_kind
+                    && lhs_status == rhs_status
+                    && lhs_request_id == rhs_request_id
+                    && lhs_accounted_usage == rhs_accounted_usage
+                    && lhs_cumulative_usage == rhs_cumulative_usage
+            }
             (Self::TextDelta { delta: lhs }, Self::TextDelta { delta: rhs }) => lhs == rhs,
             (Self::ReasoningDelta { delta: lhs }, Self::ReasoningDelta { delta: rhs }) => {
                 lhs == rhs
@@ -650,6 +789,34 @@ where
                     model: rhs_model,
                 },
             ) => lhs_request_id == rhs_request_id && lhs_model == rhs_model,
+            (
+                Self::WillRetry {
+                    attempt: lhs_attempt,
+                    after: lhs_after,
+                    kind: lhs_kind,
+                    status: lhs_status,
+                    request_id: lhs_request_id,
+                    accounted_usage: lhs_accounted_usage,
+                    cumulative_usage: lhs_cumulative_usage,
+                },
+                Self::WillRetry {
+                    attempt: rhs_attempt,
+                    after: rhs_after,
+                    kind: rhs_kind,
+                    status: rhs_status,
+                    request_id: rhs_request_id,
+                    accounted_usage: rhs_accounted_usage,
+                    cumulative_usage: rhs_cumulative_usage,
+                },
+            ) => {
+                lhs_attempt == rhs_attempt
+                    && lhs_after == rhs_after
+                    && lhs_kind == rhs_kind
+                    && lhs_status == rhs_status
+                    && lhs_request_id == rhs_request_id
+                    && lhs_accounted_usage == rhs_accounted_usage
+                    && lhs_cumulative_usage == rhs_cumulative_usage
+            }
             (Self::TextDelta { delta: lhs }, Self::TextDelta { delta: rhs }) => lhs == rhs,
             (Self::ReasoningDelta { delta: lhs }, Self::ReasoningDelta { delta: rhs }) => {
                 lhs == rhs
@@ -709,6 +876,34 @@ where
                 },
             ) => lhs_request_id == rhs_request_id && lhs_model == rhs_model,
             (
+                Self::WillRetry {
+                    attempt: lhs_attempt,
+                    after: lhs_after,
+                    kind: lhs_kind,
+                    status: lhs_status,
+                    request_id: lhs_request_id,
+                    accounted_usage: lhs_accounted_usage,
+                    cumulative_usage: lhs_cumulative_usage,
+                },
+                Self::WillRetry {
+                    attempt: rhs_attempt,
+                    after: rhs_after,
+                    kind: rhs_kind,
+                    status: rhs_status,
+                    request_id: rhs_request_id,
+                    accounted_usage: rhs_accounted_usage,
+                    cumulative_usage: rhs_cumulative_usage,
+                },
+            ) => {
+                lhs_attempt == rhs_attempt
+                    && lhs_after == rhs_after
+                    && lhs_kind == rhs_kind
+                    && lhs_status == rhs_status
+                    && lhs_request_id == rhs_request_id
+                    && lhs_accounted_usage == rhs_accounted_usage
+                    && lhs_cumulative_usage == rhs_cumulative_usage
+            }
+            (
                 Self::StructuredOutputChunk { json_delta: lhs },
                 Self::StructuredOutputChunk { json_delta: rhs },
             ) => lhs == rhs,
@@ -759,6 +954,34 @@ where
                     model: rhs_model,
                 },
             ) => lhs_request_id == rhs_request_id && lhs_model == rhs_model,
+            (
+                Self::WillRetry {
+                    attempt: lhs_attempt,
+                    after: lhs_after,
+                    kind: lhs_kind,
+                    status: lhs_status,
+                    request_id: lhs_request_id,
+                    accounted_usage: lhs_accounted_usage,
+                    cumulative_usage: lhs_cumulative_usage,
+                },
+                Self::WillRetry {
+                    attempt: rhs_attempt,
+                    after: rhs_after,
+                    kind: rhs_kind,
+                    status: rhs_status,
+                    request_id: rhs_request_id,
+                    accounted_usage: rhs_accounted_usage,
+                    cumulative_usage: rhs_cumulative_usage,
+                },
+            ) => {
+                lhs_attempt == rhs_attempt
+                    && lhs_after == rhs_after
+                    && lhs_kind == rhs_kind
+                    && lhs_status == rhs_status
+                    && lhs_request_id == rhs_request_id
+                    && lhs_accounted_usage == rhs_accounted_usage
+                    && lhs_cumulative_usage == rhs_cumulative_usage
+            }
             (
                 Self::StructuredOutputChunk { json_delta: lhs },
                 Self::StructuredOutputChunk { json_delta: rhs },
@@ -923,6 +1146,15 @@ pub enum CompletionEvent {
         request_id: Option<String>,
         model: String,
     },
+    WillRetry {
+        attempt: u32,
+        after: Duration,
+        kind: RequestFailureKind,
+        status: Option<u16>,
+        request_id: Option<String>,
+        accounted_usage: Usage,
+        cumulative_usage: Usage,
+    },
     TextDelta(String),
     Completed {
         request_id: Option<String>,
@@ -936,6 +1168,15 @@ pub enum StructuredCompletionEvent<O: StructuredOutput> {
     Started {
         request_id: Option<String>,
         model: String,
+    },
+    WillRetry {
+        attempt: u32,
+        after: Duration,
+        kind: RequestFailureKind,
+        status: Option<u16>,
+        request_id: Option<String>,
+        accounted_usage: Usage,
+        cumulative_usage: Usage,
     },
     StructuredOutputChunk {
         json_delta: String,

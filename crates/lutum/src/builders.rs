@@ -6,7 +6,7 @@ use lutum_protocol::{
     conversation::ModelInput,
     emit_collect_error_enabled,
     llm::{
-        CompletionEventStream, CompletionOptions, CompletionRequest, GenerationParams,
+        CompletionEventStream, CompletionOptions, CompletionRequest, GenerationParams, RetryPolicy,
         StructuredCompletionEventStream, StructuredCompletionRequest,
         StructuredTurn as ProtocolStructuredTurn,
         StructuredTurnEventStream as ProtocolStructuredTurnEventStream, Temperature,
@@ -142,6 +142,11 @@ impl<'a> TextTurn<'a> {
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.turn.config.generation = generation;
+        self
+    }
+
+    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.extensions.insert(retry_policy);
         self
     }
 
@@ -299,6 +304,7 @@ impl<'a> TextTurn<'a> {
             assistant_turn,
             finish_reason: staged.finish_reason,
             usage: staged.usage,
+            cumulative_usage: staged.cumulative_usage,
         })
     }
 }
@@ -351,6 +357,11 @@ where
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.turn.config.generation = generation;
+        self
+    }
+
+    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.extensions.insert(retry_policy);
         self
     }
 
@@ -587,6 +598,11 @@ where
         self
     }
 
+    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.extensions.insert(retry_policy);
+        self
+    }
+
     pub fn tools<T>(self) -> StructuredTurnWithTools<'a, T, O>
     where
         T: Toolset,
@@ -749,6 +765,7 @@ where
             semantic: staged.semantic,
             finish_reason: staged.finish_reason,
             usage: staged.usage,
+            cumulative_usage: staged.cumulative_usage,
         })
     }
 }
@@ -803,6 +820,11 @@ where
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.turn.config.generation = generation;
+        self
+    }
+
+    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.extensions.insert(retry_policy);
         self
     }
 
@@ -965,6 +987,7 @@ where
                         partial.state.model.clone(),
                         finish_reason,
                         usage,
+                        usage,
                     );
                     return Ok(outcome);
                 }
@@ -1060,6 +1083,7 @@ where
                         partial.state.model.clone(),
                         finish_reason,
                         usage,
+                        usage,
                     );
                     return Ok(outcome);
                 }
@@ -1118,6 +1142,11 @@ impl<'a> Completion<'a> {
 
     pub fn budget(mut self, budget: RequestBudget) -> Self {
         self.request.budget = budget;
+        self
+    }
+
+    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.extensions.insert(retry_policy);
         self
     }
 
@@ -1243,6 +1272,11 @@ where
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.request.generation = generation;
+        self
+    }
+
+    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.extensions.insert(retry_policy);
         self
     }
 

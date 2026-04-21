@@ -108,6 +108,7 @@ impl TurnAdapter for SpyAdapter {
                 request_id: Some("spy-req".into()),
                 model: "spy-model".into(),
             }),
+            Ok(ErasedTextTurnEvent::TextDelta { delta: "ok".into() }),
             Ok(ErasedTextTurnEvent::Completed {
                 request_id: Some("spy-req".into()),
                 finish_reason: FinishReason::Stop,
@@ -177,13 +178,11 @@ fn describe_overrides_single_tool_description() {
     let spy = Arc::new(SpyAdapter::new());
     let ctx = make_ctx(Arc::clone(&spy));
 
-    // Use `.start()` so the turn fires (populating the spy) without needing a
-    // meaningful stream to collect — we only care about what was passed in.
     block_on(
         ctx.text_turn(user_input())
             .tools::<Tools>()
             .describe_tool(ToolsSelector::Weather, "Weather (calls left: 2)")
-            .start(),
+            .collect(),
     )
     .unwrap();
 
@@ -220,7 +219,7 @@ fn describe_many_applies_bulk_overrides() {
         ctx.text_turn(user_input())
             .tools::<Tools>()
             .describe_many_tools(overrides)
-            .start(),
+            .collect(),
     )
     .unwrap();
 
@@ -247,7 +246,7 @@ fn describe_last_write_wins_for_same_selector() {
             .tools::<Tools>()
             .describe_tool(ToolsSelector::Weather, "first")
             .describe_tool(ToolsSelector::Weather, "second")
-            .start(),
+            .collect(),
     )
     .unwrap();
 
@@ -333,7 +332,7 @@ fn description_hooks_integrate_with_builder_describe_many() {
         ctx.text_turn(user_input())
             .tools::<Tools>()
             .describe_many_tools(overrides)
-            .start(),
+            .collect(),
     )
     .unwrap();
 

@@ -1142,8 +1142,8 @@ fn unknown_tool_parse_failure_is_recovered() {
     let mut session = Session::new(ctx);
     session.push_user("Search for ramen.");
 
-    // `NoTools` uses `ToolAvailability::All`, so `search` is not rejected by the outer
-    // availability gate and instead becomes `UnknownTool` at the toolset-parse layer.
+    // `NoTools` exposes no selectors, so the outer availability gate rejects the model-authored
+    // tool call before toolset parsing.
     let outcome = block_on(session.text_turn().tools::<lutum::NoTools>().collect()).unwrap();
 
     match outcome {
@@ -1152,7 +1152,7 @@ fn unknown_tool_parse_failure_is_recovered() {
             assert_eq!(round.recoverable_tool_call_issues().len(), 1);
             assert_eq!(
                 round.recoverable_tool_call_issues()[0].reason,
-                lutum::RecoverableToolCallIssueReason::UnknownTool
+                lutum::RecoverableToolCallIssueReason::NotAvailable
             );
             assert_eq!(
                 round.continue_suggestion(),
@@ -1178,7 +1178,7 @@ fn unknown_tool_parse_failure_is_recovered() {
         rejected_result
             .rejection_reason()
             .as_deref()
-            .is_some_and(|reason| reason.contains("not recognized in this toolset or round"))
+            .is_some_and(|reason| reason.contains("not available in this round"))
     );
 }
 

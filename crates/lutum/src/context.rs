@@ -1,5 +1,12 @@
-use std::{convert::Infallible, ops::Deref, sync::Arc};
+use std::{
+    convert::Infallible,
+    ops::Deref,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
+    time::Duration,
+};
 
+use async_stream::try_stream;
 use futures::StreamExt;
 use thiserror::Error;
 use tracing::{Instrument, Span, field};
@@ -8,6 +15,7 @@ use lutum_protocol::{
     AgentError, AssistantInputItem, CommittedTurn, NoTools, NoToolsContractViolation,
     budget::{BudgetLease, BudgetManager, Remaining, Usage, UsageEstimate},
     conversation::{MessageContent, ModelInput, ModelInputItem},
+    error::RequestFailure,
     extensions::RequestExtensions,
     llm::{
         AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
@@ -15,7 +23,7 @@ use lutum_protocol::{
         CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionRequest,
         ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-        ErasedTextTurnEventStream, OperationKind, StructuredCompletionEvent,
+        ErasedTextTurnEventStream, OperationKind, RetryPolicy, StructuredCompletionEvent,
         StructuredCompletionEventStream, StructuredCompletionRequest,
         StructuredTurn as ProtocolStructuredTurn, StructuredTurnEvent, StructuredTurnEventStream,
         StructuredTurnEventStreamWithTools, StructuredTurnEventWithTools,
@@ -151,6 +159,10 @@ impl Lutum {
         extensions.push_fallback(Arc::clone(&self.default_extensions));
         self.default_extensions = Arc::new(extensions);
         self
+    }
+
+    pub fn with_retry_policy(self, retry_policy: RetryPolicy) -> Self {
+        self.with_extension(retry_policy)
     }
 
     pub fn default_extensions(&self) -> &RequestExtensions {
@@ -290,6 +302,30 @@ struct OwnedLease {
     lease: Option<BudgetLease>,
 }
 
+struct SyncPinnedStream<Item> {
+    inner: Mutex<core::pin::Pin<Box<dyn futures::Stream<Item = Item> + Send + 'static>>>,
+}
+
+impl<Item> futures::Stream for SyncPinnedStream<Item> {
+    type Item = Item;
+
+    fn poll_next(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let mut inner = self.inner.lock().expect("retry stream mutex poisoned");
+        inner.as_mut().poll_next(cx)
+    }
+}
+
+fn boxed_sync_stream<Item: 'static>(
+    stream: impl futures::Stream<Item = Item> + Send + 'static,
+) -> core::pin::Pin<Box<dyn futures::Stream<Item = Item> + Send + Sync + 'static>> {
+    Box::pin(SyncPinnedStream {
+        inner: Mutex::new(Box::pin(stream)),
+    })
+}
+
 impl Drop for OwnedLease {
     fn drop(&mut self) {
         if let Some(lease) = self.lease.take()
@@ -307,8 +343,12 @@ pub struct PendingTextTurn {
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
     recovery: Arc<dyn UsageRecoveryAdapter>,
+    turns: Arc<dyn TurnAdapter>,
+    input: ModelInput,
+    turn: AdapterTextTurn,
+    estimate: UsageEstimate,
+    retry_policy: RetryPolicy,
     span: Span,
-    stream: TextTurnEventStream,
     reducer: TextTurnReducer,
 }
 
@@ -319,8 +359,13 @@ where
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
     recovery: Arc<dyn UsageRecoveryAdapter>,
+    turns: Arc<dyn TurnAdapter>,
+    input: ModelInput,
+    turn: AdapterTextTurn,
+    availability: ToolAvailability<T::Selector>,
+    estimate: UsageEstimate,
+    retry_policy: RetryPolicy,
     span: Span,
-    stream: TextTurnEventStreamWithTools<T>,
     reducer: TextTurnReducerWithTools<T>,
 }
 
@@ -331,8 +376,12 @@ where
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
     recovery: Arc<dyn UsageRecoveryAdapter>,
+    turns: Arc<dyn TurnAdapter>,
+    input: ModelInput,
+    turn: AdapterStructuredTurn,
+    estimate: UsageEstimate,
+    retry_policy: RetryPolicy,
     span: Span,
-    stream: StructuredTurnEventStream<O>,
     reducer: StructuredTurnReducer<O>,
 }
 
@@ -344,8 +393,13 @@ where
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
     recovery: Arc<dyn UsageRecoveryAdapter>,
+    turns: Arc<dyn TurnAdapter>,
+    input: ModelInput,
+    turn: AdapterStructuredTurn,
+    availability: ToolAvailability<T::Selector>,
+    estimate: UsageEstimate,
+    retry_policy: RetryPolicy,
     span: Span,
-    stream: StructuredTurnEventStreamWithTools<T, O>,
     reducer: StructuredTurnReducerWithTools<T, O>,
 }
 
@@ -429,11 +483,14 @@ where
 }
 
 pub struct PendingCompletion {
-    extensions: RequestExtensions,
+    extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
     recovery: Arc<dyn UsageRecoveryAdapter>,
+    completion: Arc<dyn CompletionAdapter>,
+    request: CompletionRequest,
+    estimate: UsageEstimate,
+    retry_policy: RetryPolicy,
     span: Span,
-    stream: CompletionEventStream,
     reducer: CompletionReducer,
 }
 
@@ -441,11 +498,14 @@ pub struct PendingStructuredCompletion<O>
 where
     O: StructuredOutput,
 {
-    extensions: RequestExtensions,
+    extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
     recovery: Arc<dyn UsageRecoveryAdapter>,
+    completion: Arc<dyn CompletionAdapter>,
+    request: AdapterStructuredCompletionRequest,
+    estimate: UsageEstimate,
+    retry_policy: RetryPolicy,
     span: Span,
-    stream: StructuredCompletionEventStream<O>,
     reducer: StructuredCompletionReducer<O>,
 }
 
@@ -465,19 +525,10 @@ impl Lutum {
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
         let extensions = Arc::new(extensions);
+        let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("text_turn", estimate);
         log_input_transcript(&span, &input);
-        let stream = match self
-            .turns
-            .text_turn(input, erase_text_turn(turn, Arc::clone(&extensions))?)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(source) => {
-                self.budget.record_used(lease, Usage::zero())?;
-                return Err(source);
-            }
-        };
+        let turn = erase_text_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingTextTurn {
             extensions,
             owned_lease: OwnedLease {
@@ -485,8 +536,12 @@ impl Lutum {
                 lease: Some(lease),
             },
             recovery: Arc::clone(&self.recovery),
+            turns: Arc::clone(&self.turns),
+            input,
+            turn,
+            estimate,
+            retry_policy,
             span,
-            stream: map_text_stream(stream),
             reducer: TextTurnReducer::new(),
         })
     }
@@ -511,19 +566,10 @@ impl Lutum {
         // Extract availability before erase_text_turn consumes the turn config.
         let availability = turn.config.tools.available.clone();
         let extensions = Arc::new(extensions);
+        let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("text_turn", estimate);
         log_input_transcript(&span, &input);
-        let stream = match self
-            .turns
-            .text_turn(input, erase_text_turn(turn, Arc::clone(&extensions))?)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(source) => {
-                self.budget.record_used(lease, Usage::zero())?;
-                return Err(source);
-            }
-        };
+        let turn = erase_text_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingTextTurnWithTools {
             extensions,
             owned_lease: OwnedLease {
@@ -531,8 +577,13 @@ impl Lutum {
                 lease: Some(lease),
             },
             recovery: Arc::clone(&self.recovery),
+            turns: Arc::clone(&self.turns),
+            input,
+            turn,
+            availability,
+            estimate,
+            retry_policy,
             span,
-            stream: map_text_stream_with_tools::<T>(stream, availability),
             reducer: TextTurnReducerWithTools::new(),
         })
     }
@@ -555,18 +606,10 @@ impl Lutum {
             .budget
             .reserve(&extensions, &estimate, turn.config.budget)?;
         let extensions = Arc::new(extensions);
+        let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("structured_turn", estimate);
-        let stream = match self
-            .turns
-            .structured_turn(input, erase_structured_turn(turn, Arc::clone(&extensions))?)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(source) => {
-                self.budget.record_used(lease, Usage::zero())?;
-                return Err(source);
-            }
-        };
+        log_input_transcript(&span, &input);
+        let turn = erase_structured_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingStructuredTurn {
             extensions,
             owned_lease: OwnedLease {
@@ -574,8 +617,12 @@ impl Lutum {
                 lease: Some(lease),
             },
             recovery: Arc::clone(&self.recovery),
+            turns: Arc::clone(&self.turns),
+            input,
+            turn,
+            estimate,
+            retry_policy,
             span,
-            stream: map_structured_stream::<O>(stream),
             reducer: StructuredTurnReducer::new(),
         })
     }
@@ -601,18 +648,10 @@ impl Lutum {
         // Extract availability before erase_structured_turn consumes the turn config.
         let availability = turn.config.tools.available.clone();
         let extensions = Arc::new(extensions);
+        let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("structured_turn", estimate);
-        let stream = match self
-            .turns
-            .structured_turn(input, erase_structured_turn(turn, Arc::clone(&extensions))?)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(source) => {
-                self.budget.record_used(lease, Usage::zero())?;
-                return Err(source);
-            }
-        };
+        log_input_transcript(&span, &input);
+        let turn = erase_structured_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingStructuredTurnWithTools {
             extensions,
             owned_lease: OwnedLease {
@@ -620,8 +659,13 @@ impl Lutum {
                 lease: Some(lease),
             },
             recovery: Arc::clone(&self.recovery),
+            turns: Arc::clone(&self.turns),
+            input,
+            turn,
+            availability,
+            estimate,
+            retry_policy,
             span,
-            stream: map_structured_stream_with_tools::<T, O>(stream, availability),
             reducer: StructuredTurnReducerWithTools::new(),
         })
     }
@@ -638,14 +682,9 @@ impl Lutum {
         let lease = self
             .budget
             .reserve(&extensions, &estimate, request.budget)?;
+        let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
+        let extensions = Arc::new(extensions);
         let span = turn_span("completion", estimate);
-        let stream = match self.completion.completion(request, &extensions).await {
-            Ok(stream) => stream,
-            Err(source) => {
-                self.budget.record_used(lease, Usage::zero())?;
-                return Err(source);
-            }
-        };
         Ok(PendingCompletion {
             extensions,
             owned_lease: OwnedLease {
@@ -653,8 +692,11 @@ impl Lutum {
                 lease: Some(lease),
             },
             recovery: Arc::clone(&self.recovery),
+            completion: Arc::clone(&self.completion),
+            request,
+            estimate,
+            retry_policy,
             span,
-            stream,
             reducer: CompletionReducer::new(),
         })
     }
@@ -674,18 +716,9 @@ impl Lutum {
         let lease = self
             .budget
             .reserve(&extensions, &estimate, request.budget)?;
+        let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
+        let extensions = Arc::new(extensions);
         let span = turn_span("structured_completion", estimate);
-        let stream = match self
-            .completion
-            .structured_completion(erase_structured_completion_request(request)?, &extensions)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(source) => {
-                self.budget.record_used(lease, Usage::zero())?;
-                return Err(source);
-            }
-        };
         Ok(PendingStructuredCompletion {
             extensions,
             owned_lease: OwnedLease {
@@ -693,20 +726,127 @@ impl Lutum {
                 lease: Some(lease),
             },
             recovery: Arc::clone(&self.recovery),
+            completion: Arc::clone(&self.completion),
+            request: erase_structured_completion_request(request)?,
+            estimate,
+            retry_policy,
             span,
-            stream: map_structured_completion_stream::<O>(stream),
             reducer: StructuredCompletionReducer::new(),
         })
     }
 }
 
 impl PendingTextTurn {
+    async fn start_attempt(&self) -> Result<TextTurnEventStream, AgentError> {
+        let stream = self
+            .turns
+            .text_turn(self.input.clone(), self.turn.clone())
+            .await?;
+        Ok(map_text_stream(stream))
+    }
+
     /// Returns the raw typed event stream.
     ///
     /// Releasing this wrapper commits zero usage and frees any reserved budget.
     pub fn into_stream(self) -> TextTurnEventStream {
-        let Self { stream, .. } = self;
-        stream
+        let Self {
+            recovery,
+            turns,
+            input,
+            turn,
+            estimate,
+            retry_policy,
+            span,
+            ..
+        } = self;
+        boxed_sync_stream(try_stream! {
+            let mut attempt = 1_u32;
+            let mut cumulative_usage = Usage::zero();
+
+            'attempts: loop {
+                let stream = turns.text_turn(input.clone(), turn.clone()).await;
+                let mut stream = match stream {
+                    Ok(stream) => map_text_stream(stream),
+                    Err(source) => {
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&retry_policy, attempt, &source)
+                        {
+                            let accounted_usage =
+                                recover_or_estimate_usage(&*recovery, OperationKind::TextTurn, None, estimate).await;
+                            cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                            yield TextTurnEvent::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: None,
+                                accounted_usage,
+                                cumulative_usage,
+                            };
+                            tokio::time::sleep(after).await;
+                            attempt = next_attempt;
+                            continue 'attempts;
+                        }
+                        Err(source)?;
+                        break;
+                    }
+                };
+
+                let mut request_id = None;
+                while let Some(item) = stream.next().instrument(span.clone()).await {
+                    match item {
+                        Ok(event) => {
+                            match &event {
+                                TextTurnEvent::Started {
+                                    request_id: event_request_id,
+                                    ..
+                                } => request_id = event_request_id.clone(),
+                                TextTurnEvent::Completed {
+                                    request_id: event_request_id,
+                                    ..
+                                } => {
+                                    if let Some(event_request_id) = event_request_id.clone() {
+                                        request_id = Some(event_request_id);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            yield event;
+                        }
+                        Err(source) => {
+                            if let Some((next_attempt, after, status, kind)) =
+                                maybe_retry_plan(&retry_policy, attempt, &source)
+                            {
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*recovery,
+                                    OperationKind::TextTurn,
+                                    request_id.as_deref(),
+                                    estimate,
+                                )
+                                .await;
+                                cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                                yield TextTurnEvent::WillRetry {
+                                    attempt: next_attempt,
+                                    after,
+                                    kind,
+                                    status,
+                                    request_id,
+                                    accounted_usage,
+                                    cumulative_usage,
+                                };
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Err(source)?;
+                            break 'attempts;
+                        }
+                    }
+                }
+
+                break;
+            }
+        })
     }
 
     pub async fn collect_with<H>(
@@ -716,175 +856,135 @@ impl PendingTextTurn {
     where
         H: EventHandler<TextTurnEvent, TextTurnState>,
     {
-        while let Some(item) = self.stream.next().instrument(self.span.clone()).await {
-            match item {
-                Ok(event) => {
-                    if let Err(source) = self.reducer.apply(&event) {
-                        emit_raw_collect_error(
-                            self.extensions.as_ref(),
-                            OperationKind::TextTurn,
-                            self.reducer.state().request_id.as_deref(),
-                            CollectErrorKind::Reduction,
-                            summarize_text_state(self.reducer.state()),
-                            source.to_string(),
-                        );
-                        return Err(CollectError::Reduction {
-                            source,
-                            partial: self.reducer.state().clone(),
-                        });
-                    }
-                    record_request_id(&self.span, self.reducer.state().request_id.as_deref());
-                    if let TextTurnEvent::Completed { committed_turn, .. } = &event {
-                        log_output_turn(&self.span, committed_turn);
-                    }
-                    if let Some(usage) = completed_usage_from_text(&event) {
-                        if let Err(source) = finalize_budget(
-                            &mut self.owned_lease,
-                            &self.span,
-                            self.reducer.state().request_id.as_deref(),
-                            usage,
-                        ) {
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::TextTurn,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Execution,
-                                summarize_text_state(self.reducer.state()),
-                                source.to_string(),
-                            );
-                            return Err(CollectError::Execution {
-                                source,
-                                partial: self.reducer.state().clone(),
-                            });
-                        }
-                        if let Err(source) = self.call_handler(&mut handler, &event).await {
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::TextTurn,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_text_state(self.reducer.state()),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: self.reducer.state().clone(),
-                            });
-                        }
-                        let partial = self.reducer.state().clone();
-                        return match self.reducer.into_result() {
-                            Ok(result) => Ok(result),
-                            Err(source) => {
+        let mut attempt = 1_u32;
+        let mut cumulative_usage = Usage::zero();
+
+        'attempts: loop {
+            let mut stream = match self.start_attempt().await {
+                Ok(stream) => stream,
+                Err(source) => {
+                    let partial = self.reducer.state().clone();
+                    let accounted_usage = recover_or_estimate_usage(
+                        &*self.recovery,
+                        OperationKind::TextTurn,
+                        self.reducer.state().request_id.as_deref(),
+                        self.estimate,
+                    )
+                    .await;
+                    let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+
+                    if let Some((next_attempt, after, status, kind)) =
+                        maybe_retry_plan(&self.retry_policy, attempt, &source)
+                    {
+                        let retry_event = TextTurnEvent::WillRetry {
+                            attempt: next_attempt,
+                            after,
+                            kind,
+                            status,
+                            request_id: self.reducer.state().request_id.clone(),
+                            accounted_usage,
+                            cumulative_usage: next_cumulative_usage,
+                        };
+                        match self.call_handler(&mut handler, &retry_event).await {
+                            Ok(HandlerDirective::Continue) => {
+                                cumulative_usage = next_cumulative_usage;
+                                self.reducer.reset_for_retry();
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Ok(HandlerDirective::Stop) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     self.extensions.as_ref(),
                                     OperationKind::TextTurn,
                                     partial.request_id.as_deref(),
-                                    CollectErrorKind::Reduction,
-                                    summarize_text_state(&partial),
-                                    source.to_string(),
-                                );
-                                Err(CollectError::Reduction { source, partial })
-                            }
-                        };
-                    }
-
-                    match self.call_handler(&mut handler, &event).await {
-                        Ok(HandlerDirective::Continue) => {}
-                        Ok(HandlerDirective::Stop) => {
-                            let partial = self.reducer.state().clone();
-                            if let Err(source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::TextTurn,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
-                                emit_raw_collect_error(
-                                    self.extensions.as_ref(),
-                                    OperationKind::TextTurn,
-                                    self.reducer.state().request_id.as_deref(),
                                     CollectErrorKind::Execution,
                                     summarize_text_state(&partial),
                                     source.to_string(),
                                 );
                                 return Err(CollectError::Execution { source, partial });
                             }
-                            return Err(CollectError::Stopped {
-                                partial: self.reducer.into_state(),
-                            });
-                        }
-                        Err(source) => {
-                            let partial = self.reducer.state().clone();
-                            if let Err(execution_source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::TextTurn,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
+                            Err(handler_source) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     self.extensions.as_ref(),
                                     OperationKind::TextTurn,
-                                    self.reducer.state().request_id.as_deref(),
-                                    CollectErrorKind::Execution,
+                                    partial.request_id.as_deref(),
+                                    CollectErrorKind::Handler,
                                     summarize_text_state(&partial),
-                                    execution_source.to_string(),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&handler_source)
+                                    ),
                                 );
-                                return Err(CollectError::Execution {
-                                    source: execution_source,
-                                    partial,
+                                return Err(CollectError::Handler {
+                                    source: handler_source,
+                                    partial: self.reducer.into_state(),
                                 });
                             }
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::TextTurn,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_text_state(self.reducer.state()),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: self.reducer.into_state(),
-                            });
                         }
                     }
-                }
-                Err(source) => {
-                    let partial = self.reducer.state().clone();
-                    if let Err(execution_source) = recover_or_release_budget(
+
+                    if let Err(finalize_source) = finalize_budget_cumulative(
                         &mut self.owned_lease,
-                        &*self.recovery,
-                        OperationKind::TextTurn,
-                        self.reducer.state().request_id.as_deref(),
-                    )
-                    .await
-                    {
+                        &self.span,
+                        partial.request_id.as_deref(),
+                        next_cumulative_usage,
+                    ) {
                         emit_raw_collect_error(
                             self.extensions.as_ref(),
                             OperationKind::TextTurn,
-                            self.reducer.state().request_id.as_deref(),
+                            partial.request_id.as_deref(),
                             CollectErrorKind::Execution,
                             summarize_text_state(&partial),
-                            execution_source.to_string(),
+                            finalize_source.to_string(),
                         );
                         return Err(CollectError::Execution {
-                            source: execution_source,
+                            source: finalize_source,
                             partial,
                         });
                     }
                     emit_raw_collect_error(
                         self.extensions.as_ref(),
                         OperationKind::TextTurn,
-                        self.reducer.state().request_id.as_deref(),
+                        partial.request_id.as_deref(),
                         CollectErrorKind::Execution,
                         summarize_text_state(&partial),
                         source.to_string(),
@@ -894,39 +994,341 @@ impl PendingTextTurn {
                         partial: self.reducer.into_state(),
                     });
                 }
-            }
-        }
+            };
 
-        let partial = self.reducer.state().clone();
-        if let Err(source) = recover_or_release_budget(
-            &mut self.owned_lease,
-            &*self.recovery,
-            OperationKind::TextTurn,
-            self.reducer.state().request_id.as_deref(),
-        )
-        .await
-        {
+            while let Some(item) = stream.next().instrument(self.span.clone()).await {
+                match item {
+                    Ok(event) => {
+                        if let Err(source) = self.reducer.apply(&event) {
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Reduction,
+                                summarize_text_state(self.reducer.state()),
+                                source.to_string(),
+                            );
+                            return Err(CollectError::Reduction {
+                                source,
+                                partial: self.reducer.state().clone(),
+                            });
+                        }
+                        record_request_id(&self.span, self.reducer.state().request_id.as_deref());
+                        if let TextTurnEvent::Completed { committed_turn, .. } = &event {
+                            log_output_turn(&self.span, committed_turn);
+                        }
+                        if let Some(usage) = completed_usage_from_text(&event) {
+                            let next_cumulative_usage = cumulative_usage.saturating_add(usage);
+                            if let Err(source) = finalize_budget_cumulative(
+                                &mut self.owned_lease,
+                                &self.span,
+                                self.reducer.state().request_id.as_deref(),
+                                next_cumulative_usage,
+                            ) {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_text_state(self.reducer.state()),
+                                    source.to_string(),
+                                );
+                                return Err(CollectError::Execution {
+                                    source,
+                                    partial: self.reducer.state().clone(),
+                                });
+                            }
+                            if let Err(source) = self.call_handler(&mut handler, &event).await {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_text_state(self.reducer.state()),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: self.reducer.state().clone(),
+                                });
+                            }
+                            let partial = self.reducer.state().clone();
+                            return match self.reducer.into_result() {
+                                Ok(mut result) => {
+                                    result.cumulative_usage = next_cumulative_usage;
+                                    Ok(result)
+                                }
+                                Err(source) => {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Reduction,
+                                        summarize_text_state(&partial),
+                                        source.to_string(),
+                                    );
+                                    Err(CollectError::Reduction { source, partial })
+                                }
+                            };
+                        }
+
+                        match self.call_handler(&mut handler, &event).await {
+                            Ok(HandlerDirective::Continue) => {}
+                            Ok(HandlerDirective::Stop) => {
+                                let partial = self.reducer.state().clone();
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                return Err(CollectError::Stopped {
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                            Err(source) => {
+                                let partial = self.reducer.state().clone();
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(execution_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state(&partial),
+                                        execution_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: execution_source,
+                                        partial,
+                                    });
+                                }
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_text_state(self.reducer.state()),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                        }
+                    }
+                    Err(source) => {
+                        let partial = self.reducer.state().clone();
+                        let accounted_usage = recover_or_estimate_usage(
+                            &*self.recovery,
+                            OperationKind::TextTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            self.estimate,
+                        )
+                        .await;
+                        let next_cumulative_usage =
+                            cumulative_usage.saturating_add(accounted_usage);
+
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&self.retry_policy, attempt, &source)
+                        {
+                            let retry_event = TextTurnEvent::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: self.reducer.state().request_id.clone(),
+                                accounted_usage,
+                                cumulative_usage: next_cumulative_usage,
+                            };
+                            match self.call_handler(&mut handler, &retry_event).await {
+                                Ok(HandlerDirective::Continue) => {
+                                    cumulative_usage = next_cumulative_usage;
+                                    self.reducer.reset_for_retry();
+                                    tokio::time::sleep(after).await;
+                                    attempt = next_attempt;
+                                    continue 'attempts;
+                                }
+                                Ok(HandlerDirective::Stop) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            self.extensions.as_ref(),
+                                            OperationKind::TextTurn,
+                                            partial.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_text_state(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                Err(handler_source) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            self.extensions.as_ref(),
+                                            OperationKind::TextTurn,
+                                            partial.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_text_state(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Handler,
+                                        summarize_text_state(&partial),
+                                        format!(
+                                            "handler error type={}",
+                                            std::any::type_name_of_val(&handler_source)
+                                        ),
+                                    );
+                                    return Err(CollectError::Handler {
+                                        source: handler_source,
+                                        partial: self.reducer.into_state(),
+                                    });
+                                }
+                            }
+                        }
+
+                        if let Err(execution_source) = finalize_budget_cumulative(
+                            &mut self.owned_lease,
+                            &self.span,
+                            self.reducer.state().request_id.as_deref(),
+                            next_cumulative_usage,
+                        ) {
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_text_state(&partial),
+                                execution_source.to_string(),
+                            );
+                            return Err(CollectError::Execution {
+                                source: execution_source,
+                                partial,
+                            });
+                        }
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::TextTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_text_state(&partial),
+                            source.to_string(),
+                        );
+                        return Err(CollectError::Execution {
+                            source,
+                            partial: self.reducer.into_state(),
+                        });
+                    }
+                }
+            }
+
+            let partial = self.reducer.state().clone();
+            let accounted_usage = recover_or_estimate_usage(
+                &*self.recovery,
+                OperationKind::TextTurn,
+                self.reducer.state().request_id.as_deref(),
+                self.estimate,
+            )
+            .await;
+            let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+            if let Err(source) = finalize_budget_cumulative(
+                &mut self.owned_lease,
+                &self.span,
+                self.reducer.state().request_id.as_deref(),
+                next_cumulative_usage,
+            ) {
+                emit_raw_collect_error(
+                    self.extensions.as_ref(),
+                    OperationKind::TextTurn,
+                    self.reducer.state().request_id.as_deref(),
+                    CollectErrorKind::Execution,
+                    summarize_text_state(&partial),
+                    source.to_string(),
+                );
+                return Err(CollectError::Execution { source, partial });
+            }
             emit_raw_collect_error(
                 self.extensions.as_ref(),
                 OperationKind::TextTurn,
                 self.reducer.state().request_id.as_deref(),
-                CollectErrorKind::Execution,
-                summarize_text_state(&partial),
-                source.to_string(),
+                CollectErrorKind::UnexpectedEof,
+                summarize_text_state(self.reducer.state()),
+                "stream ended before completion".to_string(),
             );
-            return Err(CollectError::Execution { source, partial });
+            return Err(CollectError::UnexpectedEof {
+                partial: self.reducer.into_state(),
+            });
         }
-        emit_raw_collect_error(
-            self.extensions.as_ref(),
-            OperationKind::TextTurn,
-            self.reducer.state().request_id.as_deref(),
-            CollectErrorKind::UnexpectedEof,
-            summarize_text_state(self.reducer.state()),
-            "stream ended before completion".to_string(),
-        );
-        Err(CollectError::UnexpectedEof {
-            partial: self.reducer.into_state(),
-        })
     }
 
     pub async fn collect(
@@ -957,12 +1359,120 @@ impl<T> PendingTextTurnWithTools<T>
 where
     T: Toolset,
 {
+    async fn start_attempt(&self) -> Result<TextTurnEventStreamWithTools<T>, AgentError> {
+        let stream = self
+            .turns
+            .text_turn(self.input.clone(), self.turn.clone())
+            .await?;
+        Ok(map_text_stream_with_tools::<T>(
+            stream,
+            self.availability.clone(),
+        ))
+    }
+
     /// Returns the raw typed event stream.
     ///
     /// Releasing this wrapper commits zero usage and frees any reserved budget.
     pub fn into_stream(self) -> TextTurnEventStreamWithTools<T> {
-        let Self { stream, .. } = self;
-        stream
+        let Self {
+            recovery,
+            turns,
+            input,
+            turn,
+            availability,
+            estimate,
+            retry_policy,
+            span,
+            ..
+        } = self;
+        boxed_sync_stream(try_stream! {
+            let mut attempt = 1_u32;
+            let mut cumulative_usage = Usage::zero();
+
+            'attempts: loop {
+                let stream = turns.text_turn(input.clone(), turn.clone()).await;
+                let mut stream = match stream {
+                    Ok(stream) => map_text_stream_with_tools::<T>(stream, availability.clone()),
+                    Err(source) => {
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&retry_policy, attempt, &source)
+                        {
+                            let accounted_usage =
+                                recover_or_estimate_usage(&*recovery, OperationKind::TextTurn, None, estimate).await;
+                            cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                            yield TextTurnEventWithTools::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: None,
+                                accounted_usage,
+                                cumulative_usage,
+                            };
+                            tokio::time::sleep(after).await;
+                            attempt = next_attempt;
+                            continue 'attempts;
+                        }
+                        Err(source)?;
+                        break;
+                    }
+                };
+
+                let mut request_id = None;
+                while let Some(item) = stream.next().instrument(span.clone()).await {
+                    match item {
+                        Ok(event) => {
+                            match &event {
+                                TextTurnEventWithTools::Started {
+                                    request_id: event_request_id,
+                                    ..
+                                } => request_id = event_request_id.clone(),
+                                TextTurnEventWithTools::Completed {
+                                    request_id: event_request_id,
+                                    ..
+                                } => {
+                                    if let Some(event_request_id) = event_request_id.clone() {
+                                        request_id = Some(event_request_id);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            yield event;
+                        }
+                        Err(source) => {
+                            if let Some((next_attempt, after, status, kind)) =
+                                maybe_retry_plan(&retry_policy, attempt, &source)
+                            {
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*recovery,
+                                    OperationKind::TextTurn,
+                                    request_id.as_deref(),
+                                    estimate,
+                                )
+                                .await;
+                                cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                                yield TextTurnEventWithTools::WillRetry {
+                                    attempt: next_attempt,
+                                    after,
+                                    kind,
+                                    status,
+                                    request_id,
+                                    accounted_usage,
+                                    cumulative_usage,
+                                };
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Err(source)?;
+                            break 'attempts;
+                        }
+                    }
+                }
+
+                break;
+            }
+        })
     }
 
     pub async fn collect_with<H>(
@@ -975,175 +1485,135 @@ where
     where
         H: EventHandler<TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
     {
-        while let Some(item) = self.stream.next().instrument(self.span.clone()).await {
-            match item {
-                Ok(event) => {
-                    if let Err(source) = self.reducer.apply(&event) {
-                        emit_raw_collect_error(
-                            self.extensions.as_ref(),
-                            OperationKind::TextTurn,
-                            self.reducer.state().request_id.as_deref(),
-                            CollectErrorKind::Reduction,
-                            summarize_text_state_with_tools(self.reducer.state()),
-                            source.to_string(),
-                        );
-                        return Err(CollectError::Reduction {
-                            source,
-                            partial: self.reducer.state().clone(),
-                        });
-                    }
-                    record_request_id(&self.span, self.reducer.state().request_id.as_deref());
-                    if let TextTurnEventWithTools::Completed { committed_turn, .. } = &event {
-                        log_output_turn(&self.span, committed_turn);
-                    }
-                    if let Some(usage) = completed_usage_from_text_with_tools(&event) {
-                        if let Err(source) = finalize_budget(
-                            &mut self.owned_lease,
-                            &self.span,
-                            self.reducer.state().request_id.as_deref(),
-                            usage,
-                        ) {
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::TextTurn,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Execution,
-                                summarize_text_state_with_tools(self.reducer.state()),
-                                source.to_string(),
-                            );
-                            return Err(CollectError::Execution {
-                                source,
-                                partial: self.reducer.state().clone(),
-                            });
-                        }
-                        if let Err(source) = self.call_handler(&mut handler, &event).await {
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::TextTurn,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_text_state_with_tools(self.reducer.state()),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: self.reducer.state().clone(),
-                            });
-                        }
-                        let partial = self.reducer.state().clone();
-                        return match self.reducer.into_result() {
-                            Ok(result) => Ok(result),
-                            Err(source) => {
+        let mut attempt = 1_u32;
+        let mut cumulative_usage = Usage::zero();
+
+        'attempts: loop {
+            let mut stream = match self.start_attempt().await {
+                Ok(stream) => stream,
+                Err(source) => {
+                    let partial = self.reducer.state().clone();
+                    let accounted_usage = recover_or_estimate_usage(
+                        &*self.recovery,
+                        OperationKind::TextTurn,
+                        self.reducer.state().request_id.as_deref(),
+                        self.estimate,
+                    )
+                    .await;
+                    let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+
+                    if let Some((next_attempt, after, status, kind)) =
+                        maybe_retry_plan(&self.retry_policy, attempt, &source)
+                    {
+                        let retry_event = TextTurnEventWithTools::WillRetry {
+                            attempt: next_attempt,
+                            after,
+                            kind,
+                            status,
+                            request_id: self.reducer.state().request_id.clone(),
+                            accounted_usage,
+                            cumulative_usage: next_cumulative_usage,
+                        };
+                        match self.call_handler(&mut handler, &retry_event).await {
+                            Ok(HandlerDirective::Continue) => {
+                                cumulative_usage = next_cumulative_usage;
+                                self.reducer.reset_for_retry();
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Ok(HandlerDirective::Stop) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state_with_tools(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     self.extensions.as_ref(),
                                     OperationKind::TextTurn,
                                     partial.request_id.as_deref(),
-                                    CollectErrorKind::Reduction,
-                                    summarize_text_state_with_tools(&partial),
-                                    source.to_string(),
-                                );
-                                Err(CollectError::Reduction { source, partial })
-                            }
-                        };
-                    }
-
-                    match self.call_handler(&mut handler, &event).await {
-                        Ok(HandlerDirective::Continue) => {}
-                        Ok(HandlerDirective::Stop) => {
-                            let partial = self.reducer.state().clone();
-                            if let Err(source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::TextTurn,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
-                                emit_raw_collect_error(
-                                    self.extensions.as_ref(),
-                                    OperationKind::TextTurn,
-                                    self.reducer.state().request_id.as_deref(),
                                     CollectErrorKind::Execution,
                                     summarize_text_state_with_tools(&partial),
                                     source.to_string(),
                                 );
                                 return Err(CollectError::Execution { source, partial });
                             }
-                            return Err(CollectError::Stopped {
-                                partial: self.reducer.into_state(),
-                            });
-                        }
-                        Err(source) => {
-                            let partial = self.reducer.state().clone();
-                            if let Err(execution_source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::TextTurn,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
+                            Err(handler_source) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state_with_tools(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     self.extensions.as_ref(),
                                     OperationKind::TextTurn,
-                                    self.reducer.state().request_id.as_deref(),
-                                    CollectErrorKind::Execution,
+                                    partial.request_id.as_deref(),
+                                    CollectErrorKind::Handler,
                                     summarize_text_state_with_tools(&partial),
-                                    execution_source.to_string(),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&handler_source)
+                                    ),
                                 );
-                                return Err(CollectError::Execution {
-                                    source: execution_source,
-                                    partial,
+                                return Err(CollectError::Handler {
+                                    source: handler_source,
+                                    partial: self.reducer.into_state(),
                                 });
                             }
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::TextTurn,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_text_state_with_tools(self.reducer.state()),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: self.reducer.into_state(),
-                            });
                         }
                     }
-                }
-                Err(source) => {
-                    let partial = self.reducer.state().clone();
-                    if let Err(execution_source) = recover_or_release_budget(
+
+                    if let Err(finalize_source) = finalize_budget_cumulative(
                         &mut self.owned_lease,
-                        &*self.recovery,
-                        OperationKind::TextTurn,
-                        self.reducer.state().request_id.as_deref(),
-                    )
-                    .await
-                    {
+                        &self.span,
+                        partial.request_id.as_deref(),
+                        next_cumulative_usage,
+                    ) {
                         emit_raw_collect_error(
                             self.extensions.as_ref(),
                             OperationKind::TextTurn,
-                            self.reducer.state().request_id.as_deref(),
+                            partial.request_id.as_deref(),
                             CollectErrorKind::Execution,
                             summarize_text_state_with_tools(&partial),
-                            execution_source.to_string(),
+                            finalize_source.to_string(),
                         );
                         return Err(CollectError::Execution {
-                            source: execution_source,
+                            source: finalize_source,
                             partial,
                         });
                     }
                     emit_raw_collect_error(
                         self.extensions.as_ref(),
                         OperationKind::TextTurn,
-                        self.reducer.state().request_id.as_deref(),
+                        partial.request_id.as_deref(),
                         CollectErrorKind::Execution,
                         summarize_text_state_with_tools(&partial),
                         source.to_string(),
@@ -1153,39 +1623,341 @@ where
                         partial: self.reducer.into_state(),
                     });
                 }
-            }
-        }
+            };
 
-        let partial = self.reducer.state().clone();
-        if let Err(source) = recover_or_release_budget(
-            &mut self.owned_lease,
-            &*self.recovery,
-            OperationKind::TextTurn,
-            self.reducer.state().request_id.as_deref(),
-        )
-        .await
-        {
+            while let Some(item) = stream.next().instrument(self.span.clone()).await {
+                match item {
+                    Ok(event) => {
+                        if let Err(source) = self.reducer.apply(&event) {
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Reduction,
+                                summarize_text_state_with_tools(self.reducer.state()),
+                                source.to_string(),
+                            );
+                            return Err(CollectError::Reduction {
+                                source,
+                                partial: self.reducer.state().clone(),
+                            });
+                        }
+                        record_request_id(&self.span, self.reducer.state().request_id.as_deref());
+                        if let TextTurnEventWithTools::Completed { committed_turn, .. } = &event {
+                            log_output_turn(&self.span, committed_turn);
+                        }
+                        if let Some(usage) = completed_usage_from_text_with_tools(&event) {
+                            let next_cumulative_usage = cumulative_usage.saturating_add(usage);
+                            if let Err(source) = finalize_budget_cumulative(
+                                &mut self.owned_lease,
+                                &self.span,
+                                self.reducer.state().request_id.as_deref(),
+                                next_cumulative_usage,
+                            ) {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_text_state_with_tools(self.reducer.state()),
+                                    source.to_string(),
+                                );
+                                return Err(CollectError::Execution {
+                                    source,
+                                    partial: self.reducer.state().clone(),
+                                });
+                            }
+                            if let Err(source) = self.call_handler(&mut handler, &event).await {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_text_state_with_tools(self.reducer.state()),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: self.reducer.state().clone(),
+                                });
+                            }
+                            let partial = self.reducer.state().clone();
+                            return match self.reducer.into_result() {
+                                Ok(mut result) => {
+                                    result.cumulative_usage = next_cumulative_usage;
+                                    Ok(result)
+                                }
+                                Err(source) => {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Reduction,
+                                        summarize_text_state_with_tools(&partial),
+                                        source.to_string(),
+                                    );
+                                    Err(CollectError::Reduction { source, partial })
+                                }
+                            };
+                        }
+
+                        match self.call_handler(&mut handler, &event).await {
+                            Ok(HandlerDirective::Continue) => {}
+                            Ok(HandlerDirective::Stop) => {
+                                let partial = self.reducer.state().clone();
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state_with_tools(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                return Err(CollectError::Stopped {
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                            Err(source) => {
+                                let partial = self.reducer.state().clone();
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(execution_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state_with_tools(&partial),
+                                        execution_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: execution_source,
+                                        partial,
+                                    });
+                                }
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_text_state_with_tools(self.reducer.state()),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                        }
+                    }
+                    Err(source) => {
+                        let partial = self.reducer.state().clone();
+                        let accounted_usage = recover_or_estimate_usage(
+                            &*self.recovery,
+                            OperationKind::TextTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            self.estimate,
+                        )
+                        .await;
+                        let next_cumulative_usage =
+                            cumulative_usage.saturating_add(accounted_usage);
+
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&self.retry_policy, attempt, &source)
+                        {
+                            let retry_event = TextTurnEventWithTools::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: self.reducer.state().request_id.clone(),
+                                accounted_usage,
+                                cumulative_usage: next_cumulative_usage,
+                            };
+                            match self.call_handler(&mut handler, &retry_event).await {
+                                Ok(HandlerDirective::Continue) => {
+                                    cumulative_usage = next_cumulative_usage;
+                                    self.reducer.reset_for_retry();
+                                    tokio::time::sleep(after).await;
+                                    attempt = next_attempt;
+                                    continue 'attempts;
+                                }
+                                Ok(HandlerDirective::Stop) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            self.extensions.as_ref(),
+                                            OperationKind::TextTurn,
+                                            partial.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_text_state_with_tools(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state_with_tools(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                Err(handler_source) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            self.extensions.as_ref(),
+                                            OperationKind::TextTurn,
+                                            partial.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_text_state_with_tools(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Handler,
+                                        summarize_text_state_with_tools(&partial),
+                                        format!(
+                                            "handler error type={}",
+                                            std::any::type_name_of_val(&handler_source)
+                                        ),
+                                    );
+                                    return Err(CollectError::Handler {
+                                        source: handler_source,
+                                        partial: self.reducer.into_state(),
+                                    });
+                                }
+                            }
+                        }
+
+                        if let Err(execution_source) = finalize_budget_cumulative(
+                            &mut self.owned_lease,
+                            &self.span,
+                            self.reducer.state().request_id.as_deref(),
+                            next_cumulative_usage,
+                        ) {
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_text_state_with_tools(&partial),
+                                execution_source.to_string(),
+                            );
+                            return Err(CollectError::Execution {
+                                source: execution_source,
+                                partial,
+                            });
+                        }
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::TextTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_text_state_with_tools(&partial),
+                            source.to_string(),
+                        );
+                        return Err(CollectError::Execution {
+                            source,
+                            partial: self.reducer.into_state(),
+                        });
+                    }
+                }
+            }
+
+            let partial = self.reducer.state().clone();
+            let accounted_usage = recover_or_estimate_usage(
+                &*self.recovery,
+                OperationKind::TextTurn,
+                self.reducer.state().request_id.as_deref(),
+                self.estimate,
+            )
+            .await;
+            let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+            if let Err(source) = finalize_budget_cumulative(
+                &mut self.owned_lease,
+                &self.span,
+                self.reducer.state().request_id.as_deref(),
+                next_cumulative_usage,
+            ) {
+                emit_raw_collect_error(
+                    self.extensions.as_ref(),
+                    OperationKind::TextTurn,
+                    self.reducer.state().request_id.as_deref(),
+                    CollectErrorKind::Execution,
+                    summarize_text_state_with_tools(&partial),
+                    source.to_string(),
+                );
+                return Err(CollectError::Execution { source, partial });
+            }
             emit_raw_collect_error(
                 self.extensions.as_ref(),
                 OperationKind::TextTurn,
                 self.reducer.state().request_id.as_deref(),
-                CollectErrorKind::Execution,
-                summarize_text_state_with_tools(&partial),
-                source.to_string(),
+                CollectErrorKind::UnexpectedEof,
+                summarize_text_state_with_tools(self.reducer.state()),
+                "stream ended before completion".to_string(),
             );
-            return Err(CollectError::Execution { source, partial });
+            return Err(CollectError::UnexpectedEof {
+                partial: self.reducer.into_state(),
+            });
         }
-        emit_raw_collect_error(
-            self.extensions.as_ref(),
-            OperationKind::TextTurn,
-            self.reducer.state().request_id.as_deref(),
-            CollectErrorKind::UnexpectedEof,
-            summarize_text_state_with_tools(self.reducer.state()),
-            "stream ended before completion".to_string(),
-        );
-        Err(CollectError::UnexpectedEof {
-            partial: self.reducer.into_state(),
-        })
     }
 
     pub async fn collect(
@@ -1218,12 +1990,112 @@ impl<O> PendingStructuredTurn<O>
 where
     O: StructuredOutput,
 {
+    async fn start_attempt(&self) -> Result<StructuredTurnEventStream<O>, AgentError> {
+        let stream = self
+            .turns
+            .structured_turn(self.input.clone(), self.turn.clone())
+            .await?;
+        Ok(map_structured_stream::<O>(stream))
+    }
+
     /// Returns the raw typed event stream.
     ///
     /// Releasing this wrapper commits zero usage and frees any reserved budget.
     pub fn into_stream(self) -> StructuredTurnEventStream<O> {
-        let Self { stream, .. } = self;
-        stream
+        let Self {
+            recovery,
+            turns,
+            input,
+            turn,
+            estimate,
+            retry_policy,
+            span,
+            ..
+        } = self;
+        boxed_sync_stream(try_stream! {
+            let mut attempt = 1_u32;
+            let mut cumulative_usage = Usage::zero();
+
+            'attempts: loop {
+                let stream = turns.structured_turn(input.clone(), turn.clone()).await;
+                let mut stream = match stream {
+                    Ok(stream) => map_structured_stream::<O>(stream),
+                    Err(source) => {
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&retry_policy, attempt, &source)
+                        {
+                            let accounted_usage =
+                                recover_or_estimate_usage(&*recovery, OperationKind::StructuredTurn, None, estimate).await;
+                            cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                            yield StructuredTurnEvent::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: None,
+                                accounted_usage,
+                                cumulative_usage,
+                            };
+                            tokio::time::sleep(after).await;
+                            attempt = next_attempt;
+                            continue 'attempts;
+                        }
+                        Err(source)?;
+                        break;
+                    }
+                };
+
+                let mut request_id = None;
+                while let Some(item) = stream.next().instrument(span.clone()).await {
+                    match item {
+                        Ok(event) => {
+                            match &event {
+                                StructuredTurnEvent::Started { request_id: event_request_id, .. } => {
+                                    request_id = event_request_id.clone();
+                                }
+                                StructuredTurnEvent::Completed { request_id: event_request_id, .. } => {
+                                    if let Some(event_request_id) = event_request_id.clone() {
+                                        request_id = Some(event_request_id);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            yield event;
+                        }
+                        Err(source) => {
+                            if let Some((next_attempt, after, status, kind)) =
+                                maybe_retry_plan(&retry_policy, attempt, &source)
+                            {
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*recovery,
+                                    OperationKind::StructuredTurn,
+                                    request_id.as_deref(),
+                                    estimate,
+                                )
+                                .await;
+                                cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                                yield StructuredTurnEvent::WillRetry {
+                                    attempt: next_attempt,
+                                    after,
+                                    kind,
+                                    status,
+                                    request_id,
+                                    accounted_usage,
+                                    cumulative_usage,
+                                };
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Err(source)?;
+                            break 'attempts;
+                        }
+                    }
+                }
+
+                break;
+            }
+        })
     }
 
     pub async fn collect_with<H>(
@@ -1236,94 +2108,63 @@ where
     where
         H: EventHandler<StructuredTurnEvent<O>, StructuredTurnState<O>>,
     {
-        while let Some(item) = self.stream.next().instrument(self.span.clone()).await {
-            match item {
-                Ok(event) => {
-                    if let Err(source) = self.reducer.apply(&event) {
-                        let partial =
-                            StructuredTurnPartial::from_state(self.reducer.state().clone());
-                        emit_raw_collect_error(
-                            self.extensions.as_ref(),
-                            OperationKind::StructuredTurn,
-                            partial.state.request_id.as_deref(),
-                            CollectErrorKind::Reduction,
-                            summarize_structured_partial(&partial),
-                            source.to_string(),
-                        );
-                        return Err(CollectError::Reduction { source, partial });
-                    }
-                    record_request_id(&self.span, self.reducer.state().request_id.as_deref());
-                    if let Some(usage) = completed_usage_from_structured(&event) {
-                        if let Err(source) = finalize_budget(
-                            &mut self.owned_lease,
-                            &self.span,
-                            self.reducer.state().request_id.as_deref(),
-                            usage,
-                        ) {
-                            let partial =
-                                StructuredTurnPartial::from_state(self.reducer.state().clone());
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::StructuredTurn,
-                                partial.state.request_id.as_deref(),
-                                CollectErrorKind::Execution,
-                                summarize_structured_partial(&partial),
-                                source.to_string(),
-                            );
-                            return Err(CollectError::Execution { source, partial });
-                        }
-                        if let Err(source) = self.call_handler(&mut handler, &event).await {
-                            let partial =
-                                StructuredTurnPartial::from_state(self.reducer.state().clone());
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::StructuredTurn,
-                                partial.state.request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_structured_partial(&partial),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler { source, partial });
-                        }
-                        let partial =
-                            StructuredTurnPartial::from_state(self.reducer.state().clone());
-                        return match self.reducer.into_result() {
-                            Ok(result) => Ok(result),
-                            Err((source, committed_turn)) => {
-                                let partial = if let Some(committed_turn) = committed_turn {
-                                    partial.with_committed_turn(committed_turn)
-                                } else {
-                                    partial
-                                };
-                                emit_raw_collect_error(
-                                    self.extensions.as_ref(),
-                                    OperationKind::StructuredTurn,
-                                    partial.state.request_id.as_deref(),
-                                    CollectErrorKind::Reduction,
-                                    summarize_structured_partial(&partial),
-                                    source.to_string(),
-                                );
-                                Err(CollectError::Reduction { source, partial })
-                            }
-                        };
-                    }
+        let mut attempt = 1_u32;
+        let mut cumulative_usage = Usage::zero();
 
-                    match self.call_handler(&mut handler, &event).await {
-                        Ok(HandlerDirective::Continue) => {}
-                        Ok(HandlerDirective::Stop) => {
-                            let partial =
-                                StructuredTurnPartial::from_state(self.reducer.state().clone());
-                            if let Err(source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::StructuredTurn,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
+        'attempts: loop {
+            let mut stream = match self.start_attempt().await {
+                Ok(stream) => stream,
+                Err(source) => {
+                    let partial = StructuredTurnPartial::from_state(self.reducer.state().clone());
+                    let accounted_usage = recover_or_estimate_usage(
+                        &*self.recovery,
+                        OperationKind::StructuredTurn,
+                        self.reducer.state().request_id.as_deref(),
+                        self.estimate,
+                    )
+                    .await;
+                    let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+
+                    if let Some((next_attempt, after, status, kind)) =
+                        maybe_retry_plan(&self.retry_policy, attempt, &source)
+                    {
+                        let retry_event = StructuredTurnEvent::WillRetry {
+                            attempt: next_attempt,
+                            after,
+                            kind,
+                            status,
+                            request_id: partial.state.request_id.clone(),
+                            accounted_usage,
+                            cumulative_usage: next_cumulative_usage,
+                        };
+                        match self.call_handler(&mut handler, &retry_event).await {
+                            Ok(HandlerDirective::Continue) => {
+                                cumulative_usage = next_cumulative_usage;
+                                self.reducer.reset_for_retry();
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Ok(HandlerDirective::Stop) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.state.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_partial(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     self.extensions.as_ref(),
                                     OperationKind::StructuredTurn,
@@ -1334,77 +2175,63 @@ where
                                 );
                                 return Err(CollectError::Execution { source, partial });
                             }
-                            return Err(CollectError::Stopped {
-                                partial: StructuredTurnPartial::from_state(
-                                    self.reducer.into_state(),
-                                ),
-                            });
-                        }
-                        Err(source) => {
-                            let partial =
-                                StructuredTurnPartial::from_state(self.reducer.state().clone());
-                            if let Err(execution_source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::StructuredTurn,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
+                            Err(handler_source) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.state.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_partial(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     self.extensions.as_ref(),
                                     OperationKind::StructuredTurn,
                                     partial.state.request_id.as_deref(),
-                                    CollectErrorKind::Execution,
+                                    CollectErrorKind::Handler,
                                     summarize_structured_partial(&partial),
-                                    execution_source.to_string(),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&handler_source)
+                                    ),
                                 );
-                                return Err(CollectError::Execution {
-                                    source: execution_source,
-                                    partial,
+                                return Err(CollectError::Handler {
+                                    source: handler_source,
+                                    partial: StructuredTurnPartial::from_state(
+                                        self.reducer.into_state(),
+                                    ),
                                 });
                             }
-                            let request_id = partial.state.request_id.clone();
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::StructuredTurn,
-                                request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_structured_partial(&partial),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: StructuredTurnPartial::from_state(
-                                    self.reducer.into_state(),
-                                ),
-                            });
                         }
                     }
-                }
-                Err(source) => {
-                    let partial = StructuredTurnPartial::from_state(self.reducer.state().clone());
-                    if let Err(execution_source) = recover_or_release_budget(
+
+                    if let Err(finalize_source) = finalize_budget_cumulative(
                         &mut self.owned_lease,
-                        &*self.recovery,
-                        OperationKind::StructuredTurn,
-                        self.reducer.state().request_id.as_deref(),
-                    )
-                    .await
-                    {
+                        &self.span,
+                        partial.state.request_id.as_deref(),
+                        next_cumulative_usage,
+                    ) {
                         emit_raw_collect_error(
                             self.extensions.as_ref(),
                             OperationKind::StructuredTurn,
                             partial.state.request_id.as_deref(),
                             CollectErrorKind::Execution,
                             summarize_structured_partial(&partial),
-                            execution_source.to_string(),
+                            finalize_source.to_string(),
                         );
                         return Err(CollectError::Execution {
-                            source: execution_source,
+                            source: finalize_source,
                             partial,
                         });
                     }
@@ -1421,39 +2248,350 @@ where
                         partial: StructuredTurnPartial::from_state(self.reducer.into_state()),
                     });
                 }
-            }
-        }
+            };
 
-        let partial = StructuredTurnPartial::from_state(self.reducer.state().clone());
-        if let Err(source) = recover_or_release_budget(
-            &mut self.owned_lease,
-            &*self.recovery,
-            OperationKind::StructuredTurn,
-            self.reducer.state().request_id.as_deref(),
-        )
-        .await
-        {
+            while let Some(item) = stream.next().instrument(self.span.clone()).await {
+                match item {
+                    Ok(event) => {
+                        if let Err(source) = self.reducer.apply(&event) {
+                            let partial =
+                                StructuredTurnPartial::from_state(self.reducer.state().clone());
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::StructuredTurn,
+                                partial.state.request_id.as_deref(),
+                                CollectErrorKind::Reduction,
+                                summarize_structured_partial(&partial),
+                                source.to_string(),
+                            );
+                            return Err(CollectError::Reduction { source, partial });
+                        }
+                        record_request_id(&self.span, self.reducer.state().request_id.as_deref());
+                        if let Some(usage) = completed_usage_from_structured(&event) {
+                            let next_cumulative_usage = cumulative_usage.saturating_add(usage);
+                            if let Err(source) = finalize_budget_cumulative(
+                                &mut self.owned_lease,
+                                &self.span,
+                                self.reducer.state().request_id.as_deref(),
+                                next_cumulative_usage,
+                            ) {
+                                let partial =
+                                    StructuredTurnPartial::from_state(self.reducer.state().clone());
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_structured_partial(&partial),
+                                    source.to_string(),
+                                );
+                                return Err(CollectError::Execution { source, partial });
+                            }
+                            if let Err(source) = self.call_handler(&mut handler, &event).await {
+                                let partial =
+                                    StructuredTurnPartial::from_state(self.reducer.state().clone());
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_structured_partial(&partial),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler { source, partial });
+                            }
+                            let partial =
+                                StructuredTurnPartial::from_state(self.reducer.state().clone());
+                            return match self.reducer.into_result() {
+                                Ok(mut result) => {
+                                    result.cumulative_usage = next_cumulative_usage;
+                                    Ok(result)
+                                }
+                                Err((source, committed_turn)) => {
+                                    let partial = if let Some(committed_turn) = committed_turn {
+                                        partial.with_committed_turn(committed_turn)
+                                    } else {
+                                        partial
+                                    };
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Reduction,
+                                        summarize_structured_partial(&partial),
+                                        source.to_string(),
+                                    );
+                                    Err(CollectError::Reduction { source, partial })
+                                }
+                            };
+                        }
+
+                        match self.call_handler(&mut handler, &event).await {
+                            Ok(HandlerDirective::Continue) => {}
+                            Ok(HandlerDirective::Stop) => {
+                                let partial =
+                                    StructuredTurnPartial::from_state(self.reducer.state().clone());
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::StructuredTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_partial(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                return Err(CollectError::Stopped {
+                                    partial: StructuredTurnPartial::from_state(
+                                        self.reducer.into_state(),
+                                    ),
+                                });
+                            }
+                            Err(source) => {
+                                let partial =
+                                    StructuredTurnPartial::from_state(self.reducer.state().clone());
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::StructuredTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(execution_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_partial(&partial),
+                                        execution_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: execution_source,
+                                        partial,
+                                    });
+                                }
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_structured_partial(&partial),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: StructuredTurnPartial::from_state(
+                                        self.reducer.into_state(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    Err(source) => {
+                        let partial =
+                            StructuredTurnPartial::from_state(self.reducer.state().clone());
+                        let accounted_usage = recover_or_estimate_usage(
+                            &*self.recovery,
+                            OperationKind::StructuredTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            self.estimate,
+                        )
+                        .await;
+                        let next_cumulative_usage =
+                            cumulative_usage.saturating_add(accounted_usage);
+
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&self.retry_policy, attempt, &source)
+                        {
+                            let retry_event = StructuredTurnEvent::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: partial.state.request_id.clone(),
+                                accounted_usage,
+                                cumulative_usage: next_cumulative_usage,
+                            };
+                            match self.call_handler(&mut handler, &retry_event).await {
+                                Ok(HandlerDirective::Continue) => {
+                                    cumulative_usage = next_cumulative_usage;
+                                    self.reducer.reset_for_retry();
+                                    tokio::time::sleep(after).await;
+                                    attempt = next_attempt;
+                                    continue 'attempts;
+                                }
+                                Ok(HandlerDirective::Stop) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.state.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            self.extensions.as_ref(),
+                                            OperationKind::StructuredTurn,
+                                            partial.state.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_structured_partial(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_partial(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                Err(handler_source) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.state.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            self.extensions.as_ref(),
+                                            OperationKind::StructuredTurn,
+                                            partial.state.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_structured_partial(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Handler,
+                                        summarize_structured_partial(&partial),
+                                        format!(
+                                            "handler error type={}",
+                                            std::any::type_name_of_val(&handler_source)
+                                        ),
+                                    );
+                                    return Err(CollectError::Handler {
+                                        source: handler_source,
+                                        partial: StructuredTurnPartial::from_state(
+                                            self.reducer.into_state(),
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+
+                        if let Err(execution_source) = finalize_budget_cumulative(
+                            &mut self.owned_lease,
+                            &self.span,
+                            self.reducer.state().request_id.as_deref(),
+                            next_cumulative_usage,
+                        ) {
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::StructuredTurn,
+                                partial.state.request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_structured_partial(&partial),
+                                execution_source.to_string(),
+                            );
+                            return Err(CollectError::Execution {
+                                source: execution_source,
+                                partial,
+                            });
+                        }
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::StructuredTurn,
+                            partial.state.request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_structured_partial(&partial),
+                            source.to_string(),
+                        );
+                        return Err(CollectError::Execution {
+                            source,
+                            partial: StructuredTurnPartial::from_state(self.reducer.into_state()),
+                        });
+                    }
+                }
+            }
+
+            let partial = StructuredTurnPartial::from_state(self.reducer.state().clone());
+            let accounted_usage = recover_or_estimate_usage(
+                &*self.recovery,
+                OperationKind::StructuredTurn,
+                self.reducer.state().request_id.as_deref(),
+                self.estimate,
+            )
+            .await;
+            let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+            if let Err(source) = finalize_budget_cumulative(
+                &mut self.owned_lease,
+                &self.span,
+                self.reducer.state().request_id.as_deref(),
+                next_cumulative_usage,
+            ) {
+                emit_raw_collect_error(
+                    self.extensions.as_ref(),
+                    OperationKind::StructuredTurn,
+                    partial.state.request_id.as_deref(),
+                    CollectErrorKind::Execution,
+                    summarize_structured_partial(&partial),
+                    source.to_string(),
+                );
+                return Err(CollectError::Execution { source, partial });
+            }
             emit_raw_collect_error(
                 self.extensions.as_ref(),
                 OperationKind::StructuredTurn,
                 partial.state.request_id.as_deref(),
-                CollectErrorKind::Execution,
+                CollectErrorKind::UnexpectedEof,
                 summarize_structured_partial(&partial),
-                source.to_string(),
+                "stream ended before completion".to_string(),
             );
-            return Err(CollectError::Execution { source, partial });
+            return Err(CollectError::UnexpectedEof {
+                partial: StructuredTurnPartial::from_state(self.reducer.into_state()),
+            });
         }
-        emit_raw_collect_error(
-            self.extensions.as_ref(),
-            OperationKind::StructuredTurn,
-            partial.state.request_id.as_deref(),
-            CollectErrorKind::UnexpectedEof,
-            summarize_structured_partial(&partial),
-            "stream ended before completion".to_string(),
-        );
-        Err(CollectError::UnexpectedEof {
-            partial: StructuredTurnPartial::from_state(self.reducer.into_state()),
-        })
     }
 
     pub async fn collect(
@@ -1487,12 +2625,120 @@ where
     T: Toolset,
     O: StructuredOutput,
 {
+    async fn start_attempt(&self) -> Result<StructuredTurnEventStreamWithTools<T, O>, AgentError> {
+        let stream = self
+            .turns
+            .structured_turn(self.input.clone(), self.turn.clone())
+            .await?;
+        Ok(map_structured_stream_with_tools::<T, O>(
+            stream,
+            self.availability.clone(),
+        ))
+    }
+
     /// Returns the raw typed event stream.
     ///
     /// Releasing this wrapper commits zero usage and frees any reserved budget.
     pub fn into_stream(self) -> StructuredTurnEventStreamWithTools<T, O> {
-        let Self { stream, .. } = self;
-        stream
+        let Self {
+            recovery,
+            turns,
+            input,
+            turn,
+            availability,
+            estimate,
+            retry_policy,
+            span,
+            ..
+        } = self;
+        boxed_sync_stream(try_stream! {
+            let mut attempt = 1_u32;
+            let mut cumulative_usage = Usage::zero();
+
+            'attempts: loop {
+                let stream = turns.structured_turn(input.clone(), turn.clone()).await;
+                let mut stream = match stream {
+                    Ok(stream) => map_structured_stream_with_tools::<T, O>(stream, availability.clone()),
+                    Err(source) => {
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&retry_policy, attempt, &source)
+                        {
+                            let accounted_usage =
+                                recover_or_estimate_usage(&*recovery, OperationKind::StructuredTurn, None, estimate).await;
+                            cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                            yield StructuredTurnEventWithTools::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: None,
+                                accounted_usage,
+                                cumulative_usage,
+                            };
+                            tokio::time::sleep(after).await;
+                            attempt = next_attempt;
+                            continue 'attempts;
+                        }
+                        Err(source)?;
+                        break;
+                    }
+                };
+
+                let mut request_id = None;
+                while let Some(item) = stream.next().instrument(span.clone()).await {
+                    match item {
+                        Ok(event) => {
+                            match &event {
+                                StructuredTurnEventWithTools::Started {
+                                    request_id: event_request_id,
+                                    ..
+                                } => request_id = event_request_id.clone(),
+                                StructuredTurnEventWithTools::Completed {
+                                    request_id: event_request_id,
+                                    ..
+                                } => {
+                                    if let Some(event_request_id) = event_request_id.clone() {
+                                        request_id = Some(event_request_id);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            yield event;
+                        }
+                        Err(source) => {
+                            if let Some((next_attempt, after, status, kind)) =
+                                maybe_retry_plan(&retry_policy, attempt, &source)
+                            {
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*recovery,
+                                    OperationKind::StructuredTurn,
+                                    request_id.as_deref(),
+                                    estimate,
+                                )
+                                .await;
+                                cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                                yield StructuredTurnEventWithTools::WillRetry {
+                                    attempt: next_attempt,
+                                    after,
+                                    kind,
+                                    status,
+                                    request_id,
+                                    accounted_usage,
+                                    cumulative_usage,
+                                };
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Err(source)?;
+                            break 'attempts;
+                        }
+                    }
+                }
+
+                break;
+            }
+        })
     }
 
     pub async fn collect_with<H>(
@@ -1505,99 +2751,64 @@ where
     where
         H: EventHandler<StructuredTurnEventWithTools<T, O>, StructuredTurnStateWithTools<T, O>>,
     {
-        while let Some(item) = self.stream.next().instrument(self.span.clone()).await {
-            match item {
-                Ok(event) => {
-                    if let Err(source) = self.reducer.apply(&event) {
-                        let partial = StructuredTurnPartialWithTools::from_state(
-                            self.reducer.state().clone(),
-                        );
-                        emit_raw_collect_error(
-                            self.extensions.as_ref(),
-                            OperationKind::StructuredTurn,
-                            partial.state.request_id.as_deref(),
-                            CollectErrorKind::Reduction,
-                            summarize_structured_partial_with_tools(&partial),
-                            source.to_string(),
-                        );
-                        return Err(CollectError::Reduction { source, partial });
-                    }
-                    record_request_id(&self.span, self.reducer.state().request_id.as_deref());
-                    if let Some(usage) = completed_usage_from_structured_with_tools(&event) {
-                        if let Err(source) = finalize_budget(
-                            &mut self.owned_lease,
-                            &self.span,
-                            self.reducer.state().request_id.as_deref(),
-                            usage,
-                        ) {
-                            let partial = StructuredTurnPartialWithTools::from_state(
-                                self.reducer.state().clone(),
-                            );
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::StructuredTurn,
-                                partial.state.request_id.as_deref(),
-                                CollectErrorKind::Execution,
-                                summarize_structured_partial_with_tools(&partial),
-                                source.to_string(),
-                            );
-                            return Err(CollectError::Execution { source, partial });
-                        }
-                        if let Err(source) = self.call_handler(&mut handler, &event).await {
-                            let partial = StructuredTurnPartialWithTools::from_state(
-                                self.reducer.state().clone(),
-                            );
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::StructuredTurn,
-                                partial.state.request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_structured_partial_with_tools(&partial),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler { source, partial });
-                        }
-                        let partial = StructuredTurnPartialWithTools::from_state(
-                            self.reducer.state().clone(),
-                        );
-                        return match self.reducer.into_result() {
-                            Ok(result) => Ok(result),
-                            Err((source, committed_turn)) => {
-                                let partial = if let Some(committed_turn) = committed_turn {
-                                    partial.with_committed_turn(committed_turn)
-                                } else {
-                                    partial
-                                };
-                                emit_raw_collect_error(
-                                    self.extensions.as_ref(),
-                                    OperationKind::StructuredTurn,
-                                    partial.state.request_id.as_deref(),
-                                    CollectErrorKind::Reduction,
-                                    summarize_structured_partial_with_tools(&partial),
-                                    source.to_string(),
-                                );
-                                Err(CollectError::Reduction { source, partial })
-                            }
-                        };
-                    }
+        let mut attempt = 1_u32;
+        let mut cumulative_usage = Usage::zero();
 
-                    match self.call_handler(&mut handler, &event).await {
-                        Ok(HandlerDirective::Continue) => {}
-                        Ok(HandlerDirective::Stop) => {
-                            let partial = StructuredTurnPartialWithTools::from_state(
-                                self.reducer.state().clone(),
-                            );
-                            if let Err(source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::StructuredTurn,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
+        'attempts: loop {
+            let mut stream = match self.start_attempt().await {
+                Ok(stream) => stream,
+                Err(source) => {
+                    let partial =
+                        StructuredTurnPartialWithTools::from_state(self.reducer.state().clone());
+                    let accounted_usage = recover_or_estimate_usage(
+                        &*self.recovery,
+                        OperationKind::StructuredTurn,
+                        self.reducer.state().request_id.as_deref(),
+                        self.estimate,
+                    )
+                    .await;
+                    let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+
+                    if let Some((next_attempt, after, status, kind)) =
+                        maybe_retry_plan(&self.retry_policy, attempt, &source)
+                    {
+                        let retry_event = StructuredTurnEventWithTools::WillRetry {
+                            attempt: next_attempt,
+                            after,
+                            kind,
+                            status,
+                            request_id: partial.state.request_id.clone(),
+                            accounted_usage,
+                            cumulative_usage: next_cumulative_usage,
+                        };
+                        match self.call_handler(&mut handler, &retry_event).await {
+                            Ok(HandlerDirective::Continue) => {
+                                cumulative_usage = next_cumulative_usage;
+                                self.reducer.reset_for_retry();
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Ok(HandlerDirective::Stop) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.state.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_partial_with_tools(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     self.extensions.as_ref(),
                                     OperationKind::StructuredTurn,
@@ -1608,79 +2819,63 @@ where
                                 );
                                 return Err(CollectError::Execution { source, partial });
                             }
-                            return Err(CollectError::Stopped {
-                                partial: StructuredTurnPartialWithTools::from_state(
-                                    self.reducer.into_state(),
-                                ),
-                            });
-                        }
-                        Err(source) => {
-                            let partial = StructuredTurnPartialWithTools::from_state(
-                                self.reducer.state().clone(),
-                            );
-                            if let Err(execution_source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::StructuredTurn,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
+                            Err(handler_source) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.state.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_partial_with_tools(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     self.extensions.as_ref(),
                                     OperationKind::StructuredTurn,
                                     partial.state.request_id.as_deref(),
-                                    CollectErrorKind::Execution,
+                                    CollectErrorKind::Handler,
                                     summarize_structured_partial_with_tools(&partial),
-                                    execution_source.to_string(),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&handler_source)
+                                    ),
                                 );
-                                return Err(CollectError::Execution {
-                                    source: execution_source,
-                                    partial,
+                                return Err(CollectError::Handler {
+                                    source: handler_source,
+                                    partial: StructuredTurnPartialWithTools::from_state(
+                                        self.reducer.into_state(),
+                                    ),
                                 });
                             }
-                            let request_id = partial.state.request_id.clone();
-                            emit_raw_collect_error(
-                                self.extensions.as_ref(),
-                                OperationKind::StructuredTurn,
-                                request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_structured_partial_with_tools(&partial),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: StructuredTurnPartialWithTools::from_state(
-                                    self.reducer.into_state(),
-                                ),
-                            });
                         }
                     }
-                }
-                Err(source) => {
-                    let partial =
-                        StructuredTurnPartialWithTools::from_state(self.reducer.state().clone());
-                    if let Err(execution_source) = recover_or_release_budget(
+
+                    if let Err(finalize_source) = finalize_budget_cumulative(
                         &mut self.owned_lease,
-                        &*self.recovery,
-                        OperationKind::StructuredTurn,
-                        self.reducer.state().request_id.as_deref(),
-                    )
-                    .await
-                    {
+                        &self.span,
+                        partial.state.request_id.as_deref(),
+                        next_cumulative_usage,
+                    ) {
                         emit_raw_collect_error(
                             self.extensions.as_ref(),
                             OperationKind::StructuredTurn,
                             partial.state.request_id.as_deref(),
                             CollectErrorKind::Execution,
                             summarize_structured_partial_with_tools(&partial),
-                            execution_source.to_string(),
+                            finalize_source.to_string(),
                         );
                         return Err(CollectError::Execution {
-                            source: execution_source,
+                            source: finalize_source,
                             partial,
                         });
                     }
@@ -1699,39 +2894,359 @@ where
                         ),
                     });
                 }
-            }
-        }
+            };
 
-        let partial = StructuredTurnPartialWithTools::from_state(self.reducer.state().clone());
-        if let Err(source) = recover_or_release_budget(
-            &mut self.owned_lease,
-            &*self.recovery,
-            OperationKind::StructuredTurn,
-            self.reducer.state().request_id.as_deref(),
-        )
-        .await
-        {
+            while let Some(item) = stream.next().instrument(self.span.clone()).await {
+                match item {
+                    Ok(event) => {
+                        if let Err(source) = self.reducer.apply(&event) {
+                            let partial = StructuredTurnPartialWithTools::from_state(
+                                self.reducer.state().clone(),
+                            );
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::StructuredTurn,
+                                partial.state.request_id.as_deref(),
+                                CollectErrorKind::Reduction,
+                                summarize_structured_partial_with_tools(&partial),
+                                source.to_string(),
+                            );
+                            return Err(CollectError::Reduction { source, partial });
+                        }
+                        record_request_id(&self.span, self.reducer.state().request_id.as_deref());
+                        if let Some(usage) = completed_usage_from_structured_with_tools(&event) {
+                            let next_cumulative_usage = cumulative_usage.saturating_add(usage);
+                            if let Err(source) = finalize_budget_cumulative(
+                                &mut self.owned_lease,
+                                &self.span,
+                                self.reducer.state().request_id.as_deref(),
+                                next_cumulative_usage,
+                            ) {
+                                let partial = StructuredTurnPartialWithTools::from_state(
+                                    self.reducer.state().clone(),
+                                );
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_structured_partial_with_tools(&partial),
+                                    source.to_string(),
+                                );
+                                return Err(CollectError::Execution { source, partial });
+                            }
+                            if let Err(source) = self.call_handler(&mut handler, &event).await {
+                                let partial = StructuredTurnPartialWithTools::from_state(
+                                    self.reducer.state().clone(),
+                                );
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    partial.state.request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_structured_partial_with_tools(&partial),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler { source, partial });
+                            }
+                            let partial = StructuredTurnPartialWithTools::from_state(
+                                self.reducer.state().clone(),
+                            );
+                            return match self.reducer.into_result() {
+                                Ok(mut result) => {
+                                    result.cumulative_usage = next_cumulative_usage;
+                                    Ok(result)
+                                }
+                                Err((source, committed_turn)) => {
+                                    let partial = if let Some(committed_turn) = committed_turn {
+                                        partial.with_committed_turn(committed_turn)
+                                    } else {
+                                        partial
+                                    };
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Reduction,
+                                        summarize_structured_partial_with_tools(&partial),
+                                        source.to_string(),
+                                    );
+                                    Err(CollectError::Reduction { source, partial })
+                                }
+                            };
+                        }
+
+                        match self.call_handler(&mut handler, &event).await {
+                            Ok(HandlerDirective::Continue) => {}
+                            Ok(HandlerDirective::Stop) => {
+                                let partial = StructuredTurnPartialWithTools::from_state(
+                                    self.reducer.state().clone(),
+                                );
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::StructuredTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_partial_with_tools(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                return Err(CollectError::Stopped {
+                                    partial: StructuredTurnPartialWithTools::from_state(
+                                        self.reducer.into_state(),
+                                    ),
+                                });
+                            }
+                            Err(source) => {
+                                let partial = StructuredTurnPartialWithTools::from_state(
+                                    self.reducer.state().clone(),
+                                );
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::StructuredTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(execution_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_partial_with_tools(&partial),
+                                        execution_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: execution_source,
+                                        partial,
+                                    });
+                                }
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::StructuredTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_structured_partial_with_tools(&partial),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: StructuredTurnPartialWithTools::from_state(
+                                        self.reducer.into_state(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    Err(source) => {
+                        let partial = StructuredTurnPartialWithTools::from_state(
+                            self.reducer.state().clone(),
+                        );
+                        let accounted_usage = recover_or_estimate_usage(
+                            &*self.recovery,
+                            OperationKind::StructuredTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            self.estimate,
+                        )
+                        .await;
+                        let next_cumulative_usage =
+                            cumulative_usage.saturating_add(accounted_usage);
+
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&self.retry_policy, attempt, &source)
+                        {
+                            let retry_event = StructuredTurnEventWithTools::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: partial.state.request_id.clone(),
+                                accounted_usage,
+                                cumulative_usage: next_cumulative_usage,
+                            };
+                            match self.call_handler(&mut handler, &retry_event).await {
+                                Ok(HandlerDirective::Continue) => {
+                                    cumulative_usage = next_cumulative_usage;
+                                    self.reducer.reset_for_retry();
+                                    tokio::time::sleep(after).await;
+                                    attempt = next_attempt;
+                                    continue 'attempts;
+                                }
+                                Ok(HandlerDirective::Stop) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.state.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            self.extensions.as_ref(),
+                                            OperationKind::StructuredTurn,
+                                            partial.state.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_structured_partial_with_tools(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_partial_with_tools(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                Err(handler_source) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.state.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            self.extensions.as_ref(),
+                                            OperationKind::StructuredTurn,
+                                            partial.state.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_structured_partial_with_tools(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::StructuredTurn,
+                                        partial.state.request_id.as_deref(),
+                                        CollectErrorKind::Handler,
+                                        summarize_structured_partial_with_tools(&partial),
+                                        format!(
+                                            "handler error type={}",
+                                            std::any::type_name_of_val(&handler_source)
+                                        ),
+                                    );
+                                    return Err(CollectError::Handler {
+                                        source: handler_source,
+                                        partial: StructuredTurnPartialWithTools::from_state(
+                                            self.reducer.into_state(),
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+
+                        if let Err(execution_source) = finalize_budget_cumulative(
+                            &mut self.owned_lease,
+                            &self.span,
+                            self.reducer.state().request_id.as_deref(),
+                            next_cumulative_usage,
+                        ) {
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::StructuredTurn,
+                                partial.state.request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_structured_partial_with_tools(&partial),
+                                execution_source.to_string(),
+                            );
+                            return Err(CollectError::Execution {
+                                source: execution_source,
+                                partial,
+                            });
+                        }
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::StructuredTurn,
+                            partial.state.request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_structured_partial_with_tools(&partial),
+                            source.to_string(),
+                        );
+                        return Err(CollectError::Execution {
+                            source,
+                            partial: StructuredTurnPartialWithTools::from_state(
+                                self.reducer.into_state(),
+                            ),
+                        });
+                    }
+                }
+            }
+
+            let partial = StructuredTurnPartialWithTools::from_state(self.reducer.state().clone());
+            let accounted_usage = recover_or_estimate_usage(
+                &*self.recovery,
+                OperationKind::StructuredTurn,
+                self.reducer.state().request_id.as_deref(),
+                self.estimate,
+            )
+            .await;
+            let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+            if let Err(source) = finalize_budget_cumulative(
+                &mut self.owned_lease,
+                &self.span,
+                self.reducer.state().request_id.as_deref(),
+                next_cumulative_usage,
+            ) {
+                emit_raw_collect_error(
+                    self.extensions.as_ref(),
+                    OperationKind::StructuredTurn,
+                    partial.state.request_id.as_deref(),
+                    CollectErrorKind::Execution,
+                    summarize_structured_partial_with_tools(&partial),
+                    source.to_string(),
+                );
+                return Err(CollectError::Execution { source, partial });
+            }
             emit_raw_collect_error(
                 self.extensions.as_ref(),
                 OperationKind::StructuredTurn,
                 partial.state.request_id.as_deref(),
-                CollectErrorKind::Execution,
+                CollectErrorKind::UnexpectedEof,
                 summarize_structured_partial_with_tools(&partial),
-                source.to_string(),
+                "stream ended before completion".to_string(),
             );
-            return Err(CollectError::Execution { source, partial });
+            return Err(CollectError::UnexpectedEof {
+                partial: StructuredTurnPartialWithTools::from_state(self.reducer.into_state()),
+            });
         }
-        emit_raw_collect_error(
-            self.extensions.as_ref(),
-            OperationKind::StructuredTurn,
-            partial.state.request_id.as_deref(),
-            CollectErrorKind::UnexpectedEof,
-            summarize_structured_partial_with_tools(&partial),
-            "stream ended before completion".to_string(),
-        );
-        Err(CollectError::UnexpectedEof {
-            partial: StructuredTurnPartialWithTools::from_state(self.reducer.into_state()),
-        })
     }
 
     pub async fn collect(
@@ -1765,12 +3280,114 @@ where
 }
 
 impl PendingCompletion {
+    async fn start_attempt(&self) -> Result<CompletionEventStream, AgentError> {
+        self.completion
+            .completion(self.request.clone(), self.extensions.as_ref())
+            .await
+    }
+
     /// Returns the raw typed event stream.
     ///
     /// Releasing this wrapper commits zero usage and frees any reserved budget.
     pub fn into_stream(self) -> CompletionEventStream {
-        let Self { stream, .. } = self;
-        stream
+        let Self {
+            recovery,
+            completion,
+            request,
+            estimate,
+            retry_policy,
+            extensions,
+            span,
+            ..
+        } = self;
+        boxed_sync_stream(try_stream! {
+            let mut attempt = 1_u32;
+            let mut cumulative_usage = Usage::zero();
+
+            'attempts: loop {
+                let stream = completion.completion(request.clone(), extensions.as_ref()).await;
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(source) => {
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&retry_policy, attempt, &source)
+                        {
+                            let accounted_usage =
+                                recover_or_estimate_usage(&*recovery, OperationKind::Completion, None, estimate).await;
+                            cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                            yield CompletionEvent::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: None,
+                                accounted_usage,
+                                cumulative_usage,
+                            };
+                            tokio::time::sleep(after).await;
+                            attempt = next_attempt;
+                            continue 'attempts;
+                        }
+                        Err(source)?;
+                        break;
+                    }
+                };
+
+                let mut request_id = None;
+                while let Some(item) = stream.next().instrument(span.clone()).await {
+                    match item {
+                        Ok(event) => {
+                            match &event {
+                                CompletionEvent::Started {
+                                    request_id: event_request_id,
+                                    ..
+                                } => request_id = event_request_id.clone(),
+                                CompletionEvent::Completed {
+                                    request_id: event_request_id,
+                                    ..
+                                } => {
+                                    if let Some(event_request_id) = event_request_id.clone() {
+                                        request_id = Some(event_request_id);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            yield event;
+                        }
+                        Err(source) => {
+                            if let Some((next_attempt, after, status, kind)) =
+                                maybe_retry_plan(&retry_policy, attempt, &source)
+                            {
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*recovery,
+                                    OperationKind::Completion,
+                                    request_id.as_deref(),
+                                    estimate,
+                                )
+                                .await;
+                                cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                                yield CompletionEvent::WillRetry {
+                                    attempt: next_attempt,
+                                    after,
+                                    kind,
+                                    status,
+                                    request_id,
+                                    accounted_usage,
+                                    cumulative_usage,
+                                };
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Err(source)?;
+                            break 'attempts;
+                        }
+                    }
+                }
+
+                break;
+            }
+        })
     }
 
     pub async fn collect_with<H>(
@@ -1783,172 +3400,135 @@ impl PendingCompletion {
     where
         H: EventHandler<CompletionEvent, CompletionTurnState>,
     {
-        while let Some(item) = self.stream.next().instrument(self.span.clone()).await {
-            match item {
-                Ok(event) => {
-                    if let Err(source) = self.reducer.apply(&event) {
-                        emit_raw_collect_error(
-                            &self.extensions,
-                            OperationKind::Completion,
-                            self.reducer.state().request_id.as_deref(),
-                            CollectErrorKind::Reduction,
-                            summarize_completion_state(self.reducer.state()),
-                            source.to_string(),
-                        );
-                        return Err(CollectError::Reduction {
-                            source,
-                            partial: self.reducer.state().clone(),
-                        });
-                    }
-                    record_request_id(&self.span, self.reducer.state().request_id.as_deref());
-                    if let Some(usage) = completed_usage_from_completion(&event) {
-                        if let Err(source) = finalize_budget(
-                            &mut self.owned_lease,
-                            &self.span,
-                            self.reducer.state().request_id.as_deref(),
-                            usage,
-                        ) {
-                            emit_raw_collect_error(
-                                &self.extensions,
-                                OperationKind::Completion,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Execution,
-                                summarize_completion_state(self.reducer.state()),
-                                source.to_string(),
-                            );
-                            return Err(CollectError::Execution {
-                                source,
-                                partial: self.reducer.state().clone(),
-                            });
-                        }
-                        if let Err(source) = self.call_handler(&mut handler, &event).await {
-                            emit_raw_collect_error(
-                                &self.extensions,
-                                OperationKind::Completion,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_completion_state(self.reducer.state()),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: self.reducer.state().clone(),
-                            });
-                        }
-                        let partial = self.reducer.state().clone();
-                        return match self.reducer.into_result() {
-                            Ok(result) => Ok(result),
-                            Err(source) => {
+        let mut attempt = 1_u32;
+        let mut cumulative_usage = Usage::zero();
+
+        'attempts: loop {
+            let mut stream = match self.start_attempt().await {
+                Ok(stream) => stream,
+                Err(source) => {
+                    let partial = self.reducer.state().clone();
+                    let accounted_usage = recover_or_estimate_usage(
+                        &*self.recovery,
+                        OperationKind::Completion,
+                        self.reducer.state().request_id.as_deref(),
+                        self.estimate,
+                    )
+                    .await;
+                    let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+
+                    if let Some((next_attempt, after, status, kind)) =
+                        maybe_retry_plan(&self.retry_policy, attempt, &source)
+                    {
+                        let retry_event = CompletionEvent::WillRetry {
+                            attempt: next_attempt,
+                            after,
+                            kind,
+                            status,
+                            request_id: self.reducer.state().request_id.clone(),
+                            accounted_usage,
+                            cumulative_usage: next_cumulative_usage,
+                        };
+                        match self.call_handler(&mut handler, &retry_event).await {
+                            Ok(HandlerDirective::Continue) => {
+                                cumulative_usage = next_cumulative_usage;
+                                self.reducer.reset_for_retry();
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Ok(HandlerDirective::Stop) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::Completion,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_completion_state(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     &self.extensions,
                                     OperationKind::Completion,
                                     partial.request_id.as_deref(),
-                                    CollectErrorKind::Reduction,
-                                    summarize_completion_state(&partial),
-                                    source.to_string(),
-                                );
-                                Err(CollectError::Reduction { source, partial })
-                            }
-                        };
-                    }
-
-                    match self.call_handler(&mut handler, &event).await {
-                        Ok(HandlerDirective::Continue) => {}
-                        Ok(HandlerDirective::Stop) => {
-                            let partial = self.reducer.state().clone();
-                            if let Err(source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::Completion,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
-                                emit_raw_collect_error(
-                                    &self.extensions,
-                                    OperationKind::Completion,
-                                    self.reducer.state().request_id.as_deref(),
                                     CollectErrorKind::Execution,
                                     summarize_completion_state(&partial),
                                     source.to_string(),
                                 );
                                 return Err(CollectError::Execution { source, partial });
                             }
-                            return Err(CollectError::Stopped {
-                                partial: self.reducer.into_state(),
-                            });
-                        }
-                        Err(source) => {
-                            let partial = self.reducer.state().clone();
-                            if let Err(execution_source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::Completion,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
+                            Err(handler_source) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::Completion,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_completion_state(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     &self.extensions,
                                     OperationKind::Completion,
-                                    self.reducer.state().request_id.as_deref(),
-                                    CollectErrorKind::Execution,
+                                    partial.request_id.as_deref(),
+                                    CollectErrorKind::Handler,
                                     summarize_completion_state(&partial),
-                                    execution_source.to_string(),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&handler_source)
+                                    ),
                                 );
-                                return Err(CollectError::Execution {
-                                    source: execution_source,
-                                    partial,
+                                return Err(CollectError::Handler {
+                                    source: handler_source,
+                                    partial: self.reducer.into_state(),
                                 });
                             }
-                            emit_raw_collect_error(
-                                &self.extensions,
-                                OperationKind::Completion,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_completion_state(self.reducer.state()),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: self.reducer.into_state(),
-                            });
                         }
                     }
-                }
-                Err(source) => {
-                    let partial = self.reducer.state().clone();
-                    if let Err(execution_source) = recover_or_release_budget(
+
+                    if let Err(finalize_source) = finalize_budget_cumulative(
                         &mut self.owned_lease,
-                        &*self.recovery,
-                        OperationKind::Completion,
-                        self.reducer.state().request_id.as_deref(),
-                    )
-                    .await
-                    {
+                        &self.span,
+                        partial.request_id.as_deref(),
+                        next_cumulative_usage,
+                    ) {
                         emit_raw_collect_error(
                             &self.extensions,
                             OperationKind::Completion,
-                            self.reducer.state().request_id.as_deref(),
+                            partial.request_id.as_deref(),
                             CollectErrorKind::Execution,
                             summarize_completion_state(&partial),
-                            execution_source.to_string(),
+                            finalize_source.to_string(),
                         );
                         return Err(CollectError::Execution {
-                            source: execution_source,
+                            source: finalize_source,
                             partial,
                         });
                     }
                     emit_raw_collect_error(
                         &self.extensions,
                         OperationKind::Completion,
-                        self.reducer.state().request_id.as_deref(),
+                        partial.request_id.as_deref(),
                         CollectErrorKind::Execution,
                         summarize_completion_state(&partial),
                         source.to_string(),
@@ -1958,39 +3538,338 @@ impl PendingCompletion {
                         partial: self.reducer.into_state(),
                     });
                 }
-            }
-        }
+            };
 
-        let partial = self.reducer.state().clone();
-        if let Err(source) = recover_or_release_budget(
-            &mut self.owned_lease,
-            &*self.recovery,
-            OperationKind::Completion,
-            self.reducer.state().request_id.as_deref(),
-        )
-        .await
-        {
+            while let Some(item) = stream.next().instrument(self.span.clone()).await {
+                match item {
+                    Ok(event) => {
+                        if let Err(source) = self.reducer.apply(&event) {
+                            emit_raw_collect_error(
+                                &self.extensions,
+                                OperationKind::Completion,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Reduction,
+                                summarize_completion_state(self.reducer.state()),
+                                source.to_string(),
+                            );
+                            return Err(CollectError::Reduction {
+                                source,
+                                partial: self.reducer.state().clone(),
+                            });
+                        }
+                        record_request_id(&self.span, self.reducer.state().request_id.as_deref());
+                        if let Some(usage) = completed_usage_from_completion(&event) {
+                            let next_cumulative_usage = cumulative_usage.saturating_add(usage);
+                            if let Err(source) = finalize_budget_cumulative(
+                                &mut self.owned_lease,
+                                &self.span,
+                                self.reducer.state().request_id.as_deref(),
+                                next_cumulative_usage,
+                            ) {
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::Completion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_completion_state(self.reducer.state()),
+                                    source.to_string(),
+                                );
+                                return Err(CollectError::Execution {
+                                    source,
+                                    partial: self.reducer.state().clone(),
+                                });
+                            }
+                            if let Err(source) = self.call_handler(&mut handler, &event).await {
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::Completion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_completion_state(self.reducer.state()),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: self.reducer.state().clone(),
+                                });
+                            }
+                            let partial = self.reducer.state().clone();
+                            return match self.reducer.into_result() {
+                                Ok(mut result) => {
+                                    result.cumulative_usage = next_cumulative_usage;
+                                    Ok(result)
+                                }
+                                Err(source) => {
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::Completion,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Reduction,
+                                        summarize_completion_state(&partial),
+                                        source.to_string(),
+                                    );
+                                    Err(CollectError::Reduction { source, partial })
+                                }
+                            };
+                        }
+
+                        match self.call_handler(&mut handler, &event).await {
+                            Ok(HandlerDirective::Continue) => {}
+                            Ok(HandlerDirective::Stop) => {
+                                let partial = self.reducer.state().clone();
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::Completion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::Completion,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_completion_state(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                return Err(CollectError::Stopped {
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                            Err(source) => {
+                                let partial = self.reducer.state().clone();
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::Completion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(execution_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::Completion,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_completion_state(&partial),
+                                        execution_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: execution_source,
+                                        partial,
+                                    });
+                                }
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::Completion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_completion_state(self.reducer.state()),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                        }
+                    }
+                    Err(source) => {
+                        let partial = self.reducer.state().clone();
+                        let accounted_usage = recover_or_estimate_usage(
+                            &*self.recovery,
+                            OperationKind::Completion,
+                            self.reducer.state().request_id.as_deref(),
+                            self.estimate,
+                        )
+                        .await;
+                        let next_cumulative_usage =
+                            cumulative_usage.saturating_add(accounted_usage);
+
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&self.retry_policy, attempt, &source)
+                        {
+                            let retry_event = CompletionEvent::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: self.reducer.state().request_id.clone(),
+                                accounted_usage,
+                                cumulative_usage: next_cumulative_usage,
+                            };
+                            match self.call_handler(&mut handler, &retry_event).await {
+                                Ok(HandlerDirective::Continue) => {
+                                    cumulative_usage = next_cumulative_usage;
+                                    self.reducer.reset_for_retry();
+                                    tokio::time::sleep(after).await;
+                                    attempt = next_attempt;
+                                    continue 'attempts;
+                                }
+                                Ok(HandlerDirective::Stop) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            &self.extensions,
+                                            OperationKind::Completion,
+                                            partial.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_completion_state(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::Completion,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_completion_state(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                Err(handler_source) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            &self.extensions,
+                                            OperationKind::Completion,
+                                            partial.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_completion_state(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::Completion,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Handler,
+                                        summarize_completion_state(&partial),
+                                        format!(
+                                            "handler error type={}",
+                                            std::any::type_name_of_val(&handler_source)
+                                        ),
+                                    );
+                                    return Err(CollectError::Handler {
+                                        source: handler_source,
+                                        partial: self.reducer.into_state(),
+                                    });
+                                }
+                            }
+                        }
+
+                        if let Err(execution_source) = finalize_budget_cumulative(
+                            &mut self.owned_lease,
+                            &self.span,
+                            self.reducer.state().request_id.as_deref(),
+                            next_cumulative_usage,
+                        ) {
+                            emit_raw_collect_error(
+                                &self.extensions,
+                                OperationKind::Completion,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_completion_state(&partial),
+                                execution_source.to_string(),
+                            );
+                            return Err(CollectError::Execution {
+                                source: execution_source,
+                                partial,
+                            });
+                        }
+                        emit_raw_collect_error(
+                            &self.extensions,
+                            OperationKind::Completion,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_completion_state(&partial),
+                            source.to_string(),
+                        );
+                        return Err(CollectError::Execution {
+                            source,
+                            partial: self.reducer.into_state(),
+                        });
+                    }
+                }
+            }
+
+            let partial = self.reducer.state().clone();
+            let accounted_usage = recover_or_estimate_usage(
+                &*self.recovery,
+                OperationKind::Completion,
+                self.reducer.state().request_id.as_deref(),
+                self.estimate,
+            )
+            .await;
+            let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+            if let Err(source) = finalize_budget_cumulative(
+                &mut self.owned_lease,
+                &self.span,
+                self.reducer.state().request_id.as_deref(),
+                next_cumulative_usage,
+            ) {
+                emit_raw_collect_error(
+                    &self.extensions,
+                    OperationKind::Completion,
+                    self.reducer.state().request_id.as_deref(),
+                    CollectErrorKind::Execution,
+                    summarize_completion_state(&partial),
+                    source.to_string(),
+                );
+                return Err(CollectError::Execution { source, partial });
+            }
             emit_raw_collect_error(
                 &self.extensions,
                 OperationKind::Completion,
                 self.reducer.state().request_id.as_deref(),
-                CollectErrorKind::Execution,
-                summarize_completion_state(&partial),
-                source.to_string(),
+                CollectErrorKind::UnexpectedEof,
+                summarize_completion_state(self.reducer.state()),
+                "stream ended before completion".to_string(),
             );
-            return Err(CollectError::Execution { source, partial });
+            return Err(CollectError::UnexpectedEof {
+                partial: self.reducer.into_state(),
+            });
         }
-        emit_raw_collect_error(
-            &self.extensions,
-            OperationKind::Completion,
-            self.reducer.state().request_id.as_deref(),
-            CollectErrorKind::UnexpectedEof,
-            summarize_completion_state(self.reducer.state()),
-            "stream ended before completion".to_string(),
-        );
-        Err(CollectError::UnexpectedEof {
-            partial: self.reducer.into_state(),
-        })
     }
 
     pub async fn collect(
@@ -2023,12 +3902,118 @@ impl<O> PendingStructuredCompletion<O>
 where
     O: StructuredOutput,
 {
+    async fn start_attempt(&self) -> Result<StructuredCompletionEventStream<O>, AgentError> {
+        let stream = self
+            .completion
+            .structured_completion(self.request.clone(), self.extensions.as_ref())
+            .await?;
+        Ok(map_structured_completion_stream::<O>(stream))
+    }
+
     /// Returns the raw typed event stream.
     ///
     /// Releasing this wrapper commits zero usage and frees any reserved budget.
     pub fn into_stream(self) -> StructuredCompletionEventStream<O> {
-        let Self { stream, .. } = self;
-        stream
+        let Self {
+            recovery,
+            completion,
+            request,
+            estimate,
+            retry_policy,
+            extensions,
+            span,
+            ..
+        } = self;
+        boxed_sync_stream(try_stream! {
+            let mut attempt = 1_u32;
+            let mut cumulative_usage = Usage::zero();
+
+            'attempts: loop {
+                let stream = completion
+                    .structured_completion(request.clone(), extensions.as_ref())
+                    .await;
+                let mut stream = match stream {
+                    Ok(stream) => map_structured_completion_stream::<O>(stream),
+                    Err(source) => {
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&retry_policy, attempt, &source)
+                        {
+                            let accounted_usage =
+                                recover_or_estimate_usage(&*recovery, OperationKind::StructuredCompletion, None, estimate).await;
+                            cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                            yield StructuredCompletionEvent::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: None,
+                                accounted_usage,
+                                cumulative_usage,
+                            };
+                            tokio::time::sleep(after).await;
+                            attempt = next_attempt;
+                            continue 'attempts;
+                        }
+                        Err(source)?;
+                        break;
+                    }
+                };
+
+                let mut request_id = None;
+                while let Some(item) = stream.next().instrument(span.clone()).await {
+                    match item {
+                        Ok(event) => {
+                            match &event {
+                                StructuredCompletionEvent::Started {
+                                    request_id: event_request_id,
+                                    ..
+                                } => request_id = event_request_id.clone(),
+                                StructuredCompletionEvent::Completed {
+                                    request_id: event_request_id,
+                                    ..
+                                } => {
+                                    if let Some(event_request_id) = event_request_id.clone() {
+                                        request_id = Some(event_request_id);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            yield event;
+                        }
+                        Err(source) => {
+                            if let Some((next_attempt, after, status, kind)) =
+                                maybe_retry_plan(&retry_policy, attempt, &source)
+                            {
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*recovery,
+                                    OperationKind::StructuredCompletion,
+                                    request_id.as_deref(),
+                                    estimate,
+                                )
+                                .await;
+                                cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+                                yield StructuredCompletionEvent::WillRetry {
+                                    attempt: next_attempt,
+                                    after,
+                                    kind,
+                                    status,
+                                    request_id,
+                                    accounted_usage,
+                                    cumulative_usage,
+                                };
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Err(source)?;
+                            break 'attempts;
+                        }
+                    }
+                }
+
+                break;
+            }
+        })
     }
 
     pub async fn collect_with<H>(
@@ -2041,172 +4026,135 @@ where
     where
         H: EventHandler<StructuredCompletionEvent<O>, StructuredCompletionState<O>>,
     {
-        while let Some(item) = self.stream.next().instrument(self.span.clone()).await {
-            match item {
-                Ok(event) => {
-                    if let Err(source) = self.reducer.apply(&event) {
-                        emit_raw_collect_error(
-                            &self.extensions,
-                            OperationKind::StructuredCompletion,
-                            self.reducer.state().request_id.as_deref(),
-                            CollectErrorKind::Reduction,
-                            summarize_structured_completion_state(self.reducer.state()),
-                            source.to_string(),
-                        );
-                        return Err(CollectError::Reduction {
-                            source,
-                            partial: self.reducer.state().clone(),
-                        });
-                    }
-                    record_request_id(&self.span, self.reducer.state().request_id.as_deref());
-                    if let Some(usage) = completed_usage_from_structured_completion(&event) {
-                        if let Err(source) = finalize_budget(
-                            &mut self.owned_lease,
-                            &self.span,
-                            self.reducer.state().request_id.as_deref(),
-                            usage,
-                        ) {
-                            emit_raw_collect_error(
-                                &self.extensions,
-                                OperationKind::StructuredCompletion,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Execution,
-                                summarize_structured_completion_state(self.reducer.state()),
-                                source.to_string(),
-                            );
-                            return Err(CollectError::Execution {
-                                source,
-                                partial: self.reducer.state().clone(),
-                            });
-                        }
-                        if let Err(source) = self.call_handler(&mut handler, &event).await {
-                            emit_raw_collect_error(
-                                &self.extensions,
-                                OperationKind::StructuredCompletion,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_structured_completion_state(self.reducer.state()),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: self.reducer.state().clone(),
-                            });
-                        }
-                        let partial = self.reducer.state().clone();
-                        return match self.reducer.into_result() {
-                            Ok(result) => Ok(result),
-                            Err(source) => {
+        let mut attempt = 1_u32;
+        let mut cumulative_usage = Usage::zero();
+
+        'attempts: loop {
+            let mut stream = match self.start_attempt().await {
+                Ok(stream) => stream,
+                Err(source) => {
+                    let partial = self.reducer.state().clone();
+                    let accounted_usage = recover_or_estimate_usage(
+                        &*self.recovery,
+                        OperationKind::StructuredCompletion,
+                        self.reducer.state().request_id.as_deref(),
+                        self.estimate,
+                    )
+                    .await;
+                    let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+
+                    if let Some((next_attempt, after, status, kind)) =
+                        maybe_retry_plan(&self.retry_policy, attempt, &source)
+                    {
+                        let retry_event = StructuredCompletionEvent::WillRetry {
+                            attempt: next_attempt,
+                            after,
+                            kind,
+                            status,
+                            request_id: self.reducer.state().request_id.clone(),
+                            accounted_usage,
+                            cumulative_usage: next_cumulative_usage,
+                        };
+                        match self.call_handler(&mut handler, &retry_event).await {
+                            Ok(HandlerDirective::Continue) => {
+                                cumulative_usage = next_cumulative_usage;
+                                self.reducer.reset_for_retry();
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Ok(HandlerDirective::Stop) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::StructuredCompletion,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_completion_state(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     &self.extensions,
                                     OperationKind::StructuredCompletion,
                                     partial.request_id.as_deref(),
-                                    CollectErrorKind::Reduction,
-                                    summarize_structured_completion_state(&partial),
-                                    source.to_string(),
-                                );
-                                Err(CollectError::Reduction { source, partial })
-                            }
-                        };
-                    }
-
-                    match self.call_handler(&mut handler, &event).await {
-                        Ok(HandlerDirective::Continue) => {}
-                        Ok(HandlerDirective::Stop) => {
-                            let partial = self.reducer.state().clone();
-                            if let Err(source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::StructuredCompletion,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
-                                emit_raw_collect_error(
-                                    &self.extensions,
-                                    OperationKind::StructuredCompletion,
-                                    self.reducer.state().request_id.as_deref(),
                                     CollectErrorKind::Execution,
                                     summarize_structured_completion_state(&partial),
                                     source.to_string(),
                                 );
                                 return Err(CollectError::Execution { source, partial });
                             }
-                            return Err(CollectError::Stopped {
-                                partial: self.reducer.into_state(),
-                            });
-                        }
-                        Err(source) => {
-                            let partial = self.reducer.state().clone();
-                            if let Err(execution_source) = recover_or_release_budget(
-                                &mut self.owned_lease,
-                                &*self.recovery,
-                                OperationKind::StructuredCompletion,
-                                self.reducer.state().request_id.as_deref(),
-                            )
-                            .await
-                            {
+                            Err(handler_source) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::StructuredCompletion,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_completion_state(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
                                 emit_raw_collect_error(
                                     &self.extensions,
                                     OperationKind::StructuredCompletion,
-                                    self.reducer.state().request_id.as_deref(),
-                                    CollectErrorKind::Execution,
+                                    partial.request_id.as_deref(),
+                                    CollectErrorKind::Handler,
                                     summarize_structured_completion_state(&partial),
-                                    execution_source.to_string(),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&handler_source)
+                                    ),
                                 );
-                                return Err(CollectError::Execution {
-                                    source: execution_source,
-                                    partial,
+                                return Err(CollectError::Handler {
+                                    source: handler_source,
+                                    partial: self.reducer.into_state(),
                                 });
                             }
-                            emit_raw_collect_error(
-                                &self.extensions,
-                                OperationKind::StructuredCompletion,
-                                self.reducer.state().request_id.as_deref(),
-                                CollectErrorKind::Handler,
-                                summarize_structured_completion_state(self.reducer.state()),
-                                format!(
-                                    "handler error type={}",
-                                    std::any::type_name_of_val(&source)
-                                ),
-                            );
-                            return Err(CollectError::Handler {
-                                source,
-                                partial: self.reducer.into_state(),
-                            });
                         }
                     }
-                }
-                Err(source) => {
-                    let partial = self.reducer.state().clone();
-                    if let Err(execution_source) = recover_or_release_budget(
+
+                    if let Err(finalize_source) = finalize_budget_cumulative(
                         &mut self.owned_lease,
-                        &*self.recovery,
-                        OperationKind::StructuredCompletion,
-                        self.reducer.state().request_id.as_deref(),
-                    )
-                    .await
-                    {
+                        &self.span,
+                        partial.request_id.as_deref(),
+                        next_cumulative_usage,
+                    ) {
                         emit_raw_collect_error(
                             &self.extensions,
                             OperationKind::StructuredCompletion,
-                            self.reducer.state().request_id.as_deref(),
+                            partial.request_id.as_deref(),
                             CollectErrorKind::Execution,
                             summarize_structured_completion_state(&partial),
-                            execution_source.to_string(),
+                            finalize_source.to_string(),
                         );
                         return Err(CollectError::Execution {
-                            source: execution_source,
+                            source: finalize_source,
                             partial,
                         });
                     }
                     emit_raw_collect_error(
                         &self.extensions,
                         OperationKind::StructuredCompletion,
-                        self.reducer.state().request_id.as_deref(),
+                        partial.request_id.as_deref(),
                         CollectErrorKind::Execution,
                         summarize_structured_completion_state(&partial),
                         source.to_string(),
@@ -2216,39 +4164,338 @@ where
                         partial: self.reducer.into_state(),
                     });
                 }
-            }
-        }
+            };
 
-        let partial = self.reducer.state().clone();
-        if let Err(source) = recover_or_release_budget(
-            &mut self.owned_lease,
-            &*self.recovery,
-            OperationKind::StructuredCompletion,
-            self.reducer.state().request_id.as_deref(),
-        )
-        .await
-        {
+            while let Some(item) = stream.next().instrument(self.span.clone()).await {
+                match item {
+                    Ok(event) => {
+                        if let Err(source) = self.reducer.apply(&event) {
+                            emit_raw_collect_error(
+                                &self.extensions,
+                                OperationKind::StructuredCompletion,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Reduction,
+                                summarize_structured_completion_state(self.reducer.state()),
+                                source.to_string(),
+                            );
+                            return Err(CollectError::Reduction {
+                                source,
+                                partial: self.reducer.state().clone(),
+                            });
+                        }
+                        record_request_id(&self.span, self.reducer.state().request_id.as_deref());
+                        if let Some(usage) = completed_usage_from_structured_completion(&event) {
+                            let next_cumulative_usage = cumulative_usage.saturating_add(usage);
+                            if let Err(source) = finalize_budget_cumulative(
+                                &mut self.owned_lease,
+                                &self.span,
+                                self.reducer.state().request_id.as_deref(),
+                                next_cumulative_usage,
+                            ) {
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::StructuredCompletion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_structured_completion_state(self.reducer.state()),
+                                    source.to_string(),
+                                );
+                                return Err(CollectError::Execution {
+                                    source,
+                                    partial: self.reducer.state().clone(),
+                                });
+                            }
+                            if let Err(source) = self.call_handler(&mut handler, &event).await {
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::StructuredCompletion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_structured_completion_state(self.reducer.state()),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: self.reducer.state().clone(),
+                                });
+                            }
+                            let partial = self.reducer.state().clone();
+                            return match self.reducer.into_result() {
+                                Ok(mut result) => {
+                                    result.cumulative_usage = next_cumulative_usage;
+                                    Ok(result)
+                                }
+                                Err(source) => {
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::StructuredCompletion,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Reduction,
+                                        summarize_structured_completion_state(&partial),
+                                        source.to_string(),
+                                    );
+                                    Err(CollectError::Reduction { source, partial })
+                                }
+                            };
+                        }
+
+                        match self.call_handler(&mut handler, &event).await {
+                            Ok(HandlerDirective::Continue) => {}
+                            Ok(HandlerDirective::Stop) => {
+                                let partial = self.reducer.state().clone();
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::StructuredCompletion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::StructuredCompletion,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_completion_state(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                return Err(CollectError::Stopped {
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                            Err(source) => {
+                                let partial = self.reducer.state().clone();
+                                let accounted_usage = recover_or_estimate_usage(
+                                    &*self.recovery,
+                                    OperationKind::StructuredCompletion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(execution_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::StructuredCompletion,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_completion_state(&partial),
+                                        execution_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: execution_source,
+                                        partial,
+                                    });
+                                }
+                                emit_raw_collect_error(
+                                    &self.extensions,
+                                    OperationKind::StructuredCompletion,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_structured_completion_state(self.reducer.state()),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                        }
+                    }
+                    Err(source) => {
+                        let partial = self.reducer.state().clone();
+                        let accounted_usage = recover_or_estimate_usage(
+                            &*self.recovery,
+                            OperationKind::StructuredCompletion,
+                            self.reducer.state().request_id.as_deref(),
+                            self.estimate,
+                        )
+                        .await;
+                        let next_cumulative_usage =
+                            cumulative_usage.saturating_add(accounted_usage);
+
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&self.retry_policy, attempt, &source)
+                        {
+                            let retry_event = StructuredCompletionEvent::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: self.reducer.state().request_id.clone(),
+                                accounted_usage,
+                                cumulative_usage: next_cumulative_usage,
+                            };
+                            match self.call_handler(&mut handler, &retry_event).await {
+                                Ok(HandlerDirective::Continue) => {
+                                    cumulative_usage = next_cumulative_usage;
+                                    self.reducer.reset_for_retry();
+                                    tokio::time::sleep(after).await;
+                                    attempt = next_attempt;
+                                    continue 'attempts;
+                                }
+                                Ok(HandlerDirective::Stop) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            &self.extensions,
+                                            OperationKind::StructuredCompletion,
+                                            partial.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_structured_completion_state(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::StructuredCompletion,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_structured_completion_state(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                Err(handler_source) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            &self.extensions,
+                                            OperationKind::StructuredCompletion,
+                                            partial.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_structured_completion_state(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        &self.extensions,
+                                        OperationKind::StructuredCompletion,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Handler,
+                                        summarize_structured_completion_state(&partial),
+                                        format!(
+                                            "handler error type={}",
+                                            std::any::type_name_of_val(&handler_source)
+                                        ),
+                                    );
+                                    return Err(CollectError::Handler {
+                                        source: handler_source,
+                                        partial: self.reducer.into_state(),
+                                    });
+                                }
+                            }
+                        }
+
+                        if let Err(execution_source) = finalize_budget_cumulative(
+                            &mut self.owned_lease,
+                            &self.span,
+                            self.reducer.state().request_id.as_deref(),
+                            next_cumulative_usage,
+                        ) {
+                            emit_raw_collect_error(
+                                &self.extensions,
+                                OperationKind::StructuredCompletion,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Execution,
+                                summarize_structured_completion_state(&partial),
+                                execution_source.to_string(),
+                            );
+                            return Err(CollectError::Execution {
+                                source: execution_source,
+                                partial,
+                            });
+                        }
+                        emit_raw_collect_error(
+                            &self.extensions,
+                            OperationKind::StructuredCompletion,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_structured_completion_state(&partial),
+                            source.to_string(),
+                        );
+                        return Err(CollectError::Execution {
+                            source,
+                            partial: self.reducer.into_state(),
+                        });
+                    }
+                }
+            }
+
+            let partial = self.reducer.state().clone();
+            let accounted_usage = recover_or_estimate_usage(
+                &*self.recovery,
+                OperationKind::StructuredCompletion,
+                self.reducer.state().request_id.as_deref(),
+                self.estimate,
+            )
+            .await;
+            let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+            if let Err(source) = finalize_budget_cumulative(
+                &mut self.owned_lease,
+                &self.span,
+                self.reducer.state().request_id.as_deref(),
+                next_cumulative_usage,
+            ) {
+                emit_raw_collect_error(
+                    &self.extensions,
+                    OperationKind::StructuredCompletion,
+                    self.reducer.state().request_id.as_deref(),
+                    CollectErrorKind::Execution,
+                    summarize_structured_completion_state(&partial),
+                    source.to_string(),
+                );
+                return Err(CollectError::Execution { source, partial });
+            }
             emit_raw_collect_error(
                 &self.extensions,
                 OperationKind::StructuredCompletion,
                 self.reducer.state().request_id.as_deref(),
-                CollectErrorKind::Execution,
-                summarize_structured_completion_state(&partial),
-                source.to_string(),
+                CollectErrorKind::UnexpectedEof,
+                summarize_structured_completion_state(self.reducer.state()),
+                "stream ended before completion".to_string(),
             );
-            return Err(CollectError::Execution { source, partial });
+            return Err(CollectError::UnexpectedEof {
+                partial: self.reducer.into_state(),
+            });
         }
-        emit_raw_collect_error(
-            &self.extensions,
-            OperationKind::StructuredCompletion,
-            self.reducer.state().request_id.as_deref(),
-            CollectErrorKind::UnexpectedEof,
-            summarize_structured_completion_state(self.reducer.state()),
-            "stream ended before completion".to_string(),
-        );
-        Err(CollectError::UnexpectedEof {
-            partial: self.reducer.into_state(),
-        })
     }
 
     pub async fn collect(
@@ -2781,39 +5028,21 @@ fn finalize_budget(
     record_budget_usage(owned_lease, usage)
 }
 
+fn finalize_budget_cumulative(
+    owned_lease: &mut OwnedLease,
+    span: &Span,
+    request_id: Option<&str>,
+    cumulative_usage: Usage,
+) -> Result<(), AgentError> {
+    finalize_budget(owned_lease, span, request_id, cumulative_usage)
+}
+
 fn record_budget_usage(owned_lease: &mut OwnedLease, usage: Usage) -> Result<(), AgentError> {
     if let Some(lease) = owned_lease.lease.as_ref().cloned() {
         owned_lease.budget.record_used(lease, usage)?;
         owned_lease.lease = None;
     }
     Ok(())
-}
-
-async fn recover_or_release_budget(
-    owned_lease: &mut OwnedLease,
-    recovery: &dyn UsageRecoveryAdapter,
-    kind: OperationKind,
-    request_id: Option<&str>,
-) -> Result<(), AgentError> {
-    let recovered_usage = if let Some(request_id) = request_id {
-        match recovery.recover_usage(kind, request_id).await {
-            Ok(Some(usage)) => usage,
-            Ok(None) => Usage::zero(),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    kind = ?kind,
-                    request_id,
-                    "failed to recover usage; releasing reserved budget with zero usage"
-                );
-                Usage::zero()
-            }
-        }
-    } else {
-        Usage::zero()
-    };
-
-    record_budget_usage(owned_lease, recovered_usage)
 }
 
 fn turn_span(kind: &'static str, estimate: UsageEstimate) -> Span {
@@ -3045,6 +5274,65 @@ fn record_request_id(span: &Span, request_id: Option<&str>) {
     if let Some(request_id) = request_id {
         span.record("request_id", field::display(request_id));
     }
+}
+
+fn retry_delay_for(
+    failure: &RequestFailure,
+    retry_policy: &RetryPolicy,
+    next_attempt: u32,
+) -> Duration {
+    failure
+        .retry_after
+        .unwrap_or_else(|| retry_policy.backoff.delay_for_retry(next_attempt))
+}
+
+async fn recover_or_estimate_usage(
+    recovery: &dyn UsageRecoveryAdapter,
+    kind: OperationKind,
+    request_id: Option<&str>,
+    estimate: UsageEstimate,
+) -> Usage {
+    if let Some(request_id) = request_id {
+        match recovery.recover_usage(kind, request_id).await {
+            Ok(Some(usage)) => usage,
+            Ok(None) => Usage::from_estimate(estimate),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    kind = ?kind,
+                    request_id,
+                    "failed to recover usage for retry accounting; falling back to reserved estimate"
+                );
+                Usage::from_estimate(estimate)
+            }
+        }
+    } else {
+        Usage::from_estimate(estimate)
+    }
+}
+
+fn maybe_retry_plan(
+    retry_policy: &RetryPolicy,
+    current_attempt: u32,
+    source: &AgentError,
+) -> Option<(
+    u32,
+    Duration,
+    Option<u16>,
+    lutum_protocol::RequestFailureKind,
+)> {
+    let failure = source.request_failure()?;
+    let next_attempt = current_attempt.saturating_add(1);
+    retry_policy
+        .allows_retry(current_attempt, failure.kind)
+        .then(|| {
+            (
+                next_attempt,
+                retry_delay_for(failure, retry_policy, next_attempt),
+                failure.status,
+                failure.kind,
+            )
+        })
 }
 
 fn completed_usage_from_text(event: &TextTurnEvent) -> Option<Usage> {

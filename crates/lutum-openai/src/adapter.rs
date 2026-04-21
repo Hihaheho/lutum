@@ -3,6 +3,7 @@ use std::{
     env,
     pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 use async_stream::try_stream;
@@ -31,7 +32,7 @@ use lutum_protocol::{
 };
 use reqwest::{
     Client,
-    header::{AUTHORIZATION, HeaderMap, HeaderValue},
+    header::{AUTHORIZATION, HeaderMap, HeaderValue, RETRY_AFTER},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -138,6 +139,14 @@ fn basic_request_error_debug_info(error: &impl std::fmt::Debug) -> RequestErrorD
         error_debug: format!("{error:?}"),
         ..RequestErrorDebugInfo::default()
     }
+}
+
+fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
 }
 
 fn emit_openai_stream_error(
@@ -458,35 +467,29 @@ impl TurnAdapter for OpenAiAdapter {
         if self.use_chat_completions {
             let body = self
                 .prepare_chat_request(&input, &turn.config, model.as_ref(), reasoning_effort)
-                .map_err(AgentError::backend)?;
+                .map_err(AgentError::from)?;
             if let Some(raw) = raw_chat.as_ref() {
-                raw.emit_request(
-                    None,
-                    &serialize_raw_body(&body).map_err(AgentError::backend)?,
-                );
+                raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
             }
             let stream = self
                 .send_streaming_json("/chat/completions", &body, raw_chat.as_ref())
                 .await
-                .map_err(AgentError::backend)?;
+                .map_err(AgentError::from)?;
             return Ok(Box::pin(
                 map_chat_text_stream(stream, model.into(), raw_chat)
-                    .map(|item| item.map_err(AgentError::backend)),
+                    .map(|item| item.map_err(AgentError::from)),
             ) as ErasedTextTurnEventStream);
         }
         let body = self
             .prepare_responses_request(&input, &turn.config, model.as_ref(), reasoning_effort, None)
-            .map_err(AgentError::backend)?;
+            .map_err(AgentError::from)?;
         if let Some(raw) = raw_responses.as_ref() {
-            raw.emit_request(
-                None,
-                &serialize_raw_body(&body).map_err(AgentError::backend)?,
-            );
+            raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
             .send_streaming_json("/responses", &body, raw_responses.as_ref())
             .await
-            .map_err(AgentError::backend)?;
+            .map_err(AgentError::from)?;
         Ok(Box::pin(
             map_text_stream(
                 stream,
@@ -494,7 +497,7 @@ impl TurnAdapter for OpenAiAdapter {
                 self.sse_event_recovery_hook.clone(),
                 raw_responses,
             )
-            .map(|item| item.map_err(AgentError::backend)),
+            .map(|item| item.map_err(AgentError::from)),
         ) as ErasedTextTurnEventStream)
     }
 
@@ -527,7 +530,7 @@ impl TurnAdapter for OpenAiAdapter {
         if self.use_chat_completions {
             let mut body = self
                 .prepare_chat_request(&input, &turn.config, model.as_ref(), reasoning_effort)
-                .map_err(AgentError::backend)?;
+                .map_err(AgentError::from)?;
             body.response_format = Some(ResponseFormat::JsonSchema {
                 json_schema: JsonSchemaConfig {
                     name: turn.output.schema_name.clone(),
@@ -537,18 +540,15 @@ impl TurnAdapter for OpenAiAdapter {
                 },
             });
             if let Some(raw) = raw_chat.as_ref() {
-                raw.emit_request(
-                    None,
-                    &serialize_raw_body(&body).map_err(AgentError::backend)?,
-                );
+                raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
             }
             let stream = self
                 .send_streaming_json("/chat/completions", &body, raw_chat.as_ref())
                 .await
-                .map_err(AgentError::backend)?;
+                .map_err(AgentError::from)?;
             return Ok(Box::pin(
                 map_chat_structured_stream(stream, model.into(), raw_chat)
-                    .map(|item| item.map_err(AgentError::backend)),
+                    .map(|item| item.map_err(AgentError::from)),
             ) as ErasedStructuredTurnEventStream);
         }
 
@@ -566,17 +566,14 @@ impl TurnAdapter for OpenAiAdapter {
                 reasoning_effort,
                 text_format,
             )
-            .map_err(AgentError::backend)?;
+            .map_err(AgentError::from)?;
         if let Some(raw) = raw_responses.as_ref() {
-            raw.emit_request(
-                None,
-                &serialize_raw_body(&body).map_err(AgentError::backend)?,
-            );
+            raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
             .send_streaming_json("/responses", &body, raw_responses.as_ref())
             .await
-            .map_err(AgentError::backend)?;
+            .map_err(AgentError::from)?;
         Ok(Box::pin(
             map_structured_stream(
                 stream,
@@ -584,7 +581,7 @@ impl TurnAdapter for OpenAiAdapter {
                 self.sse_event_recovery_hook.clone(),
                 raw_responses,
             )
-            .map(|item| item.map_err(AgentError::backend)),
+            .map(|item| item.map_err(AgentError::from)),
         ) as ErasedStructuredTurnEventStream)
     }
 }
@@ -603,18 +600,15 @@ impl CompletionAdapter for OpenAiAdapter {
             .await;
         let body = self.prepare_completion_request(&request, model.as_ref());
         if let Some(raw) = raw.as_ref() {
-            raw.emit_request(
-                None,
-                &serialize_raw_body(&body).map_err(AgentError::backend)?,
-            );
+            raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
             .send_streaming_json("/completions", &body, raw.as_ref())
             .await
-            .map_err(AgentError::backend)?;
+            .map_err(AgentError::from)?;
         Ok(Box::pin(
             map_completion_stream(stream, model.into(), raw)
-                .map(|item| item.map_err(AgentError::backend)),
+                .map(|item| item.map_err(AgentError::from)),
         ) as CompletionEventStream)
     }
 
@@ -631,22 +625,19 @@ impl CompletionAdapter for OpenAiAdapter {
             .await;
         let body = self.prepare_structured_completion_request(&request, model.as_ref());
         if let Some(raw) = raw.as_ref() {
-            raw.emit_request(
-                None,
-                &serialize_raw_body(&body).map_err(AgentError::backend)?,
-            );
+            raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
             .send_streaming_json("/responses", &body, raw.as_ref())
             .await
-            .map_err(AgentError::backend)?;
+            .map_err(AgentError::from)?;
         let stream = map_structured_stream(
             stream,
             model.into(),
             self.sse_event_recovery_hook.clone(),
             raw,
         )
-        .map(|item| item.map_err(AgentError::backend));
+        .map(|item| item.map_err(AgentError::from));
         Ok(
             Box::pin(stream.map(|item| item.and_then(map_erased_structured_completion_event)))
                 as ErasedStructuredCompletionEventStream,
@@ -728,11 +719,9 @@ fn map_erased_structured_completion_event(
             usage,
         }),
         ErasedStructuredTurnEvent::ToolCallChunk { .. }
-        | ErasedStructuredTurnEvent::ToolCallReady(_) => {
-            Err(AgentError::backend(OpenAiError::Sse {
-                message: "structured completion does not support tool calls".to_string(),
-            }))
-        }
+        | ErasedStructuredTurnEvent::ToolCallReady(_) => Err(AgentError::from(OpenAiError::Sse {
+            message: "structured completion does not support tool calls".to_string(),
+        })),
     }
 }
 
@@ -750,7 +739,7 @@ impl UsageRecoveryAdapter for OpenAiAdapter {
                 let value = self
                     .get_json(&format!("/responses/{request_id}"))
                     .await
-                    .map_err(AgentError::backend)?;
+                    .map_err(AgentError::from)?;
                 Ok(Some(parse_response_usage(&value)))
             }
             OperationKind::Completion => Ok(None),
@@ -830,6 +819,7 @@ async fn error_for_status_with_body(
         return Ok(response);
     }
 
+    let retry_after = retry_after_from_headers(response.headers());
     let body = response.text().await?;
     let message = serde_json::from_str::<Value>(&body)
         .ok()
@@ -841,7 +831,11 @@ async fn error_for_status_with_body(
         })
         .unwrap_or_else(|| body.clone());
 
-    let error = OpenAiError::HttpStatus { status, message };
+    let error = OpenAiError::HttpStatus {
+        status,
+        message,
+        retry_after,
+    };
     emit_openai_request_error(
         raw,
         None,
@@ -1504,26 +1498,57 @@ fn replace_buffered_text(
     item_id: &str,
     content: &str,
 ) {
+    replace_buffered_content(
+        pending_item,
+        committed_items,
+        BufferedTurnItemKind::Text,
+        item_id,
+        content,
+    );
+}
+
+fn replace_buffered_reasoning(
+    pending_item: &mut Option<BufferedTurnItem>,
+    committed_items: &mut Vec<OpenAiTurnItem>,
+    item_id: &str,
+    content: &str,
+) {
+    replace_buffered_content(
+        pending_item,
+        committed_items,
+        BufferedTurnItemKind::Reasoning,
+        item_id,
+        content,
+    );
+}
+
+fn replace_buffered_content(
+    pending_item: &mut Option<BufferedTurnItem>,
+    committed_items: &mut Vec<OpenAiTurnItem>,
+    kind: BufferedTurnItemKind,
+    item_id: &str,
+    content: &str,
+) {
     if content.is_empty() {
         return;
     }
 
     match pending_item {
-        Some(buffer) if buffer.kind == BufferedTurnItemKind::Text && buffer.item_id == item_id => {
+        Some(buffer) if buffer.kind == kind && buffer.item_id == item_id => {
             buffer.content.clear();
             buffer.content.push_str(content);
         }
         Some(_) => {
             flush_buffered_content(pending_item, committed_items);
             *pending_item = Some(BufferedTurnItem {
-                kind: BufferedTurnItemKind::Text,
+                kind,
                 item_id: item_id.to_string(),
                 content: content.to_string(),
             });
         }
         None => {
             *pending_item = Some(BufferedTurnItem {
-                kind: BufferedTurnItemKind::Text,
+                kind,
                 item_id: item_id.to_string(),
                 content: content.to_string(),
             });
@@ -1661,6 +1686,18 @@ where
                             delta: event.delta,
                         };
                     }
+                    SseEvent::ResponseReasoningTextDelta(event) => {
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Reasoning,
+                            &event.item_id,
+                            &event.delta,
+                        );
+                        yield ErasedTextTurnEvent::ReasoningDelta {
+                            delta: event.delta,
+                        };
+                    }
                     SseEvent::ResponseReasoningDelta(event) => {
                         push_buffered_content(
                             &mut pending_item,
@@ -1688,6 +1725,14 @@ where
                     }
                     SseEvent::ResponseOutputTextDone(event) => {
                         replace_buffered_text(
+                            &mut pending_item,
+                            &mut committed_items,
+                            &event.item_id,
+                            &event.text,
+                        );
+                    }
+                    SseEvent::ResponseReasoningTextDone(event) => {
+                        replace_buffered_reasoning(
                             &mut pending_item,
                             &mut committed_items,
                             &event.item_id,
@@ -1933,6 +1978,18 @@ where
                             delta: event.delta,
                         };
                     }
+                    SseEvent::ResponseReasoningTextDelta(event) => {
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Reasoning,
+                            &event.item_id,
+                            &event.delta,
+                        );
+                        yield ErasedStructuredTurnEvent::ReasoningDelta {
+                            delta: event.delta,
+                        };
+                    }
                     SseEvent::ResponseReasoningDelta(event) => {
                         push_buffered_content(
                             &mut pending_item,
@@ -1957,6 +2014,14 @@ where
                         yield ErasedStructuredTurnEvent::RefusalDelta {
                             delta: event.delta,
                         };
+                    }
+                    SseEvent::ResponseReasoningTextDone(event) => {
+                        replace_buffered_reasoning(
+                            &mut pending_item,
+                            &mut committed_items,
+                            &event.item_id,
+                            &event.text,
+                        );
                     }
                     SseEvent::ResponseFunctionCallArgumentsDelta(event) => {
                         let key = response_tool_key_from_delta(&event);
@@ -3113,7 +3178,10 @@ mod tests {
                 "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
             )),
             Ok(Bytes::from(
-                "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}\n\n",
+                "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"think\",\"sequence_number\":4}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.reasoning_text.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"text\":\"thinking\",\"sequence_number\":5}\n\n",
             )),
             Ok(Bytes::from(
                 "data: {\"type\":\"response.refusal.delta\",\"delta\":\"no\"}\n\n",
@@ -3157,6 +3225,52 @@ mod tests {
         assert!(matches!(
             events.last(),
             Some(ErasedTextTurnEvent::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn responses_sse_replaces_reasoning_with_reasoning_text_done() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_reasoning\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"thin\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.reasoning_text.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"text\":\"thinking\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_reasoning\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+            )),
+        ];
+
+        let events = block_on(async {
+            map_text_stream(
+                futures::stream::iter(payloads),
+                "gpt-4.1".into(),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        let committed_turn = match events.last() {
+            Some(ErasedTextTurnEvent::Completed { committed_turn, .. }) => committed_turn,
+            other => panic!("expected completed event, got {other:?}"),
+        };
+        let committed_turn = committed_turn
+            .as_any()
+            .downcast_ref::<OpenAiCommittedTurn>()
+            .expect("OpenAI committed turn");
+
+        assert!(matches!(
+            committed_turn.items.as_slice(),
+            [OpenAiTurnItem::Reasoning { content }] if content == "thinking"
         ));
     }
 

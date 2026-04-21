@@ -3,6 +3,7 @@ use std::{
     env,
     pin::Pin,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_stream::try_stream;
@@ -27,7 +28,7 @@ use lutum_protocol::{
 };
 use reqwest::{
     Client,
-    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
+    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER},
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -182,6 +183,14 @@ fn basic_request_error_debug_info(error: &impl std::fmt::Debug) -> RequestErrorD
         error_debug: format!("{error:?}"),
         ..RequestErrorDebugInfo::default()
     }
+}
+
+fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
 }
 
 fn emit_claude_stream_error(
@@ -430,20 +439,17 @@ impl TurnAdapter for ClaudeAdapter {
                 None,
                 true,
             )
-            .map_err(AgentError::backend)?;
+            .map_err(AgentError::from)?;
         if let Some(raw) = raw.as_ref() {
-            raw.emit_request(
-                None,
-                &serialize_raw_body(&body).map_err(AgentError::backend)?,
-            );
+            raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
             .send_streaming_json("/v1/messages", &body, raw.as_ref())
             .await
-            .map_err(AgentError::backend)?;
+            .map_err(AgentError::from)?;
         Ok(Box::pin(
             map_text_stream(stream, model.into(), Arc::clone(&self.usage_cache), raw)
-                .map(|item| item.map_err(AgentError::backend)),
+                .map(|item| item.map_err(AgentError::from)),
         ) as ErasedTextTurnEventStream)
     }
 
@@ -479,20 +485,17 @@ impl TurnAdapter for ClaudeAdapter {
                 format,
                 true,
             )
-            .map_err(AgentError::backend)?;
+            .map_err(AgentError::from)?;
         if let Some(raw) = raw.as_ref() {
-            raw.emit_request(
-                None,
-                &serialize_raw_body(&body).map_err(AgentError::backend)?,
-            );
+            raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
             .send_streaming_json("/v1/messages", &body, raw.as_ref())
             .await
-            .map_err(AgentError::backend)?;
+            .map_err(AgentError::from)?;
         Ok(Box::pin(
             map_structured_stream(stream, model.into(), Arc::clone(&self.usage_cache), raw)
-                .map(|item| item.map_err(AgentError::backend)),
+                .map(|item| item.map_err(AgentError::from)),
         ) as ErasedStructuredTurnEventStream)
     }
 }
@@ -1460,6 +1463,7 @@ async fn error_for_status_with_body(
         return Ok(response);
     }
 
+    let retry_after = retry_after_from_headers(response.headers());
     let body = response.text().await?;
     let message = serde_json::from_str::<Value>(&body)
         .ok()
@@ -1471,7 +1475,11 @@ async fn error_for_status_with_body(
         })
         .unwrap_or_else(|| body.clone());
 
-    let error = ClaudeError::HttpStatus { status, message };
+    let error = ClaudeError::HttpStatus {
+        status,
+        message,
+        retry_after,
+    };
     emit_claude_request_error(
         raw,
         None,
@@ -1867,6 +1875,7 @@ mod tests {
             let error = ClaudeError::HttpStatus {
                 status: reqwest::StatusCode::BAD_GATEWAY,
                 message: "upstream overloaded".into(),
+                retry_after: None,
             };
             emit_claude_request_error(
                 raw.as_ref(),

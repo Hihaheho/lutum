@@ -243,6 +243,7 @@ pub struct UncommittedToolRound<T: Toolset> {
     recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
     continue_suggestion: Option<ContinueSuggestionReason>,
     turn: UncommittedAssistantTurn,
 }
@@ -382,6 +383,7 @@ where
             model: self.model,
             finish_reason: self.finish_reason,
             usage: self.usage,
+            cumulative_usage: self.cumulative_usage,
             pending: Vec::new(),
             handled: Vec::new(),
             rejected: Vec::new(),
@@ -412,6 +414,7 @@ pub struct ToolRoundPlan<T: HookableToolset> {
     pub model: String,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
     /// Tool calls not yet handled by any hook — execute these and pass results to `commit`.
     pub pending: Vec<T::ToolCall>,
     /// Tool calls already handled by a hook — results are committed automatically.
@@ -614,6 +617,7 @@ where
                 continue_suggestion,
                 finish_reason,
                 usage,
+                cumulative_usage,
             } = staged;
             Self::NeedsTools(UncommittedToolRound {
                 request_id,
@@ -623,6 +627,7 @@ where
                 recoverable_tool_call_issues,
                 finish_reason,
                 usage,
+                cumulative_usage,
                 continue_suggestion,
             })
         } else {
@@ -635,6 +640,7 @@ where
                 continue_suggestion,
                 finish_reason,
                 usage,
+                cumulative_usage,
             } = staged;
             let assistant_turn = turn.assistant_turn().clone();
             if let Some(input) = session {
@@ -651,6 +657,7 @@ where
                 continue_suggestion,
                 finish_reason,
                 usage,
+                cumulative_usage,
             })
         }
     }
@@ -687,6 +694,7 @@ where
                 semantic: _,
                 finish_reason,
                 usage,
+                cumulative_usage,
             } = staged;
             Self::NeedsTools(UncommittedToolRound {
                 request_id,
@@ -696,6 +704,7 @@ where
                 recoverable_tool_call_issues,
                 finish_reason,
                 usage,
+                cumulative_usage,
                 continue_suggestion,
             })
         } else {
@@ -709,6 +718,7 @@ where
                 semantic,
                 finish_reason,
                 usage,
+                cumulative_usage,
             } = staged;
             let assistant_turn = turn.assistant_turn().clone();
             if let Some(input) = session {
@@ -726,6 +736,7 @@ where
                 semantic,
                 finish_reason,
                 usage,
+                cumulative_usage,
             })
         }
     }
@@ -740,6 +751,7 @@ where
         model: String,
         finish_reason: FinishReason,
         usage: Usage,
+        cumulative_usage: Usage,
     ) -> Self {
         Self::NeedsTools(UncommittedToolRound {
             request_id,
@@ -749,6 +761,7 @@ where
             recoverable_tool_call_issues,
             finish_reason,
             usage,
+            cumulative_usage,
             continue_suggestion,
         })
     }

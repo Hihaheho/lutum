@@ -60,6 +60,32 @@ impl Usage {
             cache_read_tokens: 0,
         }
     }
+
+    pub const fn from_estimate(estimate: UsageEstimate) -> Self {
+        Self {
+            input_tokens: estimate.input_tokens,
+            output_tokens: estimate.output_tokens,
+            total_tokens: estimate.total_tokens,
+            cost_micros_usd: estimate.cost_micros_usd,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        }
+    }
+
+    pub const fn saturating_add(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            total_tokens: self.total_tokens.saturating_add(other.total_tokens),
+            cost_micros_usd: self.cost_micros_usd.saturating_add(other.cost_micros_usd),
+            cache_creation_tokens: self
+                .cache_creation_tokens
+                .saturating_add(other.cache_creation_tokens),
+            cache_read_tokens: self
+                .cache_read_tokens
+                .saturating_add(other.cache_read_tokens),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -102,6 +128,14 @@ impl RequestBudget {
             tokens,
             cost_micros_usd,
         }
+    }
+
+    pub fn allows_usage(self, usage: Usage) -> bool {
+        self.allows(usage.total_tokens, usage.cost_micros_usd)
+    }
+
+    pub fn allows_estimate(self, estimate: UsageEstimate) -> bool {
+        self.allows(estimate.total_tokens, estimate.cost_micros_usd)
     }
 
     fn allows(self, tokens: u64, cost_micros_usd: u64) -> bool {

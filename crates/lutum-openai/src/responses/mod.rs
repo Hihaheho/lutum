@@ -6,7 +6,8 @@ pub mod turn;
 
 pub use input::{
     FunctionCallItem, FunctionCallOutputItem, InputContent, InputItem, InputMessage,
-    InputTextContent, MessageRole, OutputTextContent, ReasoningItem, RefusalContent, SummaryText,
+    InputTextContent, MessageRole, OutputTextContent, ReasoningItem, ReasoningText, RefusalContent,
+    SummaryText,
 };
 pub use output::{
     ResponseCompletedEvent, ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
@@ -15,7 +16,8 @@ pub use output::{
     ResponseOutputContent, ResponseOutputItem, ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent, ResponseOutputMessage, ResponseOutputTextDeltaEvent,
     ResponseOutputTextDoneEvent, ResponseReasoningDeltaEvent,
-    ResponseReasoningSummaryTextDeltaEvent, ResponseRefusalDeltaEvent, SseEvent,
+    ResponseReasoningSummaryTextDeltaEvent, ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent, ResponseRefusalDeltaEvent, SseEvent,
 };
 pub use request::{
     OpenAiReasoningEffort, ReasoningEffort, ResponsesReasoningConfig, ResponsesRequest,

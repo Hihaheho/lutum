@@ -60,6 +60,10 @@ impl TextTurnState {
         assistant_text(&self.assistant_turn)
     }
 
+    pub fn reset_for_retry(&mut self) {
+        *self = Self::default();
+    }
+
     /// Apply a streaming event to advance this turn state.
     ///
     /// Returns an error if the turn has already completed.
@@ -74,6 +78,7 @@ impl TextTurnState {
                 self.request_id = request_id.clone();
                 self.model = model.clone();
             }
+            TextTurnEvent::WillRetry { .. } => {}
             TextTurnEvent::TextDelta { delta } => {
                 push_or_extend_text(&mut self.assistant_turn, delta);
             }
@@ -131,6 +136,7 @@ impl TextTurnState {
             turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
             finish_reason,
             usage,
+            cumulative_usage: usage,
         })
     }
 }
@@ -146,6 +152,7 @@ pub struct TextTurnResult {
     pub assistant_turn: AssistantTurn,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
 }
 
 impl TextTurnResult {
@@ -166,6 +173,7 @@ pub struct StagedTextTurnResult {
     pub turn: UncommittedAssistantTurn,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
 }
 
 impl StagedTextTurnResult {
@@ -257,6 +265,10 @@ impl<T> TextTurnStateWithTools<T>
 where
     T: Toolset,
 {
+    pub fn reset_for_retry(&mut self) {
+        *self = Self::default();
+    }
+
     pub fn apply(
         &mut self,
         event: &TextTurnEventWithTools<T>,
@@ -271,6 +283,7 @@ where
                 self.request_id = request_id.clone();
                 self.model = model.clone();
             }
+            TextTurnEventWithTools::WillRetry { .. } => {}
             TextTurnEventWithTools::TextDelta { delta } => {
                 push_or_extend_text(&mut self.assistant_turn, delta);
             }
@@ -335,6 +348,7 @@ where
             continue_suggestion: self.continue_suggestion,
             finish_reason,
             usage,
+            cumulative_usage: usage,
         })
     }
 }
@@ -358,6 +372,7 @@ pub struct TextTurnResultWithTools<T: Toolset> {
     pub continue_suggestion: Option<ContinueSuggestionReason>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
 }
 
 impl<T> TextTurnResultWithTools<T>
@@ -381,6 +396,7 @@ pub struct StagedTextTurnResultWithTools<T: Toolset> {
     pub continue_suggestion: Option<ContinueSuggestionReason>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
 }
 
 impl<T> StagedTextTurnResultWithTools<T>
@@ -465,6 +481,10 @@ impl<O> StructuredTurnState<O>
 where
     O: StructuredOutput,
 {
+    pub fn reset_for_retry(&mut self) {
+        *self = Self::default();
+    }
+
     pub fn apply(
         &mut self,
         event: &StructuredTurnEvent<O>,
@@ -479,6 +499,7 @@ where
                 self.request_id = request_id.clone();
                 self.model = model.clone();
             }
+            StructuredTurnEvent::WillRetry { .. } => {}
             StructuredTurnEvent::StructuredOutputChunk { json_delta } => {
                 push_or_extend_text(&mut self.assistant_turn, json_delta);
             }
@@ -547,6 +568,7 @@ where
             semantic,
             finish_reason,
             usage,
+            cumulative_usage: usage,
         })
     }
 }
@@ -647,6 +669,10 @@ where
     T: Toolset,
     O: StructuredOutput,
 {
+    pub fn reset_for_retry(&mut self) {
+        *self = Self::default();
+    }
+
     pub fn apply(
         &mut self,
         event: &StructuredTurnEventWithTools<T, O>,
@@ -661,6 +687,7 @@ where
                 self.request_id = request_id.clone();
                 self.model = model.clone();
             }
+            StructuredTurnEventWithTools::WillRetry { .. } => {}
             StructuredTurnEventWithTools::StructuredOutputChunk { json_delta } => {
                 push_or_extend_text(&mut self.assistant_turn, json_delta);
             }
@@ -744,6 +771,7 @@ where
             semantic,
             finish_reason,
             usage,
+            cumulative_usage: usage,
         })
     }
 }
@@ -757,6 +785,7 @@ pub struct StructuredTurnResult<O: StructuredOutput> {
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
 }
 
 /// Staged (not yet committed) result of a no-tools structured turn.
@@ -769,6 +798,7 @@ pub struct StagedStructuredTurnResult<O: StructuredOutput> {
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
 }
 
 /// Result of a completed tool-enabled structured turn that has been auto-committed to the session.
@@ -785,6 +815,7 @@ pub struct StructuredTurnResultWithTools<T: Toolset, O: StructuredOutput> {
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
 }
 
 /// Staged (not yet committed) result of a tool-enabled structured turn.
@@ -800,6 +831,7 @@ pub struct StagedStructuredTurnResultWithTools<T: Toolset, O: StructuredOutput> 
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
@@ -825,6 +857,7 @@ impl CompletionTurnState {
                 self.request_id = request_id.clone();
                 self.model = model.clone();
             }
+            CompletionEvent::WillRetry { .. } => {}
             CompletionEvent::TextDelta(delta) => {
                 self.text.push_str(delta);
             }
@@ -846,6 +879,7 @@ impl CompletionTurnState {
 
     /// Finalize the accumulated state into a completed turn result.
     pub fn finish(self) -> Result<CompletionTurnResult, CompletionReductionError> {
+        let usage = self.usage.ok_or(CompletionReductionError::Incomplete)?;
         Ok(CompletionTurnResult {
             request_id: self.request_id,
             model: self.model,
@@ -853,8 +887,13 @@ impl CompletionTurnState {
             finish_reason: self
                 .finish_reason
                 .ok_or(CompletionReductionError::Incomplete)?,
-            usage: self.usage.ok_or(CompletionReductionError::Incomplete)?,
+            usage,
+            cumulative_usage: usage,
         })
+    }
+
+    pub fn reset_for_retry(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -865,6 +904,7 @@ pub struct CompletionTurnResult {
     pub text: String,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
 }
 
 #[derive(Clone, Debug)]
@@ -897,6 +937,10 @@ impl<O> StructuredCompletionState<O>
 where
     O: StructuredOutput,
 {
+    pub fn reset_for_retry(&mut self) {
+        *self = Self::default();
+    }
+
     pub fn apply(
         &mut self,
         event: &StructuredCompletionEvent<O>,
@@ -910,6 +954,7 @@ where
                 self.request_id = request_id.clone();
                 self.model = model.clone();
             }
+            StructuredCompletionEvent::WillRetry { .. } => {}
             StructuredCompletionEvent::StructuredOutputChunk { .. } => {}
             StructuredCompletionEvent::StructuredOutputReady(value) => {
                 if self.structured.is_some() {
@@ -941,6 +986,9 @@ where
     pub fn finish(
         self,
     ) -> Result<StructuredCompletionResult<O>, StructuredCompletionReductionError> {
+        let usage = self
+            .usage
+            .ok_or(StructuredCompletionReductionError::Incomplete)?;
         let semantic = match (self.structured, self.refusal) {
             (Some(value), None) => StructuredTurnOutcome::Structured(value),
             (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
@@ -957,9 +1005,8 @@ where
             finish_reason: self
                 .finish_reason
                 .ok_or(StructuredCompletionReductionError::Incomplete)?,
-            usage: self
-                .usage
-                .ok_or(StructuredCompletionReductionError::Incomplete)?,
+            usage,
+            cumulative_usage: usage,
         })
     }
 }
@@ -971,6 +1018,7 @@ pub struct StructuredCompletionResult<O: StructuredOutput> {
     pub semantic: StructuredTurnOutcome<O>,
     pub finish_reason: FinishReason,
     pub usage: Usage,
+    pub cumulative_usage: Usage,
 }
 
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
@@ -1064,6 +1112,10 @@ impl TextTurnReducer {
         self.state.apply(event)
     }
 
+    pub fn reset_for_retry(&mut self) {
+        self.state.reset_for_retry();
+    }
+
     pub fn into_result(self) -> Result<StagedTextTurnResult, TextTurnReductionError> {
         self.state.finish()
     }
@@ -1107,6 +1159,10 @@ where
         self.state.apply(event)
     }
 
+    pub fn reset_for_retry(&mut self) {
+        self.state.reset_for_retry();
+    }
+
     pub fn into_result(self) -> Result<StagedTextTurnResultWithTools<T>, TextTurnReductionError> {
         self.state.finish()
     }
@@ -1148,6 +1204,10 @@ where
         event: &StructuredTurnEvent<O>,
     ) -> Result<(), StructuredTurnReductionError> {
         self.state.apply(event)
+    }
+
+    pub fn reset_for_retry(&mut self) {
+        self.state.reset_for_retry();
     }
 
     pub fn into_result(
@@ -1201,6 +1261,10 @@ where
         self.state.apply(event)
     }
 
+    pub fn reset_for_retry(&mut self) {
+        self.state.reset_for_retry();
+    }
+
     pub fn into_result(
         self,
     ) -> Result<
@@ -1241,6 +1305,10 @@ impl CompletionReducer {
 
     pub fn apply(&mut self, event: &CompletionEvent) -> Result<(), CompletionReductionError> {
         self.state.apply(event)
+    }
+
+    pub fn reset_for_retry(&mut self) {
+        self.state.reset_for_retry();
     }
 
     pub fn into_result(self) -> Result<CompletionTurnResult, CompletionReductionError> {
@@ -1284,6 +1352,10 @@ where
         event: &StructuredCompletionEvent<O>,
     ) -> Result<(), StructuredCompletionReductionError> {
         self.state.apply(event)
+    }
+
+    pub fn reset_for_retry(&mut self) {
+        self.state.reset_for_retry();
     }
 
     pub fn into_result(

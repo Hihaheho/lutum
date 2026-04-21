@@ -360,7 +360,7 @@ pub struct ReasoningItem {
     #[serde(rename = "type")]
     pub item_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<Vec<Value>>,
+    pub content: Option<Vec<ReasoningText>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -381,6 +381,34 @@ impl ReasoningItem {
 
     pub fn summary_text(text: impl Into<String>) -> Self {
         Self::new(vec![SummaryText::new(text)])
+    }
+}
+
+/// ```
+/// use lutum_openai::responses::ReasoningText;
+/// use serde_json::Value;
+///
+/// let json = serde_json::from_str::<Value>(
+///     r#"{ "type": "reasoning_text", "text": "Need to count rows first." }"#,
+/// )
+/// .unwrap();
+/// let item = serde_json::from_value::<ReasoningText>(json.clone()).unwrap();
+/// assert_eq!(serde_json::to_value(&item).unwrap(), json);
+/// assert_eq!(serde_json::from_value::<ReasoningText>(json).unwrap(), item);
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningText {
+    pub text: String,
+    #[serde(rename = "type")]
+    pub item_type: String,
+}
+
+impl ReasoningText {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            item_type: "reasoning_text".to_string(),
+        }
     }
 }
 

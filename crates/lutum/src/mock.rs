@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use futures::stream;
@@ -8,7 +9,7 @@ use futures::stream;
 use thiserror::Error;
 
 use lutum_protocol::{
-    AgentError, RequestExtensions,
+    AgentError, RequestExtensions, RequestFailureKind,
     budget::Usage,
     conversation::{AssistantTurnItem, ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
     llm::{
@@ -113,45 +114,89 @@ pub enum RawStructuredCompletionEvent {
 
 #[derive(Clone, Debug)]
 pub struct MockTextScenario {
+    start_error: Option<MockError>,
     events: Vec<Result<RawTextTurnEvent, MockError>>,
 }
 
 impl MockTextScenario {
     pub fn events(events: Vec<Result<RawTextTurnEvent, MockError>>) -> Self {
-        Self { events }
+        Self {
+            start_error: None,
+            events,
+        }
+    }
+
+    pub fn start_error(error: MockError) -> Self {
+        Self {
+            start_error: Some(error),
+            events: Vec::new(),
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct MockStructuredScenario {
+    start_error: Option<MockError>,
     events: Vec<Result<RawStructuredTurnEvent, MockError>>,
 }
 
 impl MockStructuredScenario {
     pub fn events(events: Vec<Result<RawStructuredTurnEvent, MockError>>) -> Self {
-        Self { events }
+        Self {
+            start_error: None,
+            events,
+        }
+    }
+
+    pub fn start_error(error: MockError) -> Self {
+        Self {
+            start_error: Some(error),
+            events: Vec::new(),
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct MockCompletionScenario {
+    start_error: Option<MockError>,
     events: Vec<Result<RawCompletionEvent, MockError>>,
 }
 
 impl MockCompletionScenario {
     pub fn events(events: Vec<Result<RawCompletionEvent, MockError>>) -> Self {
-        Self { events }
+        Self {
+            start_error: None,
+            events,
+        }
+    }
+
+    pub fn start_error(error: MockError) -> Self {
+        Self {
+            start_error: Some(error),
+            events: Vec::new(),
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct MockStructuredCompletionScenario {
+    start_error: Option<MockError>,
     events: Vec<Result<RawStructuredCompletionEvent, MockError>>,
 }
 
 impl MockStructuredCompletionScenario {
     pub fn events(events: Vec<Result<RawStructuredCompletionEvent, MockError>>) -> Self {
-        Self { events }
+        Self {
+            start_error: None,
+            events,
+        }
+    }
+
+    pub fn start_error(error: MockError) -> Self {
+        Self {
+            start_error: Some(error),
+            events: Vec::new(),
+        }
     }
 }
 
@@ -169,8 +214,35 @@ pub enum MockError {
     StructuredOutput(String),
     #[error("failed to deserialize tool call: {0}")]
     ToolCall(String),
+    #[error("synthetic request failure: {message}")]
+    Request {
+        kind: RequestFailureKind,
+        status: Option<u16>,
+        retry_after: Option<Duration>,
+        message: String,
+    },
     #[error("synthetic adapter failure: {message}")]
     Synthetic { message: String },
+}
+
+impl MockError {
+    pub fn retryable_server(message: impl Into<String>) -> Self {
+        Self::Request {
+            kind: RequestFailureKind::Server,
+            status: Some(500),
+            retry_after: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn retryable_server_after(message: impl Into<String>, retry_after: Duration) -> Self {
+        Self::Request {
+            kind: RequestFailureKind::Server,
+            status: Some(500),
+            retry_after: Some(retry_after),
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -241,6 +313,28 @@ impl MockLlmAdapter {
     }
 }
 
+fn agent_error_from_mock(error: MockError) -> AgentError {
+    match error {
+        MockError::Request {
+            kind,
+            status,
+            retry_after,
+            message,
+        } => AgentError::request(
+            kind,
+            status,
+            retry_after,
+            MockError::Request {
+                kind,
+                status,
+                retry_after,
+                message,
+            },
+        ),
+        other => AgentError::backend(other),
+    }
+}
+
 #[async_trait::async_trait]
 impl TurnAdapter for MockLlmAdapter {
     async fn text_turn(
@@ -254,11 +348,17 @@ impl TurnAdapter for MockLlmAdapter {
             .unwrap()
             .pop_front()
             .ok_or_else(|| AgentError::backend(MockError::MissingTextScenario))?;
+        let MockTextScenario {
+            start_error,
+            events,
+        } = scenario;
+        if let Some(error) = start_error {
+            return Err(agent_error_from_mock(error));
+        }
         let mut tool_buffers: BTreeMap<ToolCallId, (ToolName, String)> = BTreeMap::new();
         let mut committed_items = Vec::<AssistantTurnItem>::new();
 
-        let events = scenario
-            .events
+        let events = events
             .into_iter()
             .flat_map(move |event| match event {
                 Ok(RawTextTurnEvent::Started { request_id, model }) => {
@@ -318,7 +418,7 @@ impl TurnAdapter for MockLlmAdapter {
                     usage,
                     committed_turn: Arc::new(AssistantTurnView::from_items(&committed_items)),
                 })],
-                Err(err) => vec![Err(AgentError::backend(err))],
+                Err(err) => vec![Err(agent_error_from_mock(err))],
             })
             .collect::<Vec<_>>();
 
@@ -336,12 +436,18 @@ impl TurnAdapter for MockLlmAdapter {
             .unwrap()
             .pop_front()
             .ok_or_else(|| AgentError::backend(MockError::MissingStructuredScenario))?;
+        let MockStructuredScenario {
+            start_error,
+            events,
+        } = scenario;
+        if let Some(error) = start_error {
+            return Err(agent_error_from_mock(error));
+        }
         let mut structured_buffer = String::new();
         let mut tool_buffers: BTreeMap<ToolCallId, (ToolName, String)> = BTreeMap::new();
         let mut committed_items = Vec::<AssistantTurnItem>::new();
 
-        let events = scenario
-            .events
+        let events = events
             .into_iter()
             .flat_map(move |event| match event {
                 Ok(RawStructuredTurnEvent::Started { request_id, model }) => {
@@ -413,7 +519,7 @@ impl TurnAdapter for MockLlmAdapter {
                     }));
                     out
                 }
-                Err(err) => vec![Err(AgentError::backend(err))],
+                Err(err) => vec![Err(agent_error_from_mock(err))],
             })
             .collect::<Vec<_>>();
 
@@ -434,7 +540,14 @@ impl CompletionAdapter for MockLlmAdapter {
             .unwrap()
             .pop_front()
             .ok_or_else(|| AgentError::backend(MockError::MissingCompletionScenario))?;
-        let events = scenario.events.into_iter().map(|event| match event {
+        let MockCompletionScenario {
+            start_error,
+            events,
+        } = scenario;
+        if let Some(error) = start_error {
+            return Err(agent_error_from_mock(error));
+        }
+        let events = events.into_iter().map(|event| match event {
             Ok(RawCompletionEvent::Started { request_id, model }) => {
                 Ok(CompletionEvent::Started { request_id, model })
             }
@@ -448,7 +561,7 @@ impl CompletionAdapter for MockLlmAdapter {
                 finish_reason,
                 usage,
             }),
-            Err(err) => Err(AgentError::backend(err)),
+            Err(err) => Err(agent_error_from_mock(err)),
         });
 
         Ok(Box::pin(stream::iter(events.collect::<Vec<_>>())) as CompletionEventStream)
@@ -465,8 +578,15 @@ impl CompletionAdapter for MockLlmAdapter {
             .unwrap()
             .pop_front()
             .ok_or_else(|| AgentError::backend(MockError::MissingStructuredCompletionScenario))?;
+        let MockStructuredCompletionScenario {
+            start_error,
+            events,
+        } = scenario;
+        if let Some(error) = start_error {
+            return Err(agent_error_from_mock(error));
+        }
         let mut structured_buffer = String::new();
-        let events = scenario.events.into_iter().flat_map(|event| match event {
+        let events = events.into_iter().flat_map(|event| match event {
             Ok(RawStructuredCompletionEvent::Started { request_id, model }) => {
                 vec![Ok(ErasedStructuredCompletionEvent::Started {
                     request_id,
@@ -505,7 +625,7 @@ impl CompletionAdapter for MockLlmAdapter {
                 finish_reason,
                 usage,
             })],
-            Err(err) => vec![Err(AgentError::backend(err))],
+            Err(err) => vec![Err(agent_error_from_mock(err))],
         });
 
         Ok(Box::pin(stream::iter(events.collect::<Vec<_>>()))

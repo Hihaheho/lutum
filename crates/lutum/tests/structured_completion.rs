@@ -134,13 +134,14 @@ fn context_new_does_not_enable_structured_completion() {
 
     let err = block_on(async {
         ctx.structured_completion::<Contact>("Extract the email address.")
-            .start()
+            .collect()
             .await
+            .unwrap_err()
     });
 
     let err = match err {
-        Ok(_) => panic!("structured completion unexpectedly succeeded"),
-        Err(err) => err,
+        CollectError::Execution { source, .. } => source,
+        other => panic!("unexpected error: {other:?}"),
     };
     assert!(
         err.to_string()

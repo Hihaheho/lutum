@@ -118,7 +118,8 @@ fn capture_raw_records_pre_stream_execution_collect_errors() {
             error,
             ..
         } => {
-            assert!(partial_summary.contains("stream_started=false"));
+            assert!(partial_summary.contains("request_id=None"));
+            assert!(partial_summary.contains("assistant_items=0"));
             assert!(error.contains("no mock text scenario configured"));
         }
         other => panic!("expected collect error entry, got {other:?}"),
