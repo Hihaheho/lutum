@@ -109,6 +109,7 @@ pub struct ChatCompletionMessage {
     pub content: Option<String>,
     pub refusal: Option<String>,
     pub role: String,
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Vec<ChatCompletionAnnotation>>,
     #[serde(skip_serializing_if = "Option::is_none")]

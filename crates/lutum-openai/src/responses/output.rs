@@ -1090,3 +1090,28 @@ pub struct ResponseCompletedEvent {
     #[serde(rename = "type")]
     pub event_type: MustBe!("response.completed"),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ResponseContentPartAddedEvent;
+
+    #[test]
+    fn response_content_part_added_allows_missing_annotations() {
+        let json = serde_json::json!({
+            "type": "response.content_part.added",
+            "item_id": "rs_tmp_vzapvvz1nn",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+                "type": "reasoning_text",
+                "text": ""
+            }
+        });
+
+        let event = serde_json::from_value::<ResponseContentPartAddedEvent>(json).unwrap();
+
+        assert!(event.part.annotations.is_empty());
+        assert_eq!(event.part.item_type, "reasoning_text");
+        assert_eq!(event.part.text, "");
+    }
+}
