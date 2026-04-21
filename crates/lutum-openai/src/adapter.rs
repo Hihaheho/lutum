@@ -140,6 +140,25 @@ fn basic_request_error_debug_info(error: &impl std::fmt::Debug) -> RequestErrorD
     }
 }
 
+fn emit_openai_stream_error(
+    raw: Option<&RawTelemetryEmitter>,
+    request_id: Option<&str>,
+    source: reqwest::Error,
+) -> OpenAiError {
+    let debug_info = reqwest_request_error_debug_info(&source);
+    let error = OpenAiError::Request(source);
+    emit_openai_request_error(
+        raw,
+        request_id,
+        RequestErrorKind::Transport,
+        None,
+        None,
+        &error.to_string(),
+        &debug_info,
+    );
+    error
+}
+
 /// A snapshot of tool name information available at the time an SSE decode error occurred.
 /// Passed to [`SseEventRecoveryHook`] so implementations can reconstruct missing fields.
 pub struct SseHints {
@@ -1565,7 +1584,14 @@ where
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(source) => Err(emit_openai_stream_error(
+                    raw.as_ref(),
+                    request_id.as_deref(),
+                    source,
+                ))?,
+            };
             for payload in parser.push(&chunk)? {
                 if payload == "[DONE]" {
                     break;
@@ -1800,7 +1826,14 @@ where
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(source) => Err(emit_openai_stream_error(
+                    raw.as_ref(),
+                    request_id.as_deref(),
+                    source,
+                ))?,
+            };
             for payload in parser.push(&chunk)? {
                 if payload == "[DONE]" {
                     break;
@@ -2096,7 +2129,14 @@ where
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(source) => Err(emit_openai_stream_error(
+                    raw.as_ref(),
+                    request_id.as_deref(),
+                    source,
+                ))?,
+            };
             for payload in parser.push(&chunk)? {
                 if payload == "[DONE]" {
                     if started && !finished {
@@ -2492,7 +2532,14 @@ where
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(source) => Err(emit_openai_stream_error(
+                    raw.as_ref(),
+                    request_id.as_deref(),
+                    source,
+                ))?,
+            };
             for payload in parser.push(&chunk)? {
                 if payload == "[DONE]" {
                     break;
@@ -2667,7 +2714,14 @@ where
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(source) => Err(emit_openai_stream_error(
+                    raw.as_ref(),
+                    request_id.as_deref(),
+                    source,
+                ))?,
+            };
             for payload in parser.push(&chunk)? {
                 if payload == "[DONE]" {
                     break;
@@ -3628,6 +3682,49 @@ mod tests {
                 && *is_request
                 && !is_body
                 && !is_decode
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_trace_captures_stream_body_request_errors() {
+        let collected = lutum_trace::test::collect_raw(async {
+            let extensions = raw_extensions();
+            let raw = RawTelemetryEmitter::new(&extensions, "openai", "responses", "text_turn");
+            emit_openai_request_error(
+                raw.as_ref(),
+                Some("resp_body_error"),
+                RequestErrorKind::Transport,
+                None,
+                None,
+                "request failed: error decoding response body",
+                &RequestErrorDebugInfo {
+                    error_debug: "reqwest::Error { kind: Body, source: hyper::Error(Body, Custom { kind: UnexpectedEof, error: \"unexpected EOF during chunk\" }) }".into(),
+                    source_chain: vec!["unexpected EOF during chunk".into()],
+                    is_body: true,
+                    ..RequestErrorDebugInfo::default()
+                },
+            );
+        })
+        .await;
+
+        assert!(matches!(
+            collected.raw.entries.as_slice(),
+            [
+                RawTraceEntry::RequestError {
+                    request_id,
+                    kind,
+                    error,
+                    error_debug,
+                    source_chain,
+                    is_body,
+                    ..
+                },
+            ] if request_id.as_deref() == Some("resp_body_error")
+                && *kind == RequestErrorKind::Transport
+                && error == "request failed: error decoding response body"
+                && error_debug.contains("kind: Body")
+                && source_chain == &vec!["unexpected EOF during chunk".to_string()]
+                && *is_body
         ));
     }
 

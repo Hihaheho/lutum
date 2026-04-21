@@ -184,6 +184,25 @@ fn basic_request_error_debug_info(error: &impl std::fmt::Debug) -> RequestErrorD
     }
 }
 
+fn emit_claude_stream_error(
+    raw: Option<&RawTelemetryEmitter>,
+    request_id: Option<&str>,
+    source: reqwest::Error,
+) -> ClaudeError {
+    let debug_info = reqwest_request_error_debug_info(&source);
+    let error = ClaudeError::Request(source);
+    emit_claude_request_error(
+        raw,
+        request_id,
+        RequestErrorKind::Transport,
+        None,
+        None,
+        &error.to_string(),
+        &debug_info,
+    );
+    error
+}
+
 #[derive(Clone)]
 pub struct ClaudeAdapter {
     client: Arc<Client>,
@@ -1007,7 +1026,14 @@ where
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(source) => Err(emit_claude_stream_error(
+                    raw.as_ref(),
+                    request_id.as_deref(),
+                    source,
+                ))?,
+            };
             for frame in parser.push(&chunk)? {
                 raw_sequence += 1;
                 if let Some(raw) = raw.as_ref() {
@@ -1185,7 +1211,14 @@ where
         futures::pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(source) => Err(emit_claude_stream_error(
+                    raw.as_ref(),
+                    request_id.as_deref(),
+                    source,
+                ))?,
+            };
             for frame in parser.push(&chunk)? {
                 raw_sequence += 1;
                 if let Some(raw) = raw.as_ref() {
