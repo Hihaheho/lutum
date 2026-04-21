@@ -22,7 +22,7 @@ use lutum_protocol::{
         ErasedTextTurnEventStream, FinishReason, ModelName, OperationKind, TurnAdapter,
         UsageRecoveryAdapter,
     },
-    telemetry::{ParseErrorStage, RawTelemetryEmitter, RequestErrorKind},
+    telemetry::{ParseErrorStage, RawTelemetryEmitter, RequestErrorDebugInfo, RequestErrorKind},
     transcript::{ToolResultItemView, TurnRole, TurnView},
 };
 use reqwest::{
@@ -143,7 +143,8 @@ fn emit_claude_request_error(
     request_error_kind: RequestErrorKind,
     status: Option<reqwest::StatusCode>,
     payload: Option<&str>,
-    error: &impl std::fmt::Display,
+    error: &str,
+    debug_info: &RequestErrorDebugInfo,
 ) {
     if let Some(raw) = raw {
         raw.emit_request_error(
@@ -151,8 +152,35 @@ fn emit_claude_request_error(
             request_error_kind,
             status.map(|status| status.as_u16()),
             payload,
-            &error.to_string(),
+            error,
+            debug_info,
         );
+    }
+}
+
+fn reqwest_request_error_debug_info(error: &reqwest::Error) -> RequestErrorDebugInfo {
+    let mut source_chain = Vec::new();
+    let mut current = std::error::Error::source(error);
+    while let Some(source) = current {
+        source_chain.push(source.to_string());
+        current = source.source();
+    }
+
+    RequestErrorDebugInfo {
+        error_debug: format!("{error:?}"),
+        source_chain,
+        is_timeout: error.is_timeout(),
+        is_connect: error.is_connect(),
+        is_request: error.is_request(),
+        is_body: error.is_body(),
+        is_decode: error.is_decode(),
+    }
+}
+
+fn basic_request_error_debug_info(error: &impl std::fmt::Debug) -> RequestErrorDebugInfo {
+    RequestErrorDebugInfo {
+        error_debug: format!("{error:?}"),
+        ..RequestErrorDebugInfo::default()
     }
 }
 
@@ -337,6 +365,7 @@ impl ClaudeAdapter {
         {
             Ok(response) => response,
             Err(source) => {
+                let debug_info = reqwest_request_error_debug_info(&source);
                 let error = ClaudeError::Request(source);
                 emit_claude_request_error(
                     raw,
@@ -344,7 +373,8 @@ impl ClaudeAdapter {
                     RequestErrorKind::Transport,
                     None,
                     None,
-                    &error,
+                    &error.to_string(),
+                    &debug_info,
                 );
                 return Err(error);
             }
@@ -1415,7 +1445,8 @@ async fn error_for_status_with_body(
         RequestErrorKind::HttpStatus,
         Some(status),
         Some(&body),
-        &error,
+        &error.to_string(),
+        &basic_request_error_debug_info(&error),
     );
     Err(error)
 }
@@ -1519,7 +1550,8 @@ mod tests {
     use lutum_protocol::{
         AdapterToolChoice, AdapterTurnConfig, ErasedTextTurnEvent, GenerationParams, ModelInput,
         ModelInputItem, ModelName, OperationKind, ParseErrorStage, RawTelemetryConfig,
-        RequestErrorKind, RequestExtensions, UsageRecoveryAdapter, budget::Usage,
+        RequestErrorDebugInfo, RequestErrorKind, RequestExtensions, UsageRecoveryAdapter,
+        budget::Usage,
     };
     use lutum_trace::RawTraceEntry;
 
@@ -1809,7 +1841,11 @@ mod tests {
                 RequestErrorKind::HttpStatus,
                 Some(reqwest::StatusCode::BAD_GATEWAY),
                 Some("{\"error\":{\"message\":\"upstream overloaded\"}}"),
-                &error,
+                &error.to_string(),
+                &RequestErrorDebugInfo {
+                    error_debug: format!("{error:?}"),
+                    ..RequestErrorDebugInfo::default()
+                },
             );
         })
         .await;
@@ -1826,6 +1862,13 @@ mod tests {
                     status,
                     payload,
                     error,
+                    error_debug,
+                    source_chain,
+                    is_timeout,
+                    is_connect,
+                    is_request,
+                    is_body,
+                    is_decode,
                 },
             ] if provider == "claude"
                 && api == "messages"
@@ -1835,6 +1878,13 @@ mod tests {
                 && *status == Some(reqwest::StatusCode::BAD_GATEWAY.as_u16())
                 && payload.as_deref() == Some("{\"error\":{\"message\":\"upstream overloaded\"}}")
                 && error.contains("request failed with status")
+                && error_debug.contains("HttpStatus")
+                && source_chain.is_empty()
+                && !is_timeout
+                && !is_connect
+                && !is_request
+                && !is_body
+                && !is_decode
         ));
     }
 

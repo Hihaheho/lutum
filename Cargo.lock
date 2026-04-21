@@ -1227,6 +1227,7 @@ name = "lutum-trace"
 version = "0.1.0"
 dependencies = [
  "lutum-protocol",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

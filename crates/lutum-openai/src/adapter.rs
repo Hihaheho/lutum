@@ -26,7 +26,7 @@ use lutum_protocol::{
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
         ErasedTextTurnEventStream, ModelName, OperationKind, TurnAdapter, UsageRecoveryAdapter,
     },
-    telemetry::{ParseErrorStage, RawTelemetryEmitter, RequestErrorKind},
+    telemetry::{ParseErrorStage, RawTelemetryEmitter, RequestErrorDebugInfo, RequestErrorKind},
     transcript::{TurnRole, TurnView},
 };
 use reqwest::{
@@ -99,7 +99,8 @@ fn emit_openai_request_error(
     request_error_kind: RequestErrorKind,
     status: Option<reqwest::StatusCode>,
     payload: Option<&str>,
-    error: &impl std::fmt::Display,
+    error: &str,
+    debug_info: &RequestErrorDebugInfo,
 ) {
     if let Some(raw) = raw {
         raw.emit_request_error(
@@ -107,8 +108,35 @@ fn emit_openai_request_error(
             request_error_kind,
             status.map(|status| status.as_u16()),
             payload,
-            &error.to_string(),
+            error,
+            debug_info,
         );
+    }
+}
+
+fn reqwest_request_error_debug_info(error: &reqwest::Error) -> RequestErrorDebugInfo {
+    let mut source_chain = Vec::new();
+    let mut current = std::error::Error::source(error);
+    while let Some(source) = current {
+        source_chain.push(source.to_string());
+        current = source.source();
+    }
+
+    RequestErrorDebugInfo {
+        error_debug: format!("{error:?}"),
+        source_chain,
+        is_timeout: error.is_timeout(),
+        is_connect: error.is_connect(),
+        is_request: error.is_request(),
+        is_body: error.is_body(),
+        is_decode: error.is_decode(),
+    }
+}
+
+fn basic_request_error_debug_info(error: &impl std::fmt::Debug) -> RequestErrorDebugInfo {
+    RequestErrorDebugInfo {
+        error_debug: format!("{error:?}"),
+        ..RequestErrorDebugInfo::default()
     }
 }
 
@@ -317,6 +345,7 @@ impl OpenAiAdapter {
             let response = match client.post(url).headers(headers).json(body).send().await {
                 Ok(response) => response,
                 Err(source) => {
+                    let debug_info = reqwest_request_error_debug_info(&source);
                     let error = OpenAiError::Request(source);
                     emit_openai_request_error(
                         raw,
@@ -324,7 +353,8 @@ impl OpenAiAdapter {
                         RequestErrorKind::Transport,
                         None,
                         None,
-                        &error,
+                        &error.to_string(),
+                        &debug_info,
                     );
                     return Err(error);
                 }
@@ -338,6 +368,7 @@ impl OpenAiAdapter {
             let response = match client.post(url).headers(headers).json(body).send().await {
                 Ok(response) => response,
                 Err(source) => {
+                    let debug_info = reqwest_request_error_debug_info(&source);
                     let error = OpenAiError::Request(source);
                     emit_openai_request_error(
                         raw,
@@ -345,7 +376,8 @@ impl OpenAiAdapter {
                         RequestErrorKind::Transport,
                         None,
                         None,
-                        &error,
+                        &error.to_string(),
+                        &debug_info,
                     );
                     return Err(error);
                 }
@@ -797,7 +829,8 @@ async fn error_for_status_with_body(
         RequestErrorKind::HttpStatus,
         Some(status),
         Some(&body),
-        &error,
+        &error.to_string(),
+        &basic_request_error_debug_info(&error),
     );
     Err(error)
 }
@@ -2763,7 +2796,7 @@ mod tests {
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
         AssistantTurnItem, AssistantTurnView, ErasedStructuredTurnEvent, ErasedTextTurnEvent,
         GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ParseErrorStage,
-        RawTelemetryConfig, RequestErrorKind, RequestExtensions, ToolResult,
+        RawTelemetryConfig, RequestErrorDebugInfo, RequestErrorKind, RequestExtensions, ToolResult,
     };
     use lutum_trace::RawTraceEntry;
 
@@ -3546,7 +3579,16 @@ mod tests {
                 RequestErrorKind::Transport,
                 None,
                 None,
-                &"error sending request for url (https://openrouter.ai/api/v1/responses)",
+                "request failed: error sending request for url (https://openrouter.ai/api/v1/responses)",
+                &RequestErrorDebugInfo {
+                    error_debug: "reqwest::Error { kind: Request, url: \"https://openrouter.ai/api/v1/responses\", source: hyper_util::client::legacy::Error(Connect, ConnectError(\"dns error\", Custom { kind: Uncategorized, error: \"failed to lookup address information\" })) }".into(),
+                    source_chain: vec![
+                        "client error (Connect)".into(),
+                        "dns error: failed to lookup address information".into(),
+                    ],
+                    is_request: true,
+                    ..RequestErrorDebugInfo::default()
+                },
             );
         })
         .await;
@@ -3563,6 +3605,13 @@ mod tests {
                     status,
                     payload,
                     error,
+                    error_debug,
+                    source_chain,
+                    is_timeout,
+                    is_connect,
+                    is_request,
+                    is_body,
+                    is_decode,
                 },
             ] if provider == "openai"
                 && api == "responses"
@@ -3572,6 +3621,13 @@ mod tests {
                 && status.is_none()
                 && payload.is_none()
                 && error.contains("error sending request for url")
+                && error_debug.contains("reqwest::Error")
+                && source_chain.len() == 2
+                && !is_timeout
+                && !is_connect
+                && *is_request
+                && !is_body
+                && !is_decode
         ));
     }
 

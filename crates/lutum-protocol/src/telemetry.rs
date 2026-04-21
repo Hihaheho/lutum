@@ -16,6 +16,13 @@ pub const RAW_FIELD_PARTIAL_SUMMARY: &str = "partial_summary";
 pub const RAW_FIELD_COLLECT_KIND: &str = "collect_kind";
 pub const RAW_FIELD_REQUEST_ERROR_KIND: &str = "request_error_kind";
 pub const RAW_FIELD_STATUS: &str = "status";
+pub const RAW_FIELD_ERROR_DEBUG: &str = "error_debug";
+pub const RAW_FIELD_SOURCE_CHAIN: &str = "source_chain";
+pub const RAW_FIELD_IS_TIMEOUT: &str = "is_timeout";
+pub const RAW_FIELD_IS_CONNECT: &str = "is_connect";
+pub const RAW_FIELD_IS_REQUEST: &str = "is_request";
+pub const RAW_FIELD_IS_BODY: &str = "is_body";
+pub const RAW_FIELD_IS_DECODE: &str = "is_decode";
 
 pub const RAW_KIND_REQUEST: &str = "request";
 pub const RAW_KIND_STREAM_EVENT: &str = "stream_event";
@@ -108,6 +115,17 @@ impl RequestErrorKind {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RequestErrorDebugInfo {
+    pub error_debug: String,
+    pub source_chain: Vec<String>,
+    pub is_timeout: bool,
+    pub is_connect: bool,
+    pub is_request: bool,
+    pub is_body: bool,
+    pub is_decode: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -236,10 +254,14 @@ impl RawTelemetryEmitter {
         status: Option<u16>,
         payload: Option<&str>,
         error: &str,
+        debug_info: &RequestErrorDebugInfo,
     ) {
         if !self.config.request {
             return;
         }
+
+        let source_chain =
+            serde_json::to_string(&debug_info.source_chain).unwrap_or_else(|_| "[]".to_string());
 
         tracing::event!(
             target: RAW_TELEMETRY_TARGET,
@@ -253,6 +275,13 @@ impl RawTelemetryEmitter {
             status = status.unwrap_or(0_u16),
             payload = payload.unwrap_or(""),
             error = error,
+            error_debug = debug_info.error_debug.as_str(),
+            source_chain = source_chain.as_str(),
+            is_timeout = debug_info.is_timeout,
+            is_connect = debug_info.is_connect,
+            is_request = debug_info.is_request,
+            is_body = debug_info.is_body,
+            is_decode = debug_info.is_decode,
         );
     }
 }

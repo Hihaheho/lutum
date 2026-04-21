@@ -38,6 +38,13 @@ pub enum RawTraceEntry {
         status: Option<u16>,
         payload: Option<String>,
         error: String,
+        error_debug: String,
+        source_chain: Vec<String>,
+        is_timeout: bool,
+        is_connect: bool,
+        is_request: bool,
+        is_body: bool,
+        is_decode: bool,
     },
     CollectError {
         operation_kind: OperationKind,
@@ -94,6 +101,19 @@ pub(crate) fn parse_raw_entry(record: &EventRecord) -> Option<RawTraceEntry> {
             status: optional_field_u16(record, lutum_protocol::RAW_FIELD_STATUS),
             payload: optional_field_str(record, lutum_protocol::RAW_FIELD_PAYLOAD),
             error: field_str(record, lutum_protocol::RAW_FIELD_ERROR)?.to_string(),
+            error_debug: field_str(record, lutum_protocol::RAW_FIELD_ERROR_DEBUG)
+                .unwrap_or_default()
+                .to_string(),
+            source_chain: optional_field_str(record, lutum_protocol::RAW_FIELD_SOURCE_CHAIN)
+                .map(|json| {
+                    serde_json::from_str::<Vec<String>>(&json).unwrap_or_else(|_| vec![json])
+                })
+                .unwrap_or_default(),
+            is_timeout: field_bool(record, lutum_protocol::RAW_FIELD_IS_TIMEOUT).unwrap_or(false),
+            is_connect: field_bool(record, lutum_protocol::RAW_FIELD_IS_CONNECT).unwrap_or(false),
+            is_request: field_bool(record, lutum_protocol::RAW_FIELD_IS_REQUEST).unwrap_or(false),
+            is_body: field_bool(record, lutum_protocol::RAW_FIELD_IS_BODY).unwrap_or(false),
+            is_decode: field_bool(record, lutum_protocol::RAW_FIELD_IS_DECODE).unwrap_or(false),
         }),
         lutum_protocol::RAW_KIND_COLLECT_ERROR => Some(RawTraceEntry::CollectError {
             operation_kind: operation_kind_from_str(field_str(
@@ -130,6 +150,13 @@ fn field_u64(record: &EventRecord, key: &str) -> Option<u64> {
     match record.field(key)? {
         FieldValue::U64(value) => Some(*value),
         FieldValue::I64(value) if *value >= 0 => Some(*value as u64),
+        _ => None,
+    }
+}
+
+fn field_bool(record: &EventRecord, key: &str) -> Option<bool> {
+    match record.field(key)? {
+        FieldValue::Bool(value) => Some(*value),
         _ => None,
     }
 }
