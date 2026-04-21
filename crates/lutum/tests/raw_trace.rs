@@ -6,8 +6,8 @@ use futures::executor::block_on;
 use lutum::{
     CollectError, CollectErrorKind, EventHandler, FinishReason, HandlerContext, HandlerDirective,
     InputMessageRole, Lutum, MockError, MockLlmAdapter, MockTextScenario, ModelInput,
-    ModelInputItem, OperationKind, RawTelemetryConfig, RawTextTurnEvent,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TextTurnEvent, TextTurnState, Usage,
+    ModelInputItem, OperationKind, RawTelemetryConfig, RawTextTurnEvent, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, TextTurnEvent, TextTurnState, Usage,
 };
 use lutum_trace::RawTraceEntry;
 
@@ -94,7 +94,11 @@ fn capture_raw_records_execution_collect_errors() {
         collected.output,
         Err(CollectError::Execution { .. })
     ));
-    assert_collect_error(&collected.raw.entries, CollectErrorKind::Execution, Some("req-execution"));
+    assert_collect_error(
+        &collected.raw.entries,
+        CollectErrorKind::Execution,
+        Some("req-execution"),
+    );
 }
 
 #[test]
@@ -126,7 +130,11 @@ fn capture_raw_records_reduction_collect_errors() {
         collected.output,
         Err(CollectError::Reduction { .. })
     ));
-    assert_collect_error(&collected.raw.entries, CollectErrorKind::Reduction, Some("req-reduction"));
+    assert_collect_error(
+        &collected.raw.entries,
+        CollectErrorKind::Reduction,
+        Some("req-reduction"),
+    );
 }
 
 #[test]
@@ -156,7 +164,11 @@ fn capture_raw_records_handler_collect_errors() {
         collected.output,
         Err(CollectError::Handler { .. })
     ));
-    assert_collect_error(&collected.raw.entries, CollectErrorKind::Handler, Some("req-handler"));
+    assert_collect_error(
+        &collected.raw.entries,
+        CollectErrorKind::Handler,
+        Some("req-handler"),
+    );
 }
 
 #[test]
@@ -180,5 +192,9 @@ fn capture_raw_records_unexpected_eof_collect_errors() {
         collected.output,
         Err(CollectError::UnexpectedEof { .. })
     ));
-    assert_collect_error(&collected.raw.entries, CollectErrorKind::UnexpectedEof, Some("req-eof"));
+    assert_collect_error(
+        &collected.raw.entries,
+        CollectErrorKind::UnexpectedEof,
+        Some("req-eof"),
+    );
 }

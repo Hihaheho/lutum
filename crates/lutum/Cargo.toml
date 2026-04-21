@@ -25,6 +25,7 @@ tracing.workspace = true
 anyhow = "1"
 console.workspace = true
 futures.workspace = true
+lutum-eval.workspace = true
 lutum-trace.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -96,6 +97,9 @@ name = "completion"
 
 [[example]]
 name = "trace_dump"
+
+[[example]]
+name = "eval_raw_debug_dump"
 
 [[example]]
 name = "skill"

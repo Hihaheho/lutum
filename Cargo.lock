@@ -1106,6 +1106,7 @@ dependencies = [
  "async-trait",
  "console",
  "futures",
+ "lutum-eval",
  "lutum-macros",
  "lutum-openai",
  "lutum-protocol",
