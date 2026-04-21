@@ -977,7 +977,9 @@ pub struct StructuredCompletionResult<O: StructuredOutput> {
 pub enum TextTurnReductionError {
     #[error("turn already completed")]
     AlreadyCompleted,
-    #[error("completed turn produced no assistant items (model={model}, request_id={request_id:?}, finish_reason={finish_reason:?}, event_count={event_count})")]
+    #[error(
+        "completed turn produced no assistant items (model={model}, request_id={request_id:?}, finish_reason={finish_reason:?}, event_count={event_count})"
+    )]
     EmptyAssistantOutput {
         model: String,
         request_id: Option<String>,
@@ -994,7 +996,9 @@ pub enum StructuredTurnReductionError {
     AlreadyCompleted,
     #[error("structured output appeared more than once")]
     DuplicateStructuredOutput,
-    #[error("completed turn produced no assistant items (model={model}, request_id={request_id:?}, finish_reason={finish_reason:?}, event_count={event_count})")]
+    #[error(
+        "completed turn produced no assistant items (model={model}, request_id={request_id:?}, finish_reason={finish_reason:?}, event_count={event_count})"
+    )]
     EmptyAssistantOutput {
         model: String,
         request_id: Option<String>,

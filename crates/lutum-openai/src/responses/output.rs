@@ -529,9 +529,7 @@ impl PartialEq for SseEvent {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Unknown(a), Self::Unknown(b)) => a == b,
-            _ => {
-                serde_json::to_string(self).ok() == serde_json::to_string(other).ok()
-            }
+            _ => serde_json::to_string(self).ok() == serde_json::to_string(other).ok(),
         }
     }
 }
