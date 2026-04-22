@@ -36,7 +36,7 @@ fn structured_completion_collects_structured_output() {
     );
     let adapter = Arc::new(adapter);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
+    let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), budget);
 
     let result = block_on(async {
         ctx.structured_completion::<Contact>("Extract the email address.")
@@ -74,7 +74,7 @@ fn structured_completion_collects_refusal() {
     );
     let adapter = Arc::new(adapter);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
+    let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), budget);
 
     let result = block_on(async {
         ctx.structured_completion::<Contact>("Extract the email address.")
@@ -109,7 +109,7 @@ fn structured_completion_requires_semantic_output() {
     );
     let adapter = Arc::new(adapter);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
+    let ctx = lutum::Lutum::from_parts(adapter.clone(), adapter.clone(), budget);
 
     let err = block_on(async {
         ctx.structured_completion::<Contact>("Extract the email address.")

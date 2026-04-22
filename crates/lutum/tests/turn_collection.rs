@@ -7,7 +7,7 @@ use lutum::{
     MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, OperationKind,
     RequestBudget, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
     StructuredTurnOutcome, TextTurnEventWithTools, TextTurnReducerWithTools,
-    TextTurnStateWithTools, ToolMetadata, Usage, UsageEstimate,
+    TextTurnStateWithTools, ToolMetadata, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -483,7 +483,9 @@ fn adapter_error_uses_recovered_usage_when_available() {
                 ..Usage::zero()
             },
         );
-    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
+    let adapter = Arc::new(adapter);
+    let ctx = Lutum::new(adapter.clone(), budget.clone())
+        .with_recovery(adapter as Arc<dyn UsageRecoveryAdapter>);
     let pending = block_on(
         ctx.text_turn(input())
             .tools::<Tools>()

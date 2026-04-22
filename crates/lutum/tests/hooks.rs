@@ -9,7 +9,7 @@ use lutum::{
     ErasedTextTurnEventStream, HookReentrancyError, InputMessageRole, Lutum, LutumHooks,
     MockLlmAdapter, ModelInput, ModelInputItem, OperationKind, RequestExtensions,
     ResolveUsageEstimate, SharedPoolBudgetManager, SharedPoolBudgetOptions, Stateful, TurnAdapter,
-    Usage, UsageRecoveryAdapter, budget::UsageEstimate,
+    budget::UsageEstimate,
 };
 use lutum_trace::FieldValue;
 use schemars::JsonSchema;
@@ -377,7 +377,6 @@ fn full_context(hooks: LutumHooks) -> Lutum {
     Lutum::from_parts_with_hooks(
         adapter.clone(),
         adapter.clone(),
-        adapter,
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
         hooks,
     )
@@ -429,17 +428,6 @@ impl CompletionAdapter for NullAdapter {
         _extensions: &RequestExtensions,
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError> {
         Ok(Box::pin(futures::stream::empty()) as ErasedStructuredCompletionEventStream)
-    }
-}
-
-#[async_trait]
-impl UsageRecoveryAdapter for NullAdapter {
-    async fn recover_usage(
-        &self,
-        _kind: OperationKind,
-        _request_id: &str,
-    ) -> Result<Option<Usage>, AgentError> {
-        Ok(None)
     }
 }
 

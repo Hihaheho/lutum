@@ -85,7 +85,7 @@ pub struct Lutum {
     budget: Arc<dyn BudgetManager>,
     turns: Arc<dyn TurnAdapter>,
     completion: Arc<dyn CompletionAdapter>,
-    recovery: Arc<dyn UsageRecoveryAdapter>,
+    recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     hooks: Arc<LutumHooks>,
     default_extensions: Arc<RequestExtensions>,
 }
@@ -93,7 +93,7 @@ pub struct Lutum {
 impl Lutum {
     pub fn new<T>(adapter: Arc<T>, budget: impl BudgetManager + 'static) -> Self
     where
-        T: TurnAdapter + UsageRecoveryAdapter + 'static,
+        T: TurnAdapter + 'static,
     {
         Self::with_hooks(adapter, budget, LutumHooks::new())
     }
@@ -104,13 +104,13 @@ impl Lutum {
         hooks: LutumHooks,
     ) -> Self
     where
-        T: TurnAdapter + UsageRecoveryAdapter + 'static,
+        T: TurnAdapter + 'static,
     {
         Self {
             budget: Arc::new(budget),
-            turns: adapter.clone(),
+            turns: adapter,
             completion: Arc::new(UnsupportedCompletionAdapter),
-            recovery: adapter,
+            recovery: None,
             hooks: Arc::new(hooks),
             default_extensions: Arc::new(RequestExtensions::new()),
         }
@@ -119,16 +119,14 @@ impl Lutum {
     pub fn from_parts(
         turns: Arc<dyn TurnAdapter>,
         completion: Arc<dyn CompletionAdapter>,
-        recovery: Arc<dyn UsageRecoveryAdapter>,
         budget: impl BudgetManager + 'static,
     ) -> Self {
-        Self::from_parts_with_hooks(turns, completion, recovery, budget, LutumHooks::new())
+        Self::from_parts_with_hooks(turns, completion, budget, LutumHooks::new())
     }
 
     pub fn from_parts_with_hooks(
         turns: Arc<dyn TurnAdapter>,
         completion: Arc<dyn CompletionAdapter>,
-        recovery: Arc<dyn UsageRecoveryAdapter>,
         budget: impl BudgetManager + 'static,
         hooks: LutumHooks,
     ) -> Self {
@@ -136,10 +134,15 @@ impl Lutum {
             budget: Arc::new(budget),
             turns,
             completion,
-            recovery,
+            recovery: None,
             hooks: Arc::new(hooks),
             default_extensions: Arc::new(RequestExtensions::new()),
         }
+    }
+
+    pub fn with_recovery(mut self, recovery: Arc<dyn UsageRecoveryAdapter>) -> Self {
+        self.recovery = Some(recovery);
+        self
     }
 
     pub fn budget(&self) -> &dyn BudgetManager {
@@ -342,7 +345,7 @@ impl Drop for OwnedLease {
 pub struct PendingTextTurn {
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
-    recovery: Arc<dyn UsageRecoveryAdapter>,
+    recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     turns: Arc<dyn TurnAdapter>,
     input: ModelInput,
     turn: AdapterTextTurn,
@@ -358,7 +361,7 @@ where
 {
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
-    recovery: Arc<dyn UsageRecoveryAdapter>,
+    recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     turns: Arc<dyn TurnAdapter>,
     input: ModelInput,
     turn: AdapterTextTurn,
@@ -375,7 +378,7 @@ where
 {
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
-    recovery: Arc<dyn UsageRecoveryAdapter>,
+    recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     turns: Arc<dyn TurnAdapter>,
     input: ModelInput,
     turn: AdapterStructuredTurn,
@@ -392,7 +395,7 @@ where
 {
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
-    recovery: Arc<dyn UsageRecoveryAdapter>,
+    recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     turns: Arc<dyn TurnAdapter>,
     input: ModelInput,
     turn: AdapterStructuredTurn,
@@ -485,7 +488,7 @@ where
 pub struct PendingCompletion {
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
-    recovery: Arc<dyn UsageRecoveryAdapter>,
+    recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     completion: Arc<dyn CompletionAdapter>,
     request: CompletionRequest,
     estimate: UsageEstimate,
@@ -500,7 +503,7 @@ where
 {
     extensions: Arc<RequestExtensions>,
     owned_lease: OwnedLease,
-    recovery: Arc<dyn UsageRecoveryAdapter>,
+    recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     completion: Arc<dyn CompletionAdapter>,
     request: AdapterStructuredCompletionRequest,
     estimate: UsageEstimate,
@@ -535,7 +538,7 @@ impl Lutum {
                 budget: Arc::clone(&self.budget),
                 lease: Some(lease),
             },
-            recovery: Arc::clone(&self.recovery),
+            recovery: self.recovery.clone(),
             turns: Arc::clone(&self.turns),
             input,
             turn,
@@ -576,7 +579,7 @@ impl Lutum {
                 budget: Arc::clone(&self.budget),
                 lease: Some(lease),
             },
-            recovery: Arc::clone(&self.recovery),
+            recovery: self.recovery.clone(),
             turns: Arc::clone(&self.turns),
             input,
             turn,
@@ -616,7 +619,7 @@ impl Lutum {
                 budget: Arc::clone(&self.budget),
                 lease: Some(lease),
             },
-            recovery: Arc::clone(&self.recovery),
+            recovery: self.recovery.clone(),
             turns: Arc::clone(&self.turns),
             input,
             turn,
@@ -658,7 +661,7 @@ impl Lutum {
                 budget: Arc::clone(&self.budget),
                 lease: Some(lease),
             },
-            recovery: Arc::clone(&self.recovery),
+            recovery: self.recovery.clone(),
             turns: Arc::clone(&self.turns),
             input,
             turn,
@@ -691,7 +694,7 @@ impl Lutum {
                 budget: Arc::clone(&self.budget),
                 lease: Some(lease),
             },
-            recovery: Arc::clone(&self.recovery),
+            recovery: self.recovery.clone(),
             completion: Arc::clone(&self.completion),
             request,
             estimate,
@@ -725,7 +728,7 @@ impl Lutum {
                 budget: Arc::clone(&self.budget),
                 lease: Some(lease),
             },
-            recovery: Arc::clone(&self.recovery),
+            recovery: self.recovery.clone(),
             completion: Arc::clone(&self.completion),
             request: erase_structured_completion_request(request)?,
             estimate,
@@ -772,7 +775,7 @@ impl PendingTextTurn {
                             maybe_retry_plan(&retry_policy, attempt, &source)
                         {
                             let accounted_usage =
-                                recover_or_estimate_usage(&*recovery, OperationKind::TextTurn, None, estimate).await;
+                                recover_or_estimate_usage(recovery.as_deref(), OperationKind::TextTurn, None, estimate).await;
                             cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
                             yield TextTurnEvent::WillRetry {
                                 attempt: next_attempt,
@@ -818,7 +821,7 @@ impl PendingTextTurn {
                                 maybe_retry_plan(&retry_policy, attempt, &source)
                             {
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*recovery,
+                                    recovery.as_deref(),
                                     OperationKind::TextTurn,
                                     request_id.as_deref(),
                                     estimate,
@@ -865,7 +868,7 @@ impl PendingTextTurn {
                 Err(source) => {
                     let partial = self.reducer.state().clone();
                     let accounted_usage = recover_or_estimate_usage(
-                        &*self.recovery,
+                        self.recovery.as_deref(),
                         OperationKind::TextTurn,
                         self.reducer.state().request_id.as_deref(),
                         self.estimate,
@@ -1080,7 +1083,7 @@ impl PendingTextTurn {
                             Ok(HandlerDirective::Stop) => {
                                 let partial = self.reducer.state().clone();
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::TextTurn,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -1111,7 +1114,7 @@ impl PendingTextTurn {
                             Err(source) => {
                                 let partial = self.reducer.state().clone();
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::TextTurn,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -1159,7 +1162,7 @@ impl PendingTextTurn {
                     Err(source) => {
                         let partial = self.reducer.state().clone();
                         let accounted_usage = recover_or_estimate_usage(
-                            &*self.recovery,
+                            self.recovery.as_deref(),
                             OperationKind::TextTurn,
                             self.reducer.state().request_id.as_deref(),
                             self.estimate,
@@ -1294,7 +1297,7 @@ impl PendingTextTurn {
 
             let partial = self.reducer.state().clone();
             let accounted_usage = recover_or_estimate_usage(
-                &*self.recovery,
+                self.recovery.as_deref(),
                 OperationKind::TextTurn,
                 self.reducer.state().request_id.as_deref(),
                 self.estimate,
@@ -1398,7 +1401,7 @@ where
                             maybe_retry_plan(&retry_policy, attempt, &source)
                         {
                             let accounted_usage =
-                                recover_or_estimate_usage(&*recovery, OperationKind::TextTurn, None, estimate).await;
+                                recover_or_estimate_usage(recovery.as_deref(), OperationKind::TextTurn, None, estimate).await;
                             cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
                             yield TextTurnEventWithTools::WillRetry {
                                 attempt: next_attempt,
@@ -1444,7 +1447,7 @@ where
                                 maybe_retry_plan(&retry_policy, attempt, &source)
                             {
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*recovery,
+                                    recovery.as_deref(),
                                     OperationKind::TextTurn,
                                     request_id.as_deref(),
                                     estimate,
@@ -1494,7 +1497,7 @@ where
                 Err(source) => {
                     let partial = self.reducer.state().clone();
                     let accounted_usage = recover_or_estimate_usage(
-                        &*self.recovery,
+                        self.recovery.as_deref(),
                         OperationKind::TextTurn,
                         self.reducer.state().request_id.as_deref(),
                         self.estimate,
@@ -1709,7 +1712,7 @@ where
                             Ok(HandlerDirective::Stop) => {
                                 let partial = self.reducer.state().clone();
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::TextTurn,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -1740,7 +1743,7 @@ where
                             Err(source) => {
                                 let partial = self.reducer.state().clone();
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::TextTurn,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -1788,7 +1791,7 @@ where
                     Err(source) => {
                         let partial = self.reducer.state().clone();
                         let accounted_usage = recover_or_estimate_usage(
-                            &*self.recovery,
+                            self.recovery.as_deref(),
                             OperationKind::TextTurn,
                             self.reducer.state().request_id.as_deref(),
                             self.estimate,
@@ -1923,7 +1926,7 @@ where
 
             let partial = self.reducer.state().clone();
             let accounted_usage = recover_or_estimate_usage(
-                &*self.recovery,
+                self.recovery.as_deref(),
                 OperationKind::TextTurn,
                 self.reducer.state().request_id.as_deref(),
                 self.estimate,
@@ -2025,7 +2028,7 @@ where
                             maybe_retry_plan(&retry_policy, attempt, &source)
                         {
                             let accounted_usage =
-                                recover_or_estimate_usage(&*recovery, OperationKind::StructuredTurn, None, estimate).await;
+                                recover_or_estimate_usage(recovery.as_deref(), OperationKind::StructuredTurn, None, estimate).await;
                             cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
                             yield StructuredTurnEvent::WillRetry {
                                 attempt: next_attempt,
@@ -2067,7 +2070,7 @@ where
                                 maybe_retry_plan(&retry_policy, attempt, &source)
                             {
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*recovery,
+                                    recovery.as_deref(),
                                     OperationKind::StructuredTurn,
                                     request_id.as_deref(),
                                     estimate,
@@ -2117,7 +2120,7 @@ where
                 Err(source) => {
                     let partial = StructuredTurnPartial::from_state(self.reducer.state().clone());
                     let accounted_usage = recover_or_estimate_usage(
-                        &*self.recovery,
+                        self.recovery.as_deref(),
                         OperationKind::StructuredTurn,
                         self.reducer.state().request_id.as_deref(),
                         self.estimate,
@@ -2335,7 +2338,7 @@ where
                                 let partial =
                                     StructuredTurnPartial::from_state(self.reducer.state().clone());
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::StructuredTurn,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -2369,7 +2372,7 @@ where
                                 let partial =
                                     StructuredTurnPartial::from_state(self.reducer.state().clone());
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::StructuredTurn,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -2420,7 +2423,7 @@ where
                         let partial =
                             StructuredTurnPartial::from_state(self.reducer.state().clone());
                         let accounted_usage = recover_or_estimate_usage(
-                            &*self.recovery,
+                            self.recovery.as_deref(),
                             OperationKind::StructuredTurn,
                             self.reducer.state().request_id.as_deref(),
                             self.estimate,
@@ -2557,7 +2560,7 @@ where
 
             let partial = StructuredTurnPartial::from_state(self.reducer.state().clone());
             let accounted_usage = recover_or_estimate_usage(
-                &*self.recovery,
+                self.recovery.as_deref(),
                 OperationKind::StructuredTurn,
                 self.reducer.state().request_id.as_deref(),
                 self.estimate,
@@ -2664,7 +2667,7 @@ where
                             maybe_retry_plan(&retry_policy, attempt, &source)
                         {
                             let accounted_usage =
-                                recover_or_estimate_usage(&*recovery, OperationKind::StructuredTurn, None, estimate).await;
+                                recover_or_estimate_usage(recovery.as_deref(), OperationKind::StructuredTurn, None, estimate).await;
                             cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
                             yield StructuredTurnEventWithTools::WillRetry {
                                 attempt: next_attempt,
@@ -2710,7 +2713,7 @@ where
                                 maybe_retry_plan(&retry_policy, attempt, &source)
                             {
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*recovery,
+                                    recovery.as_deref(),
                                     OperationKind::StructuredTurn,
                                     request_id.as_deref(),
                                     estimate,
@@ -2761,7 +2764,7 @@ where
                     let partial =
                         StructuredTurnPartialWithTools::from_state(self.reducer.state().clone());
                     let accounted_usage = recover_or_estimate_usage(
-                        &*self.recovery,
+                        self.recovery.as_deref(),
                         OperationKind::StructuredTurn,
                         self.reducer.state().request_id.as_deref(),
                         self.estimate,
@@ -2986,7 +2989,7 @@ where
                                     self.reducer.state().clone(),
                                 );
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::StructuredTurn,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -3021,7 +3024,7 @@ where
                                     self.reducer.state().clone(),
                                 );
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::StructuredTurn,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -3073,7 +3076,7 @@ where
                             self.reducer.state().clone(),
                         );
                         let accounted_usage = recover_or_estimate_usage(
-                            &*self.recovery,
+                            self.recovery.as_deref(),
                             OperationKind::StructuredTurn,
                             self.reducer.state().request_id.as_deref(),
                             self.estimate,
@@ -3212,7 +3215,7 @@ where
 
             let partial = StructuredTurnPartialWithTools::from_state(self.reducer.state().clone());
             let accounted_usage = recover_or_estimate_usage(
-                &*self.recovery,
+                self.recovery.as_deref(),
                 OperationKind::StructuredTurn,
                 self.reducer.state().request_id.as_deref(),
                 self.estimate,
@@ -3313,7 +3316,7 @@ impl PendingCompletion {
                             maybe_retry_plan(&retry_policy, attempt, &source)
                         {
                             let accounted_usage =
-                                recover_or_estimate_usage(&*recovery, OperationKind::Completion, None, estimate).await;
+                                recover_or_estimate_usage(recovery.as_deref(), OperationKind::Completion, None, estimate).await;
                             cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
                             yield CompletionEvent::WillRetry {
                                 attempt: next_attempt,
@@ -3359,7 +3362,7 @@ impl PendingCompletion {
                                 maybe_retry_plan(&retry_policy, attempt, &source)
                             {
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*recovery,
+                                    recovery.as_deref(),
                                     OperationKind::Completion,
                                     request_id.as_deref(),
                                     estimate,
@@ -3409,7 +3412,7 @@ impl PendingCompletion {
                 Err(source) => {
                     let partial = self.reducer.state().clone();
                     let accounted_usage = recover_or_estimate_usage(
-                        &*self.recovery,
+                        self.recovery.as_deref(),
                         OperationKind::Completion,
                         self.reducer.state().request_id.as_deref(),
                         self.estimate,
@@ -3621,7 +3624,7 @@ impl PendingCompletion {
                             Ok(HandlerDirective::Stop) => {
                                 let partial = self.reducer.state().clone();
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::Completion,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -3652,7 +3655,7 @@ impl PendingCompletion {
                             Err(source) => {
                                 let partial = self.reducer.state().clone();
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::Completion,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -3700,7 +3703,7 @@ impl PendingCompletion {
                     Err(source) => {
                         let partial = self.reducer.state().clone();
                         let accounted_usage = recover_or_estimate_usage(
-                            &*self.recovery,
+                            self.recovery.as_deref(),
                             OperationKind::Completion,
                             self.reducer.state().request_id.as_deref(),
                             self.estimate,
@@ -3835,7 +3838,7 @@ impl PendingCompletion {
 
             let partial = self.reducer.state().clone();
             let accounted_usage = recover_or_estimate_usage(
-                &*self.recovery,
+                self.recovery.as_deref(),
                 OperationKind::Completion,
                 self.reducer.state().request_id.as_deref(),
                 self.estimate,
@@ -3939,7 +3942,7 @@ where
                             maybe_retry_plan(&retry_policy, attempt, &source)
                         {
                             let accounted_usage =
-                                recover_or_estimate_usage(&*recovery, OperationKind::StructuredCompletion, None, estimate).await;
+                                recover_or_estimate_usage(recovery.as_deref(), OperationKind::StructuredCompletion, None, estimate).await;
                             cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
                             yield StructuredCompletionEvent::WillRetry {
                                 attempt: next_attempt,
@@ -3985,7 +3988,7 @@ where
                                 maybe_retry_plan(&retry_policy, attempt, &source)
                             {
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*recovery,
+                                    recovery.as_deref(),
                                     OperationKind::StructuredCompletion,
                                     request_id.as_deref(),
                                     estimate,
@@ -4035,7 +4038,7 @@ where
                 Err(source) => {
                     let partial = self.reducer.state().clone();
                     let accounted_usage = recover_or_estimate_usage(
-                        &*self.recovery,
+                        self.recovery.as_deref(),
                         OperationKind::StructuredCompletion,
                         self.reducer.state().request_id.as_deref(),
                         self.estimate,
@@ -4247,7 +4250,7 @@ where
                             Ok(HandlerDirective::Stop) => {
                                 let partial = self.reducer.state().clone();
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::StructuredCompletion,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -4278,7 +4281,7 @@ where
                             Err(source) => {
                                 let partial = self.reducer.state().clone();
                                 let accounted_usage = recover_or_estimate_usage(
-                                    &*self.recovery,
+                                    self.recovery.as_deref(),
                                     OperationKind::StructuredCompletion,
                                     self.reducer.state().request_id.as_deref(),
                                     self.estimate,
@@ -4326,7 +4329,7 @@ where
                     Err(source) => {
                         let partial = self.reducer.state().clone();
                         let accounted_usage = recover_or_estimate_usage(
-                            &*self.recovery,
+                            self.recovery.as_deref(),
                             OperationKind::StructuredCompletion,
                             self.reducer.state().request_id.as_deref(),
                             self.estimate,
@@ -4461,7 +4464,7 @@ where
 
             let partial = self.reducer.state().clone();
             let accounted_usage = recover_or_estimate_usage(
-                &*self.recovery,
+                self.recovery.as_deref(),
                 OperationKind::StructuredCompletion,
                 self.reducer.state().request_id.as_deref(),
                 self.estimate,
@@ -5287,12 +5290,12 @@ fn retry_delay_for(
 }
 
 async fn recover_or_estimate_usage(
-    recovery: &dyn UsageRecoveryAdapter,
+    recovery: Option<&dyn UsageRecoveryAdapter>,
     kind: OperationKind,
     request_id: Option<&str>,
     estimate: UsageEstimate,
 ) -> Usage {
-    if let Some(request_id) = request_id {
+    if let (Some(recovery), Some(request_id)) = (recovery, request_id) {
         match recovery.recover_usage(kind, request_id).await {
             Ok(Some(usage)) => usage,
             Ok(None) => Usage::from_estimate(estimate),

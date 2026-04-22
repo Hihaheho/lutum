@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
             .with_default_model(ModelName::new(&model)?),
     );
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let llm = Lutum::from_parts(adapter.clone(), adapter.clone(), adapter, budget);
+    let llm = Lutum::from_parts(adapter.clone(), adapter.clone(), budget);
 
     println!(
         "\n{}  model={}  endpoint={}",

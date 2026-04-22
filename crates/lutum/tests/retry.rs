@@ -8,7 +8,7 @@ use lutum::{
     MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, RequestBudget,
     RequestExtensions, RetryPolicy, SharedPoolBudgetManager, SharedPoolBudgetOptions,
     StructuredStepOutcomeWithTools, StructuredTurnOutcome, TextTurnEvent, TextTurnState, Usage,
-    UsageEstimate,
+    UsageEstimate, UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -299,7 +299,9 @@ async fn recover_usage_error_falls_back_to_estimate_for_retry_accounting() {
                 message: "recovery failed".into(),
             },
         );
-    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
+    let adapter = Arc::new(adapter);
+    let ctx = Lutum::new(adapter.clone(), budget.clone())
+        .with_recovery(adapter as Arc<dyn UsageRecoveryAdapter>);
 
     let result = ctx
         .text_turn(input())
