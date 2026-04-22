@@ -3,7 +3,9 @@ use std::{future::Future, marker::PhantomData};
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::{Collected, Eval, Objective, PureEval, ScoreEvalError, Scored};
+use lutum_trace::RawTraceSnapshot;
+
+use crate::{Collected, CollectedRaw, Eval, Objective, PureEval, ScoreEvalError, Scored};
 
 type ScoredResult<R, EE, OE> = Result<Scored<R>, ScoreEvalError<EE, OE>>;
 
@@ -53,6 +55,18 @@ pub trait PureEvalExt: PureEval + Sized {
     {
         let collected = lutum_trace::capture(future).await;
         self.run_collected(&collected)
+    }
+
+    async fn run_future_raw<F>(
+        &self,
+        future: F,
+    ) -> (Result<Self::Report, Self::Error>, RawTraceSnapshot)
+    where
+        F: Future<Output = Self::Artifact> + Send,
+    {
+        let CollectedRaw { output, trace, raw } = lutum_trace::capture_raw(future).await;
+        let result = self.evaluate(&trace, &output);
+        (result, raw)
     }
 
     fn scored_by<'a, O>(&'a self, objective: &'a O) -> PureScoredBy<'a, Self, O>
@@ -147,6 +161,20 @@ pub trait EvalExt: Eval + Sized {
         self.run_collected(ctx, &collected).await
     }
 
+    async fn run_future_raw<F>(
+        &self,
+        ctx: &lutum::Lutum,
+        future: F,
+    ) -> (Result<Self::Report, Self::Error>, RawTraceSnapshot)
+    where
+        Self::Artifact: Send + Sync,
+        F: Future<Output = Self::Artifact> + Send,
+    {
+        let CollectedRaw { output, trace, raw } = lutum_trace::capture_raw(future).await;
+        let result = self.evaluate(ctx, &trace, &output).await;
+        (result, raw)
+    }
+
     fn scored_by<'a, O>(&'a self, objective: &'a O) -> ScoredBy<'a, Self, O>
     where
         O: Objective<Self::Report>,
@@ -193,6 +221,19 @@ where
         let collected = lutum_trace::capture(future).await;
         self.run_collected(&collected)
     }
+
+    pub async fn run_future_raw<F>(
+        &self,
+        future: F,
+    ) -> (ScoredResult<E::Report, E::Error, O::Error>, RawTraceSnapshot)
+    where
+        F: Future<Output = E::Artifact>,
+    {
+        let CollectedRaw { output, trace, raw } = lutum_trace::capture_raw(future).await;
+        let collected = Collected { output, trace };
+        let result = self.run_collected(&collected);
+        (result, raw)
+    }
 }
 
 pub struct ScoredBy<'a, E, O> {
@@ -236,6 +277,21 @@ where
     {
         let collected = lutum_trace::capture(future).await;
         self.run_collected(ctx, &collected).await
+    }
+
+    pub async fn run_future_raw<F>(
+        &self,
+        ctx: &lutum::Lutum,
+        future: F,
+    ) -> (ScoredResult<E::Report, E::Error, O::Error>, RawTraceSnapshot)
+    where
+        E::Artifact: Sync,
+        F: Future<Output = E::Artifact>,
+    {
+        let CollectedRaw { output, trace, raw } = lutum_trace::capture_raw(future).await;
+        let collected = Collected { output, trace };
+        let result = self.run_collected(ctx, &collected).await;
+        (result, raw)
     }
 }
 

@@ -112,7 +112,7 @@ where
 }
 
 impl<T> CollectedRaw<T> {
-    fn into_collected(self) -> Collected<T> {
+    pub fn into_collected(self) -> Collected<T> {
         Collected {
             output: self.output,
             trace: self.trace,

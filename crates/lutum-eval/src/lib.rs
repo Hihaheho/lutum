@@ -17,7 +17,8 @@ pub use combinators::{
 };
 pub use judge::{JudgeEval, JudgeEvalError};
 pub use lutum_trace::{
-    Collected, EventRecord, FieldValue, SpanNode, TraceEvent, TraceSnapshot, TraceSpanId,
+    Collected, CollectedRaw, EventRecord, FieldValue, RawTraceSnapshot, SpanNode, TraceEvent,
+    TraceSnapshot, TraceSpanId,
 };
 pub use objective::{
     InvertObjective, MapObjectiveError, Maximize, Minimize, Objective, ObjectiveExt,
