@@ -2426,7 +2426,7 @@ fn convert_model_input_to_chat_messages(
             ModelInputItem::Assistant(assistant_item) => {
                 match assistant_item {
                     AssistantInputItem::Text(text) => {
-                        let msg = pending_assistant.get_or_insert_with(|| ChatAssistantMessage {
+                        let msg = pending_assistant.get_or_insert(ChatAssistantMessage {
                             content: None,
                             refusal: None,
                             audio: None,
@@ -2441,7 +2441,7 @@ fn convert_model_input_to_chat_messages(
                         }));
                     }
                     AssistantInputItem::Refusal(text) => {
-                        let msg = pending_assistant.get_or_insert_with(|| ChatAssistantMessage {
+                        let msg = pending_assistant.get_or_insert(ChatAssistantMessage {
                             content: None,
                             refusal: None,
                             audio: None,
@@ -2642,17 +2642,15 @@ where
                 }
                 for choice in &event.choices {
                     let delta = &choice.delta;
-                    if let Some(content) = &delta.content {
-                        if !content.is_empty() {
-                            text_content.push_str(content);
-                            yield ErasedTextTurnEvent::TextDelta { delta: content.clone() };
-                        }
+                    if let Some(content) = &delta.content
+                        && !content.is_empty() {
+                        text_content.push_str(content);
+                        yield ErasedTextTurnEvent::TextDelta { delta: content.clone() };
                     }
-                    if let Some(refusal) = &delta.refusal {
-                        if !refusal.is_empty() {
-                            saw_refusal = true;
-                            yield ErasedTextTurnEvent::RefusalDelta { delta: refusal.clone() };
-                        }
+                    if let Some(refusal) = &delta.refusal
+                        && !refusal.is_empty() {
+                        saw_refusal = true;
+                        yield ErasedTextTurnEvent::RefusalDelta { delta: refusal.clone() };
                     }
                     for reasoning in [&delta.reasoning_content, &delta.thinking_content].into_iter().flatten() {
                         if !reasoning.is_empty() {
@@ -2824,21 +2822,19 @@ where
                 }
                 for choice in &event.choices {
                     let delta = &choice.delta;
-                    if let Some(content) = &delta.content {
-                        if !content.is_empty() {
-                            json_buffer.push_str(content);
-                            yield ErasedStructuredTurnEvent::StructuredOutputChunk {
-                                json_delta: content.clone(),
-                            };
-                        }
+                    if let Some(content) = &delta.content
+                        && !content.is_empty() {
+                        json_buffer.push_str(content);
+                        yield ErasedStructuredTurnEvent::StructuredOutputChunk {
+                            json_delta: content.clone(),
+                        };
                     }
-                    if let Some(refusal) = &delta.refusal {
-                        if !refusal.is_empty() {
-                            saw_refusal = true;
-                            yield ErasedStructuredTurnEvent::RefusalDelta {
-                                delta: refusal.clone(),
-                            };
-                        }
+                    if let Some(refusal) = &delta.refusal
+                        && !refusal.is_empty() {
+                        saw_refusal = true;
+                        yield ErasedStructuredTurnEvent::RefusalDelta {
+                            delta: refusal.clone(),
+                        };
                     }
                     for reasoning in [&delta.reasoning_content, &delta.thinking_content].into_iter().flatten() {
                         if !reasoning.is_empty() {

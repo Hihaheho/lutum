@@ -52,7 +52,7 @@ impl ParseErrorStage {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "sse_parse" => Some(Self::SseParse),
             "sse_decode" => Some(Self::SseDecode),
@@ -83,7 +83,7 @@ impl CollectErrorKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "reduction" => Some(Self::Reduction),
             "execution" => Some(Self::Execution),
@@ -108,7 +108,7 @@ impl RequestErrorKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "transport" => Some(Self::Transport),
             "http_status" => Some(Self::HttpStatus),

@@ -741,6 +741,7 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_partial(
         assistant_turn: AssistantTurn,
         committed_turn: CommittedTurn,

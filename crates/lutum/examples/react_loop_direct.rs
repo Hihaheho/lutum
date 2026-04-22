@@ -143,7 +143,7 @@ fn lookup_orders(user_id: u32) -> DbText {
 }
 
 fn format_cents(c: u32) -> String {
-    if c % 100 == 0 {
+    if c.is_multiple_of(100) {
         format!("${}", c / 100)
     } else {
         format!("${}.{:02}", c / 100, c % 100)

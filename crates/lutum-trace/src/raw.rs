@@ -85,7 +85,7 @@ pub(crate) fn parse_raw_entry(record: &EventRecord) -> Option<RawTraceEntry> {
             api: field_str(record, lutum_protocol::RAW_FIELD_API)?.to_string(),
             operation: field_str(record, lutum_protocol::RAW_FIELD_OPERATION)?.to_string(),
             request_id: optional_field_str(record, lutum_protocol::RAW_FIELD_REQUEST_ID),
-            stage: ParseErrorStage::from_str(field_str(record, lutum_protocol::RAW_FIELD_STAGE)?)?,
+            stage: ParseErrorStage::from_name(field_str(record, lutum_protocol::RAW_FIELD_STAGE)?)?,
             payload: field_str(record, lutum_protocol::RAW_FIELD_PAYLOAD)?.to_string(),
             error: field_str(record, lutum_protocol::RAW_FIELD_ERROR)?.to_string(),
         }),
@@ -94,7 +94,7 @@ pub(crate) fn parse_raw_entry(record: &EventRecord) -> Option<RawTraceEntry> {
             api: field_str(record, lutum_protocol::RAW_FIELD_API)?.to_string(),
             operation: field_str(record, lutum_protocol::RAW_FIELD_OPERATION)?.to_string(),
             request_id: optional_field_str(record, lutum_protocol::RAW_FIELD_REQUEST_ID),
-            kind: RequestErrorKind::from_str(field_str(
+            kind: RequestErrorKind::from_name(field_str(
                 record,
                 lutum_protocol::RAW_FIELD_REQUEST_ERROR_KIND,
             )?)?,
@@ -121,7 +121,7 @@ pub(crate) fn parse_raw_entry(record: &EventRecord) -> Option<RawTraceEntry> {
                 lutum_protocol::RAW_FIELD_OPERATION,
             )?)?,
             request_id: optional_field_str(record, lutum_protocol::RAW_FIELD_REQUEST_ID),
-            kind: CollectErrorKind::from_str(field_str(
+            kind: CollectErrorKind::from_name(field_str(
                 record,
                 lutum_protocol::RAW_FIELD_COLLECT_KIND,
             )?)?,
