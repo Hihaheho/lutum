@@ -127,7 +127,10 @@ fn reqwest_request_error_debug_info(error: &reqwest::Error) -> RequestErrorDebug
         error_debug: format!("{error:?}"),
         source_chain,
         is_timeout: error.is_timeout(),
+        #[cfg(not(target_family = "wasm"))]
         is_connect: error.is_connect(),
+        #[cfg(target_family = "wasm")]
+        is_connect: false,
         is_request: error.is_request(),
         is_body: error.is_body(),
         is_decode: error.is_decode(),
