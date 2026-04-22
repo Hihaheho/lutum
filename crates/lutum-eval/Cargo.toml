@@ -14,7 +14,7 @@ lutum.workspace = true
 lutum-trace.workspace = true
 thiserror.workspace = true
 paste.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "rt"] }
 
 [dev-dependencies]
 tokio.workspace = true

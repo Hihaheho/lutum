@@ -17,5 +17,5 @@ serde_json  = { workspace = true }
 schemars    = { workspace = true }
 thiserror   = { workspace = true }
 async-trait = { workspace = true }
-tokio       = { workspace = true }
+tokio       = { workspace = true, features = ["sync", "rt-multi-thread"] }
 tracing     = { workspace = true }
