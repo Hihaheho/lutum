@@ -2,6 +2,7 @@
 members = [
     "crates/lutum", "crates/lutum-claude",
     "crates/lutum-eval",
+    "crates/lutum-eval-runner",
     "crates/lutum-macros",
     "crates/lutum-openai",
     "crates/lutum-openrouter",
@@ -12,6 +13,7 @@ members = [
 default-members = [
     "crates/lutum", "crates/lutum-claude",
     "crates/lutum-eval",
+    "crates/lutum-eval-runner",
     "crates/lutum-macros",
     "crates/lutum-openai",
     "crates/lutum-openrouter",
@@ -31,6 +33,7 @@ homepage = "https://github.com/Hihaheho/lutum"
 lutum = { path = "crates/lutum", version = "0.1.0" }
 lutum-claude = { path = "crates/lutum-claude", version = "0.1.0" }
 lutum-eval = { path = "crates/lutum-eval", version = "0.1.0" }
+lutum-eval-runner = { path = "crates/lutum-eval-runner", version = "0.1.0" }
 lutum-macros = { path = "crates/lutum-macros", version = "0.1.0" }
 lutum-openai = { path = "crates/lutum-openai", version = "0.1.0" }
 lutum-openrouter = { path = "crates/lutum-openrouter", version = "0.1.0" }

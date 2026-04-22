@@ -56,6 +56,10 @@ impl TraceSnapshot {
         })
     }
 
+    pub fn span_exists(&self, name: &str) -> bool {
+        self.span(name).is_some()
+    }
+
     pub fn find_all(&self, name: &str) -> Vec<&SpanNode> {
         let mut matches = Vec::new();
         for root in &self.roots {
@@ -66,6 +70,52 @@ impl TraceSnapshot {
 
     pub fn events(&self) -> &[EventRecord] {
         &self.root_events
+    }
+
+    /// All events across the entire trace in DFS order: root-level events first,
+    /// then each root span's events (including descendants) in DFS order.
+    pub fn all_events(&self) -> impl Iterator<Item = &EventRecord> + '_ {
+        let mut all: Vec<&EventRecord> = self.root_events.iter().collect();
+        for root in &self.roots {
+            collect_all_events(root, &mut all);
+        }
+        all.into_iter()
+    }
+
+    pub fn events_matching(
+        &self,
+        pred: impl Fn(&EventRecord) -> bool,
+    ) -> Vec<&EventRecord> {
+        self.all_events().filter(|e| pred(e)).collect()
+    }
+
+    /// Returns `true` if the first DFS occurrence of each name in `names`
+    /// appears at a strictly greater DFS position than the previous name.
+    /// Returns `false` if any name is absent or out of order.
+    pub fn spans_ordered(&self, names: &[&str]) -> bool {
+        if names.is_empty() {
+            return true;
+        }
+        let mut positions: Vec<Option<usize>> = vec![None; names.len()];
+        let mut counter = 0usize;
+        for root in &self.roots {
+            collect_dfs_positions(root, names, &mut positions, &mut counter);
+        }
+        let mut last = 0usize;
+        let mut first = true;
+        for pos in &positions {
+            match pos {
+                None => return false,
+                Some(p) => {
+                    if !first && *p <= last {
+                        return false;
+                    }
+                    last = *p;
+                    first = false;
+                }
+            }
+        }
+        true
     }
 
     pub fn has_event_message(&self, msg: &str) -> bool {
@@ -101,6 +151,13 @@ impl SpanNode {
         })
     }
 
+    /// All descendants (and self) with the given name, in DFS order.
+    pub fn find_all(&self, name: &str) -> Vec<&SpanNode> {
+        let mut matches = Vec::new();
+        collect_nodes(self, name, &mut matches);
+        matches
+    }
+
     pub fn field(&self, key: &str) -> Option<&FieldValue> {
         self.fields
             .iter()
@@ -115,6 +172,20 @@ impl SpanNode {
 
     pub fn events(&self) -> &[EventRecord] {
         &self.events
+    }
+
+    /// All events in this span and its descendants in DFS order.
+    pub fn all_events(&self) -> impl Iterator<Item = &EventRecord> + '_ {
+        let mut all = Vec::new();
+        collect_all_events(self, &mut all);
+        all.into_iter()
+    }
+
+    pub fn events_matching(
+        &self,
+        pred: impl Fn(&EventRecord) -> bool,
+    ) -> Vec<&EventRecord> {
+        self.all_events().filter(|e| pred(e)).collect()
     }
 
     pub fn children(&self) -> &[SpanNode] {
@@ -159,6 +230,31 @@ fn collect_nodes<'a>(node: &'a SpanNode, name: &str, matches: &mut Vec<&'a SpanN
 
     for child in &node.children {
         collect_nodes(child, name, matches);
+    }
+}
+
+fn collect_all_events<'a>(node: &'a SpanNode, out: &mut Vec<&'a EventRecord>) {
+    out.extend(node.events.iter());
+    for child in &node.children {
+        collect_all_events(child, out);
+    }
+}
+
+fn collect_dfs_positions(
+    node: &SpanNode,
+    names: &[&str],
+    positions: &mut Vec<Option<usize>>,
+    counter: &mut usize,
+) {
+    let pos = *counter;
+    *counter += 1;
+    for (i, &name) in names.iter().enumerate() {
+        if positions[i].is_none() && node.name == name {
+            positions[i] = Some(pos);
+        }
+    }
+    for child in &node.children {
+        collect_dfs_positions(child, names, positions, counter);
     }
 }
 
@@ -269,5 +365,171 @@ fn build_node(span_data: &[SpanData], key: usize) -> SpanNode {
             .iter()
             .map(|&child| build_node(span_data, child))
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_snapshot() -> TraceSnapshot {
+        // Tree:
+        //   span_a
+        //     event("in_a")
+        //     span_b
+        //       event("in_b")
+        //       span_c
+        //         event("in_c")
+        //   span_d
+        //     event("in_d")
+        // root_events: event("root")
+        TraceSnapshot {
+            root_events: vec![EventRecord {
+                target: "t".into(),
+                level: "INFO".into(),
+                message: Some("root".into()),
+                fields: vec![],
+            }],
+            roots: vec![
+                SpanNode {
+                    name: "span_a".into(),
+                    target: "t".into(),
+                    level: "INFO".into(),
+                    fields: vec![],
+                    events: vec![EventRecord {
+                        target: "t".into(),
+                        level: "INFO".into(),
+                        message: Some("in_a".into()),
+                        fields: vec![("key".into(), FieldValue::Str("val".into()))],
+                    }],
+                    children: vec![SpanNode {
+                        name: "span_b".into(),
+                        target: "t".into(),
+                        level: "INFO".into(),
+                        fields: vec![],
+                        events: vec![EventRecord {
+                            target: "t".into(),
+                            level: "INFO".into(),
+                            message: Some("in_b".into()),
+                            fields: vec![],
+                        }],
+                        children: vec![SpanNode {
+                            name: "span_c".into(),
+                            target: "t".into(),
+                            level: "INFO".into(),
+                            fields: vec![],
+                            events: vec![EventRecord {
+                                target: "t".into(),
+                                level: "INFO".into(),
+                                message: Some("in_c".into()),
+                                fields: vec![],
+                            }],
+                            children: vec![],
+                        }],
+                    }],
+                },
+                SpanNode {
+                    name: "span_d".into(),
+                    target: "t".into(),
+                    level: "INFO".into(),
+                    fields: vec![],
+                    events: vec![EventRecord {
+                        target: "t".into(),
+                        level: "INFO".into(),
+                        message: Some("in_d".into()),
+                        fields: vec![],
+                    }],
+                    children: vec![],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn span_exists_found_and_not_found() {
+        let snap = make_snapshot();
+        assert!(snap.span_exists("span_a"));
+        assert!(snap.span_exists("span_b"));
+        assert!(snap.span_exists("span_c"));
+        assert!(snap.span_exists("span_d"));
+        assert!(!snap.span_exists("span_z"));
+    }
+
+    #[test]
+    fn all_events_order() {
+        let snap = make_snapshot();
+        let msgs: Vec<_> = snap
+            .all_events()
+            .filter_map(|e| e.message.as_deref())
+            .collect();
+        // root_events first, then DFS span events
+        assert_eq!(msgs, ["root", "in_a", "in_b", "in_c", "in_d"]);
+    }
+
+    #[test]
+    fn events_matching_by_field() {
+        let snap = make_snapshot();
+        let matched = snap.events_matching(|e| e.field("key").is_some());
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].message.as_deref(), Some("in_a"));
+    }
+
+    #[test]
+    fn spans_ordered_in_order() {
+        let snap = make_snapshot();
+        // DFS: span_a(0), span_b(1), span_c(2), span_d(3)
+        assert!(snap.spans_ordered(&["span_a", "span_b", "span_c"]));
+        assert!(snap.spans_ordered(&["span_a", "span_d"]));
+        assert!(snap.spans_ordered(&["span_b", "span_d"]));
+        assert!(snap.spans_ordered(&["span_c", "span_d"]));
+    }
+
+    #[test]
+    fn spans_ordered_out_of_order() {
+        let snap = make_snapshot();
+        assert!(!snap.spans_ordered(&["span_d", "span_a"]));
+        assert!(!snap.spans_ordered(&["span_d", "span_b"]));
+        assert!(!snap.spans_ordered(&["span_c", "span_b"]));
+    }
+
+    #[test]
+    fn spans_ordered_missing_span() {
+        let snap = make_snapshot();
+        assert!(!snap.spans_ordered(&["span_a", "span_z"]));
+    }
+
+    #[test]
+    fn spans_ordered_empty() {
+        let snap = make_snapshot();
+        assert!(snap.spans_ordered(&[]));
+    }
+
+    #[test]
+    fn span_node_find_all() {
+        let snap = make_snapshot();
+        let a = snap.span("span_a").unwrap();
+        // find_all on span_a returns span_a itself (name match) + span_b + span_c
+        let found = a.find_all("span_b");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "span_b");
+    }
+
+    #[test]
+    fn span_node_all_events_order() {
+        let snap = make_snapshot();
+        let a = snap.span("span_a").unwrap();
+        let msgs: Vec<_> = a
+            .all_events()
+            .filter_map(|e| e.message.as_deref())
+            .collect();
+        assert_eq!(msgs, ["in_a", "in_b", "in_c"]);
+    }
+
+    #[test]
+    fn span_node_events_matching() {
+        let snap = make_snapshot();
+        let a = snap.span("span_a").unwrap();
+        let matched = a.events_matching(|e| e.message.as_deref() == Some("in_b"));
+        assert_eq!(matched.len(), 1);
     }
 }

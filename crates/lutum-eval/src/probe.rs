@@ -8,9 +8,9 @@ use tokio::{
     task::JoinHandle,
 };
 
-use lutum_trace::{TraceEvent, TraceSnapshot};
+use lutum_trace::{CollectedRaw, RawTraceSnapshot, TraceEvent, TraceSnapshot};
 
-use crate::{Collected, Eval, Objective, Scored};
+use crate::{Collected, EvalRecord, Eval, Objective, RawEvalRecord, Scored};
 
 /// A mutable, live-only evaluator over a stream of trace events plus a final
 /// trace/artifact pair.
@@ -145,6 +145,50 @@ where
         }
     }
 
+    async fn run_future_with_trace<F>(
+        self,
+        ctx: &Lutum,
+        future: F,
+    ) -> (Result<P::Report, ProbeRunError<P::Error>>, TraceSnapshot)
+    where
+        F: Future<Output = P::Artifact>,
+    {
+        let dispatcher = self.dispatcher.clone();
+        let event_ctx = ctx.clone();
+        let Collected { output, trace } =
+            lutum_trace::capture_with_events(future, move |event| {
+                let _ = dispatcher.send_trace(event_ctx.clone(), event);
+            })
+            .await;
+        let trace_clone = trace.clone();
+        let result = self.run_parts(ctx, trace, output).await;
+        (result, trace_clone)
+    }
+
+    async fn run_future_with_raw_trace<F>(
+        self,
+        ctx: &Lutum,
+        future: F,
+    ) -> (
+        Result<P::Report, ProbeRunError<P::Error>>,
+        TraceSnapshot,
+        RawTraceSnapshot,
+    )
+    where
+        F: Future<Output = P::Artifact>,
+    {
+        let dispatcher = self.dispatcher.clone();
+        let event_ctx = ctx.clone();
+        let CollectedRaw { output, trace, raw } =
+            lutum_trace::capture_raw_with_events(future, move |event| {
+                let _ = dispatcher.send_trace(event_ctx.clone(), event);
+            })
+            .await;
+        let trace_clone = trace.clone();
+        let result = self.run_parts(ctx, trace, output).await;
+        (result, trace_clone, raw)
+    }
+
     async fn run_parts(
         self,
         ctx: &Lutum,
@@ -220,6 +264,43 @@ where
             .score(&report)
             .map_err(ProbeScoreError::Objective)?;
         Ok(Scored { report, score })
+    }
+
+    pub async fn run_future_record<F>(
+        self,
+        ctx: &Lutum,
+        future: F,
+    ) -> EvalRecord<P::Report, ProbeScoreError<P::Error, O::Error>>
+    where
+        F: Future<Output = P::Artifact>,
+    {
+        let (probe_result, trace) = self.runtime.run_future_with_trace(ctx, future).await;
+        let result = probe_result.map_err(ProbeScoreError::Probe).and_then(|report| {
+            self.objective
+                .score(&report)
+                .map_err(ProbeScoreError::Objective)
+                .map(|score| Scored { report, score })
+        });
+        EvalRecord { result, trace }
+    }
+
+    pub async fn run_future_raw_record<F>(
+        self,
+        ctx: &Lutum,
+        future: F,
+    ) -> RawEvalRecord<P::Report, ProbeScoreError<P::Error, O::Error>>
+    where
+        F: Future<Output = P::Artifact>,
+    {
+        let (probe_result, trace, raw) =
+            self.runtime.run_future_with_raw_trace(ctx, future).await;
+        let result = probe_result.map_err(ProbeScoreError::Probe).and_then(|report| {
+            self.objective
+                .score(&report)
+                .map_err(ProbeScoreError::Objective)
+                .map(|score| Scored { report, score })
+        });
+        RawEvalRecord { result, trace, raw }
     }
 }
 

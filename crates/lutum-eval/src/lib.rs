@@ -5,6 +5,7 @@ mod combinators;
 mod judge;
 mod objective;
 mod probe;
+mod record;
 mod score;
 
 pub use crate::probe::{
@@ -24,6 +25,7 @@ pub use objective::{
     InvertObjective, MapObjectiveError, Maximize, Minimize, Objective, ObjectiveExt,
     PassFailObjective, maximize, minimize, pass_fail,
 };
+pub use record::{EvalRecord, RawEvalRecord};
 pub use score::{Score, ScoreRangeError};
 
 /// Pure evaluation over a trace snapshot and a strongly typed artifact.

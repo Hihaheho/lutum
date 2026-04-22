@@ -1162,6 +1162,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lutum-eval-runner"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "lutum-macros"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,20 @@
+[package]
+name = "lutum-eval-runner"
+version.workspace = true
+edition.workspace = true
+description = "Trial runner utilities for lutum-eval: pass@k, pass^k, parallel execution"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["llm", "ai", "evaluation", "testing"]
+
+[dependencies]
+futures.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+serde = { workspace = true, optional = true }
+
+[features]
+serde = ["dep:serde"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

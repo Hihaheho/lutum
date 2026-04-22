@@ -63,6 +63,14 @@ where
     capture_inner(future, None, true).await
 }
 
+pub async fn capture_raw_with_events<F, T, E>(future: F, emit: E) -> CollectedRaw<T>
+where
+    F: Future<Output = T>,
+    E: Fn(TraceEvent) + Send + Sync + 'static,
+{
+    capture_inner(future, Some(Arc::new(emit)), true).await
+}
+
 type EventSink = Arc<dyn Fn(TraceEvent) + Send + Sync>;
 
 async fn capture_inner<F, T>(
