@@ -1,0 +1,232 @@
+$frontmatter {
+  title: Adapters
+  description: Configure the Claude, OpenAI, and OpenRouter adapters and compose them with Lutum.
+  tags = ["adapters", "providers"]
+}
+
+"#": Adapters
+
+"intro" = ```markdown
+Adapters translate between the canonical `ModelInput` / `LlmEvent` algebra and provider-specific
+wire formats. Lutum ships three adapters: `ClaudeAdapter` (Anthropic Messages API),
+`OpenAiAdapter` (OpenAI Responses API and OpenAI-compatible backends), and
+`OpenRouterGenerationClient` (OpenRouter usage recovery).
+```
+
+"toc".$toc = true
+
+@ "claude" {
+  "##": ClaudeAdapter
+
+  "body" = ```markdown
+`ClaudeAdapter` targets the Anthropic Claude Messages API. Enable it with the `claude` feature:
+```
+
+  "toml-example" = ```toml
+[dependencies]
+lutum = { version = "0.1.0", features = ["claude"] }
+lutum-claude = "0.1.0"
+```
+
+  "rust-example" = ```rust
+use std::sync::Arc;
+use lutum::{Lutum, ModelName, SharedPoolBudgetManager, SharedPoolBudgetOptions};
+use lutum_claude::ClaudeAdapter;
+
+let adapter = ClaudeAdapter::new(std::env::var("ANTHROPIC_API_KEY")?)
+    .with_default_model(ModelName::new("claude-opus-4-5")?);
+
+let llm = Lutum::new(
+    Arc::new(adapter),
+    SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+);
+```
+
+  @ "thinking" {
+    "###": Extended Thinking
+
+    "body" = ```markdown
+Claude supports extended thinking via a provider-specific `BudgetTokensResolver` hook. Attach it
+through `ClaudeHooks` and pass a thinking budget via `RequestExtensions`:
+```
+
+    "rust-example" = ```rust
+use lutum::ext;
+use lutum_claude::{ClaudeAdapter, ClaudeHooks, ThinkingBudget};
+
+#[lutum::impl_hook(ResolveBudgetTokens)]
+async fn my_budget_resolver(
+    extensions: &RequestExtensions,
+    last: Option<Option<u32>>,
+) -> Option<u32> {
+    extensions.get::<ThinkingBudget>().map(|b| b.0)
+}
+
+let hooks = ClaudeHooks::new().with_budget_tokens(MyBudgetResolver);
+let adapter = ClaudeAdapter::new(api_key).with_hooks(hooks);
+
+let result = session
+    .text_turn()
+    .ext(ThinkingBudget(8000))
+    .collect()
+    .await?;
+```
+
+  }
+
+}
+
+@ "openai" {
+  "##": OpenAiAdapter
+
+  "body" = ```markdown
+`OpenAiAdapter` targets the OpenAI Responses API. It also works with any OpenAI-compatible
+endpoint (Ollama, Azure OpenAI, Together AI, etc.):
+```
+
+  "toml-example" = ```toml
+[dependencies]
+lutum = { version = "0.1.0", features = ["openai"] }
+lutum-openai = "0.1.0"
+```
+
+  "rust-example" = ```rust
+use std::sync::Arc;
+use lutum::{Lutum, ModelName, SharedPoolBudgetManager, SharedPoolBudgetOptions};
+use lutum_openai::OpenAiAdapter;
+
+// Standard OpenAI
+let adapter = OpenAiAdapter::new(std::env::var("OPENAI_API_KEY")?)
+    .with_default_model(ModelName::new("gpt-4o")?);
+
+// Ollama (OpenAI-compatible)
+let adapter = OpenAiAdapter::new("ollama")
+    .with_base_url("http://localhost:11434/v1/")
+    .with_default_model(ModelName::new("llama3.2")?);
+
+let llm = Lutum::new(
+    Arc::new(adapter),
+    SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+);
+```
+
+  @ "reasoning" {
+    "###": Reasoning Effort
+
+    "body" = ```markdown
+OpenAI o-series models support a `reasoning_effort` parameter. Configure it via
+`ReasoningEffortResolver` in `OpenAiHooks`:
+```
+
+    "rust-example" = ```rust
+use lutum_openai::{OpenAiAdapter, OpenAiHooks, ReasoningEffort};
+
+#[lutum::impl_hook(ResolveReasoningEffort)]
+async fn my_resolver(
+    extensions: &RequestExtensions,
+    last: Option<Option<ReasoningEffort>>,
+) -> Option<ReasoningEffort> {
+    Some(ReasoningEffort::High)
+}
+
+let hooks = OpenAiHooks::new().with_reasoning_effort(MyResolver);
+let adapter = OpenAiAdapter::new(api_key).with_hooks(hooks);
+```
+
+  }
+
+}
+
+@ "openrouter" {
+  "##": OpenRouter
+
+  "body" = ```markdown
+OpenRouter returns usage data out-of-band via `GET /api/v1/generation`. Use
+`OpenRouterGenerationClient` as the `UsageRecoveryAdapter` and wire it in via `Lutum::from_parts`:
+```
+
+  "toml-example" = ```toml
+[dependencies]
+lutum-openrouter = "0.1.0"
+```
+
+  "rust-example" = ```rust
+use std::sync::Arc;
+use lutum::{Lutum, ModelName, SharedPoolBudgetManager, SharedPoolBudgetOptions};
+use lutum_openai::OpenAiAdapter;
+use lutum_openrouter::OpenRouterGenerationClient;
+
+let turn_adapter = Arc::new(
+    OpenAiAdapter::new(std::env::var("OPENROUTER_API_KEY")?)
+        .with_base_url("https://openrouter.ai/api/v1/")
+        .with_default_model(ModelName::new("anthropic/claude-opus-4-5")?)
+);
+
+let recovery = Arc::new(
+    OpenRouterGenerationClient::new(std::env::var("OPENROUTER_API_KEY")?)
+);
+
+let llm = Lutum::from_parts(
+    turn_adapter.clone(),
+    turn_adapter,         // completion adapter (same for OpenRouter)
+    recovery,            // usage recovery adapter
+    SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+);
+```
+
+}
+
+@ "model-selector" {
+  "##": Dynamic Model Routing
+
+  "body" = ```markdown
+Both `ClaudeAdapter` and `OpenAiAdapter` accept a `ModelSelector` for request-level model
+routing. Implement `ModelSelector::select_model(&RequestExtensions) -> ModelSelection` and attach
+it to the adapter:
+```
+
+  "rust-example" = ```rust
+use lutum_openai::{OpenAiAdapter, ModelSelection, SelectOpenaiModel};
+
+struct TenantModelRouter;
+
+impl SelectOpenaiModel for TenantModelRouter {
+    fn select_model(&self, extensions: &RequestExtensions) -> ModelSelection {
+        let model = if extensions.get::<PremiumTenant>().is_some() {
+            "gpt-4o"
+        } else {
+            "gpt-4o-mini"
+        };
+        ModelSelection { primary: Some(model.into()), fallbacks: None }
+    }
+}
+
+let adapter = OpenAiAdapter::new(api_key)
+    .with_model_selector(TenantModelRouter);
+```
+
+}
+
+@ "from-parts" {
+  "##": Mixing Adapters with from_parts
+
+  "body" = ```markdown
+`Lutum::from_parts` accepts the three adapter traits separately, allowing any combination:
+```
+
+  "rust-example" = ```rust
+// Claude turns, OpenAI completion, OpenRouter usage recovery
+let llm = Lutum::from_parts(
+    Arc::new(claude_adapter),   // dyn TurnAdapter
+    Arc::new(openai_adapter),   // dyn CompletionAdapter
+    Arc::new(openrouter),       // dyn UsageRecoveryAdapter
+    budget,
+);
+```
+
+  "body-2" = ```markdown
+This is also required when you want to use the `structured_completion` or `completion` APIs,
+since `Lutum::new` does not wire a `CompletionAdapter`.
+```
+
+}

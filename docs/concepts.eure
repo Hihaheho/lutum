@@ -1,0 +1,185 @@
+$frontmatter {
+  title: Execution Model
+  description: The three-layer execution model, streaming pipeline, and transcript storage in lutum.
+  tags = ["concepts", "architecture"]
+}
+
+"#": Execution Model
+
+"intro" = ```markdown
+Understanding the execution model helps you predict what the library does and does not do for you.
+Three layers compose cleanly: `Lutum` at the boundary, turn builders as stateless facades, and
+`Session` as an explicit transcript accumulator.
+```
+
+"toc".$toc = true
+
+@ "three-layers" {
+  "##": Three Layers
+
+  "body" = ```markdown
+| Layer | Type | Role |
+|---|---|---|
+| Execution boundary | `Lutum` | Validates `ModelInput`, reserves budget via `OwnedLease`, emits tracing, reduces the event stream |
+| Turn builder | `TextTurn` / `StructuredTurn<O>` | Stateless builder that configures a single turn and produces a stream or collected result |
+| Transcript accumulator | `Session` | Orders `ModelInputItem` values and gates writes behind explicit `commit_*` calls |
+
+Nothing is hidden. `Session` is a convenience wrapper that adds user/assistant/tool messages to a
+`ModelInput`; it is not a runtime, an event loop, or an approval gate.
+```
+
+}
+
+@ "execution-boundary" {
+  "##": Lutum — The Execution Boundary
+
+  "body" = ```markdown
+`Lutum` is the only execution boundary in the library. When you call `.collect()` or `.stream()` on a turn builder, `Lutum`:
+
+1. Validates `ModelInput` (role ordering, required fields)
+2. Reserves a budget lease via `RequestBudget`
+3. Emits a tracing `llm_turn` span with request metadata
+4. Passes the request to the `TurnAdapter`
+5. Reduces the returned event stream into typed results
+6. Finalises the lease with actual usage on completion
+
+Adapters are public because providers need an SPI boundary, but calling an adapter directly bypasses
+the execution contract. Prefer `Lutum::new(adapter, budget)` over direct adapter use.
+```
+
+  @ "from-parts" {
+    "###": Mixing Adapters with from_parts
+
+    "body" = ```markdown
+When you need a completion adapter (for `structured_completion`) or a usage recovery adapter
+(for OpenRouter), wire them explicitly:
+```
+
+    "rust-example" = ```rust
+use lutum::Lutum;
+
+// turn adapter + completion adapter + usage recovery + budget
+let llm = Lutum::from_parts(turn_adapter, completion_adapter, recovery_adapter, budget);
+```
+
+    "body-2" = ```markdown
+The type-erased turn adapter (`dyn TurnAdapter`), completion adapter (`dyn CompletionAdapter`), and
+usage recovery adapter (`dyn UsageRecoveryAdapter`) are each injected separately. This lets you mix,
+e.g., a Claude turn adapter with an OpenRouter usage recovery adapter.
+```
+
+  }
+
+}
+
+@ "streaming-pipeline" {
+  "##": Streaming Pipeline
+
+  "pipeline-diagram" = ```
+Lutum::text_turn(input)
+  → TurnAdapter::stream(request)   [provider SSE → LlmEvent]
+  → TextTurnReducer                [folds events into TextTurnState]
+  → TextTurnResult                 [sealed when Completed event arrives]
+```
+
+  "body" = ```markdown
+The reducer accumulates text deltas, tool call deltas, usage, finish reason, and — critically —
+stores the `CommittedTurn` emitted inside the `Completed` event. Adapters never reduce; they
+translate provider wire format into `LlmEvent`.
+
+You can consume the stream directly:
+```
+
+  "rust-example" = ```rust
+use futures::StreamExt as _;
+use lutum::TextTurnEvent;
+
+let mut stream = session.text_turn().stream().await?;
+
+while let Some(event) = stream.next().await {
+    match event? {
+        TextTurnEvent::TextDelta(delta) => print!("{delta}"),
+        TextTurnEvent::Completed(result) => {
+            session.commit_text(result);
+        }
+        _ => {}
+    }
+}
+```
+
+  "body-2" = ```markdown
+Or collect the whole result at once with `.collect().await?`. The streaming path is always
+primary; collection is a thin wrapper around it.
+```
+
+}
+
+@ "transcript" {
+  "##": Transcript Model
+
+  "body" = ```markdown
+Lutum stores committed turns as **exact, adapter-owned** values — not as a canonical IR. This
+preserves provider-specific fields (thinking blocks, cache control, reasoning traces) for lossless
+same-adapter replay without any normalization step at commit time.
+```
+
+  @ "committed-turn" {
+    "###": CommittedTurn
+
+    "body" = ```markdown
+`CommittedTurn = Arc<dyn TurnView + Send + Sync>`
+
+Each adapter (Claude, OpenAI) produces its own committed turn type
+(`ClaudeCommittedTurn`, `OpenAiCommittedTurn`) and implements `TurnView` + `ItemView` over it.
+
+When a committed turn is added back into a `ModelInput` as `ModelInputItem::Turn(committed_turn)`,
+the adapter:
+1. Tries `committed_turn.as_any().downcast_ref::<ClaudeCommittedTurn>()` for exact replay
+2. Falls back to `TurnView`/`ItemView` projection for cross-adapter turns
+```
+
+  }
+
+  @ "views" {
+    "###": View Traits
+
+    "body" = ```markdown
+Views are read-only, fine-grained accessors over committed turns:
+
+| Trait | Provides |
+|---|---|
+| `TurnView` | `role()`, iteration over items via `ItemView` |
+| `ItemView` | `as_text()`, `as_tool_call()`, `as_reasoning()`, `as_refusal()` |
+
+Views exist for inspection and user-driven reduction into application-specific models. They are
+not the adapter's replay mechanism — replay always goes through the adapter with exact data.
+
+If you want a portable application-specific IR (e.g. to store turns in a database), derive it
+from `TurnView`/`ItemView` in your own code.
+```
+
+  }
+
+}
+
+@ "model-input" {
+  "##": ModelInput and ModelInputItem
+
+  "body" = ```markdown
+`ModelInput` is the canonical request algebra — a flat ordered list of `ModelInputItem` values:
+
+| Variant | Content |
+|---|---|
+| `Message { role, content }` | User, system, or developer messages |
+| `Assistant(AssistantInputItem)` | Manually constructed assistant message items |
+| `ToolResult(ToolResult)` | Tool results following a tool-call turn |
+| `Turn(CommittedTurn)` | An exact adapter-owned committed turn at its natural position |
+
+The `Turn` variant is what makes context engineering precise: committed turns and new messages live
+in the same ordered list. `[user_1, Turn_0, user_2, Turn_1]` is representable by construction.
+
+`ModelInput` and `ModelInputItem` do **not** implement `Serialize`/`Deserialize`. The canonical
+request algebra is an execution concern, not a persistence concern.
+```
+
+}

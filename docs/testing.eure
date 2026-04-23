@@ -1,0 +1,207 @@
+$frontmatter {
+  title: Testing
+  description: Write deterministic integration tests with MockLlmAdapter and scenario-driven event sequences.
+  tags = ["testing", "mock"]
+}
+
+"#": Testing
+
+"intro" = ```markdown
+Lutum's integration tests use `MockLlmAdapter` with `MockTextScenario` / `MockStructuredScenario`
+to define the exact sequence of `LlmEvent`s that the mock will emit. No real API calls are needed
+for the test suite.
+```
+
+"toc".$toc = true
+
+@ "setup" {
+  "##": Setup
+
+  "body" = ```markdown
+`MockLlmAdapter` is re-exported from the top-level `lutum` crate under the `test-utils` feature:
+```
+
+  "toml-example" = ```toml
+[dev-dependencies]
+lutum = { version = "0.1.0", features = ["openai", "test-utils"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+}
+
+@ "text-scenario" {
+  "##": MockTextScenario
+
+  "body" = ```markdown
+`MockTextScenario` specifies the event sequence for a text turn. The most common scenario emits a
+few text deltas followed by a `Completed` event:
+```
+
+  "rust-example" = ```rust
+use lutum::{
+    Lutum, Session, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    MockLlmAdapter, MockTextScenario,
+};
+use std::sync::Arc;
+
+#[tokio::test]
+async fn test_basic_text_turn() {
+    let scenario = MockTextScenario::builder()
+        .text_delta("Hello")
+        .text_delta(", world!")
+        .completed()
+        .build();
+
+    let adapter = MockLlmAdapter::new().with_text_scenario(scenario);
+
+    let llm = Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+
+    let mut session = Session::new(llm);
+    session.push_user("Say hello.");
+
+    let result = session.text_turn().collect().await.unwrap();
+
+    assert_eq!(result.assistant_text(), "Hello, world!");
+    session.commit_text(result);
+
+    // Transcript now has one committed turn
+    assert_eq!(session.input().turns().count(), 1);
+}
+```
+
+}
+
+@ "structured-scenario" {
+  "##": MockStructuredScenario
+
+  "body" = ```markdown
+`MockStructuredScenario` defines the event sequence for a structured turn. Supply the expected
+output type as the generic parameter:
+```
+
+  "rust-example" = ```rust
+use lutum::{MockStructuredScenario, StructuredTurnOutcome};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct Sentiment {
+    label: String,
+    score: f32,
+}
+
+#[tokio::test]
+async fn test_structured_turn() {
+    let expected = Sentiment { label: "positive".into(), score: 0.95 };
+
+    let scenario = MockStructuredScenario::<Sentiment>::builder()
+        .structured_output(expected.clone())
+        .completed()
+        .build();
+
+    let adapter = MockLlmAdapter::new().with_structured_scenario(scenario);
+
+    let llm = Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+
+    let mut session = Session::new(llm);
+    session.push_user("Classify sentiment of: 'Great crate!'");
+
+    let result = session.structured_turn::<Sentiment>().collect().await.unwrap();
+
+    match result.semantic.clone() {
+        StructuredTurnOutcome::Structured(s) => {
+            assert_eq!(s.label, "positive");
+            assert!((s.score - 0.95).abs() < 0.01);
+            session.commit_structured(result);
+        }
+        StructuredTurnOutcome::Refusal(r) => panic!("unexpected refusal: {r}"),
+    }
+}
+```
+
+}
+
+@ "tool-scenario" {
+  "##": Testing Tool Turns
+
+  "body" = ```markdown
+For tool-enabled turns, add tool call events to the scenario. The mock emits them in order, and
+your test code executes the tools and commits the round:
+```
+
+  "rust-example" = ```rust
+use lutum::{MockTextScenario, TextStepOutcomeWithTools};
+
+#[tokio::test]
+async fn test_tool_round() {
+    let scenario = MockTextScenario::builder()
+        // First turn: model requests a tool call
+        .tool_call("weather", r#"{"city":"Tokyo"}"#)
+        .completed()
+        // Second turn (after tool result): model gives final answer
+        .text_delta("The weather in Tokyo is sunny, 24°C.")
+        .completed()
+        .build();
+
+    let adapter = MockLlmAdapter::new().with_text_scenario(scenario);
+    let llm = Lutum::new(Arc::new(adapter), budget());
+
+    let mut session = Session::new(llm);
+    session.push_user("What is the weather in Tokyo?");
+
+    loop {
+        let outcome = session
+            .text_turn()
+            .tools::<AppTools>()
+            .collect()
+            .await
+            .unwrap();
+
+        match outcome {
+            TextStepOutcomeWithTools::NeedsTools(round) => {
+                let results = execute_mock_tools(&round.tool_calls);
+                round.commit(&mut session, results).unwrap();
+            }
+            TextStepOutcomeWithTools::Finished(result) => {
+                assert!(result.assistant_text().contains("sunny"));
+                session.commit_text_with_tools(result);
+                break;
+            }
+        }
+    }
+}
+```
+
+}
+
+@ "integration-tests" {
+  "##": Integration Test Layout
+
+  "body" = ```markdown
+Lutum's own integration tests live in `crates/lutum/tests/`. Each test file focuses on a specific
+contract (session commit model, tool round validation, structured output decoding, etc.).
+
+Follow the same pattern for your own tests:
+
+1. Build a `MockTextScenario` or `MockStructuredScenario` with the event sequence to test
+2. Create a `Lutum` context with `MockLlmAdapter`
+3. Run the turn or session flow
+4. Assert on the result and transcript state
+
+Test utilities like `budget()` (returns a default `SharedPoolBudgetManager`) are available from
+the `lutum::test_utils` module when the `test-utils` feature is enabled.
+```
+
+  "tip".$mark.alert = "TIP"
+  "tip" = ```markdown
+Run the test suite with `cargo nextest run` for cleaner output and parallel test execution.
+The workspace-level `cargo.toml` has `nextest` configured with sensible defaults.
+```
+
+}

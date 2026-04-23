@@ -35,7 +35,7 @@ Several constraints remained non-negotiable:
    `OpenAiHooks`, `ClaudeHooks`, or derive-generated tool hook owners.
 ```
 
-decision = ```markdown
+decision = ````markdown
 Make `#[hooks]` the only slot-definition surface.
 
 `#[hooks]` is applied to a trait. Each async method annotated with
@@ -133,7 +133,7 @@ to zero.
 Each generated local hook dispatch method wraps execution in
 `tracing::info_span!("lutum_hook", name = "hook_name")`, so hook invocations appear in
 `lutum-trace` captures without extra user instrumentation.
-```
+````
 
 consequences = ```markdown
 - Slot definitions and owner-local storage now live in one place: a single `#[hooks]` trait

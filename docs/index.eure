@@ -1,0 +1,74 @@
+$frontmatter {
+  title: Lutum Documentation
+  description: Lutum is a composable, streaming LLM toolkit for Rust that keeps control flow in user code.
+  tags = ["overview"]
+}
+
+"#": Lutum Documentation
+
+"intro" = ```markdown
+`lutum` is a composable, streaming LLM toolkit for advanced orchestration in Rust.
+It keeps control flow in user code, preserves provider-specific power, and makes
+transcript replay an explicit part of the API instead of a hidden framework detail.
+```
+
+"toc".$toc = true
+
+@ "principles" {
+  "##": Core Principles
+
+  "body" = ```markdown
+- **No hidden agent loop.** The library does not own the loop. User code decides when to start turns, how to execute tools, whether to commit results, and how to branch or retry.
+- **Streaming is primary.** Every turn returns a stream of typed events. Collection helpers (`collect()`, `collect_with(...)`) sit on top of streaming, not the other way around.
+- **Exact transcript replay.** Committed turns are adapter-owned values that round-trip through the same adapter without information loss. Cross-adapter replay falls back to a semantic view.
+- **Convenience without control loss.** `Session` is a helper, not a runtime. `Lutum` validates and budgets, but never hides requests from you.
+```
+
+}
+
+@ "abstractions" {
+  "##": Three Core Abstractions
+
+  "body" = ```markdown
+| Abstraction | Role |
+|---|---|
+| `Lutum` | Execution boundary. Validates input, reserves budget, traces, and drives the streaming pipeline. |
+| `TextTurn` / `StructuredTurn<O>` | Thin, builder-style facades that configure a single turn. They hold no mutable state. |
+| `Session` | Transcript accumulator with an explicit commit model. Nothing is stored until you call a `commit_*` method. |
+```
+
+}
+
+@ "crates" {
+  "##": Crate Overview
+
+  "body" = ```markdown
+| Crate | Description |
+|---|---|
+| `lutum` | Public facade — re-exports everything, integration tests |
+| `lutum-claude` | Anthropic Claude Messages API adapter |
+| `lutum-openai` | OpenAI Responses API adapter (also Ollama and OpenAI-compatible) |
+| `lutum-openrouter` | OpenRouter usage-recovery wrapper |
+| `lutum-macros` | `#[derive(Toolset)]`, `#[tool_fn]`, `#[tool_input]`, hook macros |
+| `lutum-trace` | Scoped in-memory span and event capture |
+| `lutum-eval` | Trace/artifact metrics, async judge metrics, and live probes |
+```
+
+}
+
+@ "guides" {
+  "##": Guides
+
+  "body" = ```markdown
+- [Getting Started](/docs/getting-started) — install, configure an adapter, run your first turn
+- [Execution Model](/docs/concepts) — three-layer model, streaming pipeline, transcript storage
+- [Session](/docs/session) — explicit commit model, tool rounds, branching
+- [Structured Output](/docs/structured-output) — typed structured turns and completion
+- [Tools](/docs/tools) — define and execute tools with macros
+- [Hooks](/docs/hooks) — named typed async slots for cross-cutting concerns
+- [Adapters](/docs/adapters) — Claude, OpenAI, OpenRouter setup
+- [Testing](/docs/testing) — `MockLlmAdapter` and scenario-driven tests
+- [Eval & Trace](/docs/eval) — in-memory trace capture and evaluation helpers
+```
+
+}

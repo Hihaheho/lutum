@@ -1,0 +1,190 @@
+$frontmatter {
+  title: Session
+  description: The Session transcript helper — explicit commit model, tool rounds, and branching.
+  tags = ["session", "transcript"]
+}
+
+"#": Session
+
+"intro" = ```markdown
+`Session` is a transcript helper, not a higher-order runtime. It owns a `ModelInput` and an
+execution `Lutum`, exposes builder-style turn launchers, and gates all transcript writes behind
+explicit `commit_*` calls. It deliberately does not own hidden loops, retries, or branch graphs.
+```
+
+"toc".$toc = true
+
+@ "building" {
+  "##": Building and Pushing Messages
+
+  "body" = ```markdown
+Construct a `Session` from any `Lutum` context:
+```
+
+  "rust-example" = ```rust
+use lutum::{Lutum, Session};
+
+let mut session = Session::new(llm);
+
+// Push messages directly
+session.push_system("You are a code review assistant.");
+session.push_user("Review this function for readability.");
+
+// Access and modify the underlying ModelInput directly
+session.input_mut().push_user("... or build it programmatically");
+```
+
+}
+
+@ "commit-model" {
+  "##": Explicit Commit Model
+
+  "body" = ```markdown
+Running a turn does **not** mutate the transcript. The result exists only in the returned value
+until you explicitly commit it:
+```
+
+  "rust-example" = ```rust
+// Does NOT change session state
+let result = session.text_turn().collect().await?;
+
+// NOW the turn is in the transcript
+session.commit_text(result);
+```
+
+  "body-2" = ```markdown
+The same pattern applies to all turn kinds:
+
+| Outcome | Commit method |
+|---|---|
+| Text turn result | `session.commit_text(result)` |
+| Structured turn result | `session.commit_structured(result)` |
+| Text turn with tools (finished) | `session.commit_text_with_tools(result)` |
+| Structured turn with tools (finished) | `session.commit_structured_with_tools(result)` |
+| Tool round | `round.commit(&mut session, tool_results)?` |
+
+This design supports branch evaluation, approval gates, and speculative execution — you can
+run a turn, inspect the result, and decide whether to commit or discard.
+```
+
+}
+
+@ "tool-rounds" {
+  "##": Tool Rounds
+
+  "body" = ```markdown
+When the model requests tool calls, the result is a `NeedsTools` variant carrying a `round` object.
+`round.commit(...)` validates tool result ordering against the committed turn and atomically records
+both the assistant turn and the tool results:
+```
+
+  "rust-example" = ```rust
+use lutum::TextStepOutcomeWithTools;
+
+loop {
+    let outcome = session
+        .text_turn()
+        .tools::<MyTools>()
+        .collect()
+        .await?;
+
+    match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            let tool_results = round.tool_calls.iter()
+                .cloned()
+                .map(|call| execute_tool(call))
+                .collect::<Vec<_>>();
+
+            round.commit(&mut session, tool_results)?;
+            // loop continues — session now has the assistant + tool results
+        }
+        TextStepOutcomeWithTools::Finished(result) => {
+            println!("{}", result.assistant_text());
+            session.commit_text_with_tools(result);
+            break;
+        }
+    }
+}
+```
+
+  "body-2" = ```markdown
+`round.expect_one()?` extracts exactly one tool call and panics if there are zero or more than one.
+`round.expect_at_most_one()?` returns `Option<ToolCall>`. Both are convenience helpers for
+single-tool scenarios.
+```
+
+}
+
+@ "direct-access" {
+  "##": Direct Input Access
+
+  "body" = ```markdown
+`Session` exposes the underlying `ModelInput` for low-level inspection and mutation:
+```
+
+  "rust-example" = ```rust
+// Read-only access
+let input: &ModelInput = session.input();
+
+// Mutable access
+let input: &mut ModelInput = session.input_mut();
+
+// Take ownership (consumes the session)
+let input: ModelInput = session.into_input();
+```
+
+}
+
+@ "branching" {
+  "##": Branching
+
+  "body" = ```markdown
+`Session::clone()` is the branch mechanism. Because nothing is committed until you call
+`commit_*`, cloning before a turn gives you two independent transcript histories:
+```
+
+  "rust-example" = ```rust
+// Both branches share the same history up to this point
+let mut branch_a = session.clone();
+let mut branch_b = session.clone();
+
+// Run different turns on each branch
+branch_a.push_user("Explain with an analogy.");
+branch_b.push_user("Explain with pseudocode.");
+
+let result_a = branch_a.text_turn().collect().await?;
+let result_b = branch_b.text_turn().collect().await?;
+
+// Evaluate and pick the better result, then commit it to the original session
+let best = pick_better(&result_a, &result_b);
+session.commit_text(best);
+```
+
+  "note".$mark.alert = "NOTE"
+  "note" = ```markdown
+The library does not introduce transcript graph semantics or first-class branch structure. If you
+need a full branch tree, maintain it in your own data structures using `Session::clone()` as the
+primitive.
+```
+
+}
+
+@ "defaults" {
+  "##": Turn Defaults
+
+  "body" = ```markdown
+`SessionDefaults` lets you set temperature, max output tokens, and a system prompt that apply to
+every turn launched from the session, without repeating them on each builder call:
+```
+
+  "rust-example" = ```rust
+use lutum::{Session, SessionDefaults, Temperature};
+
+let defaults = SessionDefaults::default()
+    .with_temperature(Temperature::new(0.3)?)
+    .with_system("You are a code review assistant.");
+
+let mut session = Session::with_defaults(llm, defaults);
+```
+
+}

@@ -1,8 +1,12 @@
 // Lutum project configuration
 
+@ targets.docs
+globs = ["docs/[!_]*.eure"]
+schema = "https://eure.dev/v0.1.9/schemas/article.schema.eure"
+
 @ targets.adr
 globs = ["docs/adrs/**/*.eure"]
 schema = "https://eure.dev/v0.1.7/schemas/eure-adr.schema.eure"
 
 @ cli
-default-targets = ["adr"]
+default-targets = ["docs", "adr"]

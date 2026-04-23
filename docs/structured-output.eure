@@ -1,0 +1,204 @@
+$frontmatter {
+  title: Structured Output
+  description: Type-safe structured turns and completion with StructuredTurn and StructuredCompletion.
+  tags = ["structured-output", "guide"]
+}
+
+"#": Structured Output
+
+"intro" = ```markdown
+Lutum provides two paths for structured output: `StructuredTurn<O>` (transcript-integrated) and
+`structured_completion` (one-shot, no transcript). Both derive a JSON Schema from your output type
+and decode the model's response into a typed Rust value.
+```
+
+"toc".$toc = true
+
+@ "output-type" {
+  "##": Defining the Output Type
+
+  "body" = ```markdown
+The output type `O` must derive `JsonSchema` (for schema generation) and `Deserialize` (for
+response decoding). Add `schemars` and `serde` to your dependencies:
+```
+
+  "toml-example" = ```toml
+[dependencies]
+schemars = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+```
+
+  "rust-example" = ```rust
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct CodeReview {
+    /// Overall quality score from 1 (poor) to 10 (excellent).
+    score: u8,
+    /// List of specific issues found in the code.
+    issues: Vec<String>,
+    /// Suggested improvements.
+    suggestions: Vec<String>,
+}
+```
+
+  "body-2" = ```markdown
+Doc-comments on fields are included in the JSON Schema as field descriptions, which help the model
+produce well-structured output.
+```
+
+}
+
+@ "structured-turn" {
+  "##": StructuredTurn — Transcript-Integrated
+
+  "body" = ```markdown
+Use `Session::structured_turn::<O>()` when the result should participate in the transcript:
+```
+
+  "rust-example" = ````rust
+use lutum::StructuredTurnOutcome;
+
+session.push_user("Review this Rust function for quality issues:\n\n```rust\nfn add(a: i32, b: i32) -> i32 { a + b }\n```");
+
+let result = session
+    .structured_turn::<CodeReview>()
+    .collect()
+    .await?;
+
+match result.semantic.clone() {
+    StructuredTurnOutcome::Structured(review) => {
+        println!("Score: {}/10", review.score);
+        for issue in &review.issues {
+            println!("  - {issue}");
+        }
+        session.commit_structured(result);
+    }
+    StructuredTurnOutcome::Refusal(reason) => {
+        eprintln!("Model refused: {reason}");
+    }
+}
+````
+
+  "body-2" = ```markdown
+`result.semantic` is a `StructuredTurnOutcome<O>`:
+
+| Variant | Meaning |
+|---|---|
+| `Structured(O)` | The model produced valid structured output that decoded successfully |
+| `Refusal(String)` | The model explicitly refused (e.g. the request was inappropriate) |
+```
+
+}
+
+@ "structured-with-tools" {
+  "##": Structured Turn With Tools
+
+  "body" = ```markdown
+`StructuredTurn` also supports tool use via `.tools::<T>()`. The outcome variants extend to
+`NeedsTools` (tool round) and `Finished` (structured result):
+```
+
+  "rust-example" = ```rust
+use lutum::StructuredStepOutcomeWithTools;
+
+loop {
+    let outcome = session
+        .structured_turn::<CodeReview>()
+        .tools::<MyTools>()
+        .collect()
+        .await?;
+
+    match outcome {
+        StructuredStepOutcomeWithTools::NeedsTools(round) => {
+            let results = execute_tools(&round.tool_calls).await;
+            round.commit(&mut session, results)?;
+        }
+        StructuredStepOutcomeWithTools::Finished(result) => {
+            match result.semantic.clone() {
+                StructuredTurnOutcome::Structured(review) => {
+                    println!("Score: {}", review.score);
+                    session.commit_structured_with_tools(result);
+                }
+                StructuredTurnOutcome::Refusal(r) => eprintln!("{r}"),
+            }
+            break;
+        }
+    }
+}
+```
+
+}
+
+@ "completion" {
+  "##": structured_completion — One-Shot
+
+  "body" = ```markdown
+When you don't need transcript integration — for example, a single extraction call — use
+`Lutum::structured_completion`. This requires `Lutum::from_parts` because the completion adapter
+is wired separately:
+```
+
+  "rust-example" = ```rust
+use std::sync::Arc;
+use lutum::{Lutum, ModelName, OpenAiAdapter, SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredTurnOutcome};
+
+let adapter = Arc::new(
+    OpenAiAdapter::new(api_key)
+        .with_default_model(ModelName::new("gpt-4o-mini")?)
+);
+
+// from_parts is required for completion adapters
+let llm = Lutum::from_parts(
+    adapter.clone(),
+    adapter.clone(),
+    adapter,
+    SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+);
+
+let result = llm
+    .structured_completion::<CodeReview>("Review this function: fn add(a: i32, b: i32) -> i32 { a + b }")
+    .system("Return only the structured review.")
+    .collect()
+    .await?;
+
+match result.semantic {
+    StructuredTurnOutcome::Structured(review) => println!("Score: {}", review.score),
+    StructuredTurnOutcome::Refusal(r) => eprintln!("{r}"),
+}
+```
+
+  "note".$mark.alert = "NOTE"
+  "note" = ```markdown
+`structured_completion` does not produce a `CommittedTurn` and does not integrate with the
+transcript model. If you need turn history and replay, use `Session::structured_turn::<O>()`.
+```
+
+}
+
+@ "generation-params" {
+  "##": Generation Parameters
+
+  "body" = ```markdown
+Both turn and completion builders accept inline generation parameters:
+```
+
+  "rust-example" = ```rust
+use lutum::Temperature;
+
+let result = session
+    .structured_turn::<CodeReview>()
+    .temperature(Temperature::new(0.0)?)   // deterministic output
+    .max_output_tokens(1024)
+    .seed(42)
+    .collect()
+    .await?;
+```
+
+  "body-2" = ```markdown
+Setting `temperature(0.0)` is recommended for structured extraction tasks where determinism
+matters more than creative variation.
+```
+
+}

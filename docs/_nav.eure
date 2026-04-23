@@ -1,0 +1,36 @@
+title = "Lutum"
+
+groups[] {
+  title = "Get Started"
+  description: Overview and installation.
+  pages[] { path = "/docs/" label = "Overview" }
+  pages[] { path = "/docs/getting-started" label = "Getting Started" }
+}
+
+groups[] {
+  title = "Core Concepts"
+  description: The execution model, transcript, and session API.
+  pages[] { path = "/docs/concepts" label = "Execution Model" }
+  pages[] { path = "/docs/session" label = "Session" }
+  pages[] { path = "/docs/structured-output" label = "Structured Output" }
+}
+
+groups[] {
+  title = "Tools & Hooks"
+  description: Macro-based tool definitions and typed hook slots.
+  pages[] { path = "/docs/tools" label = "Tools" }
+  pages[] { path = "/docs/hooks" label = "Hooks" }
+}
+
+groups[] {
+  title = "Providers"
+  description: Adapter setup and provider-specific configuration.
+  pages[] { path = "/docs/adapters" label = "Adapters" }
+}
+
+groups[] {
+  title = "Testing & Eval"
+  description: Mock adapters, trace capture, and evaluation helpers.
+  pages[] { path = "/docs/testing" label = "Testing" }
+  pages[] { path = "/docs/eval" label = "Eval & Trace" }
+}

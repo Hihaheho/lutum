@@ -1,0 +1,241 @@
+$frontmatter {
+  title: Eval & Trace
+  description: In-memory trace capture with lutum-trace and evaluation helpers with lutum-eval.
+  tags = ["eval", "trace", "testing"]
+}
+
+"#": Eval & Trace
+
+"intro" = ```markdown
+`lutum-trace` captures in-memory spans and events from LLM turns. `lutum-eval` builds evaluation
+helpers on top of captured traces: synchronous `PureEval`, async `Eval`, and live `Probe` hooks.
+```
+
+"toc".$toc = true
+
+@ "trace-setup" {
+  "##": Trace Setup
+
+  "body" = ```markdown
+Add the crates and set up the tracing subscriber:
+```
+
+  "toml-example" = ```toml
+[dependencies]
+lutum-trace = "0.1.0"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+```
+
+  "rust-example" = ```rust
+use tracing_subscriber::layer::SubscriberExt as _;
+
+// Build a subscriber with the capture layer
+let subscriber = tracing_subscriber::registry()
+    .with(lutum_trace::layer());
+
+// You can also compose with other layers (stdout, json, etc.)
+let subscriber = tracing_subscriber::registry()
+    .with(lutum_trace::layer())
+    .with(tracing_subscriber::fmt::layer());
+```
+
+}
+
+@ "capture" {
+  "##": Capturing a Turn
+
+  "body" = ```markdown
+Wrap any async block with `lutum_trace::capture(...)` to get back the result plus a
+`TraceSnapshot`:
+```
+
+  "rust-example" = ```rust
+use lutum::Session;
+use tracing::instrument::WithSubscriber as _;
+
+let collected = lutum_trace::capture(
+    async {
+        let mut session = Session::new(llm.clone());
+        session.push_user("Say hello in one sentence.");
+        let result = session.text_turn().collect().await?;
+        Ok::<_, Box<dyn std::error::Error>>(result.assistant_text().to_string())
+    }
+    .with_subscriber(subscriber),
+)
+.await;
+
+// Access the result
+let text = collected.output.unwrap();
+
+// Inspect the trace
+if let Some(turn) = collected.trace.span("llm_turn") {
+    println!("request_id = {:?}", turn.field("request_id"));
+    println!("finish_reason = {:?}", turn.field("finish_reason"));
+}
+```
+
+  "body-2" = ```markdown
+`Collected<T>` has two fields:
+- `output: T` — the return value of the wrapped async block
+- `trace: TraceSnapshot` — structured snapshot of all spans and events
+
+`TraceSnapshot::span(name)` returns the first span with the given name. Each span exposes
+`field(key)` for accessing recorded field values and `events()` for child events.
+```
+
+}
+
+@ "raw-capture" {
+  "##": Raw Capture
+
+  "body" = ```markdown
+`lutum_trace::capture_raw(...)` captures both a structured snapshot and the raw trace entries as a
+`Vec<TraceEntry>`. Useful for debugging or custom analysis:
+```
+
+  "rust-example" = ```rust
+let collected = lutum_trace::capture_raw(
+    my_async_block.with_subscriber(subscriber)
+).await;
+
+let trace: &TraceSnapshot = &collected.trace;
+let raw: &RawTraceSnapshot = &collected.raw;
+```
+
+}
+
+@ "pure-eval" {
+  "##": PureEval — Synchronous Evaluation
+
+  "body" = ```markdown
+`PureEval` is a synchronous evaluation trait over a captured trace plus an application-specific
+artifact:
+```
+
+  "rust-example" = ```rust
+use lutum_eval::{PureEval, Scored, Score};
+
+struct ResponseLengthEval;
+
+impl PureEval for ResponseLengthEval {
+    type Artifact = String;   // the artifact type (e.g. assistant text)
+    type Report = usize;      // the report type (e.g. character count)
+
+    fn evaluate(
+        &self,
+        trace: &TraceSnapshot,
+        artifact: &Self::Artifact,
+    ) -> Scored<Self::Report> {
+        let len = artifact.len();
+        let score = Score::new((len.min(500) as f32 / 500.0 * 100.0) as u8);
+        Scored { report: len, score }
+    }
+}
+```
+
+}
+
+@ "eval-trait" {
+  "##": Eval — Async Evaluation
+
+  "body" = ```markdown
+`Eval` is the async variant. It receives a `Lutum` context in addition to the trace and artifact,
+which lets the evaluator run its own LLM calls (e.g. an LLM-as-judge):
+```
+
+  "rust-example" = ```rust
+use lutum_eval::{Eval, Scored, Score};
+use lutum::Lutum;
+use async_trait::async_trait;
+
+struct LlmJudge;
+
+#[async_trait]
+impl Eval for LlmJudge {
+    type Artifact = String;
+    type Report = String;
+
+    async fn evaluate(
+        &self,
+        llm: &Lutum,
+        trace: &TraceSnapshot,
+        artifact: &Self::Artifact,
+    ) -> Scored<Self::Report> {
+        let prompt = format!("Rate this response 1-10 and explain: {artifact}");
+        let result = llm
+            .completion(prompt)
+            .collect()
+            .await
+            .expect("judge call failed");
+
+        let text = result.text.clone();
+        let score = Score::new(extract_score(&text));
+        Scored { report: text, score }
+    }
+}
+```
+
+}
+
+@ "probe" {
+  "##": Probe — Live Evaluation
+
+  "body" = ```markdown
+`Probe` hooks into a live turn via `collect_with(...)`. It observes streaming events in real time,
+making it useful for latency monitoring, streaming quality checks, or live dashboards:
+```
+
+  "rust-example" = ```rust
+use lutum_eval::Probe;
+
+struct FirstTokenTimer {
+    start: std::time::Instant,
+}
+
+impl Probe for FirstTokenTimer {
+    fn on_text_delta(&mut self, delta: &str) {
+        let latency = self.start.elapsed();
+        println!("First token at {latency:?}: {delta:?}");
+    }
+}
+
+let result = session
+    .text_turn()
+    .collect_with(FirstTokenTimer { start: std::time::Instant::now() })
+    .await?;
+```
+
+}
+
+@ "eval-runner" {
+  "##": lutum-eval-runner — k-Metrics
+
+  "body" = ```markdown
+`lutum-eval-runner` provides `pass_at_k` and `pass_hat_k` for measuring model reliability across
+multiple trials:
+```
+
+  "toml-example" = ```toml
+[dependencies]
+lutum-eval-runner = "0.1.0"
+```
+
+  "rust-example" = ```rust
+use lutum_eval_runner::{pass_at_k, KMetric};
+
+// Run 10 trials of the same task
+let metric: KMetric = pass_at_k(
+    10,    // k — number of trials
+    1,     // n — number of successes required
+    || async {
+        let result = session.text_turn().collect().await?;
+        let passes = result.assistant_text().contains("correct answer");
+        Ok(passes)
+    },
+)
+.await?;
+
+println!("pass@10 = {:.2}", metric.rate);
+```
+
+}

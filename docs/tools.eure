@@ -1,0 +1,200 @@
+$frontmatter {
+  title: Tools
+  description: Define tools with macros, collect them into a Toolset, and execute them in user code.
+  tags = ["tools", "macros"]
+}
+
+"#": Tools
+
+"intro" = ```markdown
+Tools are declared with macros but **never executed by the library**. User code owns the tool loop.
+The library handles schema generation, tool call decoding, and transcript recording.
+```
+
+"toc".$toc = true
+
+@ "define-input" {
+  "##": Define a Tool Input
+
+  "body" = ```markdown
+Mark a struct with `#[tool_input]` to turn it into a tool definition. The struct must derive
+`JsonSchema` and `Serialize`/`Deserialize` so the library can generate a JSON Schema for the
+model and decode the model's tool call payload:
+```
+
+  "rust-example" = ```rust
+use lutum::tool_input;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct SearchResult {
+    snippets: Vec<String>,
+}
+
+#[tool_input(name = "web_search", output = SearchResult)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct WebSearchArgs {
+    /// The query to search for.
+    query: String,
+    /// Maximum number of results to return. Defaults to 5.
+    max_results: Option<u32>,
+}
+```
+
+  "body-2" = ```markdown
+The `name` attribute sets the tool name seen by the model. The `output` attribute names the result
+type that your tool implementation returns — it is used only for type safety at the call site.
+
+Doc-comments on fields are included in the JSON Schema as field descriptions.
+```
+
+}
+
+@ "define-fn" {
+  "##": Define a Tool Function (Optional)
+
+  "body" = ```markdown
+`#[tool_fn]` wraps an `async fn` and attaches it to the tool input struct as an implementation hint.
+This is optional — you can execute tools any way you like without `#[tool_fn]`:
+```
+
+  "rust-example" = ```rust
+use lutum::tool_fn;
+
+#[tool_fn(WebSearchArgs)]
+async fn web_search(args: WebSearchArgs) -> SearchResult {
+    // your real implementation here
+    SearchResult { snippets: vec![format!("Result for: {}", args.query)] }
+}
+```
+
+}
+
+@ "toolset" {
+  "##": Collect into a Toolset
+
+  "body" = ```markdown
+`#[derive(Toolset)]` generates a typed call enum and a selector type. Group all the tools your
+application exposes into one enum:
+```
+
+  "rust-example" = ```rust
+use lutum::Toolset;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Toolset)]
+enum AppTools {
+    WebSearch(WebSearchArgs),
+    ReadFile(ReadFileArgs),
+    WriteFile(WriteFileArgs),
+}
+```
+
+  "body-2" = ```markdown
+The derive generates `AppToolsCall` (the decoded call enum) and `AppToolsSelector` (a schema-bearing
+selector type). Selectors retain a typed path back to `ToolDef`, so they can be passed directly into
+`ToolPolicy::AllowOnly(...)`.
+```
+
+}
+
+@ "policy" {
+  "##": Tool Policy
+
+  "body" = ```markdown
+`ToolPolicy<T>` controls which tools are advertised to the model and what calling behaviour is
+expected:
+
+| Policy | Meaning |
+|---|---|
+| `Disabled` | No tools advertised |
+| `AllowAll` | All tools in the Toolset are available |
+| `AllowOnly(Vec<Selector>)` | Only the listed tools are advertised |
+| `RequireAll` | All tools must be called before the turn completes |
+| `RequireOnly(Vec<Selector>)` | The model must call exactly these tools |
+
+Use `.tools::<T>()` on a turn builder to enable tools, then optionally narrow the policy:
+```
+
+  "rust-example" = ```rust
+use lutum::AppToolsSelector;
+
+let outcome = session
+    .text_turn()
+    .tools::<AppTools>()
+    .allow_only([AppToolsSelector::WebSearch])  // only web_search is available this turn
+    .collect()
+    .await?;
+```
+
+}
+
+@ "execute" {
+  "##": Executing Tool Calls
+
+  "body" = ```markdown
+Tool execution always happens in user code. When the model requests tool calls, match on the
+decoded `AppToolsCall` enum:
+```
+
+  "rust-example" = ```rust
+use lutum::{TextStepOutcomeWithTools, ToolResult};
+
+loop {
+    let outcome = session
+        .text_turn()
+        .tools::<AppTools>()
+        .collect()
+        .await?;
+
+    match outcome {
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            let mut results = Vec::new();
+
+            for call in round.tool_calls.iter().cloned() {
+                let result = match call {
+                    AppToolsCall::WebSearch(c) => {
+                        let output = web_search(c.args().clone()).await;
+                        c.complete(output).unwrap()
+                    }
+                    AppToolsCall::ReadFile(c) => {
+                        let output = read_file(c.args().clone()).await;
+                        c.complete(output).unwrap()
+                    }
+                    AppToolsCall::WriteFile(c) => {
+                        let output = write_file(c.args().clone()).await;
+                        c.complete(output).unwrap()
+                    }
+                };
+                results.push(result);
+            }
+
+            round.commit(&mut session, results)?;
+        }
+        TextStepOutcomeWithTools::Finished(result) => {
+            println!("{}", result.assistant_text());
+            session.commit_text_with_tools(result);
+            break;
+        }
+    }
+}
+```
+
+  "tip".$mark.alert = "TIP"
+  "tip" = ```markdown
+For single-tool rounds, `round.expect_one()?` is cleaner than iterating the call vector.
+```
+
+}
+
+@ "nested" {
+  "##": Nested Toolsets
+
+  "body" = ```markdown
+Tool inputs can themselves contain other types that derive `Toolset` if you need hierarchical tool
+namespacing. See `crates/lutum/examples/nested_toolset.rs` for a worked example.
+```
+
+}

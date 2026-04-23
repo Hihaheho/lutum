@@ -1,0 +1,168 @@
+$frontmatter {
+  title: Getting Started
+  description: Install lutum, configure a provider adapter, and run your first turn.
+  tags = ["guide", "quickstart"]
+}
+
+"#": Getting Started
+
+"intro" = ```markdown
+This guide gets you from zero to a running text turn in about five minutes.
+```
+
+"toc".$toc = true
+
+@ "install" {
+  "##": Installation
+
+  "body" = ```markdown
+Add `lutum` to your `Cargo.toml`. Choose the feature flag for the provider you want to use:
+```
+
+  "toml-openai" = ```toml
+[dependencies]
+# OpenAI Responses API (also works with Ollama and OpenAI-compatible endpoints)
+lutum = { version = "0.1.0", features = ["openai"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+  "toml-claude" = ```toml
+[dependencies]
+# Anthropic Claude Messages API
+lutum = { version = "0.1.0", features = ["claude"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+  "body-2" = ```markdown
+For structured output or tool schemas, also add:
+```
+
+  "toml-serde" = ```toml
+schemars = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+```
+
+}
+
+@ "first-turn" {
+  "##": First Text Turn
+
+  "body" = ```markdown
+Build a `Lutum` context, open a `Session`, push messages, run a turn, and commit the result:
+```
+
+  "rust-example" = ```rust
+use std::sync::Arc;
+use lutum::{Lutum, ModelName, OpenAiAdapter, Session, SharedPoolBudgetManager, SharedPoolBudgetOptions};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let adapter = OpenAiAdapter::new(std::env::var("OPENAI_API_KEY")?)
+        .with_default_model(ModelName::new("gpt-4o-mini")?);
+
+    let llm = Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+
+    let mut session = Session::new(llm);
+    session.push_system("You are concise.");
+    session.push_user("Explain what a borrow checker does in one sentence.");
+
+    let result = session
+        .text_turn()
+        .collect()
+        .await?;
+
+    println!("{}", result.assistant_text());
+    session.commit_text(result);
+
+    Ok(())
+}
+```
+
+  "body-2" = ```markdown
+Key points:
+
+- `Lutum::new(adapter, budget)` creates the execution context.
+- `Session::new(llm)` opens a transcript.
+- `session.push_user(...)` and `session.push_system(...)` stage messages.
+- `.collect().await?` runs the turn and reduces the event stream into a result.
+- `session.commit_text(result)` stores the turn in the transcript. Nothing is stored until you call a `commit_*` method.
+```
+
+}
+
+@ "first-structured" {
+  "##": First Structured Turn
+
+  "body" = ```markdown
+Replace `text_turn()` with `structured_turn::<O>()` where `O` derives `JsonSchema` and `Deserialize`:
+```
+
+  "rust-example" = ```rust
+use lutum::{Session, StructuredTurnOutcome};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct Sentiment {
+    label: String,   // "positive", "negative", or "neutral"
+    score: f32,      // 0.0 – 1.0
+}
+
+// reuse the session from above, or build a new one
+session.push_user("Classify the sentiment of: 'I love this crate!'");
+
+let result = session
+    .structured_turn::<Sentiment>()
+    .collect()
+    .await?;
+
+match result.semantic.clone() {
+    StructuredTurnOutcome::Structured(s) => {
+        println!("{} ({:.2})", s.label, s.score);
+        session.commit_structured(result);
+    }
+    StructuredTurnOutcome::Refusal(reason) => eprintln!("refused: {reason}"),
+}
+```
+
+}
+
+@ "without-session" {
+  "##": Without Session
+
+  "body" = ```markdown
+If you don't need transcript management, drive turns directly from `Lutum`:
+```
+
+  "rust-example" = ```rust
+use lutum::{Lutum, ModelInput};
+
+let input = ModelInput::builder()
+    .system("You are concise.")
+    .user("What is 7 × 6?")
+    .build();
+
+let result = llm
+    .text_turn(input)
+    .collect()
+    .await?;
+
+println!("{}", result.assistant_text());
+```
+
+}
+
+@ "next-steps" {
+  "##": Next Steps
+
+  "body" = ```markdown
+- [Execution Model](/docs/concepts) — understand the three-layer model and transcript storage
+- [Tools](/docs/tools) — add tool calling to your turns
+- [Session](/docs/session) — explicit transcript management, multi-turn loops, and branching
+- [Adapters](/docs/adapters) — configure Claude, OpenAI, or OpenRouter
+```
+
+}

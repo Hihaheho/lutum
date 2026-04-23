@@ -1,0 +1,203 @@
+$frontmatter {
+  title: Hooks
+  description: Named, typed async function slots for cross-cutting concerns — define once, compose freely.
+  tags = ["hooks", "extensibility"]
+}
+
+"#": Hooks
+
+"intro" = ```markdown
+Hooks are named, typed async function slots. You define them inside a `#[hooks] trait`, implement
+handlers with `#[impl_hook(...)]`, and the macro-generated owner struct dispatches them as a
+fold or pick depending on the slot kind.
+```
+
+"toc".$toc = true
+
+@ "define" {
+  "##": Defining a Hook Set
+
+  "body" = ```markdown
+Annotate a trait with `#[hooks]` and place slot definitions inside it. Each slot definition is an
+`async fn` with a default implementation:
+```
+
+  "rust-example" = ```rust
+use lutum::hooks;
+
+#[hooks]
+trait AppHooks {
+    // "always": default runs first, then registered handlers chain on top.
+    // The `last: Option<R>` parameter carries the previous handler's result.
+    #[hook(always)]
+    async fn validate_prompt(prompt: &str) -> Result<(), String> {
+        if prompt.trim().is_empty() {
+            Err("prompt must not be empty".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    // "fallback": if any handler is registered, use it; otherwise use the default.
+    #[hook(fallback)]
+    async fn pick_model(request_type: &str) -> String {
+        "gpt-4o-mini".to_string()
+    }
+
+    // "singleton": last registration wins; emits a warning if overridden more than once.
+    #[hook(singleton)]
+    async fn cost_center() -> &'static str {
+        "default"
+    }
+}
+```
+
+  "body-2" = ```markdown
+The `#[hooks]` macro generates an owner struct (`AppHooks`) with builder methods and a `new()`
+constructor. Slot definitions live in the trait and are never visible at call sites — callers
+interact only with the owner struct.
+```
+
+}
+
+@ "implement" {
+  "##": Implementing a Handler
+
+  "body" = ```markdown
+`#[impl_hook(SlotType)]` marks an `async fn` as a handler for a specific slot. The signature must
+match the slot's arguments. For `always` slots, include `last: Option<R>` yourself:
+```
+
+  "rust-example" = ```rust
+use lutum::impl_hook;
+
+// Handler for the `validate_prompt` always-slot
+#[impl_hook(ValidatePrompt)]
+async fn reject_api_keys(
+    prompt: &str,
+    last: Option<Result<(), String>>,   // carries the previous handler's result
+) -> Result<(), String> {
+    if let Some(prev) = last { prev?; }  // propagate earlier failures
+    if prompt.contains("sk-") {
+        Err("prompt looks like an API key".into())
+    } else {
+        Ok(())
+    }
+}
+
+// Handler for the `pick_model` fallback-slot (no `last` parameter)
+#[impl_hook(PickModel)]
+async fn gpu_heavy_model(request_type: &str) -> String {
+    if request_type == "code" {
+        "gpt-4o".to_string()
+    } else {
+        "gpt-4o-mini".to_string()
+    }
+}
+```
+
+}
+
+@ "compose" {
+  "##": Composing the Owner
+
+  "body" = ```markdown
+Build an `AppHooks` instance and register handlers using the generated `with_*` builder methods:
+```
+
+  "rust-example" = ```rust
+let hooks = AppHooks::new()
+    .with_validate_prompt(RejectApiKeys)   // chains after the default
+    .with_pick_model(GpuHeavyModel);       // replaces the default (fallback)
+
+// Call a slot — dispatches through all registered handlers
+hooks.validate_prompt("Explain recursion.").await?;
+let model = hooks.pick_model("code").await;
+```
+
+}
+
+@ "slot-kinds" {
+  "##": Slot Kinds
+
+  "body" = ```markdown
+| Kind | Dispatch | `last` parameter |
+|---|---|---|
+| `always` | Default first, then each registered handler in registration order | Yes — carries previous result |
+| `fallback` | Registered handlers (first to last), ignoring the default if any are present | No |
+| `singleton` | Exactly one handler (or the default); last registration wins, warning on override | No |
+```
+
+}
+
+@ "builtin-hooks" {
+  "##": Built-in Hook Sets
+
+  "body" = ```markdown
+Lutum provides three pre-built hook sets for framework-level and adapter-level extensibility.
+```
+
+  @ "lutum-hooks" {
+    "###": LutumHooks
+
+    "body" = ```markdown
+`LutumHooks` is passed to `Lutum::new(...)` or `Lutum::from_parts(...)`. It currently exposes one
+singleton slot:
+
+- `resolve_usage_estimate` — returns a `UsageEstimate` for a request before it runs. Override this
+  to supply cost-based budget estimates from a custom pricing model or a usage database.
+```
+
+  }
+
+  @ "adapter-hooks" {
+    "###": ClaudeHooks and OpenAiHooks
+
+    "body" = ```markdown
+Adapter-specific hook sets configure provider-level request shaping:
+
+- `ClaudeHooks` — passed to `ClaudeAdapter::with_hooks(...)`. Exposes slots for resolving
+  thinking budget tokens (`BudgetTokensResolver`) and model selection (`SelectClaudeModel`).
+- `OpenAiHooks` — passed to `OpenAiAdapter::with_hooks(...)`. Exposes slots for resolving
+  reasoning effort (`ReasoningEffortResolver`) and model selection (`SelectOpenaiModel`).
+
+These hook sets use the same `#[hooks]` / `#[impl_hook]` pattern as user-defined hooks.
+```
+
+    "rust-example" = ```rust
+use lutum_claude::{ClaudeAdapter, ClaudeHooks};
+
+let hooks = ClaudeHooks::new().with_budget_tokens(MyBudgetResolver);
+let adapter = ClaudeAdapter::new(api_key).with_hooks(hooks);
+```
+
+  }
+
+}
+
+@ "request-extensions" {
+  "##": RequestExtensions
+
+  "body" = ```markdown
+`RequestExtensions` is a per-request opaque type-map. Use `.ext(value)` or `.extensions(map)` on
+any turn builder to attach typed metadata. Hook implementations, adapters, and `ModelSelector`
+implementations can read these values by type:
+```
+
+  "rust-example" = ```rust
+#[derive(Clone, Debug)]
+struct Tenant(&'static str);
+
+let result = session
+    .text_turn()
+    .ext(Tenant("eu-prod"))
+    .collect()
+    .await?;
+```
+
+  "body-2" = ```markdown
+This is the recommended way to pass routing keys, cost centers, or tracing metadata from
+call sites into hooks and adapters without coupling them to application types.
+```
+
+}
