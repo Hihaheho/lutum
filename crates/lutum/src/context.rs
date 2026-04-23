@@ -4672,10 +4672,21 @@ where
                 .get(tool.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| tool.description.to_string());
+            let mut input_schema = serde_json::to_value(tool.input_schema())?;
+            // Some providers (e.g. Azure OpenAI) reject object schemas that lack a
+            // "properties" field, which schemars emits for no-argument tools.
+            if input_schema.get("type") == Some(&serde_json::Value::String("object".into()))
+                && input_schema.get("properties").is_none()
+            {
+                input_schema
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("properties".into(), serde_json::json!({}));
+            }
             Ok(AdapterToolDefinition {
                 name: tool.name.to_string(),
                 description,
-                input_schema: serde_json::to_value(tool.input_schema())?,
+                input_schema,
             })
         })
         .collect::<Result<Vec<_>, serde_json::Error>>()?;
