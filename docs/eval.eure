@@ -8,7 +8,8 @@ $frontmatter {
 
 "intro" = ```markdown
 `lutum-trace` captures in-memory spans and events from LLM turns. `lutum-eval` builds evaluation
-helpers on top of captured traces: synchronous `PureEval`, async `Eval`, and live `Probe` hooks.
+helpers on top of captured traces: synchronous `PureEval`, async `Eval`, live `Probe` hooks,
+`JudgeEval` for structured LLM-as-judge evaluation, and composable combinators.
 ```
 
 "toc".$toc = true
@@ -81,6 +82,24 @@ if let Some(turn) = collected.trace.span("llm_turn") {
 
 `TraceSnapshot::span(name)` returns the first span with the given name. Each span exposes
 `field(key)` for accessing recorded field values and `events()` for child events.
+
+For live streaming of trace events alongside capture, use `capture_with_events`:
+```
+
+  "rust-example-2" = ```rust
+let collected = lutum_trace::capture_with_events(
+    my_async_block.with_subscriber(subscriber),
+    |event: TraceEvent| {
+        // called for each span/event as it is recorded
+        println!("trace event: {:?}", event.name());
+    },
+)
+.await;
+```
+
+  "body-3" = ```markdown
+`capture_raw_with_events` combines the live callback with raw entry capture (same as
+`capture_raw` but with a streaming callback).
 ```
 
 }
@@ -109,28 +128,36 @@ let raw: &RawTraceSnapshot = &collected.raw;
 
   "body" = ```markdown
 `PureEval` is a synchronous evaluation trait over a captured trace plus an application-specific
-artifact:
+artifact. It returns `Result<Self::Report, Self::Error>` — use a `!` (never) error type if the
+eval is infallible:
 ```
 
   "rust-example" = ```rust
-use lutum_eval::{PureEval, Scored, Score};
+use std::convert::Infallible;
+use lutum_eval::{PureEval, Score};
+use lutum_trace::TraceSnapshot;
 
 struct ResponseLengthEval;
 
 impl PureEval for ResponseLengthEval {
-    type Artifact = String;   // the artifact type (e.g. assistant text)
-    type Report = usize;      // the report type (e.g. character count)
+    type Artifact = String;   // e.g. assistant text
+    type Report = usize;      // e.g. character count
+    type Error = Infallible;
 
     fn evaluate(
         &self,
-        trace: &TraceSnapshot,
+        _trace: &TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Scored<Self::Report> {
-        let len = artifact.len();
-        let score = Score::new((len.min(500) as f32 / 500.0 * 100.0) as u8);
-        Scored { report: len, score }
+    ) -> Result<Self::Report, Self::Error> {
+        Ok(artifact.len())
     }
 }
+```
+
+  "body-2" = ```markdown
+Use `PureEvalExt::scored_by(objective)` to pair an eval with an `Objective` and get a
+`Scored<Report>`. Score values are `f32` in `[0.0, 1.0]` — use `Score::try_new(f32)` or
+`Score::new_clamped(f32)`.
 ```
 
 }
@@ -140,39 +167,40 @@ impl PureEval for ResponseLengthEval {
 
   "body" = ```markdown
 `Eval` is the async variant. It receives a `Lutum` context in addition to the trace and artifact,
-which lets the evaluator run its own LLM calls (e.g. an LLM-as-judge):
+which lets the evaluator run its own LLM calls. Like `PureEval`, it returns
+`Result<Self::Report, Self::Error>`:
 ```
 
   "rust-example" = ```rust
-use lutum_eval::{Eval, Scored, Score};
+use lutum_eval::Eval;
 use lutum::Lutum;
 use async_trait::async_trait;
 
-struct LlmJudge;
+struct FreeformJudge;
 
 #[async_trait]
-impl Eval for LlmJudge {
+impl Eval for FreeformJudge {
     type Artifact = String;
     type Report = String;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     async fn evaluate(
         &self,
         llm: &Lutum,
-        trace: &TraceSnapshot,
+        _trace: &TraceSnapshot,
         artifact: &Self::Artifact,
-    ) -> Scored<Self::Report> {
+    ) -> Result<Self::Report, Self::Error> {
         let prompt = format!("Rate this response 1-10 and explain: {artifact}");
-        let result = llm
-            .completion(prompt)
-            .collect()
-            .await
-            .expect("judge call failed");
-
-        let text = result.text.clone();
-        let score = Score::new(extract_score(&text));
-        Scored { report: text, score }
+        let result = llm.completion(prompt).collect().await?;
+        Ok(result.text.clone())
     }
 }
+```
+
+  "body-2" = ```markdown
+For structured LLM-as-judge evaluation, see [`JudgeEval`](#judge-eval) below — it uses
+structured output so the judge's score is decoded as a typed Rust struct rather than parsed
+from free text.
 ```
 
 }
@@ -203,6 +231,123 @@ let result = session
     .text_turn()
     .collect_with(FirstTokenTimer { start: std::time::Instant::now() })
     .await?;
+```
+
+}
+
+@ "judge-eval" {
+  "##": JudgeEval — Structured LLM-as-Judge
+
+  "body" = ```markdown
+`JudgeEval` is a ready-made `Eval` implementation that runs an LLM call with structured output
+as the judge. Supply a `render_input` closure that builds a `ModelInput` from the trace and
+artifact; the LLM's structured response becomes the `Report`:
+```
+
+  "toml-example" = ```toml
+[dependencies]
+lutum-eval = "0.1.0"
+schemars = "0.8"
+serde = { version = "1", features = ["derive"] }
+```
+
+  "rust-example" = ```rust
+use lutum_eval::{JudgeEval, EvalExt as _};
+use lutum::ModelInput;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+struct JudgeReport {
+    score: f32,          // 0.0–1.0
+    explanation: String,
+}
+
+let judge = JudgeEval::<String, JudgeReport, _>::new(|_trace, artifact| {
+    ModelInput::from_user(format!(
+        "Rate this response 0.0–1.0 and explain:\n\n{artifact}"
+    ))
+})
+.max_output_tokens(256);
+
+// Run the judge against an artifact
+let report: JudgeReport = judge
+    .evaluate(&llm, &trace, &artifact_text)
+    .await?;
+
+println!("score={}, reason={}", report.score, report.explanation);
+```
+
+  "body-2" = ```markdown
+`JudgeEval` accepts the same builder methods as turn builders (`.temperature(...)`,
+`.max_output_tokens(...)`, `.budget(...)`, `.ext(...)`) so you can configure the judge call
+independently of the main session.
+```
+
+}
+
+@ "eval-record" {
+  "##": EvalRecord
+
+  "body" = ```markdown
+`EvalRecord<R, E>` bundles a scored result with the trace that produced it. It is the standard
+return type for eval runners and eval pipelines:
+```
+
+  "rust-example" = ```rust
+use lutum_eval::EvalRecord;
+
+// EvalRecord wraps Result<Scored<R>, E> + TraceSnapshot
+let record: EvalRecord<JudgeReport, _> = /* ... from eval runner */;
+
+if record.passed() {
+    println!("score: {:?}", record.score());
+} else {
+    println!("error: {:?}", record.error());
+}
+
+// Access the trace regardless of outcome
+let span = record.trace.span("llm_turn");
+```
+
+  "body-2" = ```markdown
+`RawEvalRecord<R, E>` adds a `raw: RawTraceSnapshot` for full protocol-level debugging. Convert
+between them with `.into_raw(raw)` and `.without_raw()`.
+```
+
+}
+
+@ "combinators" {
+  "##": Eval Combinators
+
+  "body" = ```markdown
+`PureEvalExt` and `EvalExt` (auto-implemented for all `PureEval` / `Eval` implementors) expose
+combinator methods for transforming and composing evaluators:
+
+| Method | Description |
+|---|---|
+| `.map_report(f)` | Transform the report type |
+| `.map_error(f)` | Transform the error type |
+| `.contramap_artifact(f)` | Accept a different artifact type |
+| `.combine(other, f)` | Run two evals and merge their reports |
+| `.scored_by(objective)` | Pair with an `Objective` to produce `Scored<R>` |
+| `.lift()` (PureEval only) | Lift a `PureEval` into the `Eval` trait |
+
+`Objective` controls how a report becomes a `Score`. Built-in objectives:
+- `maximize(|r| r.value)` — higher is better
+- `minimize(|r| r.latency_ms)` — lower is better
+- `pass_fail(|r| r.passed)` — boolean pass/fail
+```
+
+  "rust-example" = ```rust
+use lutum_eval::{PureEvalExt as _, maximize};
+
+// Run the eval and score by response length (higher = better, capped at 500 chars)
+let scored = ResponseLengthEval
+    .scored_by(&maximize(|len: &usize| (*len).min(500) as f32 / 500.0))
+    .run_collected(&collected)?;
+
+println!("score={:.2}, length={}", scored.score.value(), scored.report);
 ```
 
 }

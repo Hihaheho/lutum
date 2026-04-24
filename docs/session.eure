@@ -1,6 +1,6 @@
 $frontmatter {
   title: Session
-  description: The Session transcript helper — explicit commit model, tool rounds, and branching.
+  description: The Session transcript helper — auto-commit model, tool rounds, branching, and agent loop.
   tags = ["session", "transcript"]
 }
 
@@ -8,8 +8,8 @@ $frontmatter {
 
 "intro" = ```markdown
 `Session` is a transcript helper, not a higher-order runtime. It owns a `ModelInput` and an
-execution `Lutum`, exposes builder-style turn launchers, and gates all transcript writes behind
-explicit `commit_*` calls. It deliberately does not own hidden loops, retries, or branch graphs.
+execution `Lutum`, exposes builder-style turn launchers, and auto-commits turns to the transcript
+when `collect()` is called. It deliberately does not own hidden loops, retries, or branch graphs.
 ```
 
 "toc".$toc = true
@@ -26,8 +26,9 @@ use lutum::{Lutum, Session};
 
 let mut session = Session::new(llm);
 
-// Push messages directly
+// Push messages by role
 session.push_system("You are a code review assistant.");
+session.push_developer("Internal instruction visible to the model only.");
 session.push_user("Review this function for readability.");
 
 // Access and modify the underlying ModelInput directly
@@ -37,34 +38,52 @@ session.input_mut().push_user("... or build it programmatically");
 }
 
 @ "commit-model" {
-  "##": Explicit Commit Model
+  "##": Commit Model
 
   "body" = ```markdown
-Running a turn does **not** mutate the transcript. The result exists only in the returned value
-until you explicitly commit it:
+`collect()` on a session-originated turn **auto-commits** the turn to the transcript immediately.
+The returned result is ready to use — no separate commit call is needed:
 ```
 
   "rust-example" = ```rust
-// Does NOT change session state
+// collect() auto-commits when called on a session-originated turn
 let result = session.text_turn().collect().await?;
 
-// NOW the turn is in the transcript
-session.commit_text(result);
+// The turn is already in the transcript — use the result directly
+println!("{}", result.assistant_text());
 ```
 
   "body-2" = ```markdown
-The same pattern applies to all turn kinds:
+To inspect or discard a result before committing, use `collect_staged()`. It returns a
+`StagedTextTurnResult` whose `.turn` field holds an `UncommittedAssistantTurn`:
+```
 
-| Outcome | Commit method |
-|---|---|
-| Text turn result | `session.commit_text(result)` |
-| Structured turn result | `session.commit_structured(result)` |
-| Text turn with tools (finished) | `session.commit_text_with_tools(result)` |
-| Structured turn with tools (finished) | `session.commit_structured_with_tools(result)` |
-| Tool round | `round.commit(&mut session, tool_results)?` |
+  "rust-example-2" = ```rust
+use lutum::CommitTurn as _;
 
-This design supports branch evaluation, approval gates, and speculative execution — you can
-run a turn, inspect the result, and decide whether to commit or discard.
+// Does NOT commit — returns a staged result
+let staged = session.text_turn().collect_staged().await?;
+
+// Inspect...
+println!("{}", staged.assistant_text());
+
+// Commit when satisfied (CommitTurn extension trait)
+staged.turn.commit(&mut session);
+// or discard without modifying the transcript
+// staged.turn.discard();
+```
+
+  "body-3" = ```markdown
+Commit behaviour by turn kind:
+
+| Turn kind | Auto-commit path | Explicit-commit path |
+|---|---|---|
+| Text turn | `session.text_turn().collect()` | `collect_staged()` + `staged.turn.commit(&mut session)` |
+| Structured turn | `session.structured_turn().collect()` | `collect_staged()` + `staged.turn.commit(&mut session)` |
+| Tool turn — `Finished` | auto-committed when `collect()` returns the variant | `collect_staged()` not available; see tool-rounds section |
+| Tool turn — `NeedsTools` | `round.commit(&mut session, tool_results)?` after executing | `round.discard()` to opt out |
+
+Note: `Lutum::text_turn(input).collect()` (not session-originated) is never auto-committed.
 ```
 
 }
@@ -99,8 +118,8 @@ loop {
             // loop continues — session now has the assistant + tool results
         }
         TextStepOutcomeWithTools::Finished(result) => {
+            // The assistant turn is already committed to the session.
             println!("{}", result.assistant_text());
-            session.commit_text_with_tools(result);
             break;
         }
     }
@@ -139,25 +158,32 @@ let input: ModelInput = session.into_input();
   "##": Branching
 
   "body" = ```markdown
-`Session::clone()` is the branch mechanism. Because nothing is committed until you call
-`commit_*`, cloning before a turn gives you two independent transcript histories:
+`Session::clone()` is the branch mechanism. Use `collect_staged()` on each branch so you can
+inspect both results before deciding which one to commit to the original session:
 ```
 
   "rust-example" = ```rust
+use lutum::CommitTurn as _;
+
 // Both branches share the same history up to this point
 let mut branch_a = session.clone();
 let mut branch_b = session.clone();
 
-// Run different turns on each branch
 branch_a.push_user("Explain with an analogy.");
 branch_b.push_user("Explain with pseudocode.");
 
-let result_a = branch_a.text_turn().collect().await?;
-let result_b = branch_b.text_turn().collect().await?;
+// collect_staged() does not auto-commit
+let staged_a = branch_a.text_turn().collect_staged().await?;
+let staged_b = branch_b.text_turn().collect_staged().await?;
 
-// Evaluate and pick the better result, then commit it to the original session
-let best = pick_better(&result_a, &result_b);
-session.commit_text(best);
+// Pick the better result and commit it to the original session
+if pick_a(&staged_a, &staged_b) {
+    staged_a.turn.commit(&mut session);
+    staged_b.turn.discard();
+} else {
+    staged_b.turn.commit(&mut session);
+    staged_a.turn.discard();
+}
 ```
 
   "note".$mark.alert = "NOTE"
@@ -173,18 +199,120 @@ primitive.
   "##": Turn Defaults
 
   "body" = ```markdown
-`SessionDefaults` lets you set temperature, max output tokens, and a system prompt that apply to
-every turn launched from the session, without repeating them on each builder call:
+`SessionDefaults` lets you set temperature, max output tokens, and a per-request token budget
+that apply to every turn launched from the session, without repeating them on each builder call.
+It has two public fields — `generation: GenerationParams` and `budget: RequestBudget`:
 ```
 
   "rust-example" = ```rust
-use lutum::{Session, SessionDefaults, Temperature};
+use lutum::{Session, SessionDefaults, GenerationParams, Temperature};
 
-let defaults = SessionDefaults::default()
-    .with_temperature(Temperature::new(0.3)?)
-    .with_system("You are a code review assistant.");
+let defaults = SessionDefaults {
+    generation: GenerationParams {
+        temperature: Some(Temperature::new(0.3)?),
+        ..Default::default()
+    },
+    ..Default::default()
+};
 
-let mut session = Session::with_defaults(llm, defaults);
+let mut session = Session::new(llm).with_defaults(defaults);
+
+// System messages are pushed directly — SessionDefaults has no system-prompt field.
+session.push_system("You are a code review assistant.");
+```
+
+}
+
+@ "agent-loop" {
+  "##": Agent Loop
+
+  "body" = ```markdown
+`Session::agent_loop()` encapsulates the standard tool-calling loop so you only need to
+supply a dispatch closure. The loop drives the model through rounds of tool calls until it
+produces a text-only response or the round limit is reached:
+```
+
+  "rust-example" = ```rust
+use lutum::{AgentLoopError, Session};
+
+let output = session
+    .agent_loop::<AppTools>()
+    .max_rounds(20)                          // default is 20
+    .on_text_delta(move |delta| {            // optional — stream text to a channel
+        let _ = tx.send(delta);
+    })
+    .run(|call| async move {
+        match call {
+            AppToolsCall::WebSearch(c) => {
+                let result = web_search(c.args().clone()).await?;
+                Ok(c.complete(result).unwrap())
+            }
+            AppToolsCall::ReadFile(c) => {
+                let result = read_file(c.args().clone()).await?;
+                Ok(c.complete(result).unwrap())
+            }
+        }
+    })
+    .await?;
+
+println!("done in {} rounds, {} tokens", output.rounds, output.usage.total_tokens);
+```
+
+  "body-2" = ```markdown
+`AgentLoopOutput` carries two fields: `rounds` (number of turns executed) and `usage` (token
+usage accumulated across all rounds). All turns and tool results are auto-committed to the
+session as the loop runs.
+
+Errors returned from the `run` future are surfaced as `AgentLoopError::Dispatch(e)`.
+Exceeding the round limit returns `AgentLoopError::RoundLimit(n)`.
+
+To restrict which tools are available during the loop, use `.available_tools(selectors)`.
+`AgentLoop` is a convenience wrapper; the equivalent hand-written loop using
+`TextStepOutcomeWithTools` works identically and is shown in the [Tool Rounds](#tool-rounds)
+section.
+```
+
+}
+
+@ "ephemeral" {
+  "##": Ephemeral Messages
+
+  "body" = ```markdown
+Ephemeral items are included in the next model request but are stripped from the transcript
+before the result is committed. They are useful for per-request instructions or context that
+should not persist in conversation history:
+```
+
+  "rust-example" = ```rust
+// Push a system message visible only to the next turn
+session.push_ephemeral_system("Focus on performance issues only.");
+
+// Or a user message, or a developer message
+session.push_ephemeral_user("(Internal: reply in under 50 words.)");
+session.push_ephemeral_developer("Active feature flags: [ff-search]");
+
+// The next collect() sees the ephemeral items; they are removed after commit
+let result = session.text_turn().collect().await?;
+// session transcript no longer contains the ephemeral messages
+```
+
+  "body-2" = ```markdown
+To include a previously-committed turn in the next request without making it permanent in the
+transcript, use `push_ephemeral_turn`:
+```
+
+  "rust-example-2" = ```rust
+// Include an earlier turn as context for one request only
+session.push_ephemeral_turn(some_committed_turn);
+let result = session.text_turn().collect().await?;
+// the ephemeral turn is not part of the session after this point
+```
+
+  "body-3" = ```markdown
+For arbitrary `ModelInputItem` values, use the generic `push_ephemeral(item)`.
+
+All `push_ephemeral_*` methods track the inserted position and atomically remove the items
+when the next turn is collected.
 ```
 
 }

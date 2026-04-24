@@ -46,25 +46,42 @@ let llm = Lutum::new(
     "###": Extended Thinking
 
     "body" = ```markdown
-Claude supports extended thinking via a provider-specific `BudgetTokensResolver` hook. Attach it
-through `ClaudeHooks` and pass a thinking budget via `RequestExtensions`:
+Claude supports extended thinking. The simplest way is to set a default budget on the adapter:
 ```
 
     "rust-example" = ```rust
-use lutum::ext;
-use lutum_claude::{ClaudeAdapter, ClaudeHooks, ThinkingBudget};
+use lutum_claude::ClaudeAdapter;
+
+let adapter = ClaudeAdapter::new(api_key)
+    .with_default_model(ModelName::new("claude-opus-4-5")?)
+    .with_default_thinking_budget(8000);   // budget_tokens applied to every request
+```
+
+    "body-2" = ```markdown
+For per-request control, implement `ResolveBudgetTokens` and register it with
+`with_resolve_budget_tokens`. The hook receives the request's `RequestExtensions` and the
+adapter's default budget, and returns the budget to use (or `None` to disable thinking):
+```
+
+    "rust-example-2" = ```rust
+use lutum_claude::{ClaudeAdapter, ResolveBudgetTokens};
+
+// User-defined extension type — not provided by lutum_claude
+#[derive(Clone)]
+struct ThinkingBudget(u32);
 
 #[lutum::impl_hook(ResolveBudgetTokens)]
 async fn my_budget_resolver(
     extensions: &RequestExtensions,
-    last: Option<Option<u32>>,
+    default: Option<u32>,
 ) -> Option<u32> {
-    extensions.get::<ThinkingBudget>().map(|b| b.0)
+    extensions.get::<ThinkingBudget>().map(|b| b.0).or(default)
 }
 
-let hooks = ClaudeHooks::new().with_budget_tokens(MyBudgetResolver);
-let adapter = ClaudeAdapter::new(api_key).with_hooks(hooks);
+let adapter = ClaudeAdapter::new(api_key)
+    .with_resolve_budget_tokens(MyBudgetResolver);
 
+// Attach a per-request budget via RequestExtensions
 let result = session
     .text_turn()
     .ext(ThinkingBudget(8000))

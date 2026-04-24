@@ -62,13 +62,13 @@ async fn test_basic_text_turn() {
     let mut session = Session::new(llm);
     session.push_user("Say hello.");
 
+    // collect() auto-commits when called on a session-originated turn
     let result = session.text_turn().collect().await.unwrap();
 
     assert_eq!(result.assistant_text(), "Hello, world!");
-    session.commit_text(result);
 
     // Transcript now has one committed turn
-    assert_eq!(session.input().turns().count(), 1);
+    assert_eq!(session.list_turns().count(), 1);
 }
 ```
 
@@ -114,11 +114,11 @@ async fn test_structured_turn() {
 
     let result = session.structured_turn::<Sentiment>().collect().await.unwrap();
 
+    // collect() auto-commits; inspect the result directly
     match result.semantic.clone() {
         StructuredTurnOutcome::Structured(s) => {
             assert_eq!(s.label, "positive");
             assert!((s.score - 0.95).abs() < 0.01);
-            session.commit_structured(result);
         }
         StructuredTurnOutcome::Refusal(r) => panic!("unexpected refusal: {r}"),
     }
@@ -169,8 +169,8 @@ async fn test_tool_round() {
                 round.commit(&mut session, results).unwrap();
             }
             TextStepOutcomeWithTools::Finished(result) => {
+                // The assistant turn is already committed to the session.
                 assert!(result.assistant_text().contains("sunny"));
-                session.commit_text_with_tools(result);
                 break;
             }
         }
