@@ -1,15 +1,18 @@
 $frontmatter {
   title: Hooks
-  description: Named, typed async function slots for cross-cutting concerns — define once, compose freely.
-  tags = ["hooks", "extensibility"]
+  description: Named, typed async extension slots for policies, adapters, and tool interception.
+  tags = ["hooks", "extensibility", "macros"]
 }
 
 "#": Hooks
 
 "intro" = ```markdown
-Hooks are named, typed async function slots. You define them inside a `#[hooks] trait`, implement
-handlers with `#[impl_hook(...)]`, and the macro-generated owner struct dispatches them as a
-fold or pick depending on the slot kind.
+Hooks are named, typed async extension slots. A `#[hooks] trait` is the user-facing
+implementation trait, and the macro generates a companion owner named `<TraitName>Set`.
+
+The implementation side is intentionally rust-analyzer friendly: implement hook traits with
+ordinary `async fn`. The generated public traits avoid `#[async_trait]` internally by spelling
+their methods as `fn -> impl Future + MaybeSend`.
 ```
 
 "toc".$toc = true
@@ -18,8 +21,9 @@ fold or pick depending on the slot kind.
   "##": Defining a Hook Set
 
   "body" = ```markdown
-Annotate a trait with `#[hooks]` and place slot definitions inside it. Each slot definition is an
-`async fn` with a default implementation:
+Annotate a trait with `#[hooks]`. Each method must be an `async fn` with a default body and one
+`#[hook(...)]` attribute. The trait remains a real trait that application types can implement.
+The generated owner/registry is `<TraitName>Set<'h>`.
 ```
 
   "rust-example" = ```rust
@@ -27,8 +31,6 @@ use lutum::hooks;
 
 #[hooks]
 trait AppHooks {
-    // "always": default runs first, then registered handlers chain on top.
-    // The `last: Option<R>` parameter carries the previous handler's result.
     #[hook(always)]
     async fn validate_prompt(prompt: &str) -> Result<(), String> {
         if prompt.trim().is_empty() {
@@ -38,46 +40,137 @@ trait AppHooks {
         }
     }
 
-    // "fallback": if any handler is registered, use it; otherwise use the default.
     #[hook(fallback)]
-    async fn pick_model(request_type: &str) -> String {
-        "gpt-4o-mini".to_string()
+    async fn choose_model(task: &str) -> String {
+        let _ = task;
+        "gpt-4.1-mini".to_string()
     }
 
-    // "singleton": last registration wins; emits a warning if overridden more than once.
     #[hook(singleton)]
     async fn cost_center() -> &'static str {
         "default"
     }
 }
+
+let hooks = AppHooksSet::new();
 ```
 
   "body-2" = ```markdown
-The `#[hooks]` macro generates an owner struct (`AppHooks`) with builder methods and a `new()`
-constructor. Slot definitions live in the trait and are never visible at call sites — callers
-interact only with the owner struct.
-```
+`#[hooks] trait AppHooks` generates:
 
+| Generated item | Purpose |
+|---|---|
+| `trait AppHooks` | The real implementation trait. You can implement this directly with `async fn`. |
+| `AppHooksSet<'h>` | The owner/registry that stores hook objects and dispatches slots. |
+| `ValidatePrompt`, `ChooseModel`, ... | Per-slot hook traits used by `with_<method>` and `#[impl_hook]`. |
+| `StatefulValidatePrompt`, ... | Mutable-state variants used with `Stateful<T>`. |
+| `with_<method>` / `register_<method>` | Register one slot implementation. |
+| `with_hooks` / `register_hooks` | Register all methods present in one `#[impl_hooks]` impl block. |
+
+The old generated-owner style (`AppHooks::new()`) is intentionally replaced by
+`AppHooksSet::new()`.
+```
 }
 
-@ "implement" {
-  "##": Implementing a Handler
+@ "impl-hooks" {
+  "##": Implementing Many Hooks
 
   "body" = ```markdown
-`#[impl_hook(SlotType)]` marks an `async fn` as a handler for a specific slot. The signature must
-match the slot's arguments. For `always` slots, include `last: Option<R>` yourself:
+Use `#[impl_hooks(AppHooksSet)] impl AppHooks for Data` when one value should provide one or more
+methods from a hook set. Only methods physically present in that impl block are registered.
+Trait default methods that you omit are not registered.
+```
+
+  "rust-example" = ```rust
+use lutum::{hooks, impl_hooks};
+
+#[hooks]
+trait AppHooks {
+    #[hook(always)]
+    async fn validate_prompt(prompt: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[hook(fallback)]
+    async fn choose_model(task: &str) -> String {
+        "gpt-4.1-mini".to_string()
+    }
+}
+
+struct Policy<'a> {
+    prefix: &'a str,
+}
+
+#[impl_hooks(AppHooksSet)]
+impl<'a> AppHooks for Policy<'a> {
+    async fn validate_prompt(
+        &self,
+        prompt: &str,
+        last: Option<Result<(), String>>,
+    ) -> Result<(), String> {
+        last.unwrap()?;
+        if prompt.contains("sk-") {
+            Err("prompt looks like an API key".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn choose_model(&self, task: &str, _last: Option<String>) -> String {
+        format!("{}:{task}", self.prefix)
+    }
+}
+
+let prefix = String::from("tenant-a");
+let policy = Policy { prefix: &prefix };
+
+let hooks = AppHooksSet::new().with_hooks(&policy);
+```
+
+  "body-2" = ```markdown
+`register_hooks(data)` wraps `data` once in a shared internal handle, then registers lightweight
+per-method adapters. The data type does not need `Clone`.
+
+You may pass an owned value or a borrowed value:
+
+| Call | Stored lifetime |
+|---|---|
+| `hooks.register_hooks(policy)` | The hook set owns the policy value. |
+| `hooks.register_hooks(&policy)` | The hook set borrows `policy` for the hook-set lifetime. |
+
+The attribute argument must be the generated hook-set type path without generic arguments, for
+example `#[impl_hooks(AppHooksSet)]` or `#[impl_hooks(my_mod::AppHooksSet)]`.
+```
+
+  "quirks".$mark.alert = "NOTE"
+  "quirks" = ```markdown
+- Methods in `#[impl_hooks]` must be `async fn`, must take `&self`, and cannot be generic methods.
+- The impl block may contain only hook methods. Associated types, constants, helper methods, and
+  non-hook items are rejected.
+- Unknown method names and signature mismatches are reported by Rust trait checking; errors may
+  point at both the implementation trait and the generated slot adapter.
+- For `always` and plain `fallback` slots, include trailing `last: Option<Return>` in the impl
+  method. For slots with `chain`, `aggregate`, or `custom`, do not include `last`.
+```
+}
+
+@ "single-slot" {
+  "##": Implementing One Hook
+
+  "body" = ```markdown
+`#[impl_hook(SlotTrait)]` is still available for single function-like handlers. It generates a
+zero-sized type named from the function in UpperCamelCase.
 ```
 
   "rust-example" = ```rust
 use lutum::impl_hook;
 
-// Handler for the `validate_prompt` always-slot
 #[impl_hook(ValidatePrompt)]
 async fn reject_api_keys(
     prompt: &str,
-    last: Option<Result<(), String>>,   // carries the previous handler's result
+    last: Option<Result<(), String>>,
 ) -> Result<(), String> {
-    if let Some(prev) = last { prev?; }  // propagate earlier failures
+    last.unwrap()?;
     if prompt.contains("sk-") {
         Err("prompt looks like an API key".into())
     } else {
@@ -85,103 +178,238 @@ async fn reject_api_keys(
     }
 }
 
-// Handler for the `pick_model` fallback-slot (no `last` parameter)
-#[impl_hook(PickModel)]
-async fn gpu_heavy_model(request_type: &str) -> String {
-    if request_type == "code" {
-        "gpt-4o".to_string()
-    } else {
-        "gpt-4o-mini".to_string()
-    }
-}
+let hooks = AppHooksSet::new().with_validate_prompt(RejectApiKeys);
 ```
 
-}
-
-@ "compose" {
-  "##": Composing the Owner
-
-  "body" = ```markdown
-Build an `AppHooks` instance and register handlers using the generated `with_*` builder methods:
+  "body-2" = ```markdown
+`with_<method>(hook)` consumes and returns the hook set, so it is convenient for builder chains.
+`register_<method>(&mut self, hook)` mutates an existing hook set and returns `&mut Self`.
 ```
-
-  "rust-example" = ```rust
-let hooks = AppHooks::new()
-    .with_validate_prompt(RejectApiKeys)   // chains after the default
-    .with_pick_model(GpuHeavyModel);       // replaces the default (fallback)
-
-// Call a slot — dispatches through all registered handlers
-hooks.validate_prompt("Explain recursion.").await?;
-let model = hooks.pick_model("code").await;
-```
-
 }
 
 @ "slot-kinds" {
   "##": Slot Kinds
 
   "body" = ```markdown
-| Kind | Dispatch | `last` parameter |
-|---|---|---|
-| `always` | Default first, then each registered handler in registration order | Yes — carries previous result |
-| `fallback` | Registered handlers (first to last), ignoring the default if any are present | No |
-| `singleton` | Exactly one handler (or the default); last registration wins, warning on override | No |
+| Kind | No registered hooks | With registered hooks | `last` |
+|---|---|---|---|
+| `always` | Run the default | Run default first, then hooks in registration order | Yes, unless `chain`, `aggregate`, or `custom` is set |
+| `fallback` | Run the default | Run registered hooks instead of the default | Yes for plain fallback, no with `chain`, `aggregate`, or `custom` |
+| `singleton` | Run the default | Run the single registered hook | Never |
+
+For `singleton`, the last registration wins. Lutum emits a tracing warning when a singleton slot
+is overwritten.
 ```
 
+  "body-2" = ```markdown
+Plain `always` and plain `fallback` dispatch pass `last: Option<Return>` to each registered hook.
+For `always`, `last` starts as `Some(default_output)`. For `fallback`, `last` starts as `None`
+because the default is skipped whenever any hook is registered.
+```
+}
+
+@ "companions" {
+  "##": Chain Aggregate Finalize
+
+  "body" = ```markdown
+Hook slots can opt into companion behaviours:
+
+| Option | Companion trait | Effect |
+|---|---|---|
+| `chain = Type` | `Chain<Output>` | Inspect each output and stop dispatch when it returns `ControlFlow::Break(())`. |
+| `aggregate = Type` | `Aggregate<Output>` or `AggregateInto<Input, Output>` | Collect multiple hook outputs and reduce them into one value. |
+| `finalize = Type` | `Finalize<Output>` or `FinalizeInto<Input, Output>` | Transform the final dispatch result before returning it. |
+| `output = Type` | Used with aggregate/finalize | Changes the hook-set method return type while hook implementations still return the method's declared type. |
+
+`aggregate` and `finalize` are mutually exclusive. `output` requires either `aggregate` or
+`finalize`.
+```
+
+  "rust-example" = ```rust
+#[derive(Default)]
+struct Join;
+
+impl lutum::Aggregate<String> for Join {
+    async fn call(&self, outputs: Vec<String>) -> String {
+        outputs.join(", ")
+    }
+}
+
+#[hooks]
+trait LabelHooks {
+    #[hook(always, aggregate = Join)]
+    async fn label(name: &str) -> String {
+        format!("default:{name}")
+    }
+}
+```
+
+  "body-2" = ```markdown
+Built-in companions:
+
+| Type | Behaviour |
+|---|---|
+| `ShortCircuit<T, E>` | A `Chain<Result<T, E>>` that stops on the first `Err`. |
+| `FirstSuccess<T>` | A `Chain<Option<T>>` that stops on the first `Some`. |
+
+Companion trait implementations should also be written with `async fn`; no `#[async_trait]` is
+needed.
+```
+
+  "quirks".$mark.alert = "NOTE"
+  "quirks" = ```markdown
+- `fallback + chain` runs hooks when present. If every hook continues, it falls back to the
+  default at the end.
+- `fallback + aggregate` does not run the default when hooks are present. With no hooks, the
+  default is returned directly, or aggregated as a single item when `output = Type` is used.
+- `always + aggregate` includes the default output as the first aggregate item.
+- `chain` sees outputs before `aggregate` or `finalize`.
+```
+}
+
+@ "stateful" {
+  "##": Stateful Hooks
+
+  "body" = ```markdown
+Use `Stateful<T>` when a hook needs mutable state. Implement the generated
+`Stateful<SlotName>` trait for your state type, then register `Stateful::new(value)`.
+```
+
+  "rust-example" = ```rust
+use lutum::Stateful;
+
+struct Counter {
+    next: usize,
+}
+
+impl StatefulNextId for Counter {
+    async fn call_mut(&mut self, seed: usize, last: Option<usize>) -> usize {
+        let current = self.next.max(last.unwrap_or(seed));
+        self.next = current + 1;
+        current
+    }
+}
+
+let hooks = IdHooksSet::new().with_next_id(Stateful::new(Counter { next: 0 }));
+```
+
+  "body-2" = ```markdown
+Stateful hooks are protected by an internal async mutex. Re-entering the same stateful hook while
+it is already running calls `on_reentrancy(err)`. The default implementation panics, but a
+stateful hook can override it and return a slot-specific value.
+```
+}
+
+@ "lifetimes" {
+  "##": Lifetimes and Send
+
+  "body" = ```markdown
+Hook sets have a lifetime: `<TraitName>Set<'h>`. Hook objects only need to live for `'h`; they no
+longer need to be `'static`, and they do not need to implement `Clone`.
+
+The hook set itself derives `Clone`. Cloning a hook set clones the internal `Arc` handles, so both
+sets point at the same registered hook objects.
+```
+
+  "rust-example" = ```rust
+struct Borrowed<'a> {
+    table: &'a std::collections::HashSet<String>,
+}
+
+#[impl_hooks(AppHooksSet)]
+impl<'a> AppHooks for Borrowed<'a> {
+    async fn choose_model(&self, task: &str, _last: Option<String>) -> String {
+        if self.table.contains(task) {
+            "special".to_string()
+        } else {
+            "default".to_string()
+        }
+    }
+}
+
+let table = std::collections::HashSet::new();
+let policy = Borrowed { table: &table };
+let hooks = AppHooksSet::new().with_hooks(&policy);
+```
+
+  "body-2" = ```markdown
+Native targets use `MaybeSend` and `MaybeSync` as aliases for `Send` and `Sync` requirements.
+Wasm targets make these marker traits no-ops, so hook futures may be `!Send` on
+`wasm32-unknown-unknown`.
+
+A `Lutum`, adapter, or other owner that stores hooks behind an existing `'static` boundary may
+still require a `...HooksSet<'static>`. Borrowed non-`'static` hooks are usable where the hook set
+itself stays local.
+```
+}
+
+@ "arguments" {
+  "##": Argument Handling
+
+  "body" = ```markdown
+The dispatch method on `<TraitName>Set` keeps the argument types from the hook definition.
+Generated per-slot traits normalize arguments for replay:
+
+| Slot argument | Per-slot hook trait parameter |
+|---|---|
+| `&str` | `String` |
+| `&T` where `T != str` | `&T` |
+| `T` | `T` |
+
+`&str` is owned as `String` internally so multiple hooks can receive the same value without
+lifetime-heavy closure bounds. `#[impl_hooks]` adapts this back to the implementation trait, so an
+`impl AppHooks for Data` method can still take `&str`.
+```
+
+  "body-2" = ```markdown
+Owned by-value arguments require `Clone` on the hook-set dispatch method when the value may need
+to be replayed through the default and multiple hooks. Non-`str` references are passed by
+reference and do not require cloning the referent.
+```
+}
+
+@ "limitations" {
+  "##": Macro Limits
+
+  "body" = ```markdown
+`#[hooks]` currently supports plain, non-generic traits only:
+
+- no trait generics,
+- no supertraits,
+- no associated items,
+- no methods without default bodies,
+- no `last` parameter in the hook-set trait definition.
+
+`#[hook(custom = path)]` is an internal extension point used by generated tool hooks. It marks a
+fallback slot as a custom pipeline and is not a general user extension mechanism today.
+```
 }
 
 @ "builtin-hooks" {
   "##": Built-in Hook Sets
 
   "body" = ```markdown
-Lutum provides three pre-built hook sets for framework-level and adapter-level extensibility.
+Lutum exports built-in hook traits and hook sets:
+
+| Trait | Owner | Used by |
+|---|---|---|
+| `LutumHooks` | `LutumHooksSet<'h>` | `Lutum::with_hooks(...)` and `Lutum::from_parts_with_hooks(...)` |
+| `OpenAiHooks` | `OpenAiHooksSet<'h>` | `OpenAiAdapter::with_hooks(...)` |
+| `ClaudeHooks` | `ClaudeHooksSet<'h>` | `ClaudeAdapter::with_hooks(...)` |
+| `{Tools}Hooks` | `{Tools}HooksSet<'h>` | Generated by `#[derive(Toolset)]`; see `docs/tools.eure` |
+
+Adapter/context hook sets are commonly stored at `'static`, so borrowed hooks only work there if
+the surrounding adapter/context also has a compatible lifetime.
 ```
-
-  @ "lutum-hooks" {
-    "###": LutumHooks
-
-    "body" = ```markdown
-`LutumHooks` is passed to `Lutum::new(...)` or `Lutum::from_parts(...)`. It currently exposes one
-singleton slot:
-
-- `resolve_usage_estimate` — returns a `UsageEstimate` for a request before it runs. Override this
-  to supply cost-based budget estimates from a custom pricing model or a usage database.
-```
-
-  }
-
-  @ "adapter-hooks" {
-    "###": ClaudeHooks and OpenAiHooks
-
-    "body" = ```markdown
-Adapter-specific hook sets configure provider-level request shaping:
-
-- `ClaudeHooks` — passed to `ClaudeAdapter::with_hooks(...)`. Exposes slots for resolving
-  thinking budget tokens (`BudgetTokensResolver`) and model selection (`SelectClaudeModel`).
-- `OpenAiHooks` — passed to `OpenAiAdapter::with_hooks(...)`. Exposes slots for resolving
-  reasoning effort (`ReasoningEffortResolver`) and model selection (`SelectOpenaiModel`).
-
-These hook sets use the same `#[hooks]` / `#[impl_hook]` pattern as user-defined hooks.
-```
-
-    "rust-example" = ```rust
-use lutum_claude::{ClaudeAdapter, ClaudeHooks};
-
-let hooks = ClaudeHooks::new().with_budget_tokens(MyBudgetResolver);
-let adapter = ClaudeAdapter::new(api_key).with_hooks(hooks);
-```
-
-  }
-
 }
 
 @ "request-extensions" {
   "##": RequestExtensions
 
   "body" = ```markdown
-`RequestExtensions` is a per-request opaque type-map. Use `.ext(value)` or `.extensions(map)` on
-any turn builder to attach typed metadata. Hook implementations, adapters, and `ModelSelector`
-implementations can read these values by type:
+`RequestExtensions` is a per-request opaque type map. Use `.ext(value)` or `.extensions(map)` on
+turn builders to attach typed metadata. Hook implementations, adapters, and model selectors can
+read these values by type.
 ```
 
   "rust-example" = ```rust
@@ -194,10 +422,4 @@ let result = session
     .collect()
     .await?;
 ```
-
-  "body-2" = ```markdown
-This is the recommended way to pass routing keys, cost centers, or tracing metadata from
-call sites into hooks and adapters without coupling them to application types.
-```
-
 }

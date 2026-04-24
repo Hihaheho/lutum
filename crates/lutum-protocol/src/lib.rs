@@ -33,7 +33,9 @@ pub use error::{
     AgentError, BoxError, NoToolsContractViolation, RequestFailure, RequestFailureKind,
 };
 pub use extensions::RequestExtensions;
-pub use hooks::{HookReentrancyError, Stateful};
+pub use hooks::{
+    HookFuture, HookObject, HookReentrancyError, MaybeSend, MaybeSync, Stateful, boxed_hook_future,
+};
 pub use llm::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
     AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, BackoffPolicy,

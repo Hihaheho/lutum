@@ -2,7 +2,7 @@
 ///
 /// What gets captured:
 ///   - `llm_turn` spans emitted by the lutum core (one per API call)
-///   - `lutum_hook` spans for any `LutumHooks` invocations
+///   - `lutum_hook` spans for any `LutumHooksSet` invocations
 ///   - User-defined spans that opt-in via `lutum.capture = true`
 ///
 /// User spans below wrap each tool execution so the trace shows the full
@@ -123,7 +123,7 @@ fn dump_trace(snapshot: &TraceSnapshot) {
 
 // ---- main ------------------------------------------------------------------
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // Install the capture layer.  No other layer is added — the capture layer
     // records all lutum:: spans plus any span that opts in with lutum.capture=true.

@@ -1,0 +1,36 @@
+error[E0599]: no method named `register_select_label` found for mutable reference `&mut OtherHooksSet<'__lutum_hooks>` in the current scope
+  --> tests/ui/impl_hooks_wrong_hookset.rs:21:14
+   |
+21 |     async fn select_label(&self, label: String) -> String {
+   |              ^^^^^^^^^^^^
+   |
+help: there is a method `register_other_label` with a similar name
+   |
+21 -     async fn select_label(&self, label: String) -> String {
+21 +     async fn register_other_label(&self, label: String) -> String {
+   |
+
+error[E0277]: the trait bound `Policy: __LutumAppHooksSetRegisterHooks<'_>` is not satisfied
+  --> tests/ui/impl_hooks_wrong_hookset.rs:28:26
+   |
+28 |     hooks.register_hooks(Policy);
+   |           -------------- ^^^^^^ unsatisfied trait bound
+   |           |
+   |           required by a bound introduced by this call
+   |
+help: the trait `__LutumAppHooksSetRegisterHooks<'_>` is not implemented for `Policy`
+  --> tests/ui/impl_hooks_wrong_hookset.rs:17:1
+   |
+17 | struct Policy;
+   | ^^^^^^^^^^^^^
+help: this trait has no implementations, consider adding one
+  --> tests/ui/impl_hooks_wrong_hookset.rs:1:1
+   |
+ 1 | #[lutum::hooks]
+   | ^^^^^^^^^^^^^^^
+note: required by a bound in `AppHooksSet::<'__lutum_hooks>::register_hooks`
+  --> tests/ui/impl_hooks_wrong_hookset.rs:1:1
+   |
+ 1 | #[lutum::hooks]
+   | ^^^^^^^^^^^^^^^ required by this bound in `AppHooksSet::<'__lutum_hooks>::register_hooks`
+   = note: this error originates in the attribute macro `lutum::hooks` (in Nightly builds, run with -Z macro-backtrace for more info)

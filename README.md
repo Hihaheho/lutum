@@ -45,7 +45,7 @@ endpoints such as OpenAI or Ollama.
 [dependencies]
 lutum = { version = "0.1.0", features = ["openai"] }
 # Pick your favorite async runtime
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt"] }
 
 # Only if you use structured output or tool schemas
 schemars = { version = "1", features = ["derive"] }
@@ -86,7 +86,7 @@ use lutum::{
     SharedPoolBudgetOptions,
 };
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let adapter = OpenAiAdapter::new(std::env::var("TOKEN")?)
         .with_base_url(std::env::var("ENDPOINT")?)
@@ -227,7 +227,7 @@ enum Tools {
     Weather(WeatherArgs),
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let adapter = OpenAiAdapter::new(std::env::var("TOKEN")?)
         .with_base_url(std::env::var("ENDPOINT")?)
@@ -288,8 +288,9 @@ execution for the rest.
 
 ## Hooks
 
-Hooks are named, typed async slots. Define them inside a local `#[hooks] trait`, implement
-handlers with `#[impl_hook(...)]`, and call the generated methods from your own code.
+Hooks are named, typed async slots. Define them inside a local `#[hooks] trait`, implement one
+slot with `#[impl_hook(...)]` or several slots with `#[impl_hooks(...)]`, and call the generated
+`<TraitName>Set` methods from your own code.
 
 ```rust
 #[lutum::hooks]
@@ -319,14 +320,9 @@ async fn reject_secrets(
     }
 }
 
-#[lutum::hooks]
-struct AppHooks {
-    prompt_validators: ValidatePrompt,
-}
-
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let hooks = AppHooks::new().with_validate_prompt(RejectSecrets);
+    let hooks = AppHooksSet::new().with_validate_prompt(RejectSecrets);
 
     hooks
         .validate_prompt("Explain borrow checking in one paragraph.")
@@ -338,6 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - Slot definitions live inside one `#[hooks] trait` and never declare `last`.
 - `#[impl_hook(SlotType)]` is exact-signature: write `last: Option<R>` yourself whenever the slot trait has it.
+- `#[impl_hooks(AppHooksSet)] impl AppHooks for Data` registers only the methods present in that impl block.
 - `always`: run the default implementation first, then chain registered hooks on top
 - `fallback`: use registered hooks if present, otherwise run the default
 - `singleton`: pick one override or use the default; the last registration wins and emits a warning
@@ -345,9 +342,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Core hooks often take `&Lutum` as their first argument and are provider-agnostic.
 Provider-specific hooks live in owner-local hook sets:
 
-- `LutumHooks` configures built-in runtime hooks such as `resolve_usage_estimate`
-- `OpenAiHooks` configures OpenAI request-shaping hooks and is passed to `OpenAiAdapter::with_hooks(...)`
-- `ClaudeHooks` configures Claude request-shaping hooks and is passed to `ClaudeAdapter::with_hooks(...)`
+- `LutumHooksSet` configures built-in runtime hooks such as `resolve_usage_estimate`
+- `OpenAiHooksSet` configures OpenAI request-shaping hooks and is passed to `OpenAiAdapter::with_hooks(...)`
+- `ClaudeHooksSet` configures Claude request-shaping hooks and is passed to `ClaudeAdapter::with_hooks(...)`
 
 Attach request-scoped metadata inline on builders with `.ext(...)` or `.extensions(...)`:
 
@@ -451,7 +448,7 @@ struct Draft {
 struct LengthEval;
 
 struct ScaledLengthEval {
-    hooks: EvalHooks,
+    hooks: EvalHooksSet<'static>,
 }
 
 impl PureEval for LengthEval {
@@ -492,7 +489,7 @@ let pure_report = LengthEval.run_future(async {
 }).await?;
 
 let eval = ScaledLengthEval {
-    hooks: EvalHooks::new().with_score_bias(DoubleScore),
+    hooks: EvalHooksSet::new().with_score_bias(DoubleScore),
 };
 
 let eval_report = eval.run_future(&llm, async {
@@ -571,8 +568,10 @@ impl Probe for ResponseQuality {
     }
 }
 
-fn response_quality_hooks(dispatcher: ProbeHandle<ResponseQuality>) -> ResponseQualityHooks {
-    ResponseQualityHooks::new().with_validate_response(move |response: &str| {
+fn response_quality_hooks(
+    dispatcher: ProbeHandle<ResponseQuality>,
+) -> ResponseQualityHooksSet<'static> {
+    ResponseQualityHooksSet::new().with_validate_response(move |response: &str| {
         let dispatcher = dispatcher.clone();
         let response = response.to_owned();
         async move {

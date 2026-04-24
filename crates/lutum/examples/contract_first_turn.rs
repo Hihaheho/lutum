@@ -39,7 +39,7 @@ async fn ask(llm: &Lutum, system: &str, user: impl Into<String>) -> anyhow::Resu
     Ok((result.assistant_text(), result.usage))
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 #[rustfmt::skip]
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());

@@ -1,25 +1,26 @@
 $frontmatter {
   title: Tools
-  description: Define tools with macros, collect them into a Toolset, and execute them in user code.
-  tags = ["tools", "macros"]
+  description: Define tools with macros, collect them into a Toolset, intercept them with hooks, and execute them in user code.
+  tags = ["tools", "macros", "hooks"]
 }
 
 "#": Tools
 
 "intro" = ```markdown
-Tools are declared with macros but **never executed by the library**. User code owns the tool loop.
-The library handles schema generation, tool call decoding, and transcript recording.
+Tools are declared with macros but **never executed by the library**. User code owns the tool
+loop. Lutum handles schema generation, provider request configuration, tool-call decoding,
+hook-driven pre-execution decisions, and transcript-safe commit validation.
 ```
 
 "toc".$toc = true
 
 @ "define-input" {
-  "##": Define a Tool Input
+  "##": Define Tool Input
 
   "body" = ```markdown
-Mark a struct with `#[tool_input]` to turn it into a tool definition. The struct must derive
-`JsonSchema` and `Serialize`/`Deserialize` so the library can generate a JSON Schema for the
-model and decode the model's tool call payload:
+Use `#[tool_input]` when you want to define the input type yourself. The input type must be
+serializable, deserializable, schema-bearing, cloneable, and `'static`; the output type has the
+same requirements.
 ```
 
   "rust-example" = ```rust
@@ -37,46 +38,74 @@ struct SearchResult {
 struct WebSearchArgs {
     /// The query to search for.
     query: String,
-    /// Maximum number of results to return. Defaults to 5.
+    /// Maximum number of results to return.
     max_results: Option<u32>,
 }
 ```
 
   "body-2" = ```markdown
-The `name` attribute sets the tool name seen by the model. The `output` attribute names the result
-type that your tool implementation returns — it is used only for type safety at the call site.
+The macro generates a call wrapper named `<Input>Call`, for example `WebSearchArgsCall`.
 
-Doc-comments on fields are included in the JSON Schema as field descriptions.
+| Method | Meaning |
+|---|---|
+| `.metadata()` | Access the `ToolMetadata` (`id`, `name`, raw arguments). |
+| `.input()` | Read the decoded input. |
+| `.input_mut()` | Mutate the decoded input before completing. |
+| `.into_input()` | Take only the decoded input. |
+| `.into_parts()` | Take metadata and decoded input. |
+| `.complete(output)` | Convert an output into a provider-ready `ToolResult`. |
+| `.handled(output)` | Build a `HandledTool<Input, Output>` for hook-short-circuited calls. |
+
+Doc comments on fields become JSON Schema descriptions. `#[tool_input]` also supports enums; the
+enum schema is used as the single tool's input schema.
 ```
-
 }
 
 @ "define-fn" {
-  "##": Define a Tool Function (Optional)
+  "##": Define Tool Function
 
   "body" = ```markdown
-`#[tool_fn]` wraps an `async fn` and attaches it to the tool input struct as an implementation hint.
-This is optional — you can execute tools any way you like without `#[tool_fn]`:
+Use `#[tool_fn]` when the tool can be represented as a plain async Rust function. The function
+must return `Result<Output, Error>`.
 ```
 
   "rust-example" = ```rust
 use lutum::tool_fn;
 
-#[tool_fn(WebSearchArgs)]
-async fn web_search(args: WebSearchArgs) -> SearchResult {
-    // your real implementation here
-    SearchResult { snippets: vec![format!("Result for: {}", args.query)] }
+#[tool_fn]
+async fn web_search(
+    /// The query to search for.
+    query: String,
+    /// Maximum number of results to return.
+    max_results: Option<u32>,
+) -> Result<SearchResult, SearchError> {
+    Ok(SearchResult {
+        snippets: vec![format!("Result for: {query}")],
+    })
 }
 ```
 
+  "body-2" = ```markdown
+`#[tool_fn]` generates:
+
+| Item | Example |
+|---|---|
+| Input struct | `WebSearchInput` |
+| Call wrapper | `WebSearchInputCall` |
+| `ToolInput` impl | Uses the function name as the default tool name |
+| `.call()` helper | Executes the original async function and returns its `Result` |
+
+Function parameter doc comments become field descriptions. Parameters annotated with `#[skip]`
+are not exposed to the model schema and must be supplied by execution context.
+```
 }
 
 @ "toolset" {
-  "##": Collect into a Toolset
+  "##": Derive Toolset
 
   "body" = ```markdown
-`#[derive(Toolset)]` generates a typed call enum and a selector type. Group all the tools your
-application exposes into one enum:
+Group the tools available in one turn with `#[derive(Toolset)]` on an enum. Each regular variant
+must contain exactly one `ToolInput` payload.
 ```
 
   "rust-example" = ```rust
@@ -93,61 +122,98 @@ enum AppTools {
 ```
 
   "body-2" = ```markdown
-The derive generates `AppToolsCall` (the decoded call enum) and `AppToolsSelector` (a schema-bearing
-selector type). Selectors retain a typed path back to `ToolDef`, so they can be passed directly into
-`ToolPolicy::AllowOnly(...)`.
+The derive generates:
+
+| Type | Meaning |
+|---|---|
+| `AppToolsCall` | Decoded tool-call enum, one variant per tool. |
+| `AppToolsHandled` | Hook-handled call enum, one variant per tool. |
+| `AppToolsSelector` | Selector enum used by availability, requirements, and description overrides. |
+| `AppToolsHooks` | Real hook implementation trait generated via `#[hooks]`. |
+| `AppToolsHooksSet<'h>` | Hook owner/registry generated via `#[hooks]`. |
+
+The toolset itself implements `Toolset`; toolsets with generated hooks also implement
+`HookableToolset`.
 ```
 
+  "body-3" = ```markdown
+Selectors expose `all()`, `name()`, `definition()`, `definitions()`, `try_from_name()`, and
+`from_name()`. For nested toolsets, `try_from_name()` delegates to flattened nested selectors.
+
+The generated call enum exposes:
+
+| Method | Meaning |
+|---|---|
+| `.metadata()` | Provided by `ToolCallWrapper`. |
+| `.selector()` | Return the generated selector for this call. |
+| `.into_input()` | Convert into the original toolset enum containing input values. |
+| `.into_parts()` | Return metadata and the original input enum. |
+| `.hook(&hooks)` | Apply generated tool hooks to one call. |
+```
 }
 
-@ "policy" {
-  "##": Tool Policy
+@ "availability" {
+  "##": Availability and Requirements
 
   "body" = ```markdown
-`ToolPolicy<T>` controls which tools are advertised to the model and what calling behaviour is
-expected:
+`ToolAvailability<S>` controls which tool definitions are sent to the model:
 
-| Policy | Meaning |
+| Value | Meaning |
 |---|---|
-| `Disabled` | No tools advertised |
-| `AllowAll` | All tools in the Toolset are available |
-| `AllowOnly(Vec<Selector>)` | Only the listed tools are advertised |
-| `RequireAll` | All tools must be called before the turn completes |
-| `RequireOnly(Vec<Selector>)` | The model must call exactly these tools |
+| `Default` | All default-on tools. This is the default. |
+| `All` | Every tool, including default-off tools. |
+| `Only(Vec<S>)` | Exactly the listed selectors; ignores default-on/off status. |
+| `DefaultPlus(Vec<S>)` | Default-on tools plus specific extra selectors. |
 
-Use `.tools::<T>()` on a turn builder to enable tools, then optionally narrow the policy:
+Mark a regular variant `#[tool(off)]` to hide that tool from `Default`. Mark a nested toolset
+variant `#[toolset(off)]` to hide the whole nested group from `Default`.
 ```
 
   "rust-example" = ```rust
-use lutum::AppToolsSelector;
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Toolset)]
+enum AppTools {
+    WebSearch(WebSearchArgs),
+    ReadFile(ReadFileArgs),
+    #[tool(off)]
+    DeleteFile(DeleteFileArgs),
+}
 
 let outcome = session
     .text_turn()
     .tools::<AppTools>()
-    .allow_only([AppToolsSelector::WebSearch])  // only web_search is available this turn
+    .available_tools_default_plus([AppToolsSelector::DeleteFile])
     .collect()
     .await?;
 ```
 
+  "body-2" = ```markdown
+`ToolRequirement<S>` controls what the model is asked to do:
+
+| Value | Builder | Meaning |
+|---|---|---|
+| `Optional` | default | The model may call tools or answer directly. |
+| `AtLeastOne` | `.require_any_tool()` | The model should call at least one available tool. |
+| `Specific(S)` | `.require_tool(selector)` | The model should call a specific available tool. |
+
+If a specific required tool is not in the resolved available set, Lutum returns an invalid tool
+constraint error before sending the request.
+```
 }
 
 @ "execute" {
-  "##": Executing Tool Calls
+  "##": Execute Calls
 
   "body" = ```markdown
-Tool execution always happens in user code. When the model requests tool calls, match on the
-decoded `AppToolsCall` enum:
+Execution stays in user code. When a turn returns `NeedsTools(round)`, match on
+`round.tool_calls`, execute the requested functions, then commit exactly one result for each
+assistant tool call.
 ```
 
   "rust-example" = ```rust
-use lutum::{TextStepOutcomeWithTools, ToolResult};
+use lutum::TextStepOutcomeWithTools;
 
 loop {
-    let outcome = session
-        .text_turn()
-        .tools::<AppTools>()
-        .collect()
-        .await?;
+    let outcome = session.text_turn().tools::<AppTools>().collect().await?;
 
     match outcome {
         TextStepOutcomeWithTools::NeedsTools(round) => {
@@ -156,16 +222,13 @@ loop {
             for call in round.tool_calls.iter().cloned() {
                 let result = match call {
                     AppToolsCall::WebSearch(c) => {
-                        let output = web_search(c.args().clone()).await;
-                        c.complete(output).unwrap()
+                        c.complete(web_search(c.input().clone()).await?)?
                     }
                     AppToolsCall::ReadFile(c) => {
-                        let output = read_file(c.args().clone()).await;
-                        c.complete(output).unwrap()
+                        c.complete(read_file(c.input().clone()).await?)?
                     }
                     AppToolsCall::WriteFile(c) => {
-                        let output = write_file(c.args().clone()).await;
-                        c.complete(output).unwrap()
+                        c.complete(write_file(c.input().clone()).await?)?
                     }
                 };
                 results.push(result);
@@ -173,28 +236,353 @@ loop {
 
             round.commit(&mut session, results)?;
         }
-        TextStepOutcomeWithTools::Finished(result) => {
-            println!("{}", result.assistant_text());
-            session.commit_text_with_tools(result);
-            break;
-        }
+        TextStepOutcomeWithTools::Finished(result) => break result,
     }
 }
 ```
 
-  "tip".$mark.alert = "TIP"
-  "tip" = ```markdown
-For single-tool rounds, `round.expect_one()?` is cleaner than iterating the call vector.
+  "body-2" = ```markdown
+Commit validation checks missing, extra, duplicate, and mismatched tool results. Results are
+ordered to match the assistant turn before being appended to the transcript.
+
+Convenience methods:
+
+| Method | Meaning |
+|---|---|
+| `round.expect_one()?` | Return exactly one call or error. |
+| `round.expect_at_most_one()?` | Return zero or one call or error. |
+| `round.discard()` | Drop the uncommitted assistant turn. |
+```
+}
+
+@ "tool-hooks-overview" {
+  "##": Tool Hooks Overview
+
+  "body" = ```markdown
+`#[derive(Toolset)]` also generates a hook set. For `enum AppTools`, the hook trait is
+`AppToolsHooks` and the owner is `AppToolsHooksSet<'h>`.
+
+For each regular tool variant, two hook slots are generated:
+
+| Tool variant | Execution hook | Description hook |
+|---|---|---|
+| `Weather(WeatherArgs)` | method `weather_hook`, trait `WeatherHook` | method `weather_description_hook`, trait `WeatherDescriptionHook` |
+
+Execution hooks run before your tool function. Description hooks compute dynamic schema
+description overrides before the request is sent.
 ```
 
+  "rust-example" = ```rust
+use lutum::{ToolDecision, ToolMetadata, impl_hooks};
+
+struct Policy;
+
+#[impl_hooks(AppToolsHooksSet)]
+impl AppToolsHooks for Policy {
+    async fn weather_hook(
+        &self,
+        metadata: &ToolMetadata,
+        input: WeatherArgs,
+    ) -> ToolDecision<WeatherArgs, WeatherResult> {
+        let _ = metadata;
+        if input.city.trim().is_empty() {
+            ToolDecision::Reject("city must not be blank".into())
+        } else {
+            ToolDecision::RunNormally(input)
+        }
+    }
+
+    async fn weather_description_hook(&self, def: &lutum::ToolDef) -> Option<String> {
+        Some(format!("{}. Use metric units.", def.description))
+    }
+}
+
+let hooks = AppToolsHooksSet::new().with_hooks(Policy);
+```
+
+  "body-2" = ```markdown
+Tool hook sets support the same hook API as ordinary `#[hooks]` sets:
+
+| API | Use |
+|---|---|
+| `.with_weather_hook(h)` / `.register_weather_hook(h)` | Register one execution hook. |
+| `.with_weather_description_hook(h)` | Register one description hook. |
+| `.with_hooks(policy)` / `.register_hooks(policy)` | Register multiple methods from one `#[impl_hooks]` implementation. |
+| Borrowed policy values | `AppToolsHooksSet::new().with_hooks(&policy)` stores hooks for the hook-set lifetime. |
+
+Single-function `#[impl_hook(WeatherHook)]` remains supported when one function should implement
+one slot.
+```
+}
+
+@ "tool-hook-decisions" {
+  "##": Tool Hook Decisions
+
+  "body" = ```markdown
+Execution hooks return `ToolDecision<Input, Output>`.
+
+| Variant | Effect |
+|---|---|
+| `RunNormally(input)` | Continue the hook pipeline with this possibly edited input. If no later hook handles the call, user code executes the tool with this input. |
+| `Complete(output)` | Stop the hook pipeline and commit this output as a handled tool result. User code does not execute the tool. |
+| `Reject(reason)` | Stop the hook pipeline and commit a standard rejection result for the tool call. |
+
+Tool execution hooks are generated as `#[hook(fallback, custom = tool_decision_pipeline)]`.
+The default is `RunNormally(input)`.
+```
+
+  "body-2" = ```markdown
+Pipeline details:
+
+- With no registered hooks, the outcome is `Unhandled(original_call)`.
+- Registered hooks run in registration order.
+- `RunNormally(new_input)` threads `new_input` into the next hook.
+- `Complete(output)` becomes `ToolHookOutcome::Handled(AppToolsHandled::...)`.
+- `Reject(reason)` becomes `ToolHookOutcome::Rejected(RejectedToolCall { source: Hook, ... })`.
+- If every hook returns `RunNormally`, the final edited input is written back to the pending call.
+
+The pipeline logs decisions to the `lutum::tool_hook` tracing target with tool name, call id,
+decision, and effective input JSON where available.
+```
+
+  "rust-example" = ```rust
+#[lutum::impl_hook(WeatherHook)]
+async fn normalize_weather(
+    _metadata: &lutum::ToolMetadata,
+    mut input: WeatherArgs,
+) -> lutum::ToolDecision<WeatherArgs, WeatherResult> {
+    input.city = input.city.trim().to_string();
+    lutum::ToolDecision::RunNormally(input)
+}
+
+#[lutum::impl_hook(WeatherHook)]
+async fn cache_tokyo(
+    _metadata: &lutum::ToolMetadata,
+    input: WeatherArgs,
+) -> lutum::ToolDecision<WeatherArgs, WeatherResult> {
+    if input.city == "Tokyo" {
+        lutum::ToolDecision::Complete(WeatherResult {
+            forecast: "cached".into(),
+        })
+    } else {
+        lutum::ToolDecision::RunNormally(input)
+    }
+}
+
+let hooks = AppToolsHooksSet::new()
+    .with_weather_hook(NormalizeWeather)
+    .with_weather_hook(CacheTokyo);
+```
+}
+
+@ "apply-hooks" {
+  "##": Apply Hooks
+
+  "body" = ```markdown
+Apply hooks to a whole tool round with `round.apply_hooks(&hooks).await`.
+This returns `ToolRoundPlan<T>`.
+```
+
+  "rust-example" = ```rust
+let plan = round.apply_hooks(&tool_hooks).await;
+
+let mut pending_results = Vec::new();
+for call in plan.pending_calls().iter().cloned() {
+    let result = match call {
+        AppToolsCall::WebSearch(c) => c.complete(web_search(c.input().clone()).await?)?,
+        AppToolsCall::ReadFile(c) => c.complete(read_file(c.input().clone()).await?)?,
+        AppToolsCall::WriteFile(c) => c.complete(write_file(c.input().clone()).await?)?,
+    };
+    pending_results.push(result);
+}
+
+plan.commit(&mut session, pending_results)?;
+```
+
+  "body-2" = ```markdown
+`ToolRoundPlan<T>` exposes:
+
+| Field/accessor | Meaning |
+|---|---|
+| `pending` / `pending_calls()` | Calls that still need user-code execution. |
+| `handled` / `handled_calls()` | Calls short-circuited by hooks. |
+| `rejected` / `rejected_calls()` | Calls rejected by hooks. |
+| `recoverable_tool_call_issues()` | Calls that were invalid, unknown, or unavailable but recoverable. |
+| `continue_suggestion()` | Optional hint that the model should continue after recoverable issues. |
+| `apply_hooks(&more_hooks)` | Apply another hook pass to only the remaining pending calls. |
+| `commit(session, pending_results)` | Commit handled + rejected + pending results. |
+| `discard()` | Drop the uncommitted assistant turn. |
+
+`commit` automatically includes handled and rejected hook results. `pending_results` should only
+contain results for calls still in `pending`.
+```
+
+  "body-3" = ```markdown
+Recoverable tool-call issues are auto-committed as standard rejection results unless you provide
+an explicit `ToolResult` for the same call id. This lets the transcript remain provider-valid even
+when the model emitted an unavailable tool name or invalid arguments.
+```
+}
+
+@ "tool-hooks-closure" {
+  "##": ToolHooks Trait
+
+  "body" = ```markdown
+`ToolHooks<T>` abstracts over anything that can hook a `HookableToolset`.
+`AppToolsHooksSet<'h>` implements it automatically, and `apply_hooks` accepts any `H:
+ToolHooks<AppTools>`.
+
+There is also a blanket implementation for closures:
+```
+
+  "rust-example" = ```rust
+let hook = |call: AppToolsCall| async move {
+    match call {
+        AppToolsCall::WebSearch(c) if c.input().query == "secret" => {
+            lutum::ToolHookOutcome::Rejected(lutum::RejectedToolCall::from_call(
+                lutum::RejectedToolSource::Hook,
+                AppToolsCall::WebSearch(c),
+                "blocked query",
+            ))
+        }
+        other => lutum::ToolHookOutcome::Unhandled(other),
+    }
+};
+
+let plan = round.apply_hooks(&hook).await;
+```
+
+  "body-2" = ```markdown
+The closure path is useful for ad-hoc tests or one-off policies. Generated hook sets are usually
+better for application code because they preserve per-tool typing and compose with
+`#[impl_hooks]`.
+```
+}
+
+@ "description-hooks" {
+  "##": Description Hooks
+
+  "body" = ```markdown
+Tool descriptions can be overridden in two ways:
+
+| Mechanism | Scope |
+|---|---|
+| Builder `.describe_tool(selector, text)` | Directly overrides one turn. |
+| Builder `.describe_many_tools(overrides)` | Directly overrides many descriptions on one turn. |
+| Generated `*_description_hook` slots | Compute overrides from hook policy code. |
+
+Builder overrides are applied when the adapter turn config is erased. Last override wins for the
+same selector.
+```
+
+  "rust-example" = ```rust
+let dynamic = tool_hooks.description_overrides().await;
+
+let outcome = session
+    .text_turn()
+    .tools::<AppTools>()
+    .describe_many_tools(dynamic)
+    .describe_tool(AppToolsSelector::WebSearch, "Search only public sources.")
+    .collect()
+    .await?;
+```
+
+  "body-2" = ```markdown
+Description hooks are singleton slots. The default returns `None`; a registered hook returns
+`Some(description)` to override that tool. For nested toolsets, the outer hook set maps nested
+selectors back into the outer selector enum.
+```
+
+  "rust-example-2" = ```rust
+#[lutum::impl_hook(WeatherDescriptionHook)]
+async fn weather_desc(def: &lutum::ToolDef) -> Option<String> {
+    Some(format!("{} Respond with JSON-safe values.", def.description))
+}
+
+let hooks = AppToolsHooksSet::new().with_weather_description_hook(WeatherDesc);
+let overrides = hooks.description_overrides().await;
+```
 }
 
 @ "nested" {
   "##": Nested Toolsets
 
   "body" = ```markdown
-Tool inputs can themselves contain other types that derive `Toolset` if you need hierarchical tool
-namespacing. See `crates/lutum/examples/nested_toolset.rs` for a worked example.
+Mark a variant with `#[toolset]` to flatten another toolset into the parent.
+The nested payload type must implement `Toolset + HookableToolset`.
 ```
 
+  "rust-example" = ```rust
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Toolset)]
+enum DataTools {
+    GetUser(GetUserArgs),
+    ListOrders(ListOrdersArgs),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Toolset)]
+enum AppTools {
+    WebSearch(WebSearchArgs),
+    #[toolset]
+    Data(DataTools),
+}
+```
+
+  "body-2" = ```markdown
+For a nested `DataTools` variant, the generated outer hook set contains a public field named from
+the variant in snake case:
+
+| Item | Example |
+|---|---|
+| Inner hook set | `DataToolsHooksSet<'h>` |
+| Outer hook set | `AppToolsHooksSet<'h>` |
+| Outer field | `app_hooks.data` |
+| Constructor | `AppToolsHooksSet::new(DataToolsHooksSet::new())` |
+
+Nested hook dispatch delegates to the inner hook set. Handled calls are wrapped back into the
+outer handled enum; rejected calls map their stored call into the outer call enum.
+```
+
+  "rust-example-2" = ```rust
+#[lutum::impl_hook(GetUserHook)]
+async fn cached_alice(
+    _metadata: &lutum::ToolMetadata,
+    input: GetUserArgs,
+) -> lutum::ToolDecision<GetUserArgs, User> {
+    if input.user_id == "alice" {
+        lutum::ToolDecision::Complete(User { name: "Alice".into() })
+    } else {
+        lutum::ToolDecision::RunNormally(input)
+    }
+}
+
+let mut hooks = AppToolsHooksSet::new(DataToolsHooksSet::new());
+hooks.data.register_get_user_hook(CachedAlice);
+
+let plan = round.apply_hooks(&hooks).await;
+```
+
+  "body-3" = ```markdown
+Nested `#[toolset(off)]` hides the entire nested group from `ToolAvailability::Default`.
+`ToolAvailability::All`, `Only`, and `DefaultPlus` can still expose nested selectors explicitly.
+```
+}
+
+@ "quirks" {
+  "##": Quirks and Limits
+
+  "body" = ```markdown
+- Tool execution is never automatic. A hook can short-circuit or reject a call, but pending calls
+  still require user code.
+- Tool hook input types are owned. Mutating input in `RunNormally(input)` changes the pending call
+  that user code sees.
+- Hook-rejected calls are committed as tool results containing Lutum's standard rejection prefix,
+  so providers see a normal tool result item.
+- `ToolInput` and `Toolset` remain `Send + Sync + 'static` today. The non-`'static` relaxation is
+  for hook objects, not tool schemas or decoded calls.
+- Generated hook owners are named `...HooksSet`, not `...Hooks`.
+- Tool hook sets may borrow hook policy values for the hook-set lifetime, but a hook set stored
+  behind a `'static` boundary still needs `'static` hooks.
+- Native targets require hook objects/futures to satisfy `MaybeSend`/`MaybeSync` (`Send`/`Sync`);
+  wasm targets make those markers no-ops.
+```
 }

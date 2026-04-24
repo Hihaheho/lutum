@@ -85,7 +85,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = Session::new(ctx);
     session.push_user("Check Tokyo and Atlantis weather.");
 
-    let hooks = ToolsHooks::new()
+    let hooks = ToolsHooksSet::new()
         .with_weather_hook(RejectBlankCity)
         .with_weather_hook(RejectAtlantis);
 

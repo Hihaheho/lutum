@@ -25,9 +25,8 @@ mod custom {
         }
     }
 
-    #[async_trait::async_trait]
     impl lutum::Chain<Option<String>> for PreferFirstSome {
-        async fn call(&self, value: &Option<String>) -> std::ops::ControlFlow<()> {
+        async fn call<'a>(&'a self, value: &'a Option<String>) -> std::ops::ControlFlow<()> {
             match value {
                 Some(_) => std::ops::ControlFlow::Break(()),
                 None => std::ops::ControlFlow::Continue(()),
@@ -42,7 +41,7 @@ async fn choose_special(label: &str) -> Option<String> {
 }
 
 fn main() {
-    let _ = HookSet::new()
+    let _ = HookSetSet::new()
         .with_validate_output(AppendSuffix)
         .with_choose_label(ChooseSpecial);
 }

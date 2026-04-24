@@ -220,16 +220,16 @@ fn selector_name_roundtrips() {
 
 #[test]
 fn hooks_new_takes_nested_hooks_as_args() {
-    // OuterToolsHooks::new should accept (InnerToolsHooks, SearchToolsHooks).
-    let inner_hooks = InnerToolsHooks::new();
-    let search_hooks = SearchToolsHooks::new();
-    let _outer_hooks = OuterToolsHooks::new(inner_hooks, search_hooks);
+    // OuterToolsHooksSet::new should accept (InnerToolsHooksSet, SearchToolsHooksSet).
+    let inner_hooks = InnerToolsHooksSet::new();
+    let search_hooks = SearchToolsHooksSet::new();
+    let _outer_hooks = OuterToolsHooksSet::new(inner_hooks, search_hooks);
     // No assertion needed — compile-time check is the goal.
 }
 
 #[test]
 fn nested_field_accessible_for_registration() {
-    let mut hooks = OuterToolsHooks::new(InnerToolsHooks::new(), SearchToolsHooks::new());
+    let mut hooks = OuterToolsHooksSet::new(InnerToolsHooksSet::new(), SearchToolsHooksSet::new());
     // Register a hook on the nested InnerToolsHooks via field access.
     hooks.inner.register_weather_hook(CachedWeather);
     // This verifies hooks.inner is pub and has register_weather_hook.
@@ -237,7 +237,8 @@ fn nested_field_accessible_for_registration() {
 
 #[test]
 fn hook_dispatch_to_nested_complete() {
-    let mut outer_hooks = OuterToolsHooks::new(InnerToolsHooks::new(), SearchToolsHooks::new());
+    let mut outer_hooks =
+        OuterToolsHooksSet::new(InnerToolsHooksSet::new(), SearchToolsHooksSet::new());
     outer_hooks.inner.register_weather_hook(CachedWeather);
 
     let meta = make_metadata("id5", "weather", r#"{"city":"Tokyo"}"#);
@@ -255,7 +256,8 @@ fn hook_dispatch_to_nested_complete() {
 
 #[test]
 fn hook_dispatch_to_nested_run_normally() {
-    let mut outer_hooks = OuterToolsHooks::new(InnerToolsHooks::new(), SearchToolsHooks::new());
+    let mut outer_hooks =
+        OuterToolsHooksSet::new(InnerToolsHooksSet::new(), SearchToolsHooksSet::new());
     outer_hooks.inner.register_weather_hook(CachedWeather);
 
     // Non-Tokyo city → RunNormally → Unhandled
@@ -274,7 +276,8 @@ fn hook_dispatch_to_nested_run_normally() {
 
 #[test]
 fn hook_dispatch_regular_tool_unhandled() {
-    let outer_hooks = OuterToolsHooks::new(InnerToolsHooks::new(), SearchToolsHooks::new());
+    let outer_hooks =
+        OuterToolsHooksSet::new(InnerToolsHooksSet::new(), SearchToolsHooksSet::new());
 
     let meta = make_metadata("id7", "calc", r#"{"expression":"2+2"}"#);
     let call = OuterTools::parse_tool_call(meta).unwrap();
@@ -288,7 +291,8 @@ fn hook_dispatch_regular_tool_unhandled() {
 
 #[test]
 fn description_overrides_from_nested_hooks() {
-    let mut outer_hooks = OuterToolsHooks::new(InnerToolsHooks::new(), SearchToolsHooks::new());
+    let mut outer_hooks =
+        OuterToolsHooksSet::new(InnerToolsHooksSet::new(), SearchToolsHooksSet::new());
     outer_hooks
         .inner
         .register_weather_description_hook(InnerWeatherDesc);
@@ -354,7 +358,8 @@ fn call_into_input_for_nested() {
 
 #[test]
 fn handled_metadata_for_nested() {
-    let mut outer_hooks = OuterToolsHooks::new(InnerToolsHooks::new(), SearchToolsHooks::new());
+    let mut outer_hooks =
+        OuterToolsHooksSet::new(InnerToolsHooksSet::new(), SearchToolsHooksSet::new());
     outer_hooks.inner.register_weather_hook(CachedWeather);
 
     let meta_berlin = make_metadata("id10", "weather", r#"{"city":"Tokyo"}"#);

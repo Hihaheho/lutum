@@ -28,7 +28,6 @@ struct RetryMemory {
     rejection_count: usize,
 }
 
-#[async_trait::async_trait]
 impl StatefulValidateCommand for RetryMemory {
     async fn call_mut(&mut self, cmd: String, last: Option<Validation>) -> Validation {
         let command = cmd.trim().to_string();
@@ -110,12 +109,12 @@ async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> 
     Ok(result.assistant_text())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model = ModelName::new(std::env::var("MODEL").unwrap_or_else(|_| "gemma4:e2b".into()))?;
-    let hooks = ShellHooks::new().with_validate_command(Stateful::new(RetryMemory::default()));
+    let hooks = ShellHooksSet::new().with_validate_command(Stateful::new(RetryMemory::default()));
     let llm = Lutum::with_hooks(
         Arc::new(
             OpenAiAdapter::new(token)
@@ -123,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_default_model(model),
         ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        LutumHooks::new(),
+        LutumHooksSet::new(),
     );
     let system = "You are a shell expert for log triage on a read-only system.\nOutput only the shell command, nothing else.";
     let request = "List the 5 most recent error lines from /var/log/syslog.";

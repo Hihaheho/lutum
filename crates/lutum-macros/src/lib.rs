@@ -12,7 +12,7 @@ use tool_input::*;
 use toolset::*;
 
 use proc_macro::TokenStream;
-use syn::{DeriveInput, ItemFn, ItemTrait, Path, parse_macro_input};
+use syn::{DeriveInput, ItemFn, ItemImpl, ItemTrait, Path, parse_macro_input};
 
 fn build_hook_kind(attrs: HookDefAttrs, macro_name: &str) -> syn::Result<HookKind> {
     let mode_str = attrs.mode.to_string();
@@ -148,6 +148,13 @@ pub fn impl_hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     let slot_path = parse_macro_input!(attr as Path);
     let item_fn = parse_macro_input!(item as ItemFn);
     expand_hook_impl(item_fn, slot_path).into()
+}
+
+#[proc_macro_attribute]
+pub fn impl_hooks(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let hooks_set_path = parse_macro_input!(attr as Path);
+    let item_impl = parse_macro_input!(item as ItemImpl);
+    expand_hooks_impl(item_impl, hooks_set_path).into()
 }
 
 #[proc_macro_derive(Toolset, attributes(toolset, tool))]

@@ -4,7 +4,6 @@ struct Count(usize);
 #[derive(Default)]
 struct CountOutputs;
 
-#[async_trait::async_trait]
 impl lutum::AggregateInto<String, Count> for CountOutputs {
     async fn call(&self, outputs: Vec<String>) -> Count {
         Count(outputs.len())
@@ -14,7 +13,6 @@ impl lutum::AggregateInto<String, Count> for CountOutputs {
 #[derive(Default)]
 struct CountChars;
 
-#[async_trait::async_trait]
 impl lutum::FinalizeInto<String, Count> for CountChars {
     async fn call(&self, output: String) -> Count {
         Count(output.len())
@@ -48,7 +46,7 @@ fn expect_count_future<F: std::future::Future<Output = Count>>(_: F) {}
 
 #[allow(unreachable_code, unused_variables)]
 fn assert_types() {
-    let hooks = HookSet::new()
+    let hooks = HookSetSet::new()
         .with_aggregate_label(AggregateMore)
         .with_finalize_label(FinalizeMore);
     expect_count_future(hooks.aggregate_label("x"));

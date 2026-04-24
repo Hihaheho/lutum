@@ -49,7 +49,7 @@ fn main() {
         RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
     ))
     .unwrap();
-    let hooks = ToolsHooks::new().with_weather_hook(HookedForecast);
+    let hooks = ToolsHooksSet::new().with_weather_hook(HookedForecast);
 
     block_on(async move {
         match call.hook(&hooks).await {

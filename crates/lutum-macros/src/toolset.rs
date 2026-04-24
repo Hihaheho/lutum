@@ -12,7 +12,7 @@ enum VariantKind {
     /// Payload implements `Toolset + HookableToolset`; annotated with `#[toolset]`.
     Nested {
         toolset_ty: Type,
-        /// `{TypeName}Hooks` — naming convention.
+        /// `{TypeName}HooksSet` — naming convention.
         hooks_ty: Ident,
     },
 }
@@ -57,7 +57,8 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     let call_enum_ident = format_ident!("{enum_ident}Call");
     let handled_enum_ident = format_ident!("{enum_ident}Handled");
     let selector_enum_ident = format_ident!("{enum_ident}Selector");
-    let hooks_struct_ident = format_ident!("{enum_ident}Hooks");
+    let hooks_trait_ident = format_ident!("{enum_ident}Hooks");
+    let hooks_struct_ident = format_ident!("{enum_ident}HooksSet");
     let variants = data_enum.variants.into_iter().collect::<Vec<_>>();
 
     // Whether any variant is a nested toolset.
@@ -455,7 +456,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         quote! {}
     } else {
         let pairs = nested_hooks_entries.iter().map(|(fid, hty)| {
-            quote! { #fid = #hty }
+            quote! { #fid = #hty<'__lutum_hooks> }
         });
         quote! {
             #[::lutum::nested_hooks(#(#pairs),*)]
@@ -692,17 +693,17 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         }
 
         // Stage-1 output: a `#[hooks]`-annotated trait. The `#[hooks]` macro expands it
-        // in stage 2 into the HooksStruct with per-slot `with_*` / `register_*` / dispatch
+        // in stage 2 into the HooksSet with per-slot `with_*` / `register_*` / dispatch
         // methods, a `Default` impl, and `new()`.
         #[::lutum::hooks]
         #nested_hooks_attr
-        #vis trait #hooks_struct_ident {
+        #vis trait #hooks_trait_ident {
             #(#hooks_trait_methods)*
         }
 
         // Extra impl block: description_overrides() aggregates multiple slots and nested hooks.
         #[allow(dead_code)]
-        impl #hooks_struct_ident {
+        impl<'__lutum_hooks> #hooks_struct_ident<'__lutum_hooks> {
             pub async fn description_overrides(
                 &self,
             ) -> ::std::vec::Vec<(#selector_enum_ident, ::std::string::String)> {
@@ -799,12 +800,14 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             type HandledCall = #handled_enum_ident;
         }
 
-        impl ::lutum::toolset::ToolHooks<#enum_ident> for #hooks_struct_ident {
+        impl<'__lutum_hooks> ::lutum::toolset::ToolHooks<#enum_ident>
+            for #hooks_struct_ident<'__lutum_hooks>
+        {
             fn hook_call<'a>(
                 &'a self,
                 call: #call_enum_ident,
-            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::lutum::ToolHookOutcome<#call_enum_ident, #handled_enum_ident>> + ::std::marker::Send + 'a>> {
-                ::std::boxed::Box::pin(call.hook(self))
+            ) -> ::lutum::HookFuture<'a, ::lutum::ToolHookOutcome<#call_enum_ident, #handled_enum_ident>> {
+                ::lutum::boxed_hook_future(call.hook(self))
             }
         }
 
@@ -865,7 +868,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
 
             pub async fn hook(
                 self,
-                hooks: &#hooks_struct_ident,
+                hooks: &#hooks_struct_ident<'_>,
             ) -> ::lutum::ToolHookOutcome<Self, #handled_enum_ident> {
                 match self {
                     #(#call_hook_arms,)*
@@ -911,7 +914,7 @@ fn wrapper_ident_for_type(ty: &Type) -> Ident {
 fn hooks_ident_for_type(ty: &Type) -> Ident {
     if let Type::Path(path) = ty {
         let ident = &path.path.segments.last().expect("type path").ident;
-        format_ident!("{ident}Hooks")
+        format_ident!("{ident}HooksSet")
     } else {
         panic!("Toolset #[toolset] variant payloads must be path types");
     }

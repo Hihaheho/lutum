@@ -10,7 +10,7 @@ use crate::{
         CreateDatabaseResult, DbError, DbRegistry, DdlResult, ModeRequestResult, ModifyResult,
         QueryResult, SchemaInfo, SqliteDb, WritePreview, validate_sql_safety,
     },
-    hooks::{AgentHooks, TransactionMode, WriteDecision},
+    hooks::{AgentHooksSet, TransactionMode, WriteDecision},
     tools::{SqlTools, SqlToolsCall, SqlToolsSelector},
 };
 
@@ -75,8 +75,8 @@ impl<E: std::error::Error + 'static> From<AgentLoopError<E>> for AgentError {
 /// Create a new [`Session`] initialised with the system prompt from `hooks`.
 ///
 /// Use this instead of calling `Session::new` directly when you want the
-/// [`AgentHooks::system_prompt`] hook to control the system prompt.
-pub async fn init_session(llm: Lutum, hooks: &AgentHooks) -> Session {
+/// [`AgentHooksSet::system_prompt`] hook to control the system prompt.
+pub async fn init_session(llm: Lutum, hooks: &AgentHooksSet<'_>) -> Session {
     let mut session = Session::new(llm);
     session.push_system(hooks.system_prompt().await);
     session
@@ -84,13 +84,13 @@ pub async fn init_session(llm: Lutum, hooks: &AgentHooks) -> Session {
 
 /// Run one complete agent turn, streaming text deltas to `text_tx` if provided.
 ///
-/// `user_message` is augmented via [`AgentHooks::augment_user_message`] before
+/// `user_message` is augmented via [`AgentHooksSet::augment_user_message`] before
 /// being pushed to the session. The session is mutated in-place (committed
 /// turns are appended to it).
 pub async fn run_turn(
     session: &mut Session,
     registry: &DbRegistry,
-    hooks: &AgentHooks,
+    hooks: &AgentHooksSet<'_>,
     config: &AgentConfig,
     user_message: String,
     text_tx: Option<UnboundedSender<String>>,
@@ -154,7 +154,7 @@ fn tool_selectors_for_mode(mode: TransactionMode) -> Vec<SqlToolsSelector> {
 async fn dispatch_tool(
     call: SqlToolsCall,
     registry: &DbRegistry,
-    hooks: &AgentHooks,
+    hooks: &AgentHooksSet<'_>,
     config: &AgentConfig,
     sql_history: &Mutex<Vec<SqlHistoryEntry>>,
 ) -> Result<ToolResult, DbError> {
@@ -380,7 +380,7 @@ fn error_ddl(msg: &str) -> DdlResult {
 async fn prepare_write_candidate(
     sql: &str,
     db: &SqliteDb,
-    hooks: &AgentHooks,
+    hooks: &AgentHooksSet<'_>,
     config: &AgentConfig,
 ) -> Result<WritePreview, ModifyResult> {
     if let Err(e) = validate_sql_safety(sql) {
@@ -418,7 +418,7 @@ async fn prepare_write_candidate(
 async fn execute_write_op(
     sql: &str,
     db: &SqliteDb,
-    hooks: &AgentHooks,
+    hooks: &AgentHooksSet<'_>,
     config: &AgentConfig,
 ) -> Result<ModifyResult, DbError> {
     if let Err(e) = validate_sql_safety(sql) {
@@ -460,7 +460,7 @@ async fn execute_write_op(
 async fn execute_ddl_op(
     sql: &str,
     db: &SqliteDb,
-    hooks: &AgentHooks,
+    hooks: &AgentHooksSet<'_>,
 ) -> Result<DdlResult, DbError> {
     if let Err(e) = validate_sql_safety(sql) {
         return Ok(DdlResult {
@@ -482,8 +482,6 @@ async fn execute_ddl_op(
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-
     use super::*;
     use crate::{
         db::SqlValidationError,
@@ -494,7 +492,6 @@ mod tests {
         decision: WriteDecision,
     }
 
-    #[async_trait]
     impl ApproveWrite for StaticApprover {
         async fn call(
             &self,
@@ -507,7 +504,6 @@ mod tests {
 
     struct WritableMode;
 
-    #[async_trait]
     impl GetTransactionMode for WritableMode {
         async fn call(&self, _last: Option<TransactionMode>) -> TransactionMode {
             TransactionMode::Writable
@@ -547,7 +543,7 @@ mod tests {
 
     async fn run_write(
         db: &SqliteDb,
-        hooks: &AgentHooks,
+        hooks: &AgentHooksSet<'_>,
         sql: &str,
         max_rows: u64,
     ) -> ModifyResult {
@@ -567,7 +563,7 @@ mod tests {
     #[tokio::test]
     async fn edit_sql_rechecks_row_limit_before_execution() {
         let db = make_db();
-        let hooks = AgentHooks::new()
+        let hooks = AgentHooksSet::new()
             .with_approve_write(StaticApprover {
                 decision: WriteDecision::EditSql("UPDATE items SET status = 'done'".to_string()),
             })
@@ -589,7 +585,7 @@ mod tests {
     #[tokio::test]
     async fn edit_sql_rechecks_invalid_sql_before_execution() {
         let db = make_db();
-        let hooks = AgentHooks::new()
+        let hooks = AgentHooksSet::new()
             .with_approve_write(StaticApprover {
                 decision: WriteDecision::EditSql("UPDATE items SET".to_string()),
             })
@@ -611,7 +607,7 @@ mod tests {
     #[tokio::test]
     async fn edit_sql_rechecks_policy_before_execution() {
         let db = make_db();
-        let hooks = AgentHooks::new()
+        let hooks = AgentHooksSet::new()
             .with_validate_sql(RejectApprovedStatus)
             .with_approve_write(StaticApprover {
                 decision: WriteDecision::EditSql(
@@ -636,7 +632,7 @@ mod tests {
     #[tokio::test]
     async fn edit_sql_executes_only_the_replacement_statement() {
         let db = make_db();
-        let hooks = AgentHooks::new()
+        let hooks = AgentHooksSet::new()
             .with_approve_write(StaticApprover {
                 decision: WriteDecision::EditSql(
                     "UPDATE items SET status = 'done' WHERE id = 2".to_string(),
@@ -659,7 +655,7 @@ mod tests {
     #[tokio::test]
     async fn accept_executes_original_statement() {
         let db = make_db();
-        let hooks = AgentHooks::new()
+        let hooks = AgentHooksSet::new()
             .with_approve_write(StaticApprover {
                 decision: WriteDecision::Accept,
             })
@@ -680,7 +676,7 @@ mod tests {
     #[tokio::test]
     async fn reject_leaves_original_statement_unexecuted() {
         let db = make_db();
-        let hooks = AgentHooks::new()
+        let hooks = AgentHooksSet::new()
             .with_approve_write(StaticApprover {
                 decision: WriteDecision::Reject("declined".to_string()),
             })

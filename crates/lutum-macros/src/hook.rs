@@ -3,6 +3,7 @@ mod def_shared;
 #[allow(clippy::module_inception)]
 mod hook;
 mod hooks;
+mod impl_hooks;
 
 use std::collections::HashSet;
 
@@ -10,6 +11,7 @@ pub use def_local::*;
 pub use def_shared::*;
 pub use hook::*;
 pub use hooks::*;
+pub use impl_hooks::*;
 
 use quote::{format_ident, quote};
 use syn::{

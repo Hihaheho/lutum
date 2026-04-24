@@ -1,5 +1,5 @@
 use super::*;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{Attribute, ItemFn, ItemTrait, TraitItem, TraitItemFn};
 
 pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
@@ -39,9 +39,13 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
     let struct_cfg_attrs = conditional_attrs(&remaining_attrs);
     let struct_attrs = remaining_attrs;
     let ident = item_trait.ident.clone();
+    let set_ident = format_ident!("{ident}Set");
+    let register_trait_ident = format_ident!("__Lutum{set_ident}RegisterHooks");
     let vis = item_trait.vis.clone();
 
     let mut items: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut trait_methods: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut trait_ref_impl_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut field_inits: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut register_methods: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -65,12 +69,14 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
             Err(err) => return err.to_compile_error(),
         };
         let item_fn = trait_method_to_item_fn(&method);
-        let slot = match expand_slot(item_fn, kind, &vis) {
+        let slot = match expand_slot(item_fn, kind, &vis, &ident) {
             Ok(slot) => slot,
             Err(err) => return err.to_compile_error(),
         };
 
         items.push(slot.items);
+        trait_methods.push(slot.trait_method);
+        trait_ref_impl_methods.push(slot.trait_ref_impl_method);
         fields.push(slot.field);
         field_inits.push(slot.field_init);
         register_methods.push(slot.register_methods);
@@ -119,14 +125,33 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
 
         #(#struct_attrs)*
         #[allow(dead_code)]
+        #vis trait #ident: ::lutum::HookObject {
+            #(#trait_methods)*
+        }
+
+        impl<__LutumHooksRef> #ident for &__LutumHooksRef
+        where
+            __LutumHooksRef: #ident + ?Sized,
+        {
+            #(#trait_ref_impl_methods)*
+        }
+
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        #vis trait #register_trait_ident<'__lutum_hooks> {
+            fn __lutum_register_hooks(self, hooks: &mut #set_ident<'__lutum_hooks>);
+        }
+
+        #(#struct_attrs)*
+        #[allow(dead_code)]
         #[derive(::std::clone::Clone)]
-        #vis struct #ident {
+        #vis struct #set_ident<'__lutum_hooks> {
             #(#nested_fields)*
             #(#fields)*
         }
 
         #(#struct_cfg_attrs)*
-        impl ::std::default::Default for #ident {
+        impl<'__lutum_hooks> ::std::default::Default for #set_ident<'__lutum_hooks> {
             fn default() -> Self {
                 Self {
                     #(#nested_field_inits)*
@@ -137,8 +162,24 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
 
         #(#struct_cfg_attrs)*
         #[allow(dead_code)]
-        impl #ident {
+        impl<'__lutum_hooks> #set_ident<'__lutum_hooks> {
             #new_fn
+
+            pub fn with_hooks<H>(mut self, hooks: H) -> Self
+            where
+                H: #register_trait_ident<'__lutum_hooks>,
+            {
+                self.register_hooks(hooks);
+                self
+            }
+
+            pub fn register_hooks<H>(&mut self, hooks: H) -> &mut Self
+            where
+                H: #register_trait_ident<'__lutum_hooks>,
+            {
+                hooks.__lutum_register_hooks(self);
+                self
+            }
 
             #(#register_methods)*
             #(#dispatch_methods)*

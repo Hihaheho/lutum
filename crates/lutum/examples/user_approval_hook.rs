@@ -118,7 +118,7 @@ enum Approval {
 /// Called once per tool call before execution.
 ///
 /// Default: auto-accept (useful for non-interactive contexts and tests).
-/// Override with `ApprovalHooks::new().with_approve_tool_call(impl ApproveToolCall)`.
+/// Override with `ApprovalHooksSet::new().with_approve_tool_call(impl ApproveToolCall)`.
 #[hooks]
 trait ApprovalHooks {
     #[hook(fallback)]
@@ -133,7 +133,6 @@ trait ApprovalHooks {
 
 struct CliApprover;
 
-#[async_trait::async_trait]
 impl ApproveToolCall for CliApprover {
     async fn call(
         &self,
@@ -210,7 +209,7 @@ fn extract_name_and_args(call: &FsToolsCall) -> (String, serde_json::Value) {
 // Main
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
@@ -220,13 +219,13 @@ async fn main() -> anyhow::Result<()> {
     // The hook proxy: CliApprover bridges the generic slot to interactive I/O.
     // Replacing CliApprover with a different impl changes approval policy
     // without touching the agent loop below.
-    let hooks = ApprovalHooks::new().with_approve_tool_call(CliApprover);
+    let hooks = ApprovalHooksSet::new().with_approve_tool_call(CliApprover);
 
     let adapter = OpenAiAdapter::new(token)
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let llm = Lutum::with_hooks(Arc::new(adapter), budget, LutumHooks::new());
+    let llm = Lutum::with_hooks(Arc::new(adapter), budget, LutumHooksSet::new());
     let mut session = Session::new(llm.clone());
 
     session.push_system(

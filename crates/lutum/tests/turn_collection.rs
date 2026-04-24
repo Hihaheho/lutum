@@ -63,7 +63,8 @@ fn test_budget() -> SharedPoolBudgetManager {
 
 struct StopOnTextDelta;
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
     for StopOnTextDelta
 {
@@ -86,7 +87,8 @@ impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
 
 struct FailOnTextDelta;
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
     for FailOnTextDelta
 {

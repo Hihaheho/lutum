@@ -60,12 +60,14 @@ pub use context::{
     StructuredTurnPartial, StructuredTurnPartialWithTools,
 };
 pub use hooks::{
-    Aggregate, AggregateInto, Chain, Finalize, FinalizeInto, FirstSuccess, HookReentrancyError,
-    LutumHooks, ResolveUsageEstimate, ShortCircuit, Stateful,
+    Aggregate, AggregateInto, Chain, DynAggregate, DynAggregateInto, DynChain, DynFinalize,
+    DynFinalizeInto, Finalize, FinalizeInto, FirstSuccess, HookFuture, HookObject,
+    HookReentrancyError, LutumHooks, LutumHooksSet, MaybeSend, MaybeSync, ResolveUsageEstimate,
+    ShortCircuit, Stateful, boxed_hook_future,
 };
 pub use session::{CommitTurn, ToolRoundPlan, UncommittedToolRound};
 
-pub use lutum_macros::{Toolset, hooks, impl_hook, nested_hooks, tool_fn, tool_input};
+pub use lutum_macros::{Toolset, hooks, impl_hook, impl_hooks, nested_hooks, tool_fn, tool_input};
 pub use lutum_protocol::{
     AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
     AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AgentError,

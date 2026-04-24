@@ -1,7 +1,6 @@
 #[derive(Default)]
 struct JoinStrings;
 
-#[async_trait::async_trait]
 impl lutum::Aggregate<String> for JoinStrings {
     async fn call(&self, outputs: Vec<String>) -> String {
         outputs.join(",")
@@ -11,7 +10,6 @@ impl lutum::Aggregate<String> for JoinStrings {
 #[derive(Default)]
 struct WrapResult;
 
-#[async_trait::async_trait]
 impl lutum::Finalize<String> for WrapResult {
     async fn call(&self, output: String) -> String {
         format!("[{output}]")

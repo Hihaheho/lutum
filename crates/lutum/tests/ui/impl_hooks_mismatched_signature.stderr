@@ -1,0 +1,38 @@
+error[E0308]: mismatched types
+  --> tests/ui/impl_hooks_mismatched_signature.rs:11:1
+   |
+11 | #[lutum::impl_hooks(AppHooksSet)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | expected `String`, found `&String`
+   | arguments to this function are incorrect
+   |
+note: method defined here
+  --> tests/ui/impl_hooks_mismatched_signature.rs:4:14
+   |
+ 4 |     async fn select_label(label: String) -> String {
+   |              ^^^^^^^^^^^^ -------------
+   = note: this error originates in the attribute macro `lutum::impl_hooks` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: try using a conversion method
+   |
+11 | (#[lutum::impl_hooks(AppHooksSet)]).to_string()
+   | +                                 +++++++++++++
+
+error[E0053]: method `select_label` has an incompatible type for trait
+  --> tests/ui/impl_hooks_mismatched_signature.rs:13:41
+   |
+13 |     async fn select_label(&self, label: &str) -> String {
+   |                                         ^^^^ expected `String`, found `&str`
+   |
+note: type in trait
+  --> tests/ui/impl_hooks_mismatched_signature.rs:4:34
+   |
+ 4 |     async fn select_label(label: String) -> String {
+   |                                  ^^^^^^
+   = note: expected signature `fn(&Policy, String) -> impl Future<Output = String>`
+              found signature `fn(&Policy, &str) -> impl Future<Output = String>`
+help: change the parameter type to match the trait
+   |
+13 -     async fn select_label(&self, label: &str) -> String {
+13 +     async fn select_label(&self, label: String) -> String {
+   |

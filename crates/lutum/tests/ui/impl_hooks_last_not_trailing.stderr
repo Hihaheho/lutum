@@ -1,0 +1,54 @@
+error[E0308]: arguments to this function are incorrect
+  --> tests/ui/impl_hooks_last_not_trailing.rs:15:1
+   |
+15 | #[lutum::impl_hooks(AppHooksSet)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | expected `&str`, found `Option<Result<(), String>>`
+   | expected `Option<Result<(), String>>`, found `&String`
+   |
+note: method defined here
+  --> tests/ui/impl_hooks_last_not_trailing.rs:4:14
+   |
+ 4 |     async fn validate_label(label: &str) -> Result<(), String> {
+   |              ^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `lutum::impl_hooks` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0053]: method `validate_label` has an incompatible type for trait
+  --> tests/ui/impl_hooks_last_not_trailing.rs:19:15
+   |
+19 |         last: Option<Result<(), String>>,
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `&str`, found `Option<Result<(), String>>`
+   |
+note: type in trait
+  --> tests/ui/impl_hooks_last_not_trailing.rs:4:36
+   |
+ 4 |     async fn validate_label(label: &str) -> Result<(), String> {
+   |                                    ^^^^
+   = note: expected signature `fn(&Policy, &str, Option<Result<(), String>>) -> impl Future<Output = Result<(), String>>`
+              found signature `fn(&Policy, Option<Result<(), String>>, &str) -> impl Future<Output = Result<(), String>>`
+help: change the parameter type to match the trait
+   |
+19 -         last: Option<Result<(), String>>,
+19 +         last: &str,
+   |
+
+error[E0053]: method `call` has an incompatible type for trait
+  --> tests/ui/impl_hooks_last_not_trailing.rs:19:15
+   |
+19 |         last: Option<Result<(), String>>,
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `Option<Result<(), String>>`
+   |
+note: type in trait
+  --> tests/ui/impl_hooks_last_not_trailing.rs:1:1
+   |
+ 1 | #[lutum::hooks]
+   | ^^^^^^^^^^^^^^^
+   = note: expected signature `fn(&__LutumImplHooksValidateLabel<__LutumHook>, String, Option<Result<(), String>>) -> impl Future<Output = Result<(), String>>`
+              found signature `fn(&__LutumImplHooksValidateLabel<__LutumHook>, Option<Result<(), String>>, String) -> impl Future<Output = Result<(), String>>`
+   = note: this error originates in the attribute macro `lutum::hooks` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: change the parameter type to match the trait
+   |
+19 -         last: Option<Result<(), String>>,
+19 +         last: String,
+   |

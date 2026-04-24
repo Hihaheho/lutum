@@ -53,7 +53,7 @@ async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> 
     Ok(result.assistant_text())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     let model = ModelName::new(&model_name)?;
     let prompt = "Write a shell command to list all .rs files recursively.";
 
-    let hooks = DeterministicHooks::new()
+    let hooks = DeterministicHooksSet::new()
         .with_validate_prompt(RejectEmptyPrompt)
         .with_validate_output(BlockDangerousOutput);
     let llm = Lutum::with_hooks(
@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_default_model(model),
         ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        LutumHooks::new(),
+        LutumHooksSet::new(),
     );
 
     hooks

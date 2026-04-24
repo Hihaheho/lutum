@@ -133,7 +133,7 @@ fn tool_call_hook_returns_unhandled_when_no_override_is_registered() {
     ))
     .unwrap();
 
-    match block_on(call.hook(&ToolsHooks::new())) {
+    match block_on(call.hook(&ToolsHooksSet::new())) {
         ToolHookOutcome::Unhandled(ToolsCall::Weather(call)) => {
             assert_eq!(call.metadata.id.as_str(), "call-1");
             assert_eq!(call.input().city, "Tokyo");
@@ -152,7 +152,7 @@ fn tool_call_hook_preserves_metadata_input_and_output_when_handled() {
         RawJson::parse("{\"city\":\"Osaka\"}").unwrap(),
     ))
     .unwrap();
-    let hooks = ToolsHooks::new().with_weather_hook(HookedForecast);
+    let hooks = ToolsHooksSet::new().with_weather_hook(HookedForecast);
 
     match block_on(call.hook(&hooks)) {
         ToolHookOutcome::Handled(ToolsHandled::Weather(handled)) => {
@@ -183,7 +183,7 @@ fn tool_call_hook_can_rewrite_runtime_input_without_touching_metadata() {
         RawJson::parse("{\"city\":\"Sapporo\"}").unwrap(),
     ))
     .unwrap();
-    let hooks = ToolsHooks::new().with_weather_hook(RewriteWeather);
+    let hooks = ToolsHooksSet::new().with_weather_hook(RewriteWeather);
 
     match block_on(call.hook(&hooks)) {
         ToolHookOutcome::Unhandled(ToolsCall::Weather(call)) => {
@@ -202,7 +202,7 @@ fn tool_call_hook_can_reject_with_reason() {
         RawJson::parse("{\"query\":\"secret\"}").unwrap(),
     ))
     .unwrap();
-    let hooks = ToolsHooks::new().with_search_hook(RejectSearch);
+    let hooks = ToolsHooksSet::new().with_search_hook(RejectSearch);
 
     match block_on(call.hook(&hooks)) {
         ToolHookOutcome::Rejected(rejected) => {
@@ -256,7 +256,7 @@ fn tool_round_commit_accepts_typed_handled_values() {
             .await
             .unwrap()
     });
-    let hooks = ToolsHooks::new().with_weather_hook(WeatherHookPlain);
+    let hooks = ToolsHooksSet::new().with_weather_hook(WeatherHookPlain);
 
     match outcome {
         TextStepOutcomeWithTools::NeedsTools(round) => {
@@ -338,7 +338,7 @@ fn tool_round_plan_commit_preserves_original_arguments_after_rewrite() {
         TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
     };
 
-    let plan = block_on(round.apply_hooks(&ToolsHooks::new().with_weather_hook(RewriteWeather)));
+    let plan = block_on(round.apply_hooks(&ToolsHooksSet::new().with_weather_hook(RewriteWeather)));
 
     let pending_results: Vec<_> = plan
         .pending
@@ -422,7 +422,7 @@ fn apply_hooks_splits_handled_and_pending() {
     };
 
     // Hook only weather; search stays pending.
-    let hooks = ToolsHooks::new().with_weather_hook(CachedWeatherHook);
+    let hooks = ToolsHooksSet::new().with_weather_hook(CachedWeatherHook);
 
     let plan: ToolRoundPlan<Tools> = block_on(round.apply_hooks(&hooks));
 
@@ -464,8 +464,8 @@ fn apply_hooks_multi_pass_chaining_narrows_pending() {
         TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
     };
 
-    let weather_hooks = ToolsHooks::new().with_weather_hook(Pass1Weather);
-    let search_hooks = ToolsHooks::new().with_search_hook(Pass2Search);
+    let weather_hooks = ToolsHooksSet::new().with_weather_hook(Pass1Weather);
+    let search_hooks = ToolsHooksSet::new().with_search_hook(Pass2Search);
 
     let plan = block_on(async {
         round
@@ -508,7 +508,7 @@ fn tool_round_plan_commit_merges_handled_and_pending_results() {
         TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
     };
 
-    let hooks = ToolsHooks::new().with_weather_hook(WeatherHookPlain);
+    let hooks = ToolsHooksSet::new().with_weather_hook(WeatherHookPlain);
 
     let plan = block_on(round.apply_hooks(&hooks));
 
@@ -586,7 +586,7 @@ fn tool_round_plan_commit_auto_commits_rejected_calls() {
         TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
     };
 
-    let hooks = ToolsHooks::new().with_search_hook(RejectSearch);
+    let hooks = ToolsHooksSet::new().with_search_hook(RejectSearch);
     let plan = block_on(round.apply_hooks(&hooks));
 
     assert_eq!(plan.pending.len(), 1);
@@ -1208,7 +1208,8 @@ fn rejection_reason_helper_only_matches_reserved_prefix() {
 // Handler that records the names of InvalidToolCallChunk and ToolCallIssue events it sees.
 struct RecordInvalidEvents(Arc<Mutex<Vec<String>>>);
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
     for RecordInvalidEvents
 {
@@ -1237,7 +1238,8 @@ impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
 
 struct RecordParseFailureEvents(Arc<Mutex<Vec<String>>>);
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
     for RecordParseFailureEvents
 {
@@ -1411,7 +1413,7 @@ async fn tool_hook_trace_records_rewrite_and_reject_decisions() {
         RawJson::parse("{\"query\":\"secret\"}").unwrap(),
     ))
     .unwrap();
-    let hooks = ToolsHooks::new().with_search_hook(RejectSearch);
+    let hooks = ToolsHooksSet::new().with_search_hook(RejectSearch);
 
     let collected = lutum_trace::test::collect(async move {
         let _ = call.hook(&hooks).await;
@@ -1439,7 +1441,7 @@ async fn tool_hook_trace_records_rewrite_and_reject_decisions() {
         RawJson::parse("{\"city\":\"Nagoya\"}").unwrap(),
     ))
     .unwrap();
-    let rewrite_hooks = ToolsHooks::new().with_weather_hook(RewriteWeather);
+    let rewrite_hooks = ToolsHooksSet::new().with_weather_hook(RewriteWeather);
 
     let collected = lutum_trace::test::collect(async move {
         let _ = rewrite_call.hook(&rewrite_hooks).await;

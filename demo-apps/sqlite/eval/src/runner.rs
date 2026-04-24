@@ -8,11 +8,10 @@ use std::{
 };
 
 use anyhow::Context;
-use async_trait::async_trait;
 use lutum::{Lutum, ModelInputItem, Session, ToolResult};
 use lutum_eval::EvalExt as _;
 use sqlite_agent::{
-    AgentConfig, AgentHooks, DbRegistry, SqliteDb, TransactionMode, WriteDecision, WritePreview,
+    AgentConfig, AgentHooksSet, DbRegistry, SqliteDb, TransactionMode, WriteDecision, WritePreview,
     run_turn,
 };
 
@@ -31,7 +30,6 @@ struct ScriptedApprover {
     auto_approve: bool,
 }
 
-#[async_trait]
 impl sqlite_agent::hooks::ApproveWrite for ScriptedApprover {
     async fn call(&self, preview: WritePreview, _last: Option<WriteDecision>) -> WriteDecision {
         if self.auto_approve {
@@ -45,7 +43,6 @@ impl sqlite_agent::hooks::ApproveWrite for ScriptedApprover {
 
 struct FixedMode(TransactionMode);
 
-#[async_trait]
 impl sqlite_agent::hooks::GetTransactionMode for FixedMode {
     async fn call(&self, _last: Option<TransactionMode>) -> TransactionMode {
         self.0
@@ -183,7 +180,7 @@ pub async fn run_case(
         TransactionMode::ReadOnly
     };
 
-    let hooks = AgentHooks::new()
+    let hooks = AgentHooksSet::new()
         .with_approve_write(ScriptedApprover {
             auto_approve: case.auto_approve,
         })

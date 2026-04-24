@@ -53,8 +53,11 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 const MIN_THINKING_BUDGET_TOKENS: u32 = 1024;
 const MIN_RESPONSE_TOKENS_WITH_THINKING: u32 = 1024;
 
+#[cfg(not(target_family = "wasm"))]
 type ByteStream =
     Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync + 'static>>;
+#[cfg(target_family = "wasm")]
+type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + 'static>>;
 type UsageCache = Arc<Mutex<HashMap<String, Usage>>>;
 
 pub trait FallbackSerializer: Send + Sync {
@@ -171,7 +174,10 @@ fn reqwest_request_error_debug_info(error: &reqwest::Error) -> RequestErrorDebug
         error_debug: format!("{error:?}"),
         source_chain,
         is_timeout: error.is_timeout(),
+        #[cfg(not(target_family = "wasm"))]
         is_connect: error.is_connect(),
+        #[cfg(target_family = "wasm")]
+        is_connect: false,
         is_request: error.is_request(),
         is_body: error.is_body(),
         is_decode: error.is_decode(),
@@ -219,7 +225,7 @@ pub struct ClaudeAdapter {
     base_url: Arc<str>,
     default_model: ModelName,
     default_thinking_budget: Option<u32>,
-    hooks: ClaudeHooks,
+    hooks: ClaudeHooksSet<'static>,
     fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
     usage_cache: UsageCache,
 }
@@ -262,7 +268,7 @@ impl ClaudeAdapter {
             base_url: normalize_base_url(DEFAULT_BASE_URL),
             default_model: ModelName::new("claude-opus-4-5").unwrap(),
             default_thinking_budget: None,
-            hooks: ClaudeHooks::new(),
+            hooks: ClaudeHooksSet::new(),
             fallback_serializer: None,
             usage_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -283,12 +289,12 @@ impl ClaudeAdapter {
         self
     }
 
-    pub fn with_hooks(mut self, hooks: ClaudeHooks) -> Self {
+    pub fn with_hooks(mut self, hooks: ClaudeHooksSet<'static>) -> Self {
         self.hooks = hooks;
         self
     }
 
-    pub fn set_hooks(&mut self, hooks: ClaudeHooks) {
+    pub fn set_hooks(&mut self, hooks: ClaudeHooksSet<'static>) {
         self.hooks = hooks;
     }
 
@@ -412,7 +418,8 @@ impl ClaudeAdapter {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl TurnAdapter for ClaudeAdapter {
     async fn text_turn(
         &self,
@@ -500,7 +507,8 @@ impl TurnAdapter for ClaudeAdapter {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl UsageRecoveryAdapter for ClaudeAdapter {
     async fn recover_usage(
         &self,
@@ -1011,9 +1019,9 @@ fn map_text_stream<S>(
     fallback_model: String,
     usage_cache: UsageCache,
     raw: Option<RawTelemetryEmitter>,
-) -> impl Stream<Item = Result<ErasedTextTurnEvent, ClaudeError>> + Send + 'static
+) -> impl Stream<Item = Result<ErasedTextTurnEvent, ClaudeError>> + lutum_protocol::MaybeSend + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = ClaudeSseParser::default();
@@ -1194,9 +1202,11 @@ fn map_structured_stream<S>(
     fallback_model: String,
     usage_cache: UsageCache,
     raw: Option<RawTelemetryEmitter>,
-) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, ClaudeError>> + Send + 'static
+) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, ClaudeError>>
++ lutum_protocol::MaybeSend
++ 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = ClaudeSseParser::default();
@@ -1695,7 +1705,7 @@ mod tests {
 
     #[test]
     fn select_claude_model_uses_last_registered_singleton_override() {
-        let hooks = ClaudeHooks::new()
+        let hooks = ClaudeHooksSet::new()
             .with_select_claude_model(PreferClaudeSonnet)
             .with_select_claude_model(PreferClaudeHaiku);
 

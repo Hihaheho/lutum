@@ -151,7 +151,7 @@ pub fn expand_hook_impl(item_fn: ItemFn, slot_path: Path) -> proc_macro2::TokenS
         #struct_def
         #default_impl
 
-        #[::async_trait::async_trait]
+        #[allow(refining_impl_trait)]
         impl #impl_generics #hook_trait_path for #struct_ident #ty_generics
         #where_clause
         {

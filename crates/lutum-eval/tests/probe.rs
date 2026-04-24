@@ -88,7 +88,6 @@ impl Probe for TimelineProbe {
     }
 }
 
-#[async_trait]
 impl StatefulRewriteNumber for TimelineProbe {
     async fn call_mut(&mut self, value: usize) -> usize {
         self.timeline.push(format!("hook:number:{value}"));
@@ -96,7 +95,6 @@ impl StatefulRewriteNumber for TimelineProbe {
     }
 }
 
-#[async_trait]
 impl StatefulDecorateLabel for TimelineProbe {
     async fn call_mut(&mut self, label: String) -> String {
         self.timeline.push(format!("hook:label:{label}"));
@@ -252,7 +250,6 @@ impl Probe for HookErrorProbe {
     }
 }
 
-#[async_trait]
 impl StatefulValidateStep for HookErrorProbe {
     async fn call_mut(&mut self, step: String) -> Validation {
         self.hook_calls += 1;
@@ -264,8 +261,8 @@ impl StatefulValidateStep for HookErrorProbe {
     }
 }
 
-fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooks {
-    ProbeHooks::new()
+fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooksSet<'static> {
+    ProbeHooksSet::new()
         .with_rewrite_number({
             let dispatcher = dispatcher.clone();
             move |value: usize| {
@@ -302,8 +299,8 @@ fn timeline_hooks(dispatcher: ProbeHandle<TimelineProbe>) -> ProbeHooks {
         })
 }
 
-fn hook_error_hooks(dispatcher: ProbeHandle<HookErrorProbe>) -> ProbeHooks {
-    ProbeHooks::new().with_validate_step(move |step: String| {
+fn hook_error_hooks(dispatcher: ProbeHandle<HookErrorProbe>) -> ProbeHooksSet<'static> {
+    ProbeHooksSet::new().with_validate_step(move |step: String| {
         let dispatcher = dispatcher.clone();
         async move {
             dispatcher

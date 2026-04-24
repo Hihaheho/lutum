@@ -1,5 +1,5 @@
 error: #[hook(...)] does not support using 'aggregate' and 'finalize' together
-  --> tests/ui/hook_def_aggregate_finalize.rs:23:45
+  --> tests/ui/hook_def_aggregate_finalize.rs:21:45
    |
-23 |     #[hook(always, aggregate = JoinStrings, finalize = WrapResult)]
+21 |     #[hook(always, aggregate = JoinStrings, finalize = WrapResult)]
    |                                             ^^^^^^^^

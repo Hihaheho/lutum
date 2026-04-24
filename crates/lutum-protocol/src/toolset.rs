@@ -1,10 +1,13 @@
-use std::{fmt, future::Future, pin::Pin};
+use std::{fmt, future::Future};
 
 use schemars::{JsonSchema, Schema, schema_for};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-use crate::conversation::{REJECTED_TOOL_RESULT_PREFIX, ToolMetadata, ToolResult};
+use crate::{
+    conversation::{REJECTED_TOOL_RESULT_PREFIX, ToolMetadata, ToolResult},
+    hooks::{HookFuture, HookObject, boxed_hook_future},
+};
 
 #[derive(Clone, Copy)]
 pub struct ToolDef {
@@ -370,26 +373,27 @@ pub trait HookableToolset: Toolset {
 ///
 /// Implemented automatically by `#[derive(Toolset)]` for the generated `ToolsHooks` struct.
 /// A blanket impl covers `Fn(T::ToolCall) -> Fut` closures.
-pub trait ToolHooks<T: HookableToolset>: Send + Sync {
+pub trait ToolHooks<T: HookableToolset>: HookObject {
     #[allow(clippy::type_complexity)]
     fn hook_call<'a>(
         &'a self,
         call: T::ToolCall,
-    ) -> Pin<Box<dyn Future<Output = ToolHookOutcome<T::ToolCall, T::HandledCall>> + Send + 'a>>;
+    ) -> HookFuture<'a, ToolHookOutcome<T::ToolCall, T::HandledCall>>;
 }
 
 impl<T, F, Fut> ToolHooks<T> for F
 where
     T: HookableToolset,
-    F: Fn(T::ToolCall) -> Fut + Send + Sync,
-    Fut: Future<Output = ToolHookOutcome<T::ToolCall, T::HandledCall>> + Send + 'static,
+    F: Fn(T::ToolCall) -> Fut + HookObject,
+    Fut: Future<Output = ToolHookOutcome<T::ToolCall, T::HandledCall>>
+        + crate::hooks::MaybeSend
+        + 'static,
 {
     fn hook_call<'a>(
         &'a self,
         call: T::ToolCall,
-    ) -> Pin<Box<dyn Future<Output = ToolHookOutcome<T::ToolCall, T::HandledCall>> + Send + 'a>>
-    {
-        Box::pin(self(call))
+    ) -> HookFuture<'a, ToolHookOutcome<T::ToolCall, T::HandledCall>> {
+        boxed_hook_future(self(call))
     }
 }
 

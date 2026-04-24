@@ -204,14 +204,17 @@ pub struct OpenAiAdapter {
     api_key: Arc<str>,
     base_url: Arc<str>,
     default_model: ModelName,
-    hooks: OpenAiHooks,
+    hooks: OpenAiHooksSet<'static>,
     fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
     sse_event_recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
     use_chat_completions: bool,
 }
 
+#[cfg(not(target_family = "wasm"))]
 type ByteStream =
     Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync + 'static>>;
+#[cfg(target_family = "wasm")]
+type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + 'static>>;
 
 impl OpenAiAdapter {
     pub fn from_env() -> Result<Self, OpenAiError> {
@@ -225,7 +228,7 @@ impl OpenAiAdapter {
             api_key: Arc::from(api_key.into()),
             base_url: Arc::from("https://api.openai.com/v1"),
             default_model: ModelName::new("gpt-4.1").unwrap(),
-            hooks: OpenAiHooks::new(),
+            hooks: OpenAiHooksSet::new(),
             fallback_serializer: None,
             sse_event_recovery_hook: None,
             use_chat_completions: false,
@@ -249,12 +252,12 @@ impl OpenAiAdapter {
         self
     }
 
-    pub fn with_hooks(mut self, hooks: OpenAiHooks) -> Self {
+    pub fn with_hooks(mut self, hooks: OpenAiHooksSet<'static>) -> Self {
         self.hooks = hooks;
         self
     }
 
-    pub fn set_hooks(&mut self, hooks: OpenAiHooks) {
+    pub fn set_hooks(&mut self, hooks: OpenAiHooksSet<'static>) {
         self.hooks = hooks;
     }
 
@@ -444,7 +447,8 @@ impl OpenAiAdapter {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl TurnAdapter for OpenAiAdapter {
     async fn text_turn(
         &self,
@@ -589,7 +593,8 @@ impl TurnAdapter for OpenAiAdapter {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl CompletionAdapter for OpenAiAdapter {
     async fn completion(
         &self,
@@ -728,7 +733,8 @@ fn map_erased_structured_completion_event(
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl UsageRecoveryAdapter for OpenAiAdapter {
     async fn recover_usage(
         &self,
@@ -1594,9 +1600,9 @@ fn map_text_stream<S>(
     fallback_model: String,
     recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
     raw: Option<RawTelemetryEmitter>,
-) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + Send + 'static
+) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + lutum_protocol::MaybeSend + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = SseParser::default();
@@ -1854,9 +1860,11 @@ fn map_structured_stream<S>(
     fallback_model: String,
     recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
     raw: Option<RawTelemetryEmitter>,
-) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, OpenAiError>> + Send + 'static
+) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, OpenAiError>>
++ lutum_protocol::MaybeSend
++ 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = SseParser::default();
@@ -2182,9 +2190,9 @@ fn map_completion_stream<S>(
     stream: S,
     fallback_model: String,
     raw: Option<RawTelemetryEmitter>,
-) -> impl Stream<Item = Result<CompletionEvent, OpenAiError>> + Send + 'static
+) -> impl Stream<Item = Result<CompletionEvent, OpenAiError>> + lutum_protocol::MaybeSend + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = SseParser::default();
@@ -2582,9 +2590,9 @@ fn map_chat_text_stream<S>(
     stream: S,
     fallback_model: String,
     raw: Option<RawTelemetryEmitter>,
-) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + Send + 'static
+) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + lutum_protocol::MaybeSend + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = SseParser::default();
@@ -2764,9 +2772,11 @@ fn map_chat_structured_stream<S>(
     stream: S,
     fallback_model: String,
     raw: Option<RawTelemetryEmitter>,
-) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, OpenAiError>> + Send + 'static
+) -> impl Stream<Item = Result<ErasedStructuredTurnEvent, OpenAiError>>
++ lutum_protocol::MaybeSend
++ 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = SseParser::default();
@@ -3030,7 +3040,7 @@ mod tests {
 
     #[test]
     fn select_openai_model_uses_last_registered_singleton_override() {
-        let hooks = OpenAiHooks::new()
+        let hooks = OpenAiHooksSet::new()
             .with_select_openai_model(PreferGpt41)
             .with_select_openai_model(PreferGpt41Mini);
 

@@ -9,8 +9,8 @@ pub use db::{
     TableInfo, WritePreview,
 };
 pub use hooks::{
-    AgentHooks, ApproveModeRequest, AugmentUserMessage, SystemPrompt, TransactionMode,
-    WriteDecision,
+    AgentHooks, AgentHooksSet, ApproveModeRequest, AugmentUserMessage, SystemPrompt,
+    TransactionMode, WriteDecision,
 };
 pub use r#loop::{AgentConfig, AgentError, SqlHistoryEntry, TurnOutput, init_session, run_turn};
 pub use lutum::Session;

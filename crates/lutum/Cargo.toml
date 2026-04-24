@@ -31,7 +31,7 @@ lutum-eval.workspace = true
 lutum-trace.workspace = true
 schemars.workspace = true
 serde.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 tracing-subscriber.workspace = true
 trybuild = "1"
 # for examples

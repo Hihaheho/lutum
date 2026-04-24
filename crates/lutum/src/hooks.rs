@@ -23,7 +23,8 @@
 //! ```
 //!
 //! This expands to:
-//! - a hook container struct `AppHooks`
+//! - an implementation trait `AppHooks`
+//! - a hook container struct `AppHooksSet<'h>`
 //! - a slot trait `ValidateOutput`
 //! - a stateful slot trait `StatefulValidateOutput`
 //! - `with_validate_output`, `register_validate_output`, and `validate_output` methods
@@ -63,31 +64,190 @@
 
 use crate::{OperationKind, RequestExtensions, budget::UsageEstimate};
 
-pub use lutum_protocol::hooks::{HookReentrancyError, Stateful};
+pub use lutum_protocol::hooks::{
+    HookFuture, HookObject, HookReentrancyError, MaybeSend, MaybeSync, Stateful, boxed_hook_future,
+};
 
-#[async_trait::async_trait]
-pub trait Chain<Output>: Send + Sync {
-    async fn call(&self, output: &Output) -> ::std::ops::ControlFlow<()>;
+pub trait Chain<Output>: HookObject {
+    fn call<'a>(
+        &'a self,
+        output: &'a Output,
+    ) -> impl ::std::future::Future<Output = ::std::ops::ControlFlow<()>> + MaybeSend + 'a;
 }
 
-#[async_trait::async_trait]
-pub trait Aggregate<Output>: Send + Sync {
-    async fn call(&self, outputs: Vec<Output>) -> Output;
+#[doc(hidden)]
+pub trait DynChain<Output>: HookObject {
+    fn call_dyn<'a>(&'a self, output: &'a Output) -> HookFuture<'a, ::std::ops::ControlFlow<()>>;
 }
 
-#[async_trait::async_trait]
-pub trait AggregateInto<Input, Output>: Send + Sync {
-    async fn call(&self, outputs: Vec<Input>) -> Output;
+impl<T, Output> DynChain<Output> for T
+where
+    T: Chain<Output>,
+    Output: MaybeSync,
+{
+    fn call_dyn<'a>(&'a self, output: &'a Output) -> HookFuture<'a, ::std::ops::ControlFlow<()>> {
+        boxed_hook_future(async move { <T as Chain<Output>>::call(self, output).await })
+    }
 }
 
-#[async_trait::async_trait]
-pub trait Finalize<Output>: Send + Sync {
-    async fn call(&self, output: Output) -> Output;
+impl<T, Output> Chain<Output> for &T
+where
+    T: Chain<Output> + ?Sized,
+{
+    fn call<'a>(
+        &'a self,
+        output: &'a Output,
+    ) -> impl ::std::future::Future<Output = ::std::ops::ControlFlow<()>> + MaybeSend + 'a {
+        (**self).call(output)
+    }
 }
 
-#[async_trait::async_trait]
-pub trait FinalizeInto<Input, Output>: Send + Sync {
-    async fn call(&self, output: Input) -> Output;
+pub trait Aggregate<Output>: HookObject {
+    fn call(
+        &self,
+        outputs: Vec<Output>,
+    ) -> impl ::std::future::Future<Output = Output> + MaybeSend + '_;
+}
+
+#[doc(hidden)]
+pub trait DynAggregate<Output>: HookObject {
+    fn call_dyn<'a>(&'a self, outputs: Vec<Output>) -> HookFuture<'a, Output>
+    where
+        Output: 'a;
+}
+
+impl<T, Output> DynAggregate<Output> for T
+where
+    T: Aggregate<Output>,
+    Output: MaybeSend,
+{
+    fn call_dyn<'a>(&'a self, outputs: Vec<Output>) -> HookFuture<'a, Output>
+    where
+        Output: 'a,
+    {
+        boxed_hook_future(async move { <T as Aggregate<Output>>::call(self, outputs).await })
+    }
+}
+
+impl<T, Output> Aggregate<Output> for &T
+where
+    T: Aggregate<Output> + ?Sized,
+{
+    fn call(
+        &self,
+        outputs: Vec<Output>,
+    ) -> impl ::std::future::Future<Output = Output> + MaybeSend + '_ {
+        (**self).call(outputs)
+    }
+}
+
+pub trait AggregateInto<Input, Output>: HookObject {
+    fn call(
+        &self,
+        outputs: Vec<Input>,
+    ) -> impl ::std::future::Future<Output = Output> + MaybeSend + '_;
+}
+
+#[doc(hidden)]
+pub trait DynAggregateInto<Input, Output>: HookObject {
+    fn call_dyn<'a>(&'a self, outputs: Vec<Input>) -> HookFuture<'a, Output>
+    where
+        Input: 'a;
+}
+
+impl<T, Input, Output> DynAggregateInto<Input, Output> for T
+where
+    T: AggregateInto<Input, Output>,
+    Input: MaybeSend,
+{
+    fn call_dyn<'a>(&'a self, outputs: Vec<Input>) -> HookFuture<'a, Output>
+    where
+        Input: 'a,
+    {
+        boxed_hook_future(
+            async move { <T as AggregateInto<Input, Output>>::call(self, outputs).await },
+        )
+    }
+}
+
+impl<T, Input, Output> AggregateInto<Input, Output> for &T
+where
+    T: AggregateInto<Input, Output> + ?Sized,
+{
+    fn call(
+        &self,
+        outputs: Vec<Input>,
+    ) -> impl ::std::future::Future<Output = Output> + MaybeSend + '_ {
+        (**self).call(outputs)
+    }
+}
+
+pub trait Finalize<Output>: HookObject {
+    fn call(&self, output: Output) -> impl ::std::future::Future<Output = Output> + MaybeSend + '_;
+}
+
+#[doc(hidden)]
+pub trait DynFinalize<Output>: HookObject {
+    fn call_dyn<'a>(&'a self, output: Output) -> HookFuture<'a, Output>
+    where
+        Output: 'a;
+}
+
+impl<T, Output> DynFinalize<Output> for T
+where
+    T: Finalize<Output>,
+    Output: MaybeSend,
+{
+    fn call_dyn<'a>(&'a self, output: Output) -> HookFuture<'a, Output>
+    where
+        Output: 'a,
+    {
+        boxed_hook_future(async move { <T as Finalize<Output>>::call(self, output).await })
+    }
+}
+
+impl<T, Output> Finalize<Output> for &T
+where
+    T: Finalize<Output> + ?Sized,
+{
+    fn call(&self, output: Output) -> impl ::std::future::Future<Output = Output> + MaybeSend + '_ {
+        (**self).call(output)
+    }
+}
+
+pub trait FinalizeInto<Input, Output>: HookObject {
+    fn call(&self, output: Input) -> impl ::std::future::Future<Output = Output> + MaybeSend + '_;
+}
+
+#[doc(hidden)]
+pub trait DynFinalizeInto<Input, Output>: HookObject {
+    fn call_dyn<'a>(&'a self, output: Input) -> HookFuture<'a, Output>
+    where
+        Input: 'a;
+}
+
+impl<T, Input, Output> DynFinalizeInto<Input, Output> for T
+where
+    T: FinalizeInto<Input, Output>,
+    Input: MaybeSend,
+{
+    fn call_dyn<'a>(&'a self, output: Input) -> HookFuture<'a, Output>
+    where
+        Input: 'a,
+    {
+        boxed_hook_future(
+            async move { <T as FinalizeInto<Input, Output>>::call(self, output).await },
+        )
+    }
+}
+
+impl<T, Input, Output> FinalizeInto<Input, Output> for &T
+where
+    T: FinalizeInto<Input, Output> + ?Sized,
+{
+    fn call(&self, output: Input) -> impl ::std::future::Future<Output = Output> + MaybeSend + '_ {
+        (**self).call(output)
+    }
 }
 
 /// Default chain implementation for `Result<T, E>` hooks — stops dispatch on the first `Err`.

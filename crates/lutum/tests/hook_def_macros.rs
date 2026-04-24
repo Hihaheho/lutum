@@ -99,3 +99,19 @@ fn tool_hook_toolset_compiles() {
     let cases = trybuild::TestCases::new();
     cases.pass("tests/ui/tool_hook_toolset.rs");
 }
+
+#[test]
+fn impl_hooks_compiles() {
+    let cases = trybuild::TestCases::new();
+    cases.pass("tests/ui/impl_hooks_basic.rs");
+    cases.pass("tests/ui/impl_hooks_toolset.rs");
+}
+
+#[test]
+fn impl_hooks_rejects_invalid_impls() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/impl_hooks_unknown_method.rs");
+    cases.compile_fail("tests/ui/impl_hooks_mismatched_signature.rs");
+    cases.compile_fail("tests/ui/impl_hooks_wrong_hookset.rs");
+    cases.compile_fail("tests/ui/impl_hooks_last_not_trailing.rs");
+}

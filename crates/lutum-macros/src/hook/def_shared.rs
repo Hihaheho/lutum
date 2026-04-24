@@ -37,6 +37,8 @@ pub struct HookArgTokens {
     pub trait_args_no_last: Vec<proc_macro2::TokenStream>,
     /// Same with `last: Option<Output>` appended when `trait_has_last`.
     pub trait_args: Vec<proc_macro2::TokenStream>,
+    /// Trait args with any non-`str` references tied to a named lifetime.
+    pub dyn_trait_args: Vec<proc_macro2::TokenStream>,
     /// Arg names for call forwarding: field idents (+ `last` when `trait_has_last`).
     pub trait_call_arg_names: Vec<proc_macro2::TokenStream>,
     /// Variable name inside the dispatch body for each arg.
@@ -72,10 +74,20 @@ pub fn compute_hook_arg_tokens(
         .collect();
 
     let mut trait_args = trait_args_no_last.clone();
+    let dyn_lifetime: syn::Lifetime = syn::parse_quote!('__lutum_hook);
+    let mut dyn_trait_args: Vec<proc_macro2::TokenStream> = explicit_args
+        .iter()
+        .zip(args_field_idents.iter())
+        .map(|((_, ty), fi)| {
+            let param_ty = hook_param_type_with_lifetime(ty, &dyn_lifetime);
+            quote! { #fi: #param_ty }
+        })
+        .collect();
     let mut trait_call_arg_names: Vec<proc_macro2::TokenStream> =
         args_field_idents.iter().map(|fi| quote! { #fi }).collect();
     if trait_has_last {
         trait_args.push(quote! { last: ::std::option::Option<#output_ty> });
+        dyn_trait_args.push(quote! { last: ::std::option::Option<#output_ty> });
         trait_call_arg_names.push(quote! { last });
     }
 
@@ -140,6 +152,7 @@ pub fn compute_hook_arg_tokens(
     HookArgTokens {
         trait_args_no_last,
         trait_args,
+        dyn_trait_args,
         trait_call_arg_names,
         dispatch_vars,
         cloned,
@@ -157,6 +170,7 @@ pub fn generate_hook_trait_defs(
     output_ty: &Type,
     slot: &HookSlotIdents,
     trait_args: &[proc_macro2::TokenStream],
+    dyn_trait_args: &[proc_macro2::TokenStream],
     generics: &syn::Generics,
 ) -> proc_macro2::TokenStream {
     let hook_trait_ident = &slot.hook_trait;
@@ -165,42 +179,39 @@ pub fn generate_hook_trait_defs(
     let (trait_generics, where_clause) = trait_generics_tokens(generics);
     let hook_trait_def = quote_spanned! { def_span =>
         #[allow(dead_code)]
-        #[::async_trait::async_trait]
-        #vis trait #hook_trait_ident #trait_generics: Send + Sync
+        #vis trait #hook_trait_ident #trait_generics: ::lutum::HookObject
         #where_clause
         {
-            async fn call(
+            fn call(
                 &self,
                 #(#trait_args,)*
-            ) -> #output_ty;
+            ) -> impl ::std::future::Future<Output = #output_ty> + ::lutum::MaybeSend;
         }
     };
     let stateful_hook_trait_def = quote_spanned! { def_span =>
         #[allow(dead_code)]
-        #[::async_trait::async_trait]
-        #vis trait #stateful_hook_trait_ident #trait_generics: Send
+        #vis trait #stateful_hook_trait_ident #trait_generics: ::lutum::MaybeSend
         #where_clause
         {
             fn on_reentrancy(err: ::lutum_protocol::hooks::HookReentrancyError) -> #output_ty {
                 panic!("stateful hook reentered: {err}");
             }
 
-            async fn call_mut(
+            fn call_mut(
                 &mut self,
                 #(#trait_args,)*
-            ) -> #output_ty;
+            ) -> impl ::std::future::Future<Output = #output_ty> + ::lutum::MaybeSend;
         }
     };
     let dyn_hook_trait_def = quote_spanned! { def_span =>
         #[allow(dead_code)]
-        #[::async_trait::async_trait]
-        #vis trait #dyn_hook_trait_ident #trait_generics: Send + Sync
+        #vis trait #dyn_hook_trait_ident #trait_generics: ::lutum::HookObject
         #where_clause
         {
-            async fn call_dyn(
-                &self,
-                #(#trait_args,)*
-            ) -> #output_ty;
+            fn call_dyn<'__lutum_hook>(
+                &'__lutum_hook self,
+                #(#dyn_trait_args,)*
+            ) -> ::lutum::HookFuture<'__lutum_hook, #output_ty>;
         }
     };
     quote! { #hook_trait_def #stateful_hook_trait_def #dyn_hook_trait_def }
@@ -236,18 +247,18 @@ pub fn generate_fn_blanket_impl(
         quote! { (self)(#(#field_ident_names,)*).await }
     };
     let fn_bound = if trait_has_last {
-        quote! { F: Fn(#(#fn_bound_types,)* ::std::option::Option<#output_ty>) -> __Fut + Send + Sync }
+        quote! { F: Fn(#(#fn_bound_types,)* ::std::option::Option<#output_ty>) -> __Fut }
     } else {
-        quote! { F: Fn(#(#fn_bound_types,)*) -> __Fut + Send + Sync }
+        quote! { F: Fn(#(#fn_bound_types,)*) -> __Fut }
     };
 
     quote! {
         #[allow(dead_code)]
-        #[::async_trait::async_trait]
         impl<F, __Fut> #hook_trait_ident for F
         where
             #fn_bound,
-            __Fut: ::std::future::Future<Output = #output_ty> + Send + 'static,
+            F: ::lutum::HookObject,
+            __Fut: ::std::future::Future<Output = #output_ty> + ::lutum::MaybeSend,
         {
             async fn call(
                 &self,
@@ -272,6 +283,7 @@ pub fn generate_blanket_impls(
     let dyn_hook_trait_ident = &slot.dyn_trait;
     let HookArgTokens {
         trait_args,
+        dyn_trait_args,
         trait_call_arg_names,
         ..
     } = arg_tokens;
@@ -307,26 +319,26 @@ pub fn generate_blanket_impls(
         .make_where_clause()
         .predicates
         .push(syn::parse_quote!(
-            __StatefulHook: #stateful_hook_trait_ident #slot_ty_generics + 'static
+            __StatefulHook: #stateful_hook_trait_ident #slot_ty_generics
         ));
     let (stateful_impl_generics, _, stateful_where_clause) =
         stateful_impl_generics.split_for_impl();
 
     quote! {
-        #[::async_trait::async_trait]
         impl #dyn_impl_generics #dyn_hook_trait_ident #slot_ty_generics for __Hook
         #dyn_where_clause
         {
-            async fn call_dyn(
-                &self,
-                #(#trait_args,)*
-            ) -> #output_ty {
-                #dyn_hook_impl_call
+            fn call_dyn<'__lutum_hook>(
+                &'__lutum_hook self,
+                #(#dyn_trait_args,)*
+            ) -> ::lutum::HookFuture<'__lutum_hook, #output_ty> {
+                ::lutum::boxed_hook_future(async move {
+                    #dyn_hook_impl_call
+                })
             }
         }
 
         #[allow(dead_code)]
-        #[::async_trait::async_trait]
         impl #stateful_impl_generics #hook_trait_ident #slot_ty_generics
             for ::lutum_protocol::hooks::Stateful<__StatefulHook>
         #stateful_where_clause
@@ -347,5 +359,17 @@ pub fn generate_blanket_impls(
                 #stateful_hook_impl_call
             }
         }
+    }
+}
+
+fn hook_param_type_with_lifetime(ty: &Type, lifetime: &syn::Lifetime) -> proc_macro2::TokenStream {
+    match ty {
+        Type::Reference(r) if !matches!(r.elem.as_ref(), Type::Path(p) if p.path.is_ident("str")) =>
+        {
+            let elem = &r.elem;
+            let mutability = &r.mutability;
+            quote! { &#lifetime #mutability #elem }
+        }
+        _ => hook_param_type(ty),
     }
 }

@@ -24,7 +24,8 @@ const PROMPTS: &[&str] = &[
 
 struct PrintDelta;
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl EventHandler<CompletionEvent, CompletionTurnState> for PrintDelta {
     type Error = Infallible;
 
@@ -41,7 +42,7 @@ impl EventHandler<CompletionEvent, CompletionTurnState> for PrintDelta {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());

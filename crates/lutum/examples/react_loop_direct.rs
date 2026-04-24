@@ -152,7 +152,7 @@ fn format_cents(c: u32) -> String {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());

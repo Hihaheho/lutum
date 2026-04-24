@@ -132,11 +132,11 @@ let llm = Lutum::new(
 
     "body" = ```markdown
 OpenAI o-series models support a `reasoning_effort` parameter. Configure it via
-`ReasoningEffortResolver` in `OpenAiHooks`:
+`ReasoningEffortResolver` in `OpenAiHooksSet`:
 ```
 
     "rust-example" = ```rust
-use lutum_openai::{OpenAiAdapter, OpenAiHooks, ReasoningEffort};
+use lutum_openai::{OpenAiAdapter, OpenAiHooksSet, ReasoningEffort};
 
 #[lutum::impl_hook(ResolveReasoningEffort)]
 async fn my_resolver(
@@ -146,7 +146,7 @@ async fn my_resolver(
     Some(ReasoningEffort::High)
 }
 
-let hooks = OpenAiHooks::new().with_reasoning_effort(MyResolver);
+let hooks = OpenAiHooksSet::new().with_reasoning_effort(MyResolver);
 let adapter = OpenAiAdapter::new(api_key).with_hooks(hooks);
 ```
 

@@ -18,8 +18,6 @@ struct CommandPolicy {
     max_pipes: usize,
 }
 
-// A struct is clearer here: multiple policy fields, shared helper logic, no capture noise.
-#[async_trait::async_trait]
 impl ValidateCommand for CommandPolicy {
     async fn call(&self, cmd: String, last: Option<Validation>) -> Validation {
         if let Some(Err(reasons)) = last {
@@ -62,12 +60,12 @@ async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> 
     Ok(result.assistant_text())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
     let model = ModelName::new(std::env::var("MODEL").unwrap_or_else(|_| "gemma4:e2b".into()))?;
-    let hooks = ShellHooks::new().with_validate_command(CommandPolicy {
+    let hooks = ShellHooksSet::new().with_validate_command(CommandPolicy {
         allowed_prefixes: &["/var/log", "/tmp"],
         forbidden_tokens: &["rm", "mv", "sudo", ">", ">>", "dd"],
         max_pipes: 2,
@@ -79,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_default_model(model),
         ),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
-        LutumHooks::new(),
+        LutumHooksSet::new(),
     );
     let system = "You are a shell expert for log triage on a read-only system.\nOutput only the shell command, nothing else.";
     let request = "List the 5 most recent error lines from /var/log/syslog.";

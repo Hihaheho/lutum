@@ -1,9 +1,8 @@
+use std::{convert::Infallible, ops::Deref, sync::Arc, time::Duration};
+#[cfg(not(target_family = "wasm"))]
 use std::{
-    convert::Infallible,
-    ops::Deref,
-    sync::{Arc, Mutex},
+    sync::Mutex,
     task::{Context, Poll},
-    time::Duration,
 };
 
 use async_stream::try_stream;
@@ -50,7 +49,7 @@ use lutum_protocol::{
     },
 };
 
-use crate::hooks::LutumHooks;
+use crate::hooks::{LutumHooksSet, MaybeSend, MaybeSync};
 
 pub type LutumError = AgentError;
 
@@ -61,7 +60,8 @@ struct MissingCompletionAdapter;
 #[derive(Clone, Default)]
 struct UnsupportedCompletionAdapter;
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl CompletionAdapter for UnsupportedCompletionAdapter {
     async fn completion(
         &self,
@@ -86,7 +86,7 @@ pub struct Lutum {
     turns: Arc<dyn TurnAdapter>,
     completion: Arc<dyn CompletionAdapter>,
     recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
-    hooks: Arc<LutumHooks>,
+    hooks: Arc<LutumHooksSet<'static>>,
     default_extensions: Arc<RequestExtensions>,
 }
 
@@ -95,13 +95,13 @@ impl Lutum {
     where
         T: TurnAdapter + 'static,
     {
-        Self::with_hooks(adapter, budget, LutumHooks::new())
+        Self::with_hooks(adapter, budget, LutumHooksSet::new())
     }
 
     pub fn with_hooks<T>(
         adapter: Arc<T>,
         budget: impl BudgetManager + 'static,
-        hooks: LutumHooks,
+        hooks: LutumHooksSet<'static>,
     ) -> Self
     where
         T: TurnAdapter + 'static,
@@ -121,14 +121,14 @@ impl Lutum {
         completion: Arc<dyn CompletionAdapter>,
         budget: impl BudgetManager + 'static,
     ) -> Self {
-        Self::from_parts_with_hooks(turns, completion, budget, LutumHooks::new())
+        Self::from_parts_with_hooks(turns, completion, budget, LutumHooksSet::new())
     }
 
     pub fn from_parts_with_hooks(
         turns: Arc<dyn TurnAdapter>,
         completion: Arc<dyn CompletionAdapter>,
         budget: impl BudgetManager + 'static,
-        hooks: LutumHooks,
+        hooks: LutumHooksSet<'static>,
     ) -> Self {
         Self {
             budget: Arc::new(budget),
@@ -245,8 +245,9 @@ impl<'a, S> HandlerContext<'a, S> {
     }
 }
 
-#[async_trait::async_trait]
-pub trait EventHandler<E, S>: Send {
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+pub trait EventHandler<E, S>: MaybeSend {
     type Error;
 
     async fn on_event(
@@ -256,12 +257,13 @@ pub trait EventHandler<E, S>: Send {
     ) -> Result<HandlerDirective, Self::Error>;
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl<E, S, F, Err> EventHandler<E, S> for F
 where
-    F: Send + for<'a> FnMut(&'a E, &'a HandlerContext<'a, S>) -> Result<HandlerDirective, Err>,
-    E: Sync,
-    S: Sync,
+    F: MaybeSend + for<'a> FnMut(&'a E, &'a HandlerContext<'a, S>) -> Result<HandlerDirective, Err>,
+    E: MaybeSync,
+    S: MaybeSync,
 {
     type Error = Err;
 
@@ -305,10 +307,12 @@ struct OwnedLease {
     lease: Option<BudgetLease>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 struct SyncPinnedStream<Item> {
     inner: Mutex<core::pin::Pin<Box<dyn futures::Stream<Item = Item> + Send + 'static>>>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl<Item> futures::Stream for SyncPinnedStream<Item> {
     type Item = Item;
 
@@ -321,12 +325,20 @@ impl<Item> futures::Stream for SyncPinnedStream<Item> {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn boxed_sync_stream<Item: 'static>(
     stream: impl futures::Stream<Item = Item> + Send + 'static,
 ) -> core::pin::Pin<Box<dyn futures::Stream<Item = Item> + Send + Sync + 'static>> {
     Box::pin(SyncPinnedStream {
         inner: Mutex::new(Box::pin(stream)),
     })
+}
+
+#[cfg(target_family = "wasm")]
+fn boxed_sync_stream<Item: 'static>(
+    stream: impl futures::Stream<Item = Item> + 'static,
+) -> core::pin::Pin<Box<dyn futures::Stream<Item = Item> + 'static>> {
+    Box::pin(stream)
 }
 
 impl Drop for OwnedLease {
@@ -4529,11 +4541,12 @@ where
 
 struct NoopHandler;
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl<E, S> EventHandler<E, S> for NoopHandler
 where
-    E: Send + Sync + 'static,
-    S: Send + Sync + 'static,
+    E: MaybeSend + MaybeSync + 'static,
+    S: MaybeSend + MaybeSync + 'static,
 {
     type Error = Infallible;
 
@@ -5409,6 +5422,7 @@ where
 }
 
 #[test]
+#[cfg(not(target_family = "wasm"))]
 fn test_pending_turns_are_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<PendingTextTurn>();

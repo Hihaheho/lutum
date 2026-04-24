@@ -13,25 +13,61 @@ use crate::{
     transcript::CommittedTurn,
 };
 
+#[cfg(not(target_family = "wasm"))]
 pub type TextTurnEventStream<E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<TextTurnEvent, E>> + Send + Sync + 'static>>;
+#[cfg(target_family = "wasm")]
+pub type TextTurnEventStream<E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<TextTurnEvent, E>> + 'static>>;
+#[cfg(not(target_family = "wasm"))]
 pub type TextTurnEventStreamWithTools<T, E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<TextTurnEventWithTools<T>, E>> + Send + Sync + 'static>>;
+#[cfg(target_family = "wasm")]
+pub type TextTurnEventStreamWithTools<T, E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<TextTurnEventWithTools<T>, E>> + 'static>>;
+#[cfg(not(target_family = "wasm"))]
 pub type StructuredTurnEventStream<O, E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<StructuredTurnEvent<O>, E>> + Send + Sync + 'static>>;
+#[cfg(target_family = "wasm")]
+pub type StructuredTurnEventStream<O, E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<StructuredTurnEvent<O>, E>> + 'static>>;
+#[cfg(not(target_family = "wasm"))]
 pub type StructuredTurnEventStreamWithTools<T, O, E = AgentError> = Pin<
     Box<dyn Stream<Item = Result<StructuredTurnEventWithTools<T, O>, E>> + Send + Sync + 'static>,
 >;
+#[cfg(target_family = "wasm")]
+pub type StructuredTurnEventStreamWithTools<T, O, E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<StructuredTurnEventWithTools<T, O>, E>> + 'static>>;
+#[cfg(not(target_family = "wasm"))]
 pub type StructuredCompletionEventStream<O, E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<StructuredCompletionEvent<O>, E>> + Send + Sync + 'static>>;
+#[cfg(target_family = "wasm")]
+pub type StructuredCompletionEventStream<O, E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<StructuredCompletionEvent<O>, E>> + 'static>>;
+#[cfg(not(target_family = "wasm"))]
 pub type CompletionEventStream<E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<CompletionEvent, E>> + Send + Sync + 'static>>;
+#[cfg(target_family = "wasm")]
+pub type CompletionEventStream<E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<CompletionEvent, E>> + 'static>>;
+#[cfg(not(target_family = "wasm"))]
 pub type ErasedTextTurnEventStream<E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<ErasedTextTurnEvent, E>> + Send + Sync + 'static>>;
+#[cfg(target_family = "wasm")]
+pub type ErasedTextTurnEventStream<E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<ErasedTextTurnEvent, E>> + 'static>>;
+#[cfg(not(target_family = "wasm"))]
 pub type ErasedStructuredTurnEventStream<E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<ErasedStructuredTurnEvent, E>> + Send + Sync + 'static>>;
+#[cfg(target_family = "wasm")]
+pub type ErasedStructuredTurnEventStream<E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<ErasedStructuredTurnEvent, E>> + 'static>>;
+#[cfg(not(target_family = "wasm"))]
 pub type ErasedStructuredCompletionEventStream<E = AgentError> =
     Pin<Box<dyn Stream<Item = Result<ErasedStructuredCompletionEvent, E>> + Send + Sync + 'static>>;
+#[cfg(target_family = "wasm")]
+pub type ErasedStructuredCompletionEventStream<E = AgentError> =
+    Pin<Box<dyn Stream<Item = Result<ErasedStructuredCompletionEvent, E>> + 'static>>;
 
 #[derive(
     Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
@@ -1235,8 +1271,9 @@ pub enum OperationKind {
     Completion,
 }
 
-#[async_trait::async_trait]
-pub trait TurnAdapter: Send + Sync + 'static {
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+pub trait TurnAdapter: crate::hooks::MaybeSend + crate::hooks::MaybeSync + 'static {
     async fn text_turn(
         &self,
         input: ModelInput,
@@ -1250,8 +1287,9 @@ pub trait TurnAdapter: Send + Sync + 'static {
     ) -> Result<ErasedStructuredTurnEventStream, AgentError>;
 }
 
-#[async_trait::async_trait]
-pub trait CompletionAdapter: Send + Sync + 'static {
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+pub trait CompletionAdapter: crate::hooks::MaybeSend + crate::hooks::MaybeSync + 'static {
     async fn completion(
         &self,
         request: CompletionRequest,
@@ -1265,8 +1303,11 @@ pub trait CompletionAdapter: Send + Sync + 'static {
     ) -> Result<ErasedStructuredCompletionEventStream, AgentError>;
 }
 
-#[async_trait::async_trait]
-pub trait UsageRecoveryAdapter: Send + Sync + 'static {
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+pub trait UsageRecoveryAdapter:
+    crate::hooks::MaybeSend + crate::hooks::MaybeSync + 'static
+{
     async fn recover_usage(
         &self,
         kind: OperationKind,
@@ -1274,7 +1315,8 @@ pub trait UsageRecoveryAdapter: Send + Sync + 'static {
     ) -> Result<Option<Usage>, AgentError>;
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl<T> TurnAdapter for Arc<T>
 where
     T: TurnAdapter + ?Sized,
@@ -1296,7 +1338,8 @@ where
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl<T> CompletionAdapter for Arc<T>
 where
     T: CompletionAdapter + ?Sized,
@@ -1318,7 +1361,8 @@ where
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl<T> UsageRecoveryAdapter for Arc<T>
 where
     T: UsageRecoveryAdapter + ?Sized,
@@ -1333,6 +1377,7 @@ where
 }
 
 #[test]
+#[cfg(not(target_family = "wasm"))]
 fn test_stream_types_are_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<TextTurnEventStream>();

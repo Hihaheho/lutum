@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 struct NullAdapter;
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl TurnAdapter for NullAdapter {
     async fn text_turn(
         &self,
@@ -35,7 +36,8 @@ impl TurnAdapter for NullAdapter {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl CompletionAdapter for NullAdapter {
     async fn completion(
         &self,
@@ -54,7 +56,8 @@ impl CompletionAdapter for NullAdapter {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl UsageRecoveryAdapter for NullAdapter {
     async fn recover_usage(
         &self,

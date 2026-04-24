@@ -6,7 +6,7 @@
 //!   - `Calc(CalcArgs)`             — a regular direct tool
 //!
 //! Key API demonstrated:
-//!   - `AppToolsHooks::new(DataToolsHooks::new())`
+//!   - `AppToolsHooksSet::new(DataToolsHooksSet::new())`
 //!   - `hooks.data.register_get_user_hook(...)` (hook registration via nested field)
 //!   - `hooks.data.description_overrides()` flows up into `AppToolsHooks::description_overrides()`
 //!
@@ -167,7 +167,7 @@ async fn cached_alice(
 
 // ── ReAct loop ────────────────────────────────────────────────────────────────
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
@@ -191,9 +191,9 @@ async fn main() -> anyhow::Result<()> {
     );
     session.push_user("What is the total amount (in dollars) of all orders placed by user ID 2?");
 
-    // Build hooks: AppToolsHooks::new(DataToolsHooks::new())
+    // Build hooks: AppToolsHooksSet::new(DataToolsHooksSet::new())
     // Register a cache hook on the nested `data` field.
-    let mut app_hooks = AppToolsHooks::new(DataToolsHooks::new());
+    let mut app_hooks = AppToolsHooksSet::new(DataToolsHooksSet::new());
     app_hooks.data.register_get_user_hook(CachedAlice);
 
     println!("=== nested_toolset example ===");

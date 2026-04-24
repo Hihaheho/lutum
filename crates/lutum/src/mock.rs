@@ -335,7 +335,8 @@ fn agent_error_from_mock(error: MockError) -> AgentError {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl TurnAdapter for MockLlmAdapter {
     async fn text_turn(
         &self,
@@ -527,7 +528,8 @@ impl TurnAdapter for MockLlmAdapter {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl CompletionAdapter for MockLlmAdapter {
     async fn completion(
         &self,
@@ -633,7 +635,8 @@ impl CompletionAdapter for MockLlmAdapter {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl UsageRecoveryAdapter for MockLlmAdapter {
     async fn recover_usage(
         &self,

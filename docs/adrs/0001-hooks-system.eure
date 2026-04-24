@@ -31,8 +31,8 @@ Several constraints remained non-negotiable:
 1. The library must never own a loop. Hooks are call points in user code, not
    lifecycle interceptors wired into an internal agent runtime.
 2. Hook storage must remain owner-local. User-defined slots live in app-owned
-   `#[hooks]` owners, while framework-owned slots live in `LutumHooks`,
-   `OpenAiHooks`, `ClaudeHooks`, or derive-generated tool hook owners.
+   `#[hooks]` hook sets, while framework-owned slots live in `LutumHooksSet`,
+   `OpenAiHooksSet`, `ClaudeHooksSet`, or derive-generated tool hook sets.
 ```
 
 decision = ````markdown
@@ -40,8 +40,9 @@ Make `#[hooks]` the only slot-definition surface.
 
 `#[hooks]` is applied to a trait. Each async method annotated with
 `#[hook(always | fallback | singleton, ...)]` defines one hook slot and its default
-implementation. The macro expands the trait into the owner-local hook struct, the slot
-marker types, the hook traits, the dispatch methods, and any builtin companion storage.
+implementation. The trait remains the implementation trait. The macro also generates the
+owner-local `<TraitName>Set`, the slot marker types, the hook traits, the dispatch methods, and
+any builtin companion storage.
 
 Example:
 
@@ -55,7 +56,7 @@ trait AppHooks {
 }
 ```
 
-Implementation syntax becomes `#[impl_hook(SlotType)]`:
+Single-slot implementation syntax becomes `#[impl_hook(SlotType)]`:
 
 ```rust
 #[lutum::impl_hook(ChooseLabel)]
@@ -75,6 +76,11 @@ match the generated hook trait method exactly:
 
 This is intentionally explicit. If a slot chains fold results, implementations write
 `last` themselves every time. There is no macro inference layer.
+
+One value can also implement several methods with
+`#[impl_hooks(AppHooksSet)] impl AppHooks for Data { ... }`. That impl block uses ordinary
+`async fn` methods and `register_hooks(data)` registers only the methods physically present in
+the impl.
 
 Builtin companion behaviors remain part of the slot definition:
 
@@ -118,13 +124,15 @@ For `#[hook(singleton)]` slots:
 
 Every hook slot is hosted by an explicit local owner generated from one `#[hooks]` trait:
 
-- user orchestration code defines app-owned `#[hooks]` traits and calls the expanded owner directly
-- `Lutum` owns `LutumHooks` for built-in runtime hooks such as `resolve_usage_estimate`
-- adapters own provider-specific hook sets such as `OpenAiHooks` and `ClaudeHooks`
+- user orchestration code defines app-owned `#[hooks]` traits and calls the expanded
+  `<TraitName>Set` directly
+- `Lutum` owns `LutumHooksSet` for built-in runtime hooks such as `resolve_usage_estimate`
+- adapters own provider-specific hook sets such as `OpenAiHooksSet` and `ClaudeHooksSet`
 
 **Builtin hook**
 
-`resolve_usage_estimate` is declared with `#[hook(singleton)]` inside `LutumHooks`.
+`resolve_usage_estimate` is declared with `#[hook(singleton)]` inside the `LutumHooks` trait and
+is stored by `LutumHooksSet`.
 Its default implementation reads a typed estimate from `RequestExtensions` and falls back
 to zero.
 
@@ -153,6 +161,6 @@ consequences = ```markdown
   be registered, not just closures
 - External slot reuse across unrelated `#[hooks]` owners is no longer a goal of the API
 - This is a breaking change, but it improves user-facing locality and long-term maintenance
-- `Lutum::new` continues to work with an empty `LutumHooks`
+- `Lutum::new` continues to work with an empty `LutumHooksSet`
 - Adapter-local request shaping remains available without routing through `Lutum`
 ```

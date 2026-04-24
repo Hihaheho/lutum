@@ -5,6 +5,8 @@ use syn::{ItemFn, Visibility};
 
 pub struct SlotExpansion {
     pub items: proc_macro2::TokenStream,
+    pub trait_method: proc_macro2::TokenStream,
+    pub trait_ref_impl_method: proc_macro2::TokenStream,
     pub field: proc_macro2::TokenStream,
     pub field_init: proc_macro2::TokenStream,
     pub register_methods: proc_macro2::TokenStream,
@@ -16,6 +18,7 @@ pub fn expand_slot(
     mut item_fn: ItemFn,
     kind: HookKind,
     vis: &Visibility,
+    owner_trait_ident: &Ident,
 ) -> syn::Result<SlotExpansion> {
     let HookSignature {
         explicit_args,
@@ -67,6 +70,22 @@ pub fn expand_slot(
         .iter()
         .map(|(ident, _)| quote! { #ident })
         .collect::<Vec<_>>();
+    let trait_method_args = explicit_args
+        .iter()
+        .map(|(ident, ty)| quote! { #ident: #ty })
+        .collect::<Vec<_>>();
+    let mut trait_method_call_args = hook_call_arg_names.clone();
+    let trait_last_arg = if trait_has_last {
+        trait_method_call_args.push(quote! { last });
+        quote! { last: ::std::option::Option<#hook_output_ty>, }
+    } else {
+        quote! {}
+    };
+    let trait_last_ignore = if trait_has_last {
+        quote! { let _ = last; }
+    } else {
+        quote! {}
+    };
     let has_explicit_args = !explicit_args.is_empty();
     let has_ref_arg = explicit_args.iter().any(|(_, ty)| is_non_str_ref(ty));
     let dispatch_output_ty = dispatch_output_type(&kind, &hook_output_ty);
@@ -101,6 +120,7 @@ pub fn expand_slot(
         &hook_output_ty,
         &slot,
         &arg_tokens.trait_args,
+        &arg_tokens.dyn_trait_args,
         &generics,
     );
     let fn_impl = generate_fn_blanket_impl(&slot, &flags, &hook_output_ty, &arg_tokens, &generics);
@@ -144,6 +164,11 @@ pub fn expand_slot(
     } else {
         quote! { ::lutum::Aggregate<#hook_output_ty> }
     };
+    let dyn_aggregate_trait = if has_output_override {
+        quote! { ::lutum::DynAggregateInto<#hook_output_ty, #dispatch_output_ty> }
+    } else {
+        quote! { ::lutum::DynAggregate<#hook_output_ty> }
+    };
     let aggregate_trait_import = if has_output_override {
         quote! { use ::lutum::AggregateInto as _; }
     } else {
@@ -153,6 +178,11 @@ pub fn expand_slot(
         quote! { ::lutum::FinalizeInto<#hook_output_ty, #dispatch_output_ty> }
     } else {
         quote! { ::lutum::Finalize<#hook_output_ty> }
+    };
+    let dyn_finalize_trait = if has_output_override {
+        quote! { ::lutum::DynFinalizeInto<#hook_output_ty, #dispatch_output_ty> }
+    } else {
+        quote! { ::lutum::DynFinalize<#hook_output_ty> }
     };
     let finalize_trait_import = if has_output_override {
         quote! { use ::lutum::FinalizeInto as _; }
@@ -166,7 +196,7 @@ pub fn expand_slot(
             .map(|chain_default_ty| {
                 let chain_field_ty = quote! {
                     ::std::option::Option<
-                        ::std::sync::Arc<dyn ::lutum::Chain<#hook_output_ty> + Send + Sync>
+                        ::std::sync::Arc<dyn ::lutum::DynChain<#hook_output_ty> + '__lutum_hooks>
                     >
                 };
                 let chain_field_init = quote! { ::std::option::Option::None };
@@ -174,7 +204,7 @@ pub fn expand_slot(
                     if {
                         use ::lutum::Chain as _;
                         let __cf = match &self.#chain_field_ident {
-                            ::std::option::Option::Some(__h) => (__h).call(&__next).await,
+                            ::std::option::Option::Some(__h) => (__h).call_dyn(&__next).await,
                             ::std::option::Option::None => {
                                 let __d: #chain_default_ty = ::std::default::Default::default();
                                 __d.call(&__next).await
@@ -191,7 +221,7 @@ pub fn expand_slot(
             .map(|aggregate_default_ty| {
                 let aggregate_field_ty = quote! {
                     ::std::option::Option<
-                        ::std::sync::Arc<dyn #aggregate_trait + Send + Sync>
+                        ::std::sync::Arc<dyn #dyn_aggregate_trait + '__lutum_hooks>
                     >
                 };
                 let aggregate_field_init = quote! { ::std::option::Option::None };
@@ -199,7 +229,7 @@ pub fn expand_slot(
                     {
                         #aggregate_trait_import
                         match &self.#aggregate_field_ident {
-                            ::std::option::Option::Some(__h) => __h.call(__outputs).await,
+                            ::std::option::Option::Some(__h) => __h.call_dyn(__outputs).await,
                             ::std::option::Option::None => {
                                 let __a: #aggregate_default_ty =
                                     ::std::default::Default::default();
@@ -216,7 +246,7 @@ pub fn expand_slot(
             .map(|finalize_default_ty| {
                 let finalize_field_ty = quote! {
                     ::std::option::Option<
-                        ::std::sync::Arc<dyn #finalize_trait + Send + Sync>
+                        ::std::sync::Arc<dyn #dyn_finalize_trait + '__lutum_hooks>
                     >
                 };
                 let finalize_field_init = quote! { ::std::option::Option::None };
@@ -224,7 +254,7 @@ pub fn expand_slot(
                     {
                         #finalize_trait_import
                         match &self.#finalize_field_ident {
-                            ::std::option::Option::Some(__h) => __h.call(__result).await,
+                            ::std::option::Option::Some(__h) => __h.call_dyn(__result).await,
                             ::std::option::Option::None => {
                                 let __f: #finalize_default_ty =
                                     ::std::default::Default::default();
@@ -238,18 +268,18 @@ pub fn expand_slot(
 
     let (field_ty, field_init, register_impl) = match &kind {
         HookKind::Always(_) | HookKind::Fallback(_) => (
-            quote! { ::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident>> },
+            quote! { ::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident + '__lutum_hooks>> },
             quote! { ::std::vec::Vec::new() },
             quote! {
                 self.#field_ident.push(::std::sync::Arc::new(hook));
             },
         ),
         HookKind::Singleton => (
-            quote! { ::std::option::Option<::std::sync::Arc<dyn #dyn_hook_trait_ident>> },
+            quote! { ::std::option::Option<::std::sync::Arc<dyn #dyn_hook_trait_ident + '__lutum_hooks>> },
             quote! { ::std::option::Option::None },
             quote! {
                 let hook = ::std::sync::Arc::new(hook)
-                    as ::std::sync::Arc<dyn #dyn_hook_trait_ident>;
+                    as ::std::sync::Arc<dyn #dyn_hook_trait_ident + '__lutum_hooks>;
                 if self.#field_ident.replace(hook).is_some() {
                     ::tracing::warn!(
                         target: "lutum",
@@ -274,7 +304,7 @@ pub fn expand_slot(
                 #[allow(dead_code)]
                 pub fn #with_chain_fn_ident(
                     mut self,
-                    h: impl ::lutum::Chain<#hook_output_ty> + 'static,
+                    h: impl ::lutum::Chain<#hook_output_ty> + '__lutum_hooks,
                 ) -> Self {
                     if self.#chain_field_ident.replace(::std::sync::Arc::new(h)).is_some() {
                         ::tracing::warn!(
@@ -289,7 +319,7 @@ pub fn expand_slot(
                 #[allow(dead_code)]
                 pub fn #set_chain_fn_ident(
                     &mut self,
-                    h: impl ::lutum::Chain<#hook_output_ty> + 'static,
+                    h: impl ::lutum::Chain<#hook_output_ty> + '__lutum_hooks,
                 ) {
                     self.#chain_field_ident =
                         ::std::option::Option::Some(::std::sync::Arc::new(h));
@@ -310,7 +340,7 @@ pub fn expand_slot(
                 #[allow(dead_code)]
                 pub fn #with_aggregate_fn_ident(
                     mut self,
-                    h: impl #aggregate_trait + 'static,
+                    h: impl #aggregate_trait + '__lutum_hooks,
                 ) -> Self {
                     if self
                         .#aggregate_field_ident
@@ -329,7 +359,7 @@ pub fn expand_slot(
                 #[allow(dead_code)]
                 pub fn #set_aggregate_fn_ident(
                     &mut self,
-                    h: impl #aggregate_trait + 'static,
+                    h: impl #aggregate_trait + '__lutum_hooks,
                 ) {
                     self.#aggregate_field_ident =
                         ::std::option::Option::Some(::std::sync::Arc::new(h));
@@ -350,7 +380,7 @@ pub fn expand_slot(
                 #[allow(dead_code)]
                 pub fn #with_finalize_fn_ident(
                     mut self,
-                    h: impl #finalize_trait + 'static,
+                    h: impl #finalize_trait + '__lutum_hooks,
                 ) -> Self {
                     if self
                         .#finalize_field_ident
@@ -369,7 +399,7 @@ pub fn expand_slot(
                 #[allow(dead_code)]
                 pub fn #set_finalize_fn_ident(
                     &mut self,
-                    h: impl #finalize_trait + 'static,
+                    h: impl #finalize_trait + '__lutum_hooks,
                 ) {
                     self.#finalize_field_ident =
                         ::std::option::Option::Some(::std::sync::Arc::new(h));
@@ -622,6 +652,28 @@ pub fn expand_slot(
 
         #blanket_impls
     };
+    let trait_method = quote! {
+        fn #fn_ident(
+            &self,
+            #(#trait_method_args,)*
+            #trait_last_arg
+        ) -> impl ::std::future::Future<Output = #hook_output_ty> + ::lutum::MaybeSend {
+            async move {
+                let _ = self;
+                #trait_last_ignore
+                #default_impl_fn_ident(#(#hook_call_arg_names,)*).await
+            }
+        }
+    };
+    let trait_ref_impl_method = quote! {
+        async fn #fn_ident(
+            &self,
+            #(#trait_method_args,)*
+            #trait_last_arg
+        ) -> #hook_output_ty {
+            <__LutumHooksRef as #owner_trait_ident>::#fn_ident(*self, #(#trait_method_call_args,)*).await
+        }
+    };
 
     let field = quote! {
         #field_ident: #field_ty,
@@ -639,7 +691,7 @@ pub fn expand_slot(
         #[allow(dead_code)]
         pub fn #with_fn_ident(
             mut self,
-            hook: impl #hook_trait_ident + 'static,
+            hook: impl #hook_trait_ident + '__lutum_hooks,
         ) -> Self {
             #register_impl
             self
@@ -648,7 +700,7 @@ pub fn expand_slot(
         #[allow(dead_code)]
         pub fn #register_fn_ident(
             &mut self,
-            hook: impl #hook_trait_ident + 'static,
+            hook: impl #hook_trait_ident + '__lutum_hooks,
         ) -> &mut Self {
             #register_impl
             self
@@ -688,6 +740,8 @@ pub fn expand_slot(
 
     Ok(SlotExpansion {
         items,
+        trait_method,
+        trait_ref_impl_method,
         field,
         field_init,
         register_methods,

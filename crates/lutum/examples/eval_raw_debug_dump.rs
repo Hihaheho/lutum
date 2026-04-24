@@ -81,7 +81,7 @@ fn write_raw_debug_dump(path: &Path, raw: &RawTraceSnapshot) -> anyhow::Result<(
         .with_context(|| format!("failed to write raw debug dump to {}", path.display()))
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::registry().with(lutum_trace::layer());
     tracing::subscriber::set_global_default(subscriber)

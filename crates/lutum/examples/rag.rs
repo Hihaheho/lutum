@@ -42,7 +42,7 @@ async fn ask(llm: &Lutum, system: &str, user: String) -> anyhow::Result<String> 
     Ok(result.assistant_text())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let question = "What time do we close on Fridays?";
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());

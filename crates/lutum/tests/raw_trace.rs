@@ -21,7 +21,8 @@ fn test_budget() -> SharedPoolBudgetManager {
 
 struct FailOnTextDelta;
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl EventHandler<TextTurnEvent, TextTurnState> for FailOnTextDelta {
     type Error = MockError;
 

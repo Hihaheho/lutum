@@ -4,7 +4,6 @@ struct Count(usize);
 #[derive(Default)]
 struct WrongAggregate;
 
-#[async_trait::async_trait]
 impl lutum::Aggregate<String> for WrongAggregate {
     async fn call(&self, outputs: Vec<String>) -> String {
         outputs.join(",")
@@ -22,6 +21,6 @@ trait HookSet {
 fn expect_count_future<F: std::future::Future<Output = Count>>(_: F) {}
 
 fn main() {
-    let hooks = HookSet::new();
+    let hooks = HookSetSet::new();
     expect_count_future(hooks.aggregate_label("x"));
 }

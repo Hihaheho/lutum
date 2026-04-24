@@ -31,7 +31,7 @@ struct TurnRecord {
     usage: Option<Usage>,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // Ollama ignores the API key, but the adapter requires a non-empty value.
     let model = ModelName::new(MODEL)?;

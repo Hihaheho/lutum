@@ -118,7 +118,7 @@ async fn extract(llm: &Lutum, prompt: &str) -> anyhow::Result<Contact> {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("ENDPOINT").unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let token = std::env::var("TOKEN").unwrap_or_else(|_| "local".into());
@@ -128,8 +128,8 @@ async fn main() -> anyhow::Result<()> {
         .with_base_url(endpoint)
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let hooks = VerificationHooks::new();
-    let llm = Lutum::with_hooks(Arc::new(adapter), budget, LutumHooks::new());
+    let hooks = VerificationHooksSet::new();
+    let llm = Lutum::with_hooks(Arc::new(adapter), budget, LutumHooksSet::new());
     let source = "Call John Smith at john@example.com or +1-555-0100";
     let mut prior_failure = None;
 

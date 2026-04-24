@@ -1,6 +1,5 @@
 use std::sync::{Arc, RwLock};
 
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use sqlite_agent::{
@@ -29,7 +28,6 @@ impl TuiApprover {
     }
 }
 
-#[async_trait]
 impl ApproveWrite for TuiApprover {
     async fn call(&self, preview: WritePreview, _last: Option<WriteDecision>) -> WriteDecision {
         // Send preview to TUI for modal display
@@ -70,7 +68,6 @@ impl TuiModeRequestApprover {
     }
 }
 
-#[async_trait]
 impl ApproveModeRequest for TuiModeRequestApprover {
     async fn call(&self, reason: String, _last: Option<bool>) -> bool {
         if self.request_tx.send(reason).await.is_err() {
@@ -92,7 +89,6 @@ pub struct TuiModeSource {
     pub mode: Arc<RwLock<TransactionMode>>,
 }
 
-#[async_trait]
 impl GetTransactionMode for TuiModeSource {
     async fn call(&self, _last: Option<TransactionMode>) -> TransactionMode {
         *self.mode.read().unwrap()

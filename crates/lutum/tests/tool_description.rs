@@ -93,7 +93,8 @@ impl SpyAdapter {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl TurnAdapter for SpyAdapter {
     async fn text_turn(
         &self,
@@ -128,7 +129,8 @@ impl TurnAdapter for SpyAdapter {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl UsageRecoveryAdapter for SpyAdapter {
     async fn recover_usage(
         &self,
@@ -139,7 +141,8 @@ impl UsageRecoveryAdapter for SpyAdapter {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl CompletionAdapter for SpyAdapter {
     async fn completion(
         &self,
@@ -265,7 +268,7 @@ fn describe_last_write_wins_for_same_selector() {
 
 #[test]
 fn description_hook_fires_when_registered() {
-    let hooks = ToolsHooks::new().with_weather_description_hook(DynamicWeatherDesc);
+    let hooks = ToolsHooksSet::new().with_weather_description_hook(DynamicWeatherDesc);
 
     let overrides = block_on(hooks.description_overrides());
     assert_eq!(overrides.len(), 1, "only the registered hook should fire");
@@ -277,7 +280,7 @@ fn description_hook_fires_when_registered() {
 #[test]
 fn description_hook_returns_none_when_not_registered() {
     // No hooks registered — description_overrides should return empty vec
-    let hooks = ToolsHooks::new();
+    let hooks = ToolsHooksSet::new();
     let overrides = block_on(hooks.description_overrides());
     assert!(
         overrides.is_empty(),
@@ -287,7 +290,7 @@ fn description_hook_returns_none_when_not_registered() {
 
 #[test]
 fn description_hooks_for_all_tools_collected_together() {
-    let hooks = ToolsHooks::new()
+    let hooks = ToolsHooksSet::new()
         .with_weather_description_hook(WOverrideDesc)
         .with_search_description_hook(SOverrideDesc);
 
@@ -304,7 +307,7 @@ fn description_hooks_for_all_tools_collected_together() {
 fn description_hook_receives_static_tool_def() {
     // The hook receives the ToolDef for the correct tool.
     // EchoToolName returns Some(def.name) so we can assert on the override value.
-    let hooks = ToolsHooks::new().with_weather_description_hook(EchoToolName);
+    let hooks = ToolsHooksSet::new().with_weather_description_hook(EchoToolName);
     let overrides = block_on(hooks.description_overrides());
     let (sel, name) = overrides
         .iter()
@@ -321,7 +324,7 @@ fn description_hook_receives_static_tool_def() {
 fn description_hooks_integrate_with_builder_describe_many() {
     // Combine use case 2 → use case 1: collect overrides from hooks then pass to
     // the builder via describe_many().
-    let hooks = ToolsHooks::new().with_weather_description_hook(HookedWeatherDesc);
+    let hooks = ToolsHooksSet::new().with_weather_description_hook(HookedWeatherDesc);
 
     let overrides = block_on(hooks.description_overrides());
 

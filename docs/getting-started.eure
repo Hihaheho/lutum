@@ -23,14 +23,14 @@ Add `lutum` to your `Cargo.toml`. Choose the feature flag for the provider you w
 [dependencies]
 # OpenAI Responses API (also works with Ollama and OpenAI-compatible endpoints)
 lutum = { version = "0.1.0", features = ["openai"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
   "toml-claude" = ```toml
 [dependencies]
 # Anthropic Claude Messages API
 lutum = { version = "0.1.0", features = ["claude"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
   "body-2" = ```markdown
@@ -55,7 +55,7 @@ Build a `Lutum` context, open a `Session`, push messages, run a turn, and commit
 use std::sync::Arc;
 use lutum::{Lutum, ModelName, OpenAiAdapter, Session, SharedPoolBudgetManager, SharedPoolBudgetOptions};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let adapter = OpenAiAdapter::new(std::env::var("OPENAI_API_KEY")?)
         .with_default_model(ModelName::new("gpt-4o-mini")?);

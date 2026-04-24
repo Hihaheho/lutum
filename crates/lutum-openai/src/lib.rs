@@ -6,8 +6,8 @@ pub mod responses;
 pub mod sse;
 
 pub use adapter::{
-    FallbackSerializer, OpenAiAdapter, OpenAiHooks, ResolveReasoningEffort, SelectOpenaiModel,
-    SseEventRecoveryHook, SseHints,
+    FallbackSerializer, OpenAiAdapter, OpenAiHooks, OpenAiHooksSet, ResolveReasoningEffort,
+    SelectOpenaiModel, SseEventRecoveryHook, SseHints,
 };
 pub use chat::ChatCompletionRequest;
 pub use completion::CompletionRequest;

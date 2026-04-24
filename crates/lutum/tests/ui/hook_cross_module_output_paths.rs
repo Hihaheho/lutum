@@ -4,7 +4,6 @@ pub struct Count(pub usize);
 #[derive(Default)]
 pub struct CountOutputs;
 
-#[async_trait::async_trait]
 impl lutum::AggregateInto<String, Count> for CountOutputs {
     async fn call(&self, outputs: Vec<String>) -> Count {
         Count(outputs.len())
@@ -30,7 +29,7 @@ fn expect_count_future<F: std::future::Future<Output = Count>>(_: F) {}
 
 #[allow(unreachable_code, unused_variables)]
 fn assert_types() {
-    let hooks = slots::SlotHooks::new().with_summarize_label(SummarizeMore);
+    let hooks = slots::SlotHooksSet::new().with_summarize_label(SummarizeMore);
     expect_count_future(hooks.summarize_label("x"));
 }
 

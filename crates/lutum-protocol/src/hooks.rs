@@ -1,7 +1,48 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use futures::lock::{Mutex, MutexGuard};
 use thiserror::Error;
+
+#[cfg(not(target_family = "wasm"))]
+pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[cfg(target_family = "wasm")]
+pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+#[cfg(not(target_family = "wasm"))]
+pub trait MaybeSend: Send {}
+
+#[cfg(not(target_family = "wasm"))]
+impl<T> MaybeSend for T where T: Send {}
+
+#[cfg(target_family = "wasm")]
+pub trait MaybeSend {}
+
+#[cfg(target_family = "wasm")]
+impl<T> MaybeSend for T {}
+
+#[cfg(not(target_family = "wasm"))]
+pub trait MaybeSync: Sync {}
+
+#[cfg(not(target_family = "wasm"))]
+impl<T> MaybeSync for T where T: Sync {}
+
+#[cfg(target_family = "wasm")]
+pub trait MaybeSync {}
+
+#[cfg(target_family = "wasm")]
+impl<T> MaybeSync for T {}
+
+pub trait HookObject: MaybeSend + MaybeSync {}
+
+impl<T> HookObject for T where T: MaybeSend + MaybeSync + ?Sized {}
+
+pub fn boxed_hook_future<'a, T, F>(future: F) -> HookFuture<'a, T>
+where
+    F: Future<Output = T> + MaybeSend + 'a,
+{
+    Box::pin(future)
+}
 
 #[derive(Clone)]
 pub struct Stateful<H> {

@@ -11,8 +11,8 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 use lutum::Usage;
 use sqlite_agent::{
-    AgentConfig, AgentError, AgentHooks, DbRegistry, SqlHistoryEntry, TransactionMode, TurnOutput,
-    WriteDecision, WritePreview, run_turn,
+    AgentConfig, AgentError, AgentHooksSet, DbRegistry, SqlHistoryEntry, TransactionMode,
+    TurnOutput, WriteDecision, WritePreview, run_turn,
 };
 
 use crate::{
@@ -258,7 +258,7 @@ impl TuiApp {
             mode_decision_rx,
             self.mode.clone(),
         );
-        let hooks = AgentHooks::new()
+        let hooks = AgentHooksSet::new()
             .with_approve_write(approver)
             .with_get_transaction_mode(mode_source)
             .with_approve_mode_request(mode_request_approver);

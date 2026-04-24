@@ -84,7 +84,8 @@ fn shared_pool_budget_error(err: &lutum::AgentError) -> &lutum::SharedPoolBudget
 
 struct StopOnWillRetry;
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl EventHandler<TextTurnEvent, TextTurnState> for StopOnWillRetry {
     type Error = std::convert::Infallible;
 
