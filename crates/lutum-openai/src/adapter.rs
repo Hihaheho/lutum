@@ -3222,12 +3222,27 @@ where
 }
 
 fn parse_chat_usage(usage: &crate::chat::CompletionUsage) -> Usage {
+    let prompt_tokens_details = usage.prompt_tokens_details.as_ref();
     Usage {
         input_tokens: usage.prompt_tokens,
         output_tokens: usage.completion_tokens,
         total_tokens: usage.total_tokens,
-        cost_micros_usd: 0,
+        cost_micros_usd: usage.cost.map(cost_to_micros_usd).unwrap_or_default(),
+        cache_creation_tokens: prompt_tokens_details
+            .and_then(|details| details.cache_write_tokens)
+            .unwrap_or_default(),
+        cache_read_tokens: prompt_tokens_details
+            .and_then(|details| details.cached_tokens)
+            .unwrap_or_default(),
         ..Usage::zero()
+    }
+}
+
+fn cost_to_micros_usd(cost: f64) -> u64 {
+    if cost.is_finite() && cost > 0.0 {
+        (cost * 1_000_000.0) as u64
+    } else {
+        0
     }
 }
 
@@ -3259,6 +3274,136 @@ mod tests {
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
     struct Summary {
         answer: String,
+    }
+
+    #[test]
+    fn parse_chat_usage_maps_openai_cached_tokens() {
+        let usage = parse_chat_usage(&crate::chat::CompletionUsage {
+            prompt_tokens: 120,
+            completion_tokens: 30,
+            total_tokens: 150,
+            completion_tokens_details: None,
+            prompt_tokens_details: Some(crate::chat::PromptTokensDetails {
+                audio_tokens: None,
+                cached_tokens: Some(64),
+                cache_write_tokens: None,
+            }),
+            cost: None,
+            cost_details: None,
+        });
+
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.output_tokens, 30);
+        assert_eq!(usage.total_tokens, 150);
+        assert_eq!(usage.cache_read_tokens, 64);
+        assert_eq!(usage.cache_creation_tokens, 0);
+        assert_eq!(usage.cost_micros_usd, 0);
+    }
+
+    #[test]
+    fn parse_chat_usage_maps_openrouter_cache_write_and_cost() {
+        let wire = serde_json::json!({
+            "prompt_tokens": 194,
+            "completion_tokens": 2,
+            "total_tokens": 196,
+            "cost": 0.95,
+            "cost_details": {
+                "upstream_inference_cost": 19
+            },
+            "prompt_tokens_details": {
+                "cached_tokens": 40,
+                "cache_write_tokens": 100,
+                "audio_tokens": 0
+            }
+        });
+        let decoded: crate::chat::CompletionUsage = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            decoded.cost_details.as_ref().unwrap()["upstream_inference_cost"],
+            19
+        );
+
+        let usage = parse_chat_usage(&decoded);
+
+        assert_eq!(usage.input_tokens, 194);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.total_tokens, 196);
+        assert_eq!(usage.cache_read_tokens, 40);
+        assert_eq!(usage.cache_creation_tokens, 100);
+        assert_eq!(usage.cost_micros_usd, 950_000);
+    }
+
+    #[test]
+    fn chat_sse_final_usage_chunk_may_have_empty_choices() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-4.1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-4.1\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":4,\"cache_write_tokens\":6}}}\n\n",
+            )),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+
+        let events = block_on(async {
+            map_chat_text_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert!(matches!(events[0], ErasedTextTurnEvent::Started { .. }));
+        assert!(matches!(
+            events[1],
+            ErasedTextTurnEvent::TextDelta { ref delta } if delta == "hello"
+        ));
+        match events.last() {
+            Some(ErasedTextTurnEvent::Completed {
+                usage,
+                committed_turn,
+                ..
+            }) => {
+                assert_eq!(usage.input_tokens, 10);
+                assert_eq!(usage.output_tokens, 2);
+                assert_eq!(usage.total_tokens, 12);
+                assert_eq!(usage.cache_read_tokens, 4);
+                assert_eq!(usage.cache_creation_tokens, 6);
+
+                let committed_turn = committed_turn
+                    .as_any()
+                    .downcast_ref::<OpenAiCommittedTurn>()
+                    .expect("OpenAI committed turn");
+                assert_eq!(committed_turn.usage, *usage);
+            }
+            other => panic!("expected completed event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_sse_without_usage_preserves_zero_usage() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-4.1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+
+        let events = block_on(async {
+            map_chat_text_stream(futures::stream::iter(payloads), "gpt-4.1".into(), None)
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        match events.last() {
+            Some(ErasedTextTurnEvent::Completed { usage, .. }) => {
+                assert_eq!(*usage, Usage::zero());
+            }
+            other => panic!("expected completed event, got {other:?}"),
+        }
     }
 
     fn raw_extensions() -> RequestExtensions {

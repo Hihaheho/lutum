@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::message::{ChatFunctionCallArgs, ChatMessageToolCall};
 
@@ -253,7 +254,7 @@ pub struct CompletionTokensDetails {
 /// use lutum_openai::chat::PromptTokensDetails;
 /// use serde_json::Value;
 ///
-/// let json = serde_json::from_str::<Value>(r#"{"cached_tokens":10}"#).unwrap();
+/// let json = serde_json::from_str::<Value>(r#"{"cached_tokens":10,"cache_write_tokens":20}"#).unwrap();
 /// let val = serde_json::from_value::<PromptTokensDetails>(json.clone()).unwrap();
 /// assert_eq!(serde_json::to_value(&val).unwrap(), json);
 /// assert_eq!(serde_json::from_value::<PromptTokensDetails>(json).unwrap(), val);
@@ -264,6 +265,8 @@ pub struct PromptTokensDetails {
     pub audio_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
 }
 
 /// Token usage statistics for a completion request.
@@ -280,7 +283,7 @@ pub struct PromptTokensDetails {
 /// assert_eq!(serde_json::to_value(&val).unwrap(), json);
 /// assert_eq!(serde_json::from_value::<CompletionUsage>(json).unwrap(), val);
 /// ```
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompletionUsage {
     pub completion_tokens: u64,
     pub prompt_tokens: u64,
@@ -289,6 +292,10 @@ pub struct CompletionUsage {
     pub completion_tokens_details: Option<CompletionTokensDetails>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_details: Option<Value>,
 }
 
 /// A complete chat completion response from the model.

@@ -21,6 +21,7 @@ pub struct Generation {
     pub native_tokens_prompt: Option<u64>,
     pub native_tokens_completion: Option<u64>,
     pub native_tokens_reasoning: Option<u64>,
+    pub native_tokens_cached: Option<u64>,
     pub cached_tokens: Option<u64>,
     pub provider_name: Option<String>,
     pub finish_reason: Option<String>,
@@ -39,6 +40,10 @@ impl Generation {
             output_tokens: output,
             total_tokens: input + output,
             cost_micros_usd: cost_micros,
+            cache_read_tokens: self
+                .native_tokens_cached
+                .or(self.cached_tokens)
+                .unwrap_or_default(),
             ..Usage::zero()
         }
     }
@@ -134,5 +139,49 @@ impl UsageRecoveryAdapter for OpenRouterGenerationClient {
                 Ok(None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generation() -> Generation {
+        Generation {
+            id: "gen-1".to_string(),
+            model: Some("openai/gpt-4.1".to_string()),
+            total_cost: Some(0.0015),
+            tokens_prompt: Some(10),
+            tokens_completion: Some(25),
+            native_tokens_prompt: Some(10),
+            native_tokens_completion: Some(25),
+            native_tokens_reasoning: Some(5),
+            native_tokens_cached: Some(3),
+            cached_tokens: Some(2),
+            provider_name: Some("OpenAI".to_string()),
+            finish_reason: Some("stop".to_string()),
+        }
+    }
+
+    #[test]
+    fn generation_usage_maps_native_cached_tokens() {
+        let usage = generation().to_usage();
+
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 25);
+        assert_eq!(usage.total_tokens, 35);
+        assert_eq!(usage.cost_micros_usd, 1_500);
+        assert_eq!(usage.cache_read_tokens, 3);
+        assert_eq!(usage.cache_creation_tokens, 0);
+    }
+
+    #[test]
+    fn generation_usage_keeps_cached_tokens_fallback() {
+        let mut generation = generation();
+        generation.native_tokens_cached = None;
+
+        let usage = generation.to_usage();
+
+        assert_eq!(usage.cache_read_tokens, 2);
     }
 }
