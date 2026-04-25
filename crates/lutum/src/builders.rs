@@ -44,10 +44,16 @@ impl<'a> TurnTarget<'a> {
         }
     }
 
-    fn input(&mut self) -> ModelInput {
+    fn input(&mut self, extensions: &mut RequestExtensions) -> ModelInput {
         match self {
             Self::Lutum { input, .. } => input.clone(),
-            Self::Session { session } => session.snapshot_input(),
+            Self::Session { session } => {
+                let (input, ephemeral_indices) = session.snapshot_input_with_ephemeral_indices();
+                if !ephemeral_indices.is_empty() {
+                    extensions.insert(ephemeral_indices);
+                }
+                input
+            }
         }
     }
 
@@ -176,12 +182,12 @@ impl<'a> TextTurn<'a> {
     pub async fn start(self) -> Result<PendingTextTurn, LutumError> {
         let TextTurn {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         lutum.run_text_turn(extensions, input, turn).await
     }
 
@@ -204,12 +210,12 @@ impl<'a> TextTurn<'a> {
     {
         let TextTurn {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_text_turn(extensions, input, turn).await {
@@ -238,12 +244,12 @@ impl<'a> TextTurn<'a> {
     > {
         let TextTurn {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_text_turn(extensions, input, turn).await {
@@ -272,12 +278,12 @@ impl<'a> TextTurn<'a> {
     > {
         let TextTurn {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum.run_text_turn(extensions, input, turn).await {
             Ok(pending) => match pending.collect().await {
@@ -421,12 +427,12 @@ where
     pub async fn start(self) -> Result<PendingTextTurnWithTools<T>, LutumError> {
         let TextTurnWithTools {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         lutum
             .run_text_turn_with_tools(extensions, input, turn)
             .await
@@ -450,12 +456,12 @@ where
     {
         let TextTurnWithTools {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum
             .run_text_turn_with_tools(extensions, input, turn)
@@ -494,12 +500,12 @@ where
     > {
         let TextTurnWithTools {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum
             .run_text_turn_with_tools(extensions, input, turn)
@@ -630,12 +636,12 @@ where
     pub async fn start(self) -> Result<PendingStructuredTurn<O>, LutumError> {
         let StructuredTurn {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         lutum.run_structured_turn(extensions, input, turn).await
     }
 
@@ -658,12 +664,12 @@ where
     {
         let StructuredTurn {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_structured_turn(extensions, input, turn).await {
@@ -694,12 +700,12 @@ where
     > {
         let StructuredTurn {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_structured_turn(extensions, input, turn).await {
@@ -730,12 +736,12 @@ where
     > {
         let StructuredTurn {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum.run_structured_turn(extensions, input, turn).await {
             Ok(pending) => match pending.collect().await {
@@ -884,12 +890,12 @@ where
     pub async fn start(self) -> Result<PendingStructuredTurnWithTools<T, O>, LutumError> {
         let StructuredTurnWithTools {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         lutum
             .run_structured_turn_with_tools(extensions, input, turn)
             .await
@@ -916,12 +922,12 @@ where
     {
         let StructuredTurnWithTools {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let pending = match lutum
             .run_structured_turn_with_tools(extensions, input, turn)
@@ -1012,12 +1018,12 @@ where
     > {
         let StructuredTurnWithTools {
             mut target,
-            extensions,
+            mut extensions,
             mut turn,
         } = self;
         target.apply_defaults(&mut turn.config);
         let lutum = target.lutum_owned();
-        let input = target.input();
+        let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let pending = match lutum
             .run_structured_turn_with_tools(extensions, input, turn)

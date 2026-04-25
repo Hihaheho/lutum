@@ -13,8 +13,8 @@ use lutum_protocol::{
     AgentError,
     budget::Usage,
     conversation::{
-        AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, RawJson,
-        ToolCallId, ToolMetadata, ToolName, ToolResult,
+        AssistantInputItem, EphemeralInputIndices, InputMessageRole, MessageContent, ModelInput,
+        ModelInputItem, RawJson, ToolCallId, ToolMetadata, ToolName, ToolResult,
     },
     extensions::RequestExtensions,
     llm::{
@@ -62,51 +62,6 @@ type UsageCache = Arc<Mutex<HashMap<String, Usage>>>;
 
 pub trait FallbackSerializer: Send + Sync {
     fn apply(&self, request: &mut MessagesRequest);
-}
-
-/// Built-in prompt-caching serializer.
-///
-/// Applies `cache_control: { type: "ephemeral" }` at three cache breakpoints:
-///   1. Last system block  — covers the system prompt prefix
-///   2. Last tool          — covers system + all tool definitions (static across turns)
-///   3. Last content block of the second-to-last message — covers conversation history
-struct BuiltinCacheSerializer;
-
-impl FallbackSerializer for BuiltinCacheSerializer {
-    fn apply(&self, request: &mut MessagesRequest) {
-        use crate::messages::{CacheControl, ClaudeContentBlock};
-
-        // 1. Last system block
-        if let Some(blocks) = request.system.as_mut()
-            && let Some(last) = blocks.last_mut()
-        {
-            last.cache_control = Some(CacheControl::ephemeral());
-        }
-
-        // 2. Last tool definition
-        if let Some(tools) = request.tools.as_mut()
-            && let Some(last) = tools.last_mut()
-        {
-            last.cache_control = Some(CacheControl::ephemeral());
-        }
-
-        // 3. Last content block of the second-to-last message (penultimate turn)
-        let n = request.messages.len();
-        if n >= 2 {
-            let msg = &mut request.messages[n - 2];
-            if let Some(block) = msg.content.last_mut() {
-                match block {
-                    ClaudeContentBlock::Text(b) => {
-                        b.cache_control = Some(CacheControl::ephemeral())
-                    }
-                    ClaudeContentBlock::ToolResult(b) => {
-                        b.cache_control = Some(CacheControl::ephemeral())
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
 }
 
 #[lutum_macros::hooks]
@@ -226,6 +181,7 @@ pub struct ClaudeAdapter {
     default_model: ModelName,
     default_thinking_budget: Option<u32>,
     hooks: ClaudeHooksSet<'static>,
+    prompt_caching: bool,
     fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
     usage_cache: UsageCache,
 }
@@ -233,7 +189,34 @@ pub struct ClaudeAdapter {
 #[derive(Default)]
 struct CompiledClaudeConversation {
     system: Vec<SystemBlock>,
+    system_sources: Vec<Option<usize>>,
     messages: Vec<ClaudeMessage>,
+    message_sources: Vec<Vec<Option<usize>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaudeCacheTarget {
+    System { index: usize },
+    Tool { index: usize },
+    MessageContent { message: usize, block: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClaudeCacheCandidate {
+    sequence: usize,
+    target: ClaudeCacheTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClaudeWireBlock {
+    sequence: usize,
+    source_index: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ClaudeCacheMap {
+    wire_blocks: Vec<ClaudeWireBlock>,
+    candidates: Vec<ClaudeCacheCandidate>,
 }
 
 #[derive(Debug)]
@@ -269,6 +252,7 @@ impl ClaudeAdapter {
             default_model: ModelName::new("claude-opus-4-5").unwrap(),
             default_thinking_budget: None,
             hooks: ClaudeHooksSet::new(),
+            prompt_caching: true,
             fallback_serializer: None,
             usage_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -320,15 +304,24 @@ impl ClaudeAdapter {
         self.fallback_serializer = Some(s.into());
     }
 
-    /// Enable the built-in 3-breakpoint prompt-caching strategy.
+    /// Enable automatic explicit prompt caching.
     ///
-    /// Cache breakpoints are inserted at: the last system block, the last tool
-    /// definition, and the last content block of the penultimate message. This
-    /// covers the system prompt, tool schema, and conversation history —
-    /// the three parts of the context that grow slowly across turns.
+    /// The adapter marks the last cacheable block before the first session
+    /// ephemeral item. If a request has no ephemeral item, it marks the last
+    /// cacheable block in the request.
     pub fn with_prompt_caching(mut self) -> Self {
-        self.set_fallback_serializer(Box::new(BuiltinCacheSerializer));
+        self.prompt_caching = true;
         self
+    }
+
+    /// Disable automatic explicit prompt caching.
+    pub fn without_prompt_caching(mut self) -> Self {
+        self.prompt_caching = false;
+        self
+    }
+
+    pub fn set_prompt_caching(&mut self, enabled: bool) {
+        self.prompt_caching = enabled;
     }
 
     fn request_headers(&self) -> Result<HeaderMap, ClaudeError> {
@@ -349,13 +342,17 @@ impl ClaudeAdapter {
         &self,
         input: &ModelInput,
         config: &AdapterTurnConfig,
+        extensions: &RequestExtensions,
         model: &str,
         thinking_budget: Option<u32>,
         format: Option<OutputFormat>,
         stream: bool,
     ) -> Result<MessagesRequest, ClaudeError> {
-        let mut request =
+        let (mut request, cache_map) =
             build_messages_request(input, config, model, thinking_budget, format, stream)?;
+        if self.prompt_caching {
+            apply_auto_prompt_caching(&mut request, &cache_map, extensions);
+        }
         if let Some(serializer) = self.fallback_serializer.as_ref() {
             serializer.apply(&mut request);
         }
@@ -441,6 +438,7 @@ impl TurnAdapter for ClaudeAdapter {
             .prepare_messages_request(
                 &input,
                 &turn.config,
+                turn.extensions.as_ref(),
                 model.as_ref(),
                 thinking_budget,
                 None,
@@ -487,6 +485,7 @@ impl TurnAdapter for ClaudeAdapter {
             .prepare_messages_request(
                 &input,
                 &turn.config,
+                turn.extensions.as_ref(),
                 model.as_ref(),
                 thinking_budget,
                 format,
@@ -534,18 +533,27 @@ impl UsageRecoveryAdapter for ClaudeAdapter {
 }
 
 impl CompiledClaudeConversation {
-    fn push_system_text(&mut self, text: &str) {
+    fn push_system_text(&mut self, text: &str, source_index: Option<usize>) {
         if text.is_empty() {
             return;
         }
         self.system.push(SystemBlock::new(text));
+        self.system_sources.push(source_index);
     }
 
-    fn push_block(&mut self, role: ClaudeRole, block: ClaudeContentBlock) {
+    fn push_block(
+        &mut self,
+        role: ClaudeRole,
+        block: ClaudeContentBlock,
+        source_index: Option<usize>,
+    ) {
         if let Some(last) = self.messages.last_mut()
             && last.role == role
         {
             last.content.push(block);
+            if let Some(last_sources) = self.message_sources.last_mut() {
+                last_sources.push(source_index);
+            }
             return;
         }
 
@@ -553,13 +561,15 @@ impl CompiledClaudeConversation {
             role,
             content: vec![block],
         });
+        self.message_sources.push(vec![source_index]);
     }
 
-    fn into_messages(self) -> Vec<ClaudeMessage> {
+    fn into_messages(self) -> (Vec<ClaudeMessage>, Vec<Vec<Option<usize>>>) {
         self.messages
             .into_iter()
-            .filter(|message| !message.content.is_empty())
-            .collect()
+            .zip(self.message_sources)
+            .filter(|(message, _)| !message.content.is_empty())
+            .unzip()
     }
 }
 
@@ -652,32 +662,40 @@ fn build_messages_request(
     thinking_budget: Option<u32>,
     format: Option<OutputFormat>,
     stream: bool,
-) -> Result<MessagesRequest, ClaudeError> {
+) -> Result<(MessagesRequest, ClaudeCacheMap), ClaudeError> {
     let compiled = compile_model_input(input)?;
     let system = (!compiled.system.is_empty()).then_some(compiled.system.clone());
+    let system_sources = compiled.system_sources.clone();
     let max_tokens = resolve_max_tokens(config.generation.max_output_tokens, thinking_budget);
     let tools = (!config.tools.is_empty()).then(|| build_tool_definitions(config));
+    let tool_count = tools.as_ref().map(|tools| tools.len()).unwrap_or(0);
+    let (messages, message_sources) = compiled.into_messages();
+    let cache_map =
+        build_claude_cache_map(&system_sources, tool_count, &messages, &message_sources);
 
-    Ok(MessagesRequest {
-        model: model.to_string(),
-        max_tokens,
-        messages: compiled.into_messages(),
-        stream: Some(stream),
-        system,
-        temperature: config
-            .generation
-            .temperature
-            .map(|temperature| temperature.get()),
-        tools,
-        tool_choice: build_tool_choice(config),
-        thinking: thinking_budget.map(|budget_tokens| ThinkingConfig {
-            kind: ThinkingKind::Enabled,
-            budget_tokens,
-        }),
-        output_config: format.map(|format| OutputConfig { format }),
-        stop_sequences: None,
-        models: None,
-    })
+    Ok((
+        MessagesRequest {
+            model: model.to_string(),
+            max_tokens,
+            messages,
+            stream: Some(stream),
+            system,
+            temperature: config
+                .generation
+                .temperature
+                .map(|temperature| temperature.get()),
+            tools,
+            tool_choice: build_tool_choice(config),
+            thinking: thinking_budget.map(|budget_tokens| ThinkingConfig {
+                kind: ThinkingKind::Enabled,
+                budget_tokens,
+            }),
+            output_config: format.map(|format| OutputConfig { format }),
+            stop_sequences: None,
+            models: None,
+        },
+        cache_map,
+    ))
 }
 
 fn resolve_max_tokens(explicit: Option<u32>, thinking_budget: Option<u32>) -> u32 {
@@ -726,6 +744,149 @@ fn build_tool_choice(config: &AdapterTurnConfig) -> Option<ClaudeToolChoice> {
     }
 }
 
+fn build_claude_cache_map(
+    system_sources: &[Option<usize>],
+    tool_count: usize,
+    messages: &[ClaudeMessage],
+    message_sources: &[Vec<Option<usize>>],
+) -> ClaudeCacheMap {
+    let mut map = ClaudeCacheMap::default();
+    let mut sequence = 0usize;
+
+    for (index, source_index) in system_sources.iter().copied().enumerate() {
+        map.wire_blocks.push(ClaudeWireBlock {
+            sequence,
+            source_index,
+        });
+        map.candidates.push(ClaudeCacheCandidate {
+            sequence,
+            target: ClaudeCacheTarget::System { index },
+        });
+        sequence += 1;
+    }
+
+    for index in 0..tool_count {
+        map.wire_blocks.push(ClaudeWireBlock {
+            sequence,
+            source_index: None,
+        });
+        map.candidates.push(ClaudeCacheCandidate {
+            sequence,
+            target: ClaudeCacheTarget::Tool { index },
+        });
+        sequence += 1;
+    }
+
+    for (message_index, message) in messages.iter().enumerate() {
+        let sources = message_sources.get(message_index);
+        for (block_index, block) in message.content.iter().enumerate() {
+            let source_index = sources
+                .and_then(|sources| sources.get(block_index))
+                .copied()
+                .flatten();
+            map.wire_blocks.push(ClaudeWireBlock {
+                sequence,
+                source_index,
+            });
+            if is_cacheable_claude_content_block(block) {
+                map.candidates.push(ClaudeCacheCandidate {
+                    sequence,
+                    target: ClaudeCacheTarget::MessageContent {
+                        message: message_index,
+                        block: block_index,
+                    },
+                });
+            }
+            sequence += 1;
+        }
+    }
+
+    map
+}
+
+fn is_cacheable_claude_content_block(block: &ClaudeContentBlock) -> bool {
+    matches!(
+        block,
+        ClaudeContentBlock::Text(_) | ClaudeContentBlock::ToolResult(_)
+    )
+}
+
+fn apply_auto_prompt_caching(
+    request: &mut MessagesRequest,
+    cache_map: &ClaudeCacheMap,
+    extensions: &RequestExtensions,
+) {
+    let first_ephemeral_sequence = extensions
+        .get::<EphemeralInputIndices>()
+        .and_then(|indices| {
+            cache_map
+                .wire_blocks
+                .iter()
+                .filter(|block| {
+                    block
+                        .source_index
+                        .is_some_and(|index| indices.contains(index))
+                })
+                .map(|block| block.sequence)
+                .min()
+        });
+
+    let target = match first_ephemeral_sequence {
+        Some(ephemeral_sequence) => cache_map
+            .candidates
+            .iter()
+            .rev()
+            .find(|candidate| candidate.sequence < ephemeral_sequence),
+        None => cache_map.candidates.last(),
+    };
+    let Some(target) = target else {
+        return;
+    };
+
+    mark_claude_cache_target(request, target.target);
+}
+
+fn mark_claude_cache_target(request: &mut MessagesRequest, target: ClaudeCacheTarget) {
+    match target {
+        ClaudeCacheTarget::System { index } => {
+            if let Some(block) = request
+                .system
+                .as_mut()
+                .and_then(|blocks| blocks.get_mut(index))
+            {
+                block.cache_control = Some(crate::messages::CacheControl::ephemeral());
+            }
+        }
+        ClaudeCacheTarget::Tool { index } => {
+            if let Some(tool) = request
+                .tools
+                .as_mut()
+                .and_then(|tools| tools.get_mut(index))
+            {
+                tool.cache_control = Some(crate::messages::CacheControl::ephemeral());
+            }
+        }
+        ClaudeCacheTarget::MessageContent { message, block } => {
+            let Some(block) = request
+                .messages
+                .get_mut(message)
+                .and_then(|message| message.content.get_mut(block))
+            else {
+                return;
+            };
+            match block {
+                ClaudeContentBlock::Text(block) => {
+                    block.cache_control = Some(crate::messages::CacheControl::ephemeral());
+                }
+                ClaudeContentBlock::ToolResult(block) => {
+                    block.cache_control = Some(crate::messages::CacheControl::ephemeral());
+                }
+                ClaudeContentBlock::ToolUse(_) | ClaudeContentBlock::Thinking(_) => {}
+            }
+        }
+    }
+}
+
 fn compile_model_input(input: &ModelInput) -> Result<CompiledClaudeConversation, ClaudeError> {
     let mut compiled = CompiledClaudeConversation::default();
     // Track whether the immediately preceding item was a committed Turn that contained
@@ -733,23 +894,27 @@ fn compile_model_input(input: &ModelInput) -> Result<CompiledClaudeConversation,
     // tool_result — the assistant-side tool_use blocks are already in the Turn.
     let mut prev_was_tool_turn = false;
 
-    for item in input.items() {
+    for (source_index, item) in input.items().iter().enumerate() {
         match item {
             ModelInputItem::Message { role, content } => {
-                emit_message(role, content.iter(), &mut compiled)?;
+                emit_message(role, content.iter(), &mut compiled, source_index)?;
                 prev_was_tool_turn = false;
             }
             ModelInputItem::Assistant(item) => {
-                compiled.push_block(ClaudeRole::Assistant, assistant_replay_block(item));
+                compiled.push_block(
+                    ClaudeRole::Assistant,
+                    assistant_replay_block(item),
+                    Some(source_index),
+                );
                 prev_was_tool_turn = false;
             }
             ModelInputItem::ToolResult(tool_result) => {
                 if prev_was_tool_turn {
                     // The assistant's tool_use block was already emitted by the preceding
                     // committed Turn. Only emit the user-side tool_result.
-                    emit_tool_result(tool_result, &mut compiled)?;
+                    emit_tool_result(tool_result, &mut compiled, source_index)?;
                 } else {
-                    emit_tool_use(tool_result, &mut compiled)?;
+                    emit_tool_use(tool_result, &mut compiled, source_index)?;
                 }
                 // ToolResult items form a contiguous group after a Turn; keep the flag set.
             }
@@ -762,12 +927,12 @@ fn compile_model_input(input: &ModelInput) -> Result<CompiledClaudeConversation,
                         .items
                         .iter()
                         .any(|i| matches!(i, ClaudeTurnItem::ToolCall { .. }));
-                    emit_claude_turn_exact(claude_turn, &mut compiled)?;
+                    emit_claude_turn_exact(claude_turn, &mut compiled, source_index)?;
                 } else {
                     has_tool_calls = (0..turn.item_count())
                         .filter_map(|i| turn.item_at(i))
                         .any(|v| v.as_tool_call().is_some());
-                    emit_turn_from_view(turn.as_ref(), &mut compiled)?;
+                    emit_turn_from_view(turn.as_ref(), &mut compiled, source_index)?;
                 }
                 prev_was_tool_turn = has_tool_calls;
             }
@@ -781,17 +946,22 @@ fn emit_message<'a>(
     role: &InputMessageRole,
     content: impl IntoIterator<Item = &'a MessageContent>,
     compiled: &mut CompiledClaudeConversation,
+    source_index: usize,
 ) -> Result<(), ClaudeError> {
     match role {
         InputMessageRole::System | InputMessageRole::Developer => {
             for item in content {
                 let MessageContent::Text(text) = item;
-                compiled.push_system_text(text);
+                compiled.push_system_text(text, Some(source_index));
             }
         }
         InputMessageRole::User => {
             for item in content {
-                compiled.push_block(ClaudeRole::User, message_content_block(item));
+                compiled.push_block(
+                    ClaudeRole::User,
+                    message_content_block(item),
+                    Some(source_index),
+                );
             }
         }
     }
@@ -803,12 +973,18 @@ fn emit_message<'a>(
 fn emit_tool_use(
     tool_result: &ToolResult,
     compiled: &mut CompiledClaudeConversation,
+    source_index: usize,
 ) -> Result<(), ClaudeError> {
     compiled.push_block(
         ClaudeRole::Assistant,
         tool_use_block(&tool_result.id, &tool_result.name, &tool_result.arguments)?,
+        Some(source_index),
     );
-    compiled.push_block(ClaudeRole::User, tool_result_block(tool_result)?);
+    compiled.push_block(
+        ClaudeRole::User,
+        tool_result_block(tool_result)?,
+        Some(source_index),
+    );
     Ok(())
 }
 
@@ -817,19 +993,29 @@ fn emit_tool_use(
 fn emit_tool_result(
     tool_result: &ToolResult,
     compiled: &mut CompiledClaudeConversation,
+    source_index: usize,
 ) -> Result<(), ClaudeError> {
-    compiled.push_block(ClaudeRole::User, tool_result_block(tool_result)?);
+    compiled.push_block(
+        ClaudeRole::User,
+        tool_result_block(tool_result)?,
+        Some(source_index),
+    );
     Ok(())
 }
 
 fn emit_claude_turn_exact(
     turn: &ClaudeCommittedTurn,
     compiled: &mut CompiledClaudeConversation,
+    source_index: usize,
 ) -> Result<(), ClaudeError> {
     for item in &turn.items {
         match item {
             ClaudeTurnItem::Text { content } => {
-                compiled.push_block(ClaudeRole::Assistant, text_block(content));
+                compiled.push_block(
+                    ClaudeRole::Assistant,
+                    text_block(content),
+                    Some(source_index),
+                );
             }
             ClaudeTurnItem::Thinking { content, signature } => {
                 compiled.push_block(
@@ -838,17 +1024,26 @@ fn emit_claude_turn_exact(
                         thinking: content.clone(),
                         signature: signature.clone(),
                     }),
+                    Some(source_index),
                 );
             }
             ClaudeTurnItem::Reasoning { content } | ClaudeTurnItem::Refusal { content } => {
-                compiled.push_block(ClaudeRole::Assistant, text_block(content));
+                compiled.push_block(
+                    ClaudeRole::Assistant,
+                    text_block(content),
+                    Some(source_index),
+                );
             }
             ClaudeTurnItem::ToolCall {
                 id,
                 name,
                 arguments,
             } => {
-                compiled.push_block(ClaudeRole::Assistant, tool_use_block(id, name, arguments)?);
+                compiled.push_block(
+                    ClaudeRole::Assistant,
+                    tool_use_block(id, name, arguments)?,
+                    Some(source_index),
+                );
             }
         }
     }
@@ -859,6 +1054,7 @@ fn emit_claude_turn_exact(
 fn emit_turn_from_view(
     turn: &dyn TurnView,
     compiled: &mut CompiledClaudeConversation,
+    source_index: usize,
 ) -> Result<(), ClaudeError> {
     match turn.role() {
         TurnRole::System | TurnRole::Developer => {
@@ -867,11 +1063,11 @@ fn emit_turn_from_view(
                     continue;
                 };
                 if let Some(text) = item.as_text() {
-                    compiled.push_system_text(text);
+                    compiled.push_system_text(text, Some(source_index));
                     continue;
                 }
                 if let Some(text) = item.as_reasoning().or_else(|| item.as_refusal()) {
-                    compiled.push_system_text(text);
+                    compiled.push_system_text(text, Some(source_index));
                     continue;
                 }
                 if item.as_tool_call().is_some() || item.as_tool_result().is_some() {
@@ -890,16 +1086,19 @@ fn emit_turn_from_view(
                     continue;
                 };
                 if let Some(text) = item.as_text() {
-                    compiled.push_block(ClaudeRole::User, text_block(text));
+                    compiled.push_block(ClaudeRole::User, text_block(text), Some(source_index));
                     continue;
                 }
                 if let Some(text) = item.as_reasoning().or_else(|| item.as_refusal()) {
-                    compiled.push_block(ClaudeRole::User, text_block(text));
+                    compiled.push_block(ClaudeRole::User, text_block(text), Some(source_index));
                     continue;
                 }
                 if let Some(tool_result) = item.as_tool_result() {
-                    compiled
-                        .push_block(ClaudeRole::User, tool_result_block_from_view(tool_result)?);
+                    compiled.push_block(
+                        ClaudeRole::User,
+                        tool_result_block_from_view(tool_result)?,
+                        Some(source_index),
+                    );
                     continue;
                 }
                 if item.as_tool_call().is_some() {
@@ -917,17 +1116,26 @@ fn emit_turn_from_view(
                     continue;
                 };
                 if let Some(text) = item.as_text() {
-                    compiled.push_block(ClaudeRole::Assistant, text_block(text));
+                    compiled.push_block(
+                        ClaudeRole::Assistant,
+                        text_block(text),
+                        Some(source_index),
+                    );
                     continue;
                 }
                 if let Some(text) = item.as_reasoning().or_else(|| item.as_refusal()) {
-                    compiled.push_block(ClaudeRole::Assistant, text_block(text));
+                    compiled.push_block(
+                        ClaudeRole::Assistant,
+                        text_block(text),
+                        Some(source_index),
+                    );
                     continue;
                 }
                 if let Some(tool_call) = item.as_tool_call() {
                     compiled.push_block(
                         ClaudeRole::Assistant,
                         tool_use_block(tool_call.id, tool_call.name, tool_call.arguments)?,
+                        Some(source_index),
                     );
                     continue;
                 }
@@ -1599,10 +1807,10 @@ mod tests {
     use futures::{StreamExt, executor::block_on};
 
     use lutum_protocol::{
-        AdapterToolChoice, AdapterTurnConfig, ErasedTextTurnEvent, GenerationParams, ModelInput,
-        ModelInputItem, ModelName, OperationKind, ParseErrorStage, RawTelemetryConfig,
-        RequestErrorDebugInfo, RequestErrorKind, RequestExtensions, UsageRecoveryAdapter,
-        budget::Usage,
+        AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, EphemeralInputIndices,
+        ErasedTextTurnEvent, GenerationParams, ModelInput, ModelInputItem, ModelName,
+        OperationKind, ParseErrorStage, RawTelemetryConfig, RequestErrorDebugInfo,
+        RequestErrorKind, RequestExtensions, UsageRecoveryAdapter, budget::Usage,
     };
     use lutum_trace::RawTraceEntry;
 
@@ -1645,7 +1853,15 @@ mod tests {
         };
 
         let request = adapter
-            .prepare_messages_request(&input, &config, "claude-sonnet-override", None, None, true)
+            .prepare_messages_request(
+                &input,
+                &config,
+                &RequestExtensions::new(),
+                "claude-sonnet-override",
+                None,
+                None,
+                true,
+            )
             .unwrap();
 
         assert_eq!(request.model, "claude-sonnet-override");
@@ -1696,11 +1912,188 @@ mod tests {
         };
 
         let request = adapter
-            .prepare_messages_request(&input, &config, "claude-sonnet", None, None, true)
+            .prepare_messages_request(
+                &input,
+                &config,
+                &RequestExtensions::new(),
+                "claude-sonnet",
+                None,
+                None,
+                true,
+            )
             .unwrap();
 
         assert_eq!(request.model, "claude-sonnet");
         assert_eq!(request.models, Some(vec!["fallback-model".to_string()]));
+    }
+
+    #[test]
+    fn prompt_caching_defaults_to_last_cacheable_block_without_ephemerals() {
+        let adapter = ClaudeAdapter::new("test-key");
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+
+        let request = adapter
+            .prepare_messages_request(
+                &input,
+                &config,
+                &RequestExtensions::new(),
+                "claude-sonnet",
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            &request.messages[0].content[0],
+            ClaudeContentBlock::Text(block) if block.cache_control.is_some()
+        ));
+    }
+
+    #[test]
+    fn prompt_caching_marks_block_before_first_ephemeral_item() {
+        let adapter = ClaudeAdapter::new("test-key");
+        let input = ModelInput::from_items(vec![
+            ModelInputItem::text(InputMessageRole::User, "stable"),
+            ModelInputItem::text(InputMessageRole::User, "dynamic"),
+        ]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(EphemeralInputIndices::new([1]));
+
+        let request = adapter
+            .prepare_messages_request(
+                &input,
+                &config,
+                &extensions,
+                "claude-sonnet",
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            &request.messages[0].content[0],
+            ClaudeContentBlock::Text(block) if block.cache_control.is_some()
+        ));
+        assert!(matches!(
+            &request.messages[0].content[1],
+            ClaudeContentBlock::Text(block) if block.cache_control.is_none()
+        ));
+    }
+
+    #[test]
+    fn prompt_caching_omits_breakpoint_when_first_wire_block_is_ephemeral() {
+        let adapter = ClaudeAdapter::new("test-key");
+        let input = ModelInput::from_items(vec![ModelInputItem::text(
+            InputMessageRole::User,
+            "dynamic",
+        )]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(EphemeralInputIndices::new([0]));
+
+        let request = adapter
+            .prepare_messages_request(
+                &input,
+                &config,
+                &extensions,
+                "claude-sonnet",
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            &request.messages[0].content[0],
+            ClaudeContentBlock::Text(block) if block.cache_control.is_none()
+        ));
+    }
+
+    #[test]
+    fn prompt_caching_can_mark_tool_before_ephemeral_message() {
+        let adapter = ClaudeAdapter::new("test-key");
+        let input = ModelInput::from_items(vec![ModelInputItem::text(
+            InputMessageRole::User,
+            "dynamic",
+        )]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: vec![AdapterToolDefinition {
+                name: "lookup".to_string(),
+                description: "Lookup data".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(EphemeralInputIndices::new([0]));
+
+        let request = adapter
+            .prepare_messages_request(
+                &input,
+                &config,
+                &extensions,
+                "claude-sonnet",
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+
+        assert!(
+            request.tools.as_ref().unwrap()[0].cache_control.is_some(),
+            "tool should be the stable cache endpoint before the ephemeral message"
+        );
+        assert!(matches!(
+            &request.messages[0].content[0],
+            ClaudeContentBlock::Text(block) if block.cache_control.is_none()
+        ));
+    }
+
+    #[test]
+    fn prompt_caching_can_be_disabled() {
+        let adapter = ClaudeAdapter::new("test-key").without_prompt_caching();
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+
+        let request = adapter
+            .prepare_messages_request(
+                &input,
+                &config,
+                &RequestExtensions::new(),
+                "claude-sonnet",
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            &request.messages[0].content[0],
+            ClaudeContentBlock::Text(block) if block.cache_control.is_none()
+        ));
     }
 
     #[test]
@@ -1831,7 +2224,15 @@ mod tests {
             tool_choice: AdapterToolChoice::Auto,
         };
         let request = adapter
-            .prepare_messages_request(&input, &config, "claude-sonnet", None, None, true)
+            .prepare_messages_request(
+                &input,
+                &config,
+                &RequestExtensions::new(),
+                "claude-sonnet",
+                None,
+                None,
+                true,
+            )
             .unwrap();
         let request_body = serialize_raw_body(&request).unwrap();
 

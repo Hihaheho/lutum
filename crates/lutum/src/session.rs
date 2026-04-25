@@ -7,6 +7,7 @@ use lutum_protocol::{
     RawJson, RecoverableToolCallIssue, RejectedToolCall, RequestBudget, ToolHookOutcome, ToolHooks,
     ToolResult, ToolResultError, Toolset, TurnConfig, TurnView, UncommittedAssistantTurn,
     budget::Usage,
+    conversation::EphemeralInputIndices,
     reducer::{
         StagedStructuredTurnResultWithTools, StagedTextTurnResultWithTools,
         StructuredTurnResultWithTools, TextTurnResultWithTools,
@@ -173,10 +174,24 @@ impl Session {
         self.input.push(ModelInputItem::Turn(wrapped));
     }
 
-    pub(crate) fn snapshot_input(&mut self) -> ModelInput {
+    pub(crate) fn snapshot_input_with_ephemeral_indices(
+        &mut self,
+    ) -> (ModelInput, EphemeralInputIndices) {
+        let indices = self.ephemeral_input_indices();
         let snapshot = self.input.clone();
         self.strip_ephemerals();
-        snapshot
+        (snapshot, indices)
+    }
+
+    fn ephemeral_input_indices(&self) -> EphemeralInputIndices {
+        let mut indices = self.ephemeral_indices.clone();
+        indices.extend(self.input.items().iter().enumerate().filter_map(
+            |(index, item)| match item {
+                ModelInputItem::Turn(turn) if turn.ephemeral() => Some(index),
+                _ => None,
+            },
+        ));
+        EphemeralInputIndices::new(indices)
     }
 
     fn strip_ephemerals(&mut self) {

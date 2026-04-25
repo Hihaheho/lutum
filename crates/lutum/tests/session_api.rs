@@ -421,6 +421,7 @@ fn ephemeral_turn_is_cleared_after_collect() {
             },
         }),
     ]));
+    let observed = adapter.clone();
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
     let mut session = Session::new(ctx);
@@ -435,6 +436,7 @@ fn ephemeral_turn_is_cleared_after_collect() {
     // then is cleared from the session. Only the new committed turn remains.
     futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
 
+    assert_eq!(observed.observed_ephemeral_indices(), vec![vec![1]]);
     assert_eq!(
         session.list_turns().count(),
         1,
@@ -445,5 +447,42 @@ fn ephemeral_turn_is_cleared_after_collect() {
         session.input().items().len(),
         2, // push_user + committed assistant turn
         "ephemeral turn must not be persisted in session.input()"
+    );
+}
+
+#[test]
+fn ephemeral_message_indices_are_attached_to_session_turn_request() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-ephemeral-message-1".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "response".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-ephemeral-message-1".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 5,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let observed = adapter.clone();
+    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
+    let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
+    let mut session = Session::new(ctx);
+
+    session.push_user("Stable prompt.");
+    session.push_ephemeral_user("Dynamic prompt.");
+
+    futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
+
+    assert_eq!(observed.observed_ephemeral_indices(), vec![vec![1]]);
+    assert_eq!(
+        session.input().items().len(),
+        2,
+        "ephemeral message must be stripped before commit"
     );
 }

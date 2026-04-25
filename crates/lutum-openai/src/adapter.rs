@@ -15,8 +15,8 @@ use lutum_protocol::{
     AgentError, FinishReason,
     budget::Usage,
     conversation::{
-        AssistantInputItem, InputMessageRole, MessageContent, ModelInput, ModelInputItem, RawJson,
-        ToolCallId, ToolMetadata, ToolName, ToolResult,
+        AssistantInputItem, EphemeralInputIndices, InputMessageRole, MessageContent, ModelInput,
+        ModelInputItem, RawJson, ToolCallId, ToolMetadata, ToolName, ToolResult,
     },
     extensions::RequestExtensions,
     llm::{
@@ -61,6 +61,19 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply_to_responses(&self, request: &mut crate::responses::ResponsesRequest);
     fn apply_to_completion(&self, request: &mut CompletionRequest);
     fn apply_to_chat(&self, _request: &mut crate::chat::ChatCompletionRequest) {}
+}
+
+pub trait ChatMessageJsonSerializer: Send + Sync {
+    fn serialize_message(&self, message: &ChatMessageParam) -> Option<Value>;
+}
+
+impl<F> ChatMessageJsonSerializer for F
+where
+    F: for<'a> Fn(&'a ChatMessageParam) -> Option<Value> + Send + Sync,
+{
+    fn serialize_message(&self, message: &ChatMessageParam) -> Option<Value> {
+        self(message)
+    }
 }
 
 #[lutum_macros::hooks]
@@ -206,8 +219,40 @@ pub struct OpenAiAdapter {
     default_model: ModelName,
     hooks: OpenAiHooksSet<'static>,
     fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
+    chat_message_json_serializer: Option<Arc<dyn ChatMessageJsonSerializer>>,
+    claude_prompt_caching: bool,
     sse_event_recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
     use_chat_completions: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedChatRequest {
+    body: crate::chat::ChatCompletionRequest,
+    cache_map: ChatCacheMap,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ChatCompilation {
+    messages: Vec<ChatMessageParam>,
+    message_sources: Vec<Vec<usize>>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingChatAssistant {
+    message: ChatAssistantMessage,
+    sources: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChatCacheCandidate {
+    sequence: usize,
+    message_index: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ChatCacheMap {
+    message_sources: Vec<Vec<usize>>,
+    candidates: Vec<ChatCacheCandidate>,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -230,6 +275,8 @@ impl OpenAiAdapter {
             default_model: ModelName::new("gpt-4.1").unwrap(),
             hooks: OpenAiHooksSet::new(),
             fallback_serializer: None,
+            chat_message_json_serializer: None,
+            claude_prompt_caching: false,
             sse_event_recovery_hook: None,
             use_chat_completions: false,
         }
@@ -286,6 +333,39 @@ impl OpenAiAdapter {
         self.fallback_serializer = Some(serializer.into());
     }
 
+    pub fn with_chat_message_json_serializer(
+        mut self,
+        serializer: impl ChatMessageJsonSerializer + 'static,
+    ) -> Self {
+        self.chat_message_json_serializer = Some(Arc::new(serializer));
+        self
+    }
+
+    pub fn set_chat_message_json_serializer(
+        &mut self,
+        serializer: Box<dyn ChatMessageJsonSerializer>,
+    ) {
+        self.chat_message_json_serializer = Some(serializer.into());
+    }
+
+    /// Enable Claude/OpenRouter-style `cache_control` injection for Chat Completions.
+    ///
+    /// This affects only serialized Chat Completions JSON. Responses and legacy
+    /// Completions requests are left untouched.
+    pub fn with_claude_prompt_caching(mut self) -> Self {
+        self.claude_prompt_caching = true;
+        self
+    }
+
+    pub fn without_claude_prompt_caching(mut self) -> Self {
+        self.claude_prompt_caching = false;
+        self
+    }
+
+    pub fn set_claude_prompt_caching(&mut self, enabled: bool) {
+        self.claude_prompt_caching = enabled;
+    }
+
     pub fn with_sse_event_recovery_hook(
         mut self,
         hook: impl SseEventRecoveryHook + 'static,
@@ -330,12 +410,12 @@ impl OpenAiAdapter {
         config: &AdapterTurnConfig,
         model: &str,
         reasoning_effort: Option<OpenAiReasoningEffort>,
-    ) -> Result<crate::chat::ChatCompletionRequest, OpenAiError> {
-        let mut body = build_chat_request(input, config, model, reasoning_effort)?;
+    ) -> Result<PreparedChatRequest, OpenAiError> {
+        let (mut body, cache_map) = build_chat_request(input, config, model, reasoning_effort)?;
         if let Some(serializer) = self.fallback_serializer.as_ref() {
             serializer.apply_to_chat(&mut body);
         }
-        Ok(body)
+        Ok(PreparedChatRequest { body, cache_map })
     }
 
     fn prepare_completion_request(
@@ -360,6 +440,35 @@ impl OpenAiAdapter {
             serializer.apply_to_responses(&mut body);
         }
         body
+    }
+
+    fn serialize_chat_request_body(
+        &self,
+        request: &crate::chat::ChatCompletionRequest,
+        cache_map: &ChatCacheMap,
+        extensions: &RequestExtensions,
+    ) -> Result<Value, OpenAiError> {
+        let cache_target = self
+            .claude_prompt_caching
+            .then(|| select_chat_cache_target(cache_map, extensions))
+            .flatten();
+        serialize_chat_request_with_message_mapper(request, |index, message| {
+            let mut replacement = self
+                .chat_message_json_serializer
+                .as_ref()
+                .and_then(|serializer| serializer.serialize_message(message));
+
+            if cache_target == Some(index) {
+                let mut value = match replacement.take() {
+                    Some(value) => value,
+                    None => serde_json::to_value(message).ok()?,
+                };
+                add_cache_control_to_chat_message_value(&mut value);
+                replacement = Some(value);
+            }
+
+            replacement
+        })
     }
 
     async fn send_streaming_json<T>(
@@ -472,8 +581,15 @@ impl TurnAdapter for OpenAiAdapter {
             .resolve_reasoning_effort(turn.extensions.as_ref())
             .await;
         if self.use_chat_completions {
-            let body = self
+            let prepared = self
                 .prepare_chat_request(&input, &turn.config, model.as_ref(), reasoning_effort)
+                .map_err(AgentError::from)?;
+            let body = self
+                .serialize_chat_request_body(
+                    &prepared.body,
+                    &prepared.cache_map,
+                    turn.extensions.as_ref(),
+                )
                 .map_err(AgentError::from)?;
             if let Some(raw) = raw_chat.as_ref() {
                 raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
@@ -535,10 +651,10 @@ impl TurnAdapter for OpenAiAdapter {
             .await;
 
         if self.use_chat_completions {
-            let mut body = self
+            let mut prepared = self
                 .prepare_chat_request(&input, &turn.config, model.as_ref(), reasoning_effort)
                 .map_err(AgentError::from)?;
-            body.response_format = Some(ResponseFormat::JsonSchema {
+            prepared.body.response_format = Some(ResponseFormat::JsonSchema {
                 json_schema: JsonSchemaConfig {
                     name: turn.output.schema_name.clone(),
                     description: None,
@@ -546,6 +662,13 @@ impl TurnAdapter for OpenAiAdapter {
                     strict: Some(true),
                 },
             });
+            let body = self
+                .serialize_chat_request_body(
+                    &prepared.body,
+                    &prepared.cache_map,
+                    turn.extensions.as_ref(),
+                )
+                .map_err(AgentError::from)?;
             if let Some(raw) = raw_chat.as_ref() {
                 raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
             }
@@ -2333,8 +2456,9 @@ fn build_chat_request(
     config: &AdapterTurnConfig,
     model: &str,
     reasoning_effort: Option<OpenAiReasoningEffort>,
-) -> Result<crate::chat::ChatCompletionRequest, OpenAiError> {
-    let messages = convert_model_input_to_chat_messages(input)?;
+) -> Result<(crate::chat::ChatCompletionRequest, ChatCacheMap), OpenAiError> {
+    let compilation = convert_model_input_to_chat_messages(input)?;
+    let cache_map = build_chat_cache_map(&compilation);
     let tools: Vec<crate::chat::ChatTool> = config
         .tools
         .iter()
@@ -2359,57 +2483,53 @@ fn build_chat_request(
             }
         })
     };
-    Ok(crate::chat::ChatCompletionRequest {
-        model: model.to_string(),
-        messages,
-        stream: Some(true),
-        stream_options: Some(ChatStreamOptions {
-            include_usage: Some(true),
-            include_obfuscation: None,
-        }),
-        temperature: config.generation.temperature.map(|t| t.get()),
-        max_completion_tokens: config.generation.max_output_tokens,
-        seed: config.generation.seed,
-        tools: if tools.is_empty() { None } else { Some(tools) },
-        tool_choice,
-        reasoning_effort,
-        top_p: None,
-        n: None,
-        frequency_penalty: None,
-        presence_penalty: None,
-        max_tokens: None,
-        logprobs: None,
-        top_logprobs: None,
-        stop: None,
-        parallel_tool_calls: None,
-        response_format: None,
-        store: None,
-        service_tier: None,
-        models: None,
-        user: None,
-        safety_identifier: None,
-        prompt_cache_key: None,
-    })
+    Ok((
+        crate::chat::ChatCompletionRequest {
+            model: model.to_string(),
+            messages: compilation.messages,
+            stream: Some(true),
+            stream_options: Some(ChatStreamOptions {
+                include_usage: Some(true),
+                include_obfuscation: None,
+            }),
+            temperature: config.generation.temperature.map(|t| t.get()),
+            max_completion_tokens: config.generation.max_output_tokens,
+            seed: config.generation.seed,
+            tools: if tools.is_empty() { None } else { Some(tools) },
+            tool_choice,
+            reasoning_effort,
+            top_p: None,
+            n: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            max_tokens: None,
+            logprobs: None,
+            top_logprobs: None,
+            stop: None,
+            parallel_tool_calls: None,
+            response_format: None,
+            store: None,
+            service_tier: None,
+            models: None,
+            user: None,
+            safety_identifier: None,
+            prompt_cache_key: None,
+        },
+        cache_map,
+    ))
 }
 
 /// Convert a `ModelInput` to a list of `ChatMessageParam` for the Chat Completions API.
 fn convert_model_input_to_chat_messages(
     input: &ModelInput,
-) -> Result<Vec<ChatMessageParam>, OpenAiError> {
-    let mut messages: Vec<ChatMessageParam> = Vec::new();
-    let mut pending_assistant: Option<ChatAssistantMessage> = None;
+) -> Result<ChatCompilation, OpenAiError> {
+    let mut compilation = ChatCompilation::default();
+    let mut pending_assistant: Option<PendingChatAssistant> = None;
 
-    let flush_assistant = |pending: &mut Option<ChatAssistantMessage>,
-                           messages: &mut Vec<ChatMessageParam>| {
-        if let Some(msg) = pending.take() {
-            messages.push(ChatMessageParam::Assistant(msg));
-        }
-    };
-
-    for item in input.items() {
+    for (source_index, item) in input.items().iter().enumerate() {
         match item {
             ModelInputItem::Message { role, content } => {
-                flush_assistant(&mut pending_assistant, &mut messages);
+                flush_pending_chat_assistant(&mut pending_assistant, &mut compilation);
                 let text: String = content
                     .iter()
                     .map(|c| match c {
@@ -2432,35 +2552,23 @@ fn convert_model_input_to_chat_messages(
                         name: None,
                     }),
                 };
-                messages.push(msg);
+                push_chat_message(&mut compilation, msg, vec![source_index]);
             }
             ModelInputItem::Assistant(assistant_item) => {
                 match assistant_item {
                     AssistantInputItem::Text(text) => {
-                        let msg = pending_assistant.get_or_insert(ChatAssistantMessage {
-                            content: None,
-                            refusal: None,
-                            audio: None,
-                            name: None,
-                            tool_calls: None,
-                            function_call: None,
-                        });
-                        let existing = msg.content.take();
-                        msg.content = Some(AssistantContent::Text(match existing {
+                        let pending = pending_chat_assistant(&mut pending_assistant);
+                        push_source_index(&mut pending.sources, source_index);
+                        let existing = pending.message.content.take();
+                        pending.message.content = Some(AssistantContent::Text(match existing {
                             Some(AssistantContent::Text(t)) => format!("{t}{text}"),
                             _ => text.clone(),
                         }));
                     }
                     AssistantInputItem::Refusal(text) => {
-                        let msg = pending_assistant.get_or_insert(ChatAssistantMessage {
-                            content: None,
-                            refusal: None,
-                            audio: None,
-                            name: None,
-                            tool_calls: None,
-                            function_call: None,
-                        });
-                        msg.refusal = Some(text.clone());
+                        let pending = pending_chat_assistant(&mut pending_assistant);
+                        push_source_index(&mut pending.sources, source_index);
+                        pending.message.refusal = Some(text.clone());
                     }
                     AssistantInputItem::Reasoning(_) => {
                         // Reasoning items are not sent in chat completions format.
@@ -2468,29 +2576,79 @@ fn convert_model_input_to_chat_messages(
                 }
             }
             ModelInputItem::ToolResult(tool_result) => {
-                flush_assistant(&mut pending_assistant, &mut messages);
-                messages.push(ChatMessageParam::Tool(ChatToolMessage {
-                    content: ChatTextContent::Text(tool_result.result.get().to_string()),
-                    tool_call_id: tool_result.id.as_str().to_string(),
-                }));
+                flush_pending_chat_assistant(&mut pending_assistant, &mut compilation);
+                push_chat_message(
+                    &mut compilation,
+                    ChatMessageParam::Tool(ChatToolMessage {
+                        content: ChatTextContent::Text(tool_result.result.get().to_string()),
+                        tool_call_id: tool_result.id.as_str().to_string(),
+                    }),
+                    vec![source_index],
+                );
             }
             ModelInputItem::Turn(committed_turn) => {
-                flush_assistant(&mut pending_assistant, &mut messages);
+                flush_pending_chat_assistant(&mut pending_assistant, &mut compilation);
                 // Downcast to OpenAiCommittedTurn for direct access to typed items.
                 if let Some(openai_turn) = committed_turn
                     .as_ref()
                     .as_any()
                     .downcast_ref::<OpenAiCommittedTurn>()
                 {
-                    emit_openai_turn_as_chat_messages(openai_turn, &mut messages);
+                    emit_openai_turn_as_chat_messages(openai_turn, &mut compilation, source_index);
                 } else {
-                    emit_turn_view_as_chat_messages(committed_turn.as_ref(), &mut messages);
+                    emit_turn_view_as_chat_messages(
+                        committed_turn.as_ref(),
+                        &mut compilation,
+                        source_index,
+                    );
                 }
             }
         }
     }
-    flush_assistant(&mut pending_assistant, &mut messages);
-    Ok(messages)
+    flush_pending_chat_assistant(&mut pending_assistant, &mut compilation);
+    Ok(compilation)
+}
+
+fn push_chat_message(
+    compilation: &mut ChatCompilation,
+    message: ChatMessageParam,
+    source_indices: Vec<usize>,
+) {
+    compilation.messages.push(message);
+    compilation.message_sources.push(source_indices);
+}
+
+fn pending_chat_assistant(pending: &mut Option<PendingChatAssistant>) -> &mut PendingChatAssistant {
+    pending.get_or_insert_with(|| PendingChatAssistant {
+        message: ChatAssistantMessage {
+            content: None,
+            refusal: None,
+            audio: None,
+            name: None,
+            tool_calls: None,
+            function_call: None,
+        },
+        sources: Vec::new(),
+    })
+}
+
+fn push_source_index(indices: &mut Vec<usize>, source_index: usize) {
+    if !indices.contains(&source_index) {
+        indices.push(source_index);
+    }
+}
+
+fn flush_pending_chat_assistant(
+    pending: &mut Option<PendingChatAssistant>,
+    compilation: &mut ChatCompilation,
+) {
+    if let Some(pending) = pending.take() {
+        push_chat_message(
+            compilation,
+            ChatMessageParam::Assistant(pending.message),
+            pending.sources,
+        );
+    }
 }
 
 /// Convert an `OpenAiCommittedTurn` to one or more `ChatMessageParam` entries.
@@ -2499,7 +2657,8 @@ fn convert_model_input_to_chat_messages(
 /// items are silently dropped — the Chat Completions API does not accept them.
 fn emit_openai_turn_as_chat_messages(
     turn: &OpenAiCommittedTurn,
-    messages: &mut Vec<ChatMessageParam>,
+    compilation: &mut ChatCompilation,
+    source_index: usize,
 ) {
     let mut text = String::new();
     let mut tool_calls: Vec<ChatMessageToolCall> = Vec::new();
@@ -2526,26 +2685,34 @@ fn emit_openai_turn_as_chat_messages(
         }
     }
 
-    messages.push(ChatMessageParam::Assistant(ChatAssistantMessage {
-        content: if text.is_empty() {
-            None
-        } else {
-            Some(AssistantContent::Text(text))
-        },
-        refusal: None,
-        audio: None,
-        name: None,
-        tool_calls: if tool_calls.is_empty() {
-            None
-        } else {
-            Some(tool_calls)
-        },
-        function_call: None,
-    }));
+    push_chat_message(
+        compilation,
+        ChatMessageParam::Assistant(ChatAssistantMessage {
+            content: if text.is_empty() {
+                None
+            } else {
+                Some(AssistantContent::Text(text))
+            },
+            refusal: None,
+            audio: None,
+            name: None,
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+            function_call: None,
+        }),
+        vec![source_index],
+    );
 }
 
 /// Fallback: convert a generic `TurnView` to chat messages.
-fn emit_turn_view_as_chat_messages(turn: &dyn TurnView, messages: &mut Vec<ChatMessageParam>) {
+fn emit_turn_view_as_chat_messages(
+    turn: &dyn TurnView,
+    compilation: &mut ChatCompilation,
+    source_index: usize,
+) {
     let mut text = String::new();
     let mut tool_calls: Vec<ChatMessageToolCall> = Vec::new();
 
@@ -2567,22 +2734,175 @@ fn emit_turn_view_as_chat_messages(turn: &dyn TurnView, messages: &mut Vec<ChatM
         }
     }
 
-    messages.push(ChatMessageParam::Assistant(ChatAssistantMessage {
-        content: if text.is_empty() {
-            None
-        } else {
-            Some(AssistantContent::Text(text))
-        },
-        refusal: None,
-        audio: None,
-        name: None,
-        tool_calls: if tool_calls.is_empty() {
-            None
-        } else {
-            Some(tool_calls)
-        },
-        function_call: None,
-    }));
+    push_chat_message(
+        compilation,
+        ChatMessageParam::Assistant(ChatAssistantMessage {
+            content: if text.is_empty() {
+                None
+            } else {
+                Some(AssistantContent::Text(text))
+            },
+            refusal: None,
+            audio: None,
+            name: None,
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+            function_call: None,
+        }),
+        vec![source_index],
+    );
+}
+
+fn build_chat_cache_map(compilation: &ChatCompilation) -> ChatCacheMap {
+    let candidates = compilation
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(message_index, message)| {
+            chat_message_is_cacheable(message).then_some(ChatCacheCandidate {
+                sequence: message_index,
+                message_index,
+            })
+        })
+        .collect();
+
+    ChatCacheMap {
+        message_sources: compilation.message_sources.clone(),
+        candidates,
+    }
+}
+
+fn chat_message_is_cacheable(message: &ChatMessageParam) -> bool {
+    match message {
+        ChatMessageParam::Developer(message) => chat_text_content_is_cacheable(&message.content),
+        ChatMessageParam::System(message) => chat_text_content_is_cacheable(&message.content),
+        ChatMessageParam::User(message) => chat_user_content_is_cacheable(&message.content),
+        ChatMessageParam::Assistant(message) => message
+            .content
+            .as_ref()
+            .is_some_and(assistant_content_is_cacheable),
+        ChatMessageParam::Tool(message) => chat_text_content_is_cacheable(&message.content),
+        ChatMessageParam::Function(message) => !message.content.is_empty(),
+    }
+}
+
+fn chat_text_content_is_cacheable(content: &ChatTextContent) -> bool {
+    match content {
+        ChatTextContent::Text(text) => !text.is_empty(),
+        ChatTextContent::Parts(parts) => parts.iter().any(
+            |part| matches!(part, crate::chat::ChatContentPart::Text { text } if !text.is_empty()),
+        ),
+    }
+}
+
+fn chat_user_content_is_cacheable(content: &ChatUserContent) -> bool {
+    match content {
+        ChatUserContent::Text(text) => !text.is_empty(),
+        ChatUserContent::Parts(parts) => parts.iter().any(
+            |part| matches!(part, crate::chat::ChatContentPart::Text { text } if !text.is_empty()),
+        ),
+    }
+}
+
+fn assistant_content_is_cacheable(content: &AssistantContent) -> bool {
+    match content {
+        AssistantContent::Text(text) => !text.is_empty(),
+        AssistantContent::Parts(parts) => parts.iter().any(
+            |part| matches!(part, crate::chat::AssistantContentPart::Text { text } if !text.is_empty()),
+        ),
+    }
+}
+
+fn select_chat_cache_target(
+    cache_map: &ChatCacheMap,
+    extensions: &RequestExtensions,
+) -> Option<usize> {
+    let first_ephemeral_sequence = extensions
+        .get::<EphemeralInputIndices>()
+        .and_then(|indices| {
+            cache_map
+                .message_sources
+                .iter()
+                .enumerate()
+                .filter(|(_, sources)| sources.iter().any(|index| indices.contains(*index)))
+                .map(|(sequence, _)| sequence)
+                .min()
+        });
+
+    match first_ephemeral_sequence {
+        Some(ephemeral_sequence) => cache_map
+            .candidates
+            .iter()
+            .rev()
+            .find(|candidate| candidate.sequence < ephemeral_sequence)
+            .map(|candidate| candidate.message_index),
+        None => cache_map
+            .candidates
+            .last()
+            .map(|candidate| candidate.message_index),
+    }
+}
+
+fn serialize_chat_request_with_message_mapper(
+    request: &crate::chat::ChatCompletionRequest,
+    mut mapper: impl FnMut(usize, &ChatMessageParam) -> Option<Value>,
+) -> Result<Value, OpenAiError> {
+    let mut value = serde_json::to_value(request).map_err(OpenAiError::Json)?;
+    let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
+        return Ok(value);
+    };
+
+    for (index, message) in request.messages.iter().enumerate() {
+        if let Some(replacement) = mapper(index, message)
+            && let Some(slot) = messages.get_mut(index)
+        {
+            *slot = replacement;
+        }
+    }
+
+    Ok(value)
+}
+
+fn add_cache_control_to_chat_message_value(value: &mut Value) -> bool {
+    let Some(content) = value.get_mut("content") else {
+        return false;
+    };
+
+    if let Some(text) = content.as_str().map(ToOwned::to_owned) {
+        *content = Value::Array(vec![chat_text_part_with_cache_control(text)]);
+        return true;
+    }
+
+    let Some(parts) = content.as_array_mut() else {
+        return false;
+    };
+    for part in parts.iter_mut().rev() {
+        let Some(object) = part.as_object_mut() else {
+            continue;
+        };
+        if object.get("type").and_then(Value::as_str) == Some("text")
+            && object.get("text").and_then(Value::as_str).is_some()
+        {
+            object.insert(
+                "cache_control".to_string(),
+                serde_json::json!({ "type": "ephemeral" }),
+            );
+            return true;
+        }
+    }
+
+    false
+}
+
+fn chat_text_part_with_cache_control(text: String) -> Value {
+    serde_json::json!({
+        "type": "text",
+        "text": text,
+        "cache_control": { "type": "ephemeral" }
+    })
 }
 
 /// Map a Chat Completions SSE byte stream to `ErasedTextTurnEvent`.
@@ -2922,9 +3242,10 @@ mod tests {
 
     use lutum_protocol::{
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
-        AssistantTurnItem, AssistantTurnView, ErasedStructuredTurnEvent, ErasedTextTurnEvent,
-        GenerationParams, InputMessageRole, ModelInput, ModelInputItem, ModelName, ParseErrorStage,
-        RawTelemetryConfig, RequestErrorDebugInfo, RequestErrorKind, RequestExtensions, ToolResult,
+        AssistantTurnItem, AssistantTurnView, EphemeralInputIndices, ErasedStructuredTurnEvent,
+        ErasedTextTurnEvent, GenerationParams, InputMessageRole, ModelInput, ModelInputItem,
+        ModelName, ParseErrorStage, RawTelemetryConfig, RequestErrorDebugInfo, RequestErrorKind,
+        RequestExtensions, ToolResult,
     };
     use lutum_trace::RawTraceEntry;
 
@@ -3035,6 +3356,133 @@ mod tests {
         assert_eq!(
             completion_request.models,
             Some(vec!["fallback".to_string()])
+        );
+    }
+
+    #[test]
+    fn claude_prompt_caching_for_chat_changes_serialized_json_only() {
+        let adapter = OpenAiAdapter::new("test-key").with_claude_prompt_caching();
+        let input = ModelInput::from_items(vec![
+            ModelInputItem::text(InputMessageRole::User, "stable"),
+            ModelInputItem::text(InputMessageRole::User, "dynamic"),
+        ]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(EphemeralInputIndices::new([1]));
+
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "anthropic/claude-sonnet-4-5", None)
+            .unwrap();
+        assert!(matches!(
+            &prepared.body.messages[0],
+            ChatMessageParam::User(message) if matches!(&message.content, ChatUserContent::Text(text) if text == "stable")
+        ));
+
+        let body = adapter
+            .serialize_chat_request_body(&prepared.body, &prepared.cache_map, &extensions)
+            .unwrap();
+        let messages = body["messages"].as_array().unwrap();
+
+        assert_eq!(
+            messages[0]["content"][0]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert!(messages[1]["content"].as_str().is_some());
+
+        let typed_json = serde_json::to_value(&prepared.body).unwrap();
+        assert!(
+            typed_json.to_string().find("cache_control").is_none(),
+            "typed ChatCompletionRequest should remain cache-control free"
+        );
+    }
+
+    #[test]
+    fn claude_prompt_caching_for_chat_is_opt_in() {
+        let adapter = OpenAiAdapter::new("test-key");
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "stable")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "anthropic/claude-sonnet-4-5", None)
+            .unwrap();
+
+        let body = adapter
+            .serialize_chat_request_body(
+                &prepared.body,
+                &prepared.cache_map,
+                &RequestExtensions::new(),
+            )
+            .unwrap();
+
+        assert!(!body.to_string().contains("cache_control"));
+    }
+
+    #[test]
+    fn chat_message_json_serializer_can_replace_message_json() {
+        fn add_provider_marker(message: &ChatMessageParam) -> Option<Value> {
+            let mut value = serde_json::to_value(message).ok()?;
+            value["provider_marker"] = Value::String("present".to_string());
+            Some(value)
+        }
+
+        let adapter =
+            OpenAiAdapter::new("test-key").with_chat_message_json_serializer(add_provider_marker);
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "gpt-4.1", None)
+            .unwrap();
+
+        let body = adapter
+            .serialize_chat_request_body(
+                &prepared.body,
+                &prepared.cache_map,
+                &RequestExtensions::new(),
+            )
+            .unwrap();
+
+        assert_eq!(body["messages"][0]["provider_marker"], "present");
+    }
+
+    #[test]
+    fn claude_prompt_caching_does_not_touch_responses_or_completions() {
+        let adapter = OpenAiAdapter::new("test-key").with_claude_prompt_caching();
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+
+        let responses_request = adapter
+            .prepare_responses_request(&input, &config, "gpt-4.1", None, None)
+            .unwrap();
+        let completion_request =
+            adapter.prepare_completion_request(&ProtocolCompletionRequest::new("hello"), "gpt-4.1");
+
+        assert!(
+            !serde_json::to_string(&responses_request)
+                .unwrap()
+                .contains("cache_control")
+        );
+        assert!(
+            !serde_json::to_string(&completion_request)
+                .unwrap()
+                .contains("cache_control")
         );
     }
 

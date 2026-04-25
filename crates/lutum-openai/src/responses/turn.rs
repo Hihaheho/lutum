@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 ///         "input_tokens": 36,
 ///         "output_tokens": 87,
 ///         "total_tokens": 123,
-///         "cost_micros_usd": 0
+///         "cost_micros_usd": 0,
+///         "cache_creation_tokens": 0,
+///         "cache_read_tokens": 0
 ///       }
 ///     }"#,
 /// )

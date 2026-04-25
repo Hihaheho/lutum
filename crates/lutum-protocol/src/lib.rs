@@ -25,9 +25,9 @@ pub use budget::{
 };
 pub use conversation::{
     AssistantInputItem, AssistantTurn, AssistantTurnInputError, AssistantTurnItem,
-    EmptyNonEmptyError, InputMessageRole, MessageContent, ModelInput, ModelInputItem,
-    ModelInputValidationError, NonEmpty, REJECTED_TOOL_RESULT_PREFIX, RawJson, ToolCallId,
-    ToolMetadata, ToolName, ToolResult, UncommittedAssistantTurn,
+    EmptyNonEmptyError, EphemeralInputIndices, InputMessageRole, MessageContent, ModelInput,
+    ModelInputItem, ModelInputValidationError, NonEmpty, REJECTED_TOOL_RESULT_PREFIX, RawJson,
+    ToolCallId, ToolMetadata, ToolName, ToolResult, UncommittedAssistantTurn,
 };
 pub use error::{
     AgentError, BoxError, NoToolsContractViolation, RequestFailure, RequestFailureKind,

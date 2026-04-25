@@ -1,3 +1,4 @@
+use monostate::MustBe;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -126,9 +127,9 @@ pub enum MessageRole {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum InputContent {
-    OutputText(OutputTextContent),
-    Refusal(RefusalContent),
     InputText(InputTextContent),
+    Refusal(RefusalContent),
+    OutputText(OutputTextContent),
 }
 
 impl From<InputTextContent> for InputContent {
@@ -165,14 +166,14 @@ impl From<RefusalContent> for InputContent {
 pub struct InputTextContent {
     pub text: String,
     #[serde(rename = "type")]
-    pub item_type: String,
+    pub item_type: MustBe!("input_text"),
 }
 
 impl InputTextContent {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            item_type: "input_text".to_string(),
+            item_type: Default::default(),
         }
     }
 }
@@ -231,14 +232,14 @@ impl OutputTextContent {
 pub struct RefusalContent {
     pub refusal: String,
     #[serde(rename = "type")]
-    pub item_type: String,
+    pub item_type: MustBe!("refusal"),
 }
 
 impl RefusalContent {
     pub fn new(refusal: impl Into<String>) -> Self {
         Self {
             refusal: refusal.into(),
-            item_type: "refusal".to_string(),
+            item_type: Default::default(),
         }
     }
 }

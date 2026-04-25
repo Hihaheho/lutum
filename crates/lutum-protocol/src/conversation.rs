@@ -109,6 +109,37 @@ impl From<Vec<ModelInputItem>> for ModelInput {
     }
 }
 
+/// Per-request metadata identifying [`ModelInputItem`] positions that are ephemeral.
+///
+/// `Session` attaches this to [`crate::RequestExtensions`] for session-originated turns so
+/// adapters can place provider-specific cache breakpoints before volatile context without
+/// changing the canonical request algebra.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EphemeralInputIndices {
+    indices: Vec<usize>,
+}
+
+impl EphemeralInputIndices {
+    pub fn new(indices: impl IntoIterator<Item = usize>) -> Self {
+        let mut indices = indices.into_iter().collect::<Vec<_>>();
+        indices.sort_unstable();
+        indices.dedup();
+        Self { indices }
+    }
+
+    pub fn indices(&self) -> &[usize] {
+        &self.indices
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    pub fn contains(&self, index: usize) -> bool {
+        self.indices.binary_search(&index).is_ok()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ModelInputItem {
     Message {

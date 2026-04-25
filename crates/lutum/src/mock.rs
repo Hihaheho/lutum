@@ -11,7 +11,10 @@ use thiserror::Error;
 use lutum_protocol::{
     AgentError, RequestExtensions, RequestFailureKind,
     budget::Usage,
-    conversation::{AssistantTurnItem, ModelInput, RawJson, ToolCallId, ToolMetadata, ToolName},
+    conversation::{
+        AssistantTurnItem, EphemeralInputIndices, ModelInput, RawJson, ToolCallId, ToolMetadata,
+        ToolName,
+    },
     llm::{
         AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn,
         CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionRequest,
@@ -251,6 +254,7 @@ pub struct MockLlmAdapter {
     structured_turns: Arc<Mutex<VecDeque<MockStructuredScenario>>>,
     completions: Arc<Mutex<VecDeque<MockCompletionScenario>>>,
     structured_completions: Arc<Mutex<VecDeque<MockStructuredCompletionScenario>>>,
+    observed_ephemeral_indices: Arc<Mutex<Vec<Vec<usize>>>>,
     recovered_usage: Arc<Mutex<BTreeMap<(OperationKind, String), Usage>>>,
     recover_usage_errors: Arc<Mutex<BTreeMap<(OperationKind, String), MockError>>>,
 }
@@ -311,6 +315,10 @@ impl MockLlmAdapter {
             .insert((kind, request_id.into()), error);
         self
     }
+
+    pub fn observed_ephemeral_indices(&self) -> Vec<Vec<usize>> {
+        self.observed_ephemeral_indices.lock().unwrap().clone()
+    }
 }
 
 fn agent_error_from_mock(error: MockError) -> AgentError {
@@ -341,8 +349,14 @@ impl TurnAdapter for MockLlmAdapter {
     async fn text_turn(
         &self,
         _input: ModelInput,
-        _turn: AdapterTextTurn,
+        turn: AdapterTextTurn,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
+        if let Some(indices) = turn.extensions.get::<EphemeralInputIndices>() {
+            self.observed_ephemeral_indices
+                .lock()
+                .unwrap()
+                .push(indices.indices().to_vec());
+        }
         let scenario = self
             .text_turns
             .lock()
@@ -429,8 +443,14 @@ impl TurnAdapter for MockLlmAdapter {
     async fn structured_turn(
         &self,
         _input: ModelInput,
-        _turn: AdapterStructuredTurn,
+        turn: AdapterStructuredTurn,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
+        if let Some(indices) = turn.extensions.get::<EphemeralInputIndices>() {
+            self.observed_ephemeral_indices
+                .lock()
+                .unwrap()
+                .push(indices.indices().to_vec());
+        }
         let scenario = self
             .structured_turns
             .lock()

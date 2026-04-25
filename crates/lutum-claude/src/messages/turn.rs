@@ -34,7 +34,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///             "input_tokens": 25,
 ///             "output_tokens": 15,
 ///             "total_tokens": 40,
-///             "cost_micros_usd": 0
+///             "cost_micros_usd": 0,
+///             "cache_creation_tokens": 0,
+///             "cache_read_tokens": 0
 ///         },
 ///         "cache_creation_input_tokens": 0,
 ///         "cache_read_input_tokens": 0
@@ -59,6 +61,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///         output_tokens: 15,
 ///         total_tokens: 40,
 ///         cost_micros_usd: 0,
+///         cache_creation_tokens: 0,
+///         cache_read_tokens: 0,
 ///     },
 ///     cache_creation_input_tokens: 0,
 ///     cache_read_input_tokens: 0,
