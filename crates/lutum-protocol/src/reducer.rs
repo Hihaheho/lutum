@@ -17,6 +17,28 @@ use crate::{
     transcript::CommittedTurn,
 };
 
+#[derive(Debug, Error, Clone, Eq, PartialEq)]
+#[error(
+    "model reached the output token limit before completing the turn (model={model}, request_id={request_id:?}, usage={usage:?}, event_count={event_count})"
+)]
+pub struct OutputLimitExceeded {
+    pub model: String,
+    pub request_id: Option<String>,
+    pub usage: Usage,
+    pub event_count: u32,
+}
+
+impl OutputLimitExceeded {
+    fn new(model: String, request_id: Option<String>, usage: Usage, event_count: u32) -> Self {
+        Self {
+            model,
+            request_id,
+            usage,
+            event_count,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TextTurnState {
     pub request_id: Option<String>,
@@ -119,6 +141,11 @@ impl TextTurnState {
             .finish_reason
             .ok_or(TextTurnReductionError::Incomplete)?;
         let usage = self.usage.ok_or(TextTurnReductionError::Incomplete)?;
+        if finish_reason == FinishReason::Length {
+            return Err(TextTurnReductionError::OutputLimitExceeded(
+                OutputLimitExceeded::new(self.model, self.request_id, usage, self.event_count),
+            ));
+        }
         let committed_turn = self
             .committed_turn
             .ok_or(TextTurnReductionError::Incomplete)?;
@@ -328,6 +355,11 @@ where
             .finish_reason
             .ok_or(TextTurnReductionError::Incomplete)?;
         let usage = self.usage.ok_or(TextTurnReductionError::Incomplete)?;
+        if finish_reason == FinishReason::Length {
+            return Err(TextTurnReductionError::OutputLimitExceeded(
+                OutputLimitExceeded::new(self.model, self.request_id, usage, self.event_count),
+            ));
+        }
         let committed_turn = self
             .committed_turn
             .ok_or(TextTurnReductionError::Incomplete)?;
@@ -543,6 +575,11 @@ where
             .finish_reason
             .ok_or(StructuredTurnReductionError::Incomplete)?;
         let usage = self.usage.ok_or(StructuredTurnReductionError::Incomplete)?;
+        if finish_reason == FinishReason::Length {
+            return Err(StructuredTurnReductionError::OutputLimitExceeded(
+                OutputLimitExceeded::new(self.model, self.request_id, usage, self.event_count),
+            ));
+        }
         let committed_turn = self
             .committed_turn
             .ok_or(StructuredTurnReductionError::Incomplete)?;
@@ -743,6 +780,11 @@ where
             .finish_reason
             .ok_or(StructuredTurnReductionError::Incomplete)?;
         let usage = self.usage.ok_or(StructuredTurnReductionError::Incomplete)?;
+        if finish_reason == FinishReason::Length {
+            return Err(StructuredTurnReductionError::OutputLimitExceeded(
+                OutputLimitExceeded::new(self.model, self.request_id, usage, self.event_count),
+            ));
+        }
         let committed_turn = self
             .committed_turn
             .ok_or(StructuredTurnReductionError::Incomplete)?;
@@ -841,6 +883,7 @@ pub struct CompletionTurnState {
     pub text: String,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
+    pub event_count: u32,
 }
 
 impl CompletionTurnState {
@@ -851,6 +894,7 @@ impl CompletionTurnState {
         if self.finish_reason.is_some() {
             return Err(CompletionReductionError::AlreadyCompleted);
         }
+        self.event_count += 1;
 
         match event {
             CompletionEvent::Started { request_id, model } => {
@@ -880,13 +924,19 @@ impl CompletionTurnState {
     /// Finalize the accumulated state into a completed turn result.
     pub fn finish(self) -> Result<CompletionTurnResult, CompletionReductionError> {
         let usage = self.usage.ok_or(CompletionReductionError::Incomplete)?;
+        let finish_reason = self
+            .finish_reason
+            .ok_or(CompletionReductionError::Incomplete)?;
+        if finish_reason == FinishReason::Length {
+            return Err(CompletionReductionError::OutputLimitExceeded(
+                OutputLimitExceeded::new(self.model, self.request_id, usage, self.event_count),
+            ));
+        }
         Ok(CompletionTurnResult {
             request_id: self.request_id,
             model: self.model,
             text: self.text,
-            finish_reason: self
-                .finish_reason
-                .ok_or(CompletionReductionError::Incomplete)?,
+            finish_reason,
             usage,
             cumulative_usage: usage,
         })
@@ -915,6 +965,7 @@ pub struct StructuredCompletionState<O: StructuredOutput> {
     pub refusal: Option<String>,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
+    pub event_count: u32,
 }
 
 impl<O> Default for StructuredCompletionState<O>
@@ -929,6 +980,7 @@ where
             refusal: None,
             finish_reason: None,
             usage: None,
+            event_count: 0,
         }
     }
 }
@@ -948,6 +1000,7 @@ where
         if self.finish_reason.is_some() {
             return Err(StructuredCompletionReductionError::AlreadyCompleted);
         }
+        self.event_count += 1;
 
         match event {
             StructuredCompletionEvent::Started { request_id, model } => {
@@ -989,6 +1042,14 @@ where
         let usage = self
             .usage
             .ok_or(StructuredCompletionReductionError::Incomplete)?;
+        let finish_reason = self
+            .finish_reason
+            .ok_or(StructuredCompletionReductionError::Incomplete)?;
+        if finish_reason == FinishReason::Length {
+            return Err(StructuredCompletionReductionError::OutputLimitExceeded(
+                OutputLimitExceeded::new(self.model, self.request_id, usage, self.event_count),
+            ));
+        }
         let semantic = match (self.structured, self.refusal) {
             (Some(value), None) => StructuredTurnOutcome::Structured(value),
             (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
@@ -1002,9 +1063,7 @@ where
             request_id: self.request_id,
             model: self.model,
             semantic,
-            finish_reason: self
-                .finish_reason
-                .ok_or(StructuredCompletionReductionError::Incomplete)?,
+            finish_reason,
             usage,
             cumulative_usage: usage,
         })
@@ -1025,6 +1084,8 @@ pub struct StructuredCompletionResult<O: StructuredOutput> {
 pub enum TextTurnReductionError {
     #[error("turn already completed")]
     AlreadyCompleted,
+    #[error(transparent)]
+    OutputLimitExceeded(OutputLimitExceeded),
     #[error(
         "completed turn produced no assistant items (model={model}, request_id={request_id:?}, finish_reason={finish_reason:?}, event_count={event_count})"
     )]
@@ -1042,6 +1103,8 @@ pub enum TextTurnReductionError {
 pub enum StructuredTurnReductionError {
     #[error("turn already completed")]
     AlreadyCompleted,
+    #[error(transparent)]
+    OutputLimitExceeded(OutputLimitExceeded),
     #[error("structured output appeared more than once")]
     DuplicateStructuredOutput,
     #[error(
@@ -1065,6 +1128,8 @@ pub enum StructuredTurnReductionError {
 pub enum CompletionReductionError {
     #[error("turn already completed")]
     AlreadyCompleted,
+    #[error(transparent)]
+    OutputLimitExceeded(OutputLimitExceeded),
     #[error("turn has not completed yet")]
     Incomplete,
 }
@@ -1073,6 +1138,8 @@ pub enum CompletionReductionError {
 pub enum StructuredCompletionReductionError {
     #[error("turn already completed")]
     AlreadyCompleted,
+    #[error(transparent)]
+    OutputLimitExceeded(OutputLimitExceeded),
     #[error("structured output appeared more than once")]
     DuplicateStructuredOutput,
     #[error("turn has not completed yet")]

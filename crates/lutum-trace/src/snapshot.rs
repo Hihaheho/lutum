@@ -82,10 +82,7 @@ impl TraceSnapshot {
         all.into_iter()
     }
 
-    pub fn events_matching(
-        &self,
-        pred: impl Fn(&EventRecord) -> bool,
-    ) -> Vec<&EventRecord> {
+    pub fn events_matching(&self, pred: impl Fn(&EventRecord) -> bool) -> Vec<&EventRecord> {
         self.all_events().filter(|e| pred(e)).collect()
     }
 
@@ -181,10 +178,7 @@ impl SpanNode {
         all.into_iter()
     }
 
-    pub fn events_matching(
-        &self,
-        pred: impl Fn(&EventRecord) -> bool,
-    ) -> Vec<&EventRecord> {
+    pub fn events_matching(&self, pred: impl Fn(&EventRecord) -> bool) -> Vec<&EventRecord> {
         self.all_events().filter(|e| pred(e)).collect()
     }
 

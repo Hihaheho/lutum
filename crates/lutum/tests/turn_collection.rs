@@ -465,6 +465,116 @@ fn into_stream_releases_reserved_budget_without_collect() {
 }
 
 #[test]
+fn text_turn_length_finish_reason_surfaces_as_reduction_error() {
+    let budget = test_budget();
+    let usage = Usage {
+        input_tokens: 14,
+        output_tokens: 16,
+        total_tokens: 30,
+        ..Usage::zero()
+    };
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::mock::RawTextTurnEvent::Started {
+            request_id: Some("req-length".into()),
+            model: "qwen3.5:9b".into(),
+        }),
+        Ok(lutum::mock::RawTextTurnEvent::ReasoningDelta {
+            delta: "thinking".into(),
+        }),
+        Ok(lutum::mock::RawTextTurnEvent::Completed {
+            request_id: Some("req-length".into()),
+            finish_reason: FinishReason::Length,
+            usage,
+        }),
+    ]));
+    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
+    let pending = block_on(
+        ctx.text_turn(input())
+            .ext(UsageEstimate {
+                total_tokens: 40,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    )
+    .unwrap();
+
+    let err = block_on(pending.collect()).unwrap_err();
+
+    match err {
+        CollectError::Reduction {
+            source: lutum::TextTurnReductionError::OutputLimitExceeded(limit),
+            partial,
+        } => {
+            assert_eq!(limit.model, "qwen3.5:9b");
+            assert_eq!(limit.request_id.as_deref(), Some("req-length"));
+            assert_eq!(limit.usage, usage);
+            assert_eq!(partial.finish_reason, Some(FinishReason::Length));
+            assert!(matches!(
+                partial.assistant_turn.as_slice(),
+                [AssistantTurnItem::Reasoning(text)] if text == "thinking"
+            ));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 70);
+}
+
+#[test]
+fn structured_turn_length_takes_precedence_over_missing_semantic() {
+    let budget = test_budget();
+    let usage = Usage {
+        input_tokens: 20,
+        output_tokens: 64,
+        total_tokens: 84,
+        ..Usage::zero()
+    };
+    let adapter =
+        MockLlmAdapter::new().with_structured_scenario(MockStructuredScenario::events(vec![
+            Ok(lutum::mock::RawStructuredTurnEvent::Started {
+                request_id: Some("req-structured-length".into()),
+                model: "qwen3.5:9b".into(),
+            }),
+            Ok(lutum::mock::RawStructuredTurnEvent::ReasoningDelta {
+                delta: "thinking only".into(),
+            }),
+            Ok(lutum::mock::RawStructuredTurnEvent::Completed {
+                request_id: Some("req-structured-length".into()),
+                finish_reason: FinishReason::Length,
+                usage,
+            }),
+        ]));
+    let ctx = Lutum::new(Arc::new(adapter), budget.clone());
+    let pending = block_on(
+        ctx.structured_turn::<Summary>(input())
+            .ext(UsageEstimate {
+                total_tokens: 90,
+                ..UsageEstimate::zero()
+            })
+            .start(),
+    )
+    .unwrap();
+
+    let err = block_on(pending.collect()).unwrap_err();
+
+    match err {
+        CollectError::Reduction {
+            source: lutum::StructuredTurnReductionError::OutputLimitExceeded(limit),
+            partial,
+        } => {
+            assert_eq!(limit.model, "qwen3.5:9b");
+            assert_eq!(limit.request_id.as_deref(), Some("req-structured-length"));
+            assert_eq!(limit.usage, usage);
+            assert_eq!(partial.finish_reason, Some(FinishReason::Length));
+            assert!(partial.structured.is_none());
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 16);
+}
+
+#[test]
 fn adapter_error_uses_recovered_usage_when_available() {
     let budget = test_budget();
     let adapter = MockLlmAdapter::new()

@@ -200,11 +200,7 @@ fn validate_k(n: u64, k: u64) -> Result<(), KMetricRangeError> {
 ///
 /// `f(trial_index)` produces the future for each trial. Results are returned
 /// in completion order (not submission order).
-pub async fn run_parallel<T, E, F, Fut>(
-    n: usize,
-    concurrency: usize,
-    f: F,
-) -> Vec<Result<T, E>>
+pub async fn run_parallel<T, E, F, Fut>(n: usize, concurrency: usize, f: F) -> Vec<Result<T, E>>
 where
     T: Send + 'static,
     E: Send + 'static,
@@ -218,11 +214,7 @@ where
 }
 
 /// Runs `n` trials and returns a [`TrialSet`] in completion order.
-pub async fn run_trials<T, E, F, Fut>(
-    n: usize,
-    concurrency: usize,
-    f: F,
-) -> TrialSet<T, E>
+pub async fn run_trials<T, E, F, Fut>(n: usize, concurrency: usize, f: F) -> TrialSet<T, E>
 where
     T: Send + 'static,
     E: Send + 'static,

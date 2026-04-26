@@ -10,7 +10,7 @@ use tokio::{
 
 use lutum_trace::{CollectedRaw, RawTraceSnapshot, TraceEvent, TraceSnapshot};
 
-use crate::{Collected, EvalRecord, Eval, Objective, RawEvalRecord, Scored};
+use crate::{Collected, Eval, EvalRecord, Objective, RawEvalRecord, Scored};
 
 /// A mutable, live-only evaluator over a stream of trace events plus a final
 /// trace/artifact pair.
@@ -155,11 +155,10 @@ where
     {
         let dispatcher = self.dispatcher.clone();
         let event_ctx = ctx.clone();
-        let Collected { output, trace } =
-            lutum_trace::capture_with_events(future, move |event| {
-                let _ = dispatcher.send_trace(event_ctx.clone(), event);
-            })
-            .await;
+        let Collected { output, trace } = lutum_trace::capture_with_events(future, move |event| {
+            let _ = dispatcher.send_trace(event_ctx.clone(), event);
+        })
+        .await;
         let trace_clone = trace.clone();
         let result = self.run_parts(ctx, trace, output).await;
         (result, trace_clone)
@@ -275,12 +274,14 @@ where
         F: Future<Output = P::Artifact>,
     {
         let (probe_result, trace) = self.runtime.run_future_with_trace(ctx, future).await;
-        let result = probe_result.map_err(ProbeScoreError::Probe).and_then(|report| {
-            self.objective
-                .score(&report)
-                .map_err(ProbeScoreError::Objective)
-                .map(|score| Scored { report, score })
-        });
+        let result = probe_result
+            .map_err(ProbeScoreError::Probe)
+            .and_then(|report| {
+                self.objective
+                    .score(&report)
+                    .map_err(ProbeScoreError::Objective)
+                    .map(|score| Scored { report, score })
+            });
         EvalRecord { result, trace }
     }
 
@@ -292,14 +293,15 @@ where
     where
         F: Future<Output = P::Artifact>,
     {
-        let (probe_result, trace, raw) =
-            self.runtime.run_future_with_raw_trace(ctx, future).await;
-        let result = probe_result.map_err(ProbeScoreError::Probe).and_then(|report| {
-            self.objective
-                .score(&report)
-                .map_err(ProbeScoreError::Objective)
-                .map(|score| Scored { report, score })
-        });
+        let (probe_result, trace, raw) = self.runtime.run_future_with_raw_trace(ctx, future).await;
+        let result = probe_result
+            .map_err(ProbeScoreError::Probe)
+            .and_then(|report| {
+                self.objective
+                    .score(&report)
+                    .map_err(ProbeScoreError::Objective)
+                    .map(|score| Scored { report, score })
+            });
         RawEvalRecord { result, trace, raw }
     }
 }

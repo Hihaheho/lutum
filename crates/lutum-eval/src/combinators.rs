@@ -228,7 +228,10 @@ where
     pub async fn run_future_raw<F>(
         &self,
         future: F,
-    ) -> (ScoredResult<E::Report, E::Error, O::Error>, RawTraceSnapshot)
+    ) -> (
+        ScoredResult<E::Report, E::Error, O::Error>,
+        RawTraceSnapshot,
+    )
     where
         F: Future<Output = E::Artifact>,
     {
@@ -318,7 +321,10 @@ where
         &self,
         ctx: &lutum::Lutum,
         future: F,
-    ) -> (ScoredResult<E::Report, E::Error, O::Error>, RawTraceSnapshot)
+    ) -> (
+        ScoredResult<E::Report, E::Error, O::Error>,
+        RawTraceSnapshot,
+    )
     where
         E::Artifact: Sync,
         F: Future<Output = E::Artifact>,

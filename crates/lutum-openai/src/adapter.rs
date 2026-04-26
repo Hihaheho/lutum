@@ -52,7 +52,8 @@ use crate::{
         InputMessage, InputTextContent, MessageRole, OpenAiCommittedTurn, OpenAiReasoningEffort,
         OpenAiTool, OpenAiTurnItem, OutputTextContent, ReasoningItem, RefusalContent,
         ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
-        ResponseOutputItem, SseEvent, SummaryText, TextFormat, ToolChoice,
+        ResponseObject, ResponseOutputContent, ResponseOutputItem, SseEvent, SummaryText,
+        TextFormat, ToolChoice,
     },
     sse::SseParser,
 };
@@ -1946,22 +1947,14 @@ where
                     SseEvent::ResponseCompleted(event) => {
                         request_id = Some(event.response.id.clone());
                         flush_buffered_content(&mut pending_item, &mut committed_items);
-                        let finish_reason = event
-                            .response
-                            .stop_reason
-                            .as_deref()
-                            .or(event.response.finish_reason.as_deref())
-                            .map(map_responses_finish_reason)
-                            .unwrap_or_else(|| {
-                                if saw_tool_call {
-                                    FinishReason::ToolCall
-                                } else if saw_refusal {
-                                    FinishReason::ContentFilter
-                                } else {
-                                    FinishReason::Stop
-                                }
-                            });
                         let usage = parse_response_usage_value(&event.response.usage);
+                        let finish_reason = response_object_finish_reason(
+                            &event.response,
+                            usage,
+                            saw_tool_call,
+                            saw_refusal,
+                            openai_turn_items_lack_terminal_semantic(&committed_items),
+                        );
                         yield ErasedTextTurnEvent::Completed {
                             request_id: request_id.clone(),
                             finish_reason: finish_reason.clone(),
@@ -2229,42 +2222,36 @@ where
                     }
                     SseEvent::ResponseCompleted(event) => {
                         request_id = Some(event.response.id.clone());
-                        let value = match maybe_parse_structured_output(
-                            &structured_buffer,
-                            &mut emitted_ready,
-                        ) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                emit_openai_parse_error(
-                                    raw.as_ref(),
-                                    request_id.as_deref(),
-                                    ParseErrorStage::StructuredOutputParse,
-                                    &structured_buffer,
-                                    &err,
-                                );
-                                Err(err)?
+                        let usage = parse_response_usage_value(&event.response.usage);
+                        let finish_reason = response_object_finish_reason(
+                            &event.response,
+                            usage,
+                            saw_tool_call,
+                            saw_refusal,
+                            structured_buffer.is_empty() && !saw_tool_call && !saw_refusal,
+                        );
+                        if finish_reason != FinishReason::Length {
+                            let value = match maybe_parse_structured_output(
+                                &structured_buffer,
+                                &mut emitted_ready,
+                            ) {
+                                Ok(value) => value,
+                                Err(err) => {
+                                    emit_openai_parse_error(
+                                        raw.as_ref(),
+                                        request_id.as_deref(),
+                                        ParseErrorStage::StructuredOutputParse,
+                                        &structured_buffer,
+                                        &err,
+                                    );
+                                    Err(err)?
+                                }
+                            };
+                            if let Some(value) = value {
+                                yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
                             }
-                        };
-                        if let Some(value) = value {
-                            yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
                         }
                         flush_buffered_content(&mut pending_item, &mut committed_items);
-                        let finish_reason = event
-                            .response
-                            .stop_reason
-                            .as_deref()
-                            .or(event.response.finish_reason.as_deref())
-                            .map(map_responses_finish_reason)
-                            .unwrap_or_else(|| {
-                                if saw_tool_call {
-                                    FinishReason::ToolCall
-                                } else if saw_refusal {
-                                    FinishReason::ContentFilter
-                                } else {
-                                    FinishReason::Stop
-                                }
-                            });
-                        let usage = parse_response_usage_value(&event.response.usage);
                         yield ErasedStructuredTurnEvent::Completed {
                             request_id: request_id.clone(),
                             finish_reason: finish_reason.clone(),
@@ -2436,10 +2423,94 @@ fn parse_response_usage_value(usage: &Value) -> Usage {
 fn map_responses_finish_reason(reason: &str) -> FinishReason {
     match reason {
         "end_turn" | "stop_sequence" => FinishReason::Stop,
-        "max_tokens" => FinishReason::Length,
+        "length" | "max_tokens" | "max_output_tokens" => FinishReason::Length,
         "tool_use" => FinishReason::ToolCall,
         other => FinishReason::Unknown(other.to_string()),
     }
+}
+
+fn response_object_finish_reason(
+    response: &ResponseObject,
+    usage: Usage,
+    saw_tool_call: bool,
+    saw_refusal: bool,
+    stream_lacks_terminal_semantic: bool,
+) -> FinishReason {
+    if let Some(reason) = response
+        .stop_reason
+        .as_deref()
+        .or(response.finish_reason.as_deref())
+    {
+        return map_responses_finish_reason(reason);
+    }
+
+    if let Some(reason) = response_incomplete_reason(response) {
+        return map_responses_finish_reason(reason);
+    }
+
+    if response.extra.get("status").and_then(Value::as_str) == Some("incomplete") {
+        return FinishReason::Length;
+    }
+
+    if stream_lacks_terminal_semantic && response_likely_exhausted_output_limit(response, usage) {
+        return FinishReason::Length;
+    }
+
+    if saw_tool_call {
+        FinishReason::ToolCall
+    } else if saw_refusal {
+        FinishReason::ContentFilter
+    } else {
+        FinishReason::Stop
+    }
+}
+
+fn openai_turn_items_lack_terminal_semantic(items: &[OpenAiTurnItem]) -> bool {
+    !items.iter().any(|item| match item {
+        OpenAiTurnItem::Text { content } => !content.is_empty(),
+        OpenAiTurnItem::Refusal { content } => !content.is_empty(),
+        OpenAiTurnItem::ToolCall { .. } => true,
+        OpenAiTurnItem::Reasoning { .. } => false,
+    })
+}
+
+fn response_incomplete_reason(response: &ResponseObject) -> Option<&str> {
+    let details = response.extra.get("incomplete_details")?;
+    if details.is_null() {
+        return None;
+    }
+    details
+        .get("reason")
+        .and_then(Value::as_str)
+        .or_else(|| details.as_str())
+}
+
+fn response_likely_exhausted_output_limit(response: &ResponseObject, usage: Usage) -> bool {
+    let Some(max_output_tokens) = response
+        .extra
+        .get("max_output_tokens")
+        .and_then(Value::as_u64)
+    else {
+        return false;
+    };
+    max_output_tokens > 0
+        && usage.output_tokens >= max_output_tokens
+        && response_lacks_terminal_semantic(response)
+}
+
+fn response_lacks_terminal_semantic(response: &ResponseObject) -> bool {
+    !response.output.iter().any(|item| match item {
+        ResponseOutputItem::Message(message) => {
+            message.content.iter().any(|content| match content {
+                ResponseOutputContent::OutputText { text, .. } => !text.is_empty(),
+                ResponseOutputContent::Refusal { refusal } => !refusal.is_empty(),
+            })
+        }
+        ResponseOutputItem::FunctionCall { .. } => true,
+        ResponseOutputItem::FunctionCallOutput { .. } | ResponseOutputItem::Reasoning { .. } => {
+            false
+        }
+    })
 }
 
 fn parse_completion_usage(value: &CompletionUsage) -> Usage {
@@ -2456,6 +2527,16 @@ fn map_completion_finish_reason(reason: &str) -> FinishReason {
     match reason {
         "stop" => FinishReason::Stop,
         "length" => FinishReason::Length,
+        "content_filter" => FinishReason::ContentFilter,
+        other => FinishReason::Unknown(other.to_string()),
+    }
+}
+
+fn map_chat_finish_reason(reason: &str) -> FinishReason {
+    match reason {
+        "stop" => FinishReason::Stop,
+        "length" => FinishReason::Length,
+        "tool_calls" | "function_call" => FinishReason::ToolCall,
         "content_filter" => FinishReason::ContentFilter,
         other => FinishReason::Unknown(other.to_string()),
     }
@@ -2938,6 +3019,7 @@ where
         let mut saw_tool_call = false;
         let mut saw_refusal = false;
         let mut tool_calls = ToolCallTracker::default();
+        let mut stream_finish_reason = None::<FinishReason>;
         let mut last_usage = Usage::zero();
         let mut raw_sequence = 0_u64;
         futures::pin_mut!(stream);
@@ -2987,6 +3069,9 @@ where
                     last_usage = parse_chat_usage(usage);
                 }
                 for choice in &event.choices {
+                    if let Some(reason) = choice.finish_reason.as_deref() {
+                        stream_finish_reason = Some(map_chat_finish_reason(reason));
+                    }
                     let delta = &choice.delta;
                     if let Some(content) = &delta.content
                         && !content.is_empty() {
@@ -3071,13 +3156,13 @@ where
             });
         }
 
-        let finish_reason = if saw_tool_call {
+        let finish_reason = stream_finish_reason.unwrap_or_else(|| if saw_tool_call {
             FinishReason::ToolCall
         } else if saw_refusal {
             FinishReason::ContentFilter
         } else {
             FinishReason::Stop
-        };
+        });
 
         if started {
             let committed_turn = Arc::new(OpenAiCommittedTurn {
@@ -3121,6 +3206,7 @@ where
         let mut json_buffer = String::new();
         let mut last_usage = Usage::zero();
         let mut saw_refusal = false;
+        let mut stream_finish_reason = None::<FinishReason>;
         let mut raw_sequence = 0_u64;
         futures::pin_mut!(stream);
 
@@ -3169,6 +3255,9 @@ where
                     last_usage = parse_chat_usage(usage);
                 }
                 for choice in &event.choices {
+                    if let Some(reason) = choice.finish_reason.as_deref() {
+                        stream_finish_reason = Some(map_chat_finish_reason(reason));
+                    }
                     let delta = &choice.delta;
                     if let Some(content) = &delta.content
                         && !content.is_empty() {
@@ -3196,13 +3285,13 @@ where
         }
 
         if started {
-            let finish_reason = if saw_refusal {
+            let finish_reason = stream_finish_reason.unwrap_or_else(|| if saw_refusal {
                 FinishReason::ContentFilter
             } else {
                 FinishReason::Stop
-            };
+            });
 
-            if !json_buffer.is_empty() {
+            if finish_reason != FinishReason::Length && !json_buffer.is_empty() {
                 let raw_json = match RawJson::parse(json_buffer.clone()) {
                     Ok(raw_json) => raw_json,
                     Err(err) => {
@@ -3416,6 +3505,76 @@ mod tests {
         match events.last() {
             Some(ErasedTextTurnEvent::Completed { usage, .. }) => {
                 assert_eq!(*usage, Usage::zero());
+            }
+            other => panic!("expected completed event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_sse_preserves_length_finish_reason() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-length\",\"model\":\"qwen3.5:9b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":14,\"completion_tokens\":16,\"total_tokens\":30}}\n\n",
+            )),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+
+        let events = block_on(async {
+            map_chat_text_stream(futures::stream::iter(payloads), "qwen3.5:9b".into(), None)
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        match events.last() {
+            Some(ErasedTextTurnEvent::Completed {
+                finish_reason,
+                usage,
+                ..
+            }) => {
+                assert_eq!(*finish_reason, FinishReason::Length);
+                assert_eq!(usage.total_tokens, 30);
+            }
+            other => panic!("expected completed event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_structured_sse_length_does_not_parse_partial_json() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-structured-length\",\"model\":\"qwen3.5:9b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"{\\\"answer\\\":\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-structured-length\",\"model\":\"qwen3.5:9b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":64,\"total_tokens\":84}}\n\n",
+            )),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+
+        let events = block_on(async {
+            map_chat_structured_stream(futures::stream::iter(payloads), "qwen3.5:9b".into(), None)
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ErasedStructuredTurnEvent::StructuredOutputReady(_)))
+        );
+        match events.last() {
+            Some(ErasedStructuredTurnEvent::Completed {
+                finish_reason,
+                usage,
+                ..
+            }) => {
+                assert_eq!(*finish_reason, FinishReason::Length);
+                assert_eq!(usage.total_tokens, 84);
             }
             other => panic!("expected completed event, got {other:?}"),
         }
@@ -3899,6 +4058,47 @@ mod tests {
             committed_turn.items.as_slice(),
             [OpenAiTurnItem::Reasoning { content }] if content == "thinking"
         ));
+    }
+
+    #[test]
+    fn responses_sse_infers_length_for_reasoning_only_output_at_limit() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_length\",\"model\":\"qwen/qwen3.5-9b\",\"output\":[],\"usage\":null}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Thinking\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_length\",\"model\":\"qwen/qwen3.5-9b\",\"status\":\"completed\",\"output\":[{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"completed\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"Thinking\"}],\"summary\":[]}],\"max_output_tokens\":16,\"usage\":{\"input_tokens\":14,\"output_tokens\":16,\"output_tokens_details\":{\"reasoning_tokens\":16},\"total_tokens\":30}}}\n\n",
+            )),
+        ];
+
+        let events = block_on(async {
+            map_text_stream(
+                futures::stream::iter(payloads),
+                "qwen/qwen3.5-9b".into(),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        match events.last() {
+            Some(ErasedTextTurnEvent::Completed {
+                finish_reason,
+                usage,
+                ..
+            }) => {
+                assert_eq!(*finish_reason, FinishReason::Length);
+                assert_eq!(usage.output_tokens, 16);
+            }
+            other => panic!("expected completed event, got {other:?}"),
+        }
     }
 
     #[test]
