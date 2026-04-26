@@ -68,6 +68,12 @@ pub enum OpenAiTurnItem {
     },
     Reasoning {
         content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
     },
     Refusal {
         content: String,
@@ -107,7 +113,7 @@ impl ItemView for OpenAiTurnItem {
 
     fn as_reasoning(&self) -> Option<&str> {
         match self {
-            Self::Reasoning { content } => Some(content),
+            Self::Reasoning { content, .. } if !content.is_empty() => Some(content),
             _ => None,
         }
     }

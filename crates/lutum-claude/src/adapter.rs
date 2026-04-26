@@ -228,6 +228,9 @@ enum ContentBlockState {
         content: String,
         signature: String,
     },
+    RedactedThinking {
+        data: String,
+    },
     ToolUse {
         id: ToolCallId,
         name: ToolName,
@@ -650,7 +653,10 @@ impl ContentBlockState {
                 Ok(Some(ToolMetadata::new(id.clone(), name.clone(), arguments)))
             }
             // Text and Thinking blocks are finalized via flush_blocks; nothing to yield here.
-            Self::Unsupported | Self::Text { .. } | Self::Thinking { .. } => Ok(None),
+            Self::Unsupported
+            | Self::Text { .. }
+            | Self::Thinking { .. }
+            | Self::RedactedThinking { .. } => Ok(None),
         }
     }
 }
@@ -881,7 +887,9 @@ fn mark_claude_cache_target(request: &mut MessagesRequest, target: ClaudeCacheTa
                 ClaudeContentBlock::ToolResult(block) => {
                     block.cache_control = Some(crate::messages::CacheControl::ephemeral());
                 }
-                ClaudeContentBlock::ToolUse(_) | ClaudeContentBlock::Thinking(_) => {}
+                ClaudeContentBlock::ToolUse(_)
+                | ClaudeContentBlock::Thinking(_)
+                | ClaudeContentBlock::RedactedThinking { .. } => {}
             }
         }
     }
@@ -1024,6 +1032,13 @@ fn emit_claude_turn_exact(
                         thinking: content.clone(),
                         signature: signature.clone(),
                     }),
+                    Some(source_index),
+                );
+            }
+            ClaudeTurnItem::RedactedThinking { data } => {
+                compiled.push_block(
+                    ClaudeRole::Assistant,
+                    ClaudeContentBlock::RedactedThinking { data: data.clone() },
                     Some(source_index),
                 );
             }
@@ -1650,6 +1665,9 @@ fn finalize_committed_items(
                     }
                 }
             }
+            ContentBlockState::RedactedThinking { data } => {
+                items.push(ClaudeTurnItem::RedactedThinking { data: data.clone() });
+            }
             ContentBlockState::ToolUse { .. } => {
                 if let Some(metadata) = block.finalize_tool_call()? {
                     items.push(ClaudeTurnItem::ToolCall {
@@ -1739,9 +1757,8 @@ fn start_block_state(content_block: SseContentBlock) -> ContentBlockState {
             delta_json: String::new(),
             finalized_arguments: None,
         },
-        SseContentBlock::RedactedThinking { .. } | SseContentBlock::Unsupported => {
-            ContentBlockState::Unsupported
-        }
+        SseContentBlock::RedactedThinking { data } => ContentBlockState::RedactedThinking { data },
+        SseContentBlock::Unsupported => ContentBlockState::Unsupported,
     }
 }
 
@@ -1886,6 +1903,67 @@ mod tests {
         assert!(matches!(
             &events[0],
             ErasedTextTurnEvent::Started { model, .. } if model == "claude-sonnet-override"
+        ));
+    }
+
+    #[test]
+    fn message_stream_commits_redacted_thinking_blocks_for_replay() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque-token\"}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            )),
+            Ok(Bytes::from(
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            )),
+            Ok(Bytes::from(
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":25,\"output_tokens\":15,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            )),
+        ];
+
+        let events = block_on(async {
+            map_text_stream(
+                futures::stream::iter(payloads),
+                "claude-sonnet".to_string(),
+                Arc::new(Mutex::new(HashMap::new())),
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        let committed_turn = match events.last() {
+            Some(ErasedTextTurnEvent::Completed { committed_turn, .. }) => committed_turn,
+            other => panic!("expected completed event, got {other:?}"),
+        };
+        let committed_turn = committed_turn
+            .as_any()
+            .downcast_ref::<ClaudeCommittedTurn>()
+            .expect("Claude committed turn");
+
+        assert!(matches!(
+            committed_turn.items.as_slice(),
+            [
+                ClaudeTurnItem::RedactedThinking { data },
+                ClaudeTurnItem::Text { content }
+            ] if data == "opaque-token" && content == "OK"
         ));
     }
 

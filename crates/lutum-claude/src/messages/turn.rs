@@ -128,6 +128,9 @@ pub enum ClaudeTurnItem {
         content: String,
         signature: String,
     },
+    RedactedThinking {
+        data: String,
+    },
     Reasoning {
         content: String,
     },
@@ -160,6 +163,9 @@ impl<'de> Deserialize<'de> for ClaudeTurnItem {
             ClaudeTurnItemReprOwned::Text { content } => Ok(Self::Text { content }),
             ClaudeTurnItemReprOwned::Thinking { content, signature } => {
                 Ok(Self::Thinking { content, signature })
+            }
+            ClaudeTurnItemReprOwned::RedactedThinking { data } => {
+                Ok(Self::RedactedThinking { data })
             }
             ClaudeTurnItemReprOwned::Reasoning { content } => Ok(Self::Reasoning { content }),
             ClaudeTurnItemReprOwned::Refusal { content } => Ok(Self::Refusal { content }),
@@ -248,6 +254,9 @@ enum ClaudeTurnItemRepr<'a> {
         content: &'a str,
         signature: &'a str,
     },
+    RedactedThinking {
+        data: &'a str,
+    },
     Reasoning {
         content: &'a str,
     },
@@ -268,6 +277,7 @@ impl<'a> From<&'a ClaudeTurnItem> for ClaudeTurnItemRepr<'a> {
             ClaudeTurnItem::Thinking { content, signature } => {
                 Self::Thinking { content, signature }
             }
+            ClaudeTurnItem::RedactedThinking { data } => Self::RedactedThinking { data },
             ClaudeTurnItem::Reasoning { content } => Self::Reasoning { content },
             ClaudeTurnItem::Refusal { content } => Self::Refusal { content },
             ClaudeTurnItem::ToolCall {
@@ -292,6 +302,9 @@ enum ClaudeTurnItemReprOwned {
     Thinking {
         content: String,
         signature: String,
+    },
+    RedactedThinking {
+        data: String,
     },
     Reasoning {
         content: String,

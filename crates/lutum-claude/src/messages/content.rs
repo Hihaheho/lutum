@@ -81,6 +81,7 @@ pub enum ClaudeContentBlock {
     ToolUse(ToolUseBlock),
     ToolResult(ToolResultBlock),
     Thinking(ThinkingBlock),
+    RedactedThinking { data: String },
 }
 
 /// Text content block.

@@ -12,9 +12,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use lutum::{
-    Lutum, ModelName, RawTelemetryConfig, RequestExtensions, Session, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, StructuredTurnOutcome, TextStepOutcomeWithTools, Usage, UsageEstimate,
-    UsageRecoveryAdapter,
+    CompletionOptions, Lutum, ModelName, RawTelemetryConfig, RequestExtensions, Session,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredTurnOutcome,
+    TextStepOutcomeWithTools, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use lutum_claude::{ClaudeAdapter, MessagesRequest};
 use lutum_openai::{CompletionRequest, OpenAiAdapter, OpenAiReasoningEffort};
@@ -36,6 +36,8 @@ struct Args {
     strict: bool,
     #[arg(long)]
     save_raw: Option<PathBuf>,
+    #[arg(long)]
+    save_summary: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, eure::FromEure)]
@@ -245,6 +247,7 @@ async fn main() -> Result<()> {
         );
     }
     let raw_path = resolve_raw_dump_path(args.save_raw.as_deref())?;
+    let summary_path = resolve_summary_path(args.save_summary.as_deref(), &raw_path);
     prepare_raw_dump(&raw_path)
         .with_context(|| format!("failed to initialize raw dump {}", raw_path.display()))?;
 
@@ -253,6 +256,7 @@ async fn main() -> Result<()> {
         selected.len()
     );
     println!("raw dump: {}", raw_path.display());
+    println!("summary eure: {}", summary_path.display());
 
     let mut reports = Vec::new();
     for case in selected {
@@ -281,6 +285,17 @@ async fn main() -> Result<()> {
         usage.total_tokens,
         usage.cost_micros_usd as f64 / 1_000_000.0
     );
+
+    write_summary_eure(
+        &summary_path,
+        &args.config,
+        &raw_path,
+        &reports,
+        usage,
+        estimate,
+        cap,
+    )
+    .with_context(|| format!("failed to save summary eure {}", summary_path.display()))?;
 
     if failed > 0 {
         bail!("{failed} smoke case(s) failed");
@@ -438,7 +453,7 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
     let raw = collected.raw.entries;
     match output {
         Ok(case_usage) => {
-            usage = usage.saturating_add(case_usage);
+            usage = usage.saturating_add(enrich_usage(&case.endpoint, case_usage, &raw));
             if let Err(err) = verify_raw_expectations(&case, &raw) {
                 return CaseReport {
                     case_id: case.case_id,
@@ -459,6 +474,7 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
             }
         }
         Err(err) => {
+            usage = usage.saturating_add(enrich_usage(&case.endpoint, Usage::zero(), &raw));
             let endpoint_unavailable = raw.iter().any(|entry| {
                 matches!(
                     entry,
@@ -622,10 +638,166 @@ fn structured_max_output_tokens(endpoint: &EndpointConfig, defaults: &DefaultsCo
         .unwrap_or(defaults.structured_max_output_tokens)
 }
 
+fn enrich_usage(endpoint: &EndpointConfig, adapter_usage: Usage, raw: &[RawTraceEntry]) -> Usage {
+    let raw_usage = usage_from_raw(raw);
+    let mut usage = if adapter_usage.total_tokens == 0 && raw_usage.total_tokens > 0 {
+        raw_usage
+    } else {
+        adapter_usage
+    };
+
+    if usage.cache_creation_tokens == 0 {
+        usage.cache_creation_tokens = raw_usage.cache_creation_tokens;
+    }
+    if usage.cache_read_tokens == 0 {
+        usage.cache_read_tokens = raw_usage.cache_read_tokens;
+    }
+    if usage.cost_micros_usd == 0 {
+        usage.cost_micros_usd = if raw_usage.cost_micros_usd > 0 {
+            raw_usage.cost_micros_usd
+        } else {
+            price_usage_micros(endpoint, usage)
+        };
+    }
+    usage
+}
+
+fn usage_from_raw(raw: &[RawTraceEntry]) -> Usage {
+    raw.iter().fold(Usage::zero(), |usage, entry| {
+        let RawTraceEntry::StreamEvent {
+            event_name,
+            payload,
+            ..
+        } = entry
+        else {
+            return usage;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return usage;
+        };
+
+        let next = if event_name.as_deref() == Some("message_delta") {
+            value.get("usage").map(usage_from_token_value)
+        } else if value.get("object").and_then(|object| object.as_str())
+            == Some("chat.completion.chunk")
+        {
+            value.get("usage").map(usage_from_chat_value)
+        } else if value.get("type").and_then(|kind| kind.as_str()) == Some("response.completed") {
+            value
+                .get("response")
+                .and_then(|response| response.get("usage"))
+                .map(usage_from_token_value)
+        } else {
+            None
+        };
+
+        usage.saturating_add(next.unwrap_or_else(Usage::zero))
+    })
+}
+
+fn usage_from_token_value(value: &serde_json::Value) -> Usage {
+    if !value.is_object() {
+        return Usage::zero();
+    }
+    let cache_creation_tokens = value
+        .get("cache_creation_input_tokens")
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or_default();
+    let cache_read_tokens = value
+        .get("cache_read_input_tokens")
+        .or_else(|| {
+            value
+                .get("input_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+        })
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or_default();
+    let input_tokens = value
+        .get("input_tokens")
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or_default()
+        .saturating_add(cache_creation_tokens)
+        .saturating_add(cache_read_tokens);
+    let output_tokens = value
+        .get("output_tokens")
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or_default();
+    let total_tokens = value
+        .get("total_tokens")
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
+    Usage {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        cost_micros_usd: value
+            .get("cost")
+            .and_then(|cost| cost.as_f64())
+            .map(cost_to_micros_usd)
+            .unwrap_or_default(),
+        cache_creation_tokens,
+        cache_read_tokens,
+    }
+}
+
+fn usage_from_chat_value(value: &serde_json::Value) -> Usage {
+    if !value.is_object() {
+        return Usage::zero();
+    }
+    let details = value.get("prompt_tokens_details");
+    let cache_creation_tokens = details
+        .and_then(|details| details.get("cache_write_tokens"))
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or_default();
+    let cache_read_tokens = details
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or_default();
+    Usage {
+        input_tokens: value
+            .get("prompt_tokens")
+            .and_then(|tokens| tokens.as_u64())
+            .unwrap_or_default(),
+        output_tokens: value
+            .get("completion_tokens")
+            .and_then(|tokens| tokens.as_u64())
+            .unwrap_or_default(),
+        total_tokens: value
+            .get("total_tokens")
+            .and_then(|tokens| tokens.as_u64())
+            .unwrap_or_default(),
+        cost_micros_usd: value
+            .get("cost")
+            .and_then(|cost| cost.as_f64())
+            .map(cost_to_micros_usd)
+            .unwrap_or_default(),
+        cache_creation_tokens,
+        cache_read_tokens,
+    }
+}
+
+fn price_usage_micros(endpoint: &EndpointConfig, usage: Usage) -> u64 {
+    let cost = usage.input_tokens as f64 * endpoint.input_price_per_million / 1_000_000.0
+        + usage.output_tokens as f64 * endpoint.output_price_per_million / 1_000_000.0;
+    cost_to_micros_usd(cost)
+}
+
+fn cost_to_micros_usd(cost: f64) -> u64 {
+    if cost.is_finite() && cost > 0.0 {
+        (cost * 1_000_000.0).ceil() as u64
+    } else {
+        0
+    }
+}
+
 async fn run_completion(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Result<Usage> {
     let result = llm
         .completion("Return exactly OK.")
-        .max_output_tokens(text_max_output_tokens(&case.endpoint, defaults))
+        .completion_options(CompletionOptions {
+            max_output_tokens: Some(text_max_output_tokens(&case.endpoint, defaults)),
+            stop: vec![".".to_string(), "\n".to_string()],
+            ..CompletionOptions::default()
+        })
         .collect()
         .await?;
     ensure_ok(&result.text, "completion")?;
@@ -683,7 +855,7 @@ async fn run_tool(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Re
     session.push_user("Call echo_word with word OK, then answer exactly OK.");
     let mut usage = Usage::zero();
     let mut saw_tool = false;
-    for _ in 0..3 {
+    for _ in 0..4 {
         let mut turn = session
             .text_turn()
             .tools::<SmokeTools>()
@@ -785,8 +957,15 @@ fn verify_raw_expectations(case: &CaseSpec, raw: &[RawTraceEntry]) -> Result<()>
         if !raw_request_contains(raw, &["thinking", "budget_tokens"]) {
             bail!("Claude thinking_roundtrip request did not include thinking budget");
         }
-        if !raw_request_contains(raw, &["\"type\":\"thinking\""]) {
-            bail!("Claude thinking_roundtrip replay did not preserve thinking blocks");
+        if raw_stream_contains(raw, &["redacted_thinking"])
+            && !raw_request_contains(raw, &["\"type\":\"redacted_thinking\""])
+        {
+            bail!("Claude thinking_roundtrip replay did not preserve redacted thinking blocks");
+        }
+        if raw_stream_contains(raw, &["signature_delta"])
+            && !raw_request_contains(raw, &["\"type\":\"thinking\""])
+        {
+            bail!("Claude thinking_roundtrip replay did not preserve signed thinking blocks");
         }
     }
 
@@ -797,6 +976,7 @@ fn verify_raw_expectations(case: &CaseSpec, raw: &[RawTraceEntry]) -> Result<()>
             );
         }
         if case.kind == AdapterKind::OpenAiResponses
+            && raw_stream_contains(raw, &["\"type\":\"reasoning\""])
             && !raw_request_contains(raw, &["\"type\":\"reasoning\""])
         {
             bail!("responses replay request did not preserve reasoning items");
@@ -867,6 +1047,12 @@ fn resolve_raw_dump_path(override_path: Option<&Path>) -> Result<PathBuf> {
     }
 }
 
+fn resolve_summary_path(override_path: Option<&Path>, raw_path: &Path) -> PathBuf {
+    override_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| raw_path.with_extension("eure"))
+}
+
 fn current_unix_seconds() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -923,6 +1109,95 @@ fn write_raw(path: &Path, report: &CaseReport) -> Result<()> {
     serde_json::to_writer(&mut file, &line)?;
     file.write_all(b"\n")?;
     Ok(())
+}
+
+fn write_summary_eure(
+    path: &Path,
+    config_path: &Path,
+    raw_path: &Path,
+    reports: &[CaseReport],
+    usage: Usage,
+    estimate_usd: f64,
+    cap_usd: f64,
+) -> Result<()> {
+    let failed = reports
+        .iter()
+        .filter(|report| matches!(report.status, CaseStatus::Failed))
+        .count();
+    let skipped = reports
+        .iter()
+        .filter(|report| matches!(report.status, CaseStatus::Skipped))
+        .count();
+    let passed = reports.len().saturating_sub(skipped + failed);
+
+    let mut content = String::new();
+    content.push_str("@ summary\n");
+    push_eure_string(&mut content, "config", &config_path.display().to_string());
+    push_eure_string(&mut content, "raw_dump", &raw_path.display().to_string());
+    content.push_str(&format!("total_cases = {}\n", reports.len()));
+    content.push_str(&format!("passed = {passed}\n"));
+    content.push_str(&format!("skipped = {skipped}\n"));
+    content.push_str(&format!("failed = {failed}\n"));
+    content.push_str(&format!("usage_total_tokens = {}\n", usage.total_tokens));
+    content.push_str(&format!("usage_input_tokens = {}\n", usage.input_tokens));
+    content.push_str(&format!("usage_output_tokens = {}\n", usage.output_tokens));
+    content.push_str(&format!("cost_micros_usd = {}\n", usage.cost_micros_usd));
+    content.push_str(&format!(
+        "cost_usd = {:.6}\n",
+        usage.cost_micros_usd as f64 / 1_000_000.0
+    ));
+    content.push_str(&format!("estimated_worst_case_usd = {estimate_usd:.6}\n"));
+    content.push_str(&format!("cap_usd = {cap_usd:.6}\n\n"));
+
+    for (index, report) in reports.iter().enumerate() {
+        content.push_str(&format!("@ cases.case_{:03}\n", index + 1));
+        push_eure_string(&mut content, "id", &report.case_id);
+        push_eure_string(&mut content, "status", case_status_str(&report.status));
+        push_eure_string(&mut content, "message", &report.message);
+        content.push_str(&format!("total_tokens = {}\n", report.usage.total_tokens));
+        content.push_str(&format!("input_tokens = {}\n", report.usage.input_tokens));
+        content.push_str(&format!("output_tokens = {}\n", report.usage.output_tokens));
+        content.push_str(&format!(
+            "cache_creation_tokens = {}\n",
+            report.usage.cache_creation_tokens
+        ));
+        content.push_str(&format!(
+            "cache_read_tokens = {}\n",
+            report.usage.cache_read_tokens
+        ));
+        content.push_str(&format!(
+            "cost_micros_usd = {}\n",
+            report.usage.cost_micros_usd
+        ));
+        content.push_str(&format!(
+            "cost_usd = {:.6}\n\n",
+            report.usage.cost_micros_usd as f64 / 1_000_000.0
+        ));
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    file.write_all(content.as_bytes())?;
+    Ok(())
+}
+
+fn case_status_str(status: &CaseStatus) -> &'static str {
+    match status {
+        CaseStatus::Passed => "passed",
+        CaseStatus::Skipped => "skipped",
+        CaseStatus::Failed => "failed",
+    }
+}
+
+fn push_eure_string(content: &mut String, key: &str, value: &str) {
+    content.push_str(key);
+    content.push_str(" = ");
+    content.push_str(&serde_json::to_string(value).expect("string serialization cannot fail"));
+    content.push('\n');
 }
 
 fn empty_trace() -> TraceSnapshot {
@@ -1095,20 +1370,63 @@ structured_max_output_tokens = 64
 claude_thinking_budget_tokens = 1024
 openai_reasoning_effort = "minimal"
 
-@ endpoints.openrouter_responses_qwen35_9b
+@ endpoints.openrouter_responses_gemma4_26b
 adapter = "openai-responses"
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
-model = "qwen/qwen3.5-9b"
+model = "google/gemma-4-26b-a4b-it"
 cases = ["text", "structured", "tool", "thinking_roundtrip"]
 expects_visible_thinking = true
-fallback_models = ["qwen/qwen3.5-9b", "openai/gpt-5.4-nano"]
-input_price_per_million = 0.03
-output_price_per_million = 0.06
+fallback_models = ["google/gemma-4-26b-a4b-it", "openai/gpt-5.4-nano"]
+input_price_per_million = 0.08
+output_price_per_million = 0.35
 "#;
 
     fn sample_config() -> SmokeConfig {
         eure::parse_content(SAMPLE, PathBuf::from("sample.eure")).unwrap()
+    }
+
+    #[derive(Debug, eure::FromEure)]
+    #[eure(crate = ::eure::document)]
+    #[allow(dead_code)]
+    struct SummaryDoc {
+        summary: SummarySection,
+        cases: BTreeMap<String, SummaryCase>,
+    }
+
+    #[derive(Debug, eure::FromEure)]
+    #[eure(crate = ::eure::document)]
+    #[allow(dead_code)]
+    struct SummarySection {
+        config: String,
+        raw_dump: String,
+        total_cases: u64,
+        passed: u64,
+        skipped: u64,
+        failed: u64,
+        usage_total_tokens: u64,
+        usage_input_tokens: u64,
+        usage_output_tokens: u64,
+        cost_micros_usd: u64,
+        cost_usd: f64,
+        estimated_worst_case_usd: f64,
+        cap_usd: f64,
+    }
+
+    #[derive(Debug, eure::FromEure)]
+    #[eure(crate = ::eure::document)]
+    #[allow(dead_code)]
+    struct SummaryCase {
+        id: String,
+        status: String,
+        message: String,
+        total_tokens: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_tokens: u64,
+        cache_read_tokens: u64,
+        cost_micros_usd: u64,
+        cost_usd: f64,
     }
 
     #[test]
@@ -1123,6 +1441,21 @@ output_price_per_million = 0.06
     fn raw_dump_path_override_is_exact() {
         let path = PathBuf::from("/tmp/custom-smoke.jsonl");
         assert_eq!(resolve_raw_dump_path(Some(&path)).unwrap(), path);
+    }
+
+    #[test]
+    fn default_summary_path_replaces_raw_extension() {
+        let raw_path = PathBuf::from("/tmp/custom-smoke.jsonl");
+        assert_eq!(
+            resolve_summary_path(None, &raw_path),
+            PathBuf::from("/tmp/custom-smoke.eure")
+        );
+
+        let summary_path = PathBuf::from("/tmp/custom-summary.eure");
+        assert_eq!(
+            resolve_summary_path(Some(&summary_path), &raw_path),
+            summary_path
+        );
     }
 
     #[test]
@@ -1163,12 +1496,77 @@ output_price_per_million = 0.06
     }
 
     #[test]
+    fn write_summary_eure_writes_parseable_summary_and_cases() {
+        let path = PathBuf::from(format!(
+            "/tmp/lutum-adapter-smoke-summary-test-{}-{}.eure",
+            current_unix_seconds().unwrap(),
+            process::id()
+        ));
+        let reports = vec![
+            CaseReport {
+                case_id: "endpoint:text".into(),
+                status: CaseStatus::Passed,
+                message: "ok".into(),
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                    cost_micros_usd: 3,
+                    cache_creation_tokens: 1,
+                    cache_read_tokens: 2,
+                },
+                raw: Vec::new(),
+                trace: empty_trace(),
+            },
+            CaseReport {
+                case_id: "endpoint:structured".into(),
+                status: CaseStatus::Failed,
+                message: "schema \"bad\"".into(),
+                usage: Usage {
+                    input_tokens: 20,
+                    output_tokens: 7,
+                    total_tokens: 27,
+                    cost_micros_usd: 5,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                },
+                raw: Vec::new(),
+                trace: empty_trace(),
+            },
+        ];
+        let usage = reports.iter().fold(Usage::zero(), |sum, report| {
+            sum.saturating_add(report.usage)
+        });
+
+        write_summary_eure(
+            &path,
+            Path::new("data/adapter-smoke-config.eure"),
+            Path::new("/tmp/raw.jsonl"),
+            &reports,
+            usage,
+            0.0123,
+            0.05,
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let doc: SummaryDoc = eure::parse_content(&content, path).unwrap();
+        assert_eq!(doc.summary.total_cases, 2);
+        assert_eq!(doc.summary.passed, 1);
+        assert_eq!(doc.summary.failed, 1);
+        assert_eq!(doc.summary.cost_micros_usd, 8);
+        assert_eq!(doc.cases["case_001"].id, "endpoint:text");
+        assert_eq!(doc.cases["case_002"].status, "failed");
+        assert_eq!(doc.cases["case_002"].message, "schema \"bad\"");
+    }
+
+    #[test]
     fn parses_eure_config() {
         let config = sample_config();
         assert_eq!(config.defaults.text_max_output_tokens, 8);
         let endpoint = config
             .endpoints
-            .get("openrouter_responses_qwen35_9b")
+            .get("openrouter_responses_gemma4_26b")
             .unwrap();
         assert_eq!(endpoint.adapter, "openai-responses");
         assert!(endpoint.expects_visible_thinking);
@@ -1203,10 +1601,10 @@ output_price_per_million = 0.06
         assert_eq!(
             ids,
             vec![
-                "openrouter_responses_qwen35_9b:text",
-                "openrouter_responses_qwen35_9b:structured",
-                "openrouter_responses_qwen35_9b:tool",
-                "openrouter_responses_qwen35_9b:thinking_roundtrip",
+                "openrouter_responses_gemma4_26b:text",
+                "openrouter_responses_gemma4_26b:structured",
+                "openrouter_responses_gemma4_26b:tool",
+                "openrouter_responses_gemma4_26b:thinking_roundtrip",
             ]
         );
     }
@@ -1222,7 +1620,7 @@ output_price_per_million = 0.06
             1
         );
         assert_eq!(
-            filter_cases(cases.clone(), &["openrouter_responses_qwen35_9b".into()])
+            filter_cases(cases.clone(), &["openrouter_responses_gemma4_26b".into()])
                 .unwrap()
                 .len(),
             4
@@ -1240,6 +1638,96 @@ output_price_per_million = 0.06
     }
 
     #[test]
+    fn usage_from_raw_extracts_openrouter_cost() {
+        let raw = vec![RawTraceEntry::StreamEvent {
+            provider: "openrouter".into(),
+            api: "responses".into(),
+            operation: "text_turn".into(),
+            request_id: Some("req_1".into()),
+            sequence: 1,
+            event_name: None,
+            payload: json!({
+                "type": "response.completed",
+                "response": {
+                    "usage": {
+                        "input_tokens": 3,
+                        "output_tokens": 4,
+                        "total_tokens": 7,
+                        "cost": 0.000012,
+                    }
+                }
+            })
+            .to_string(),
+        }];
+
+        let usage = usage_from_raw(&raw);
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 4);
+        assert_eq!(usage.total_tokens, 7);
+        assert_eq!(usage.cost_micros_usd, 12);
+    }
+
+    #[test]
+    fn enrich_usage_uses_raw_cost_before_configured_pricing() {
+        let endpoint = sample_config()
+            .endpoints
+            .remove("openrouter_responses_gemma4_26b")
+            .unwrap();
+        let raw = vec![RawTraceEntry::StreamEvent {
+            provider: "openrouter".into(),
+            api: "responses".into(),
+            operation: "text_turn".into(),
+            request_id: Some("req_1".into()),
+            sequence: 1,
+            event_name: None,
+            payload: json!({
+                "type": "response.completed",
+                "response": {
+                    "usage": {
+                        "input_tokens": 3,
+                        "output_tokens": 4,
+                        "total_tokens": 7,
+                        "cost": 0.000012,
+                    }
+                }
+            })
+            .to_string(),
+        }];
+
+        let usage = enrich_usage(
+            &endpoint,
+            Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 2_000_000,
+                total_tokens: 3_000_000,
+                ..Usage::zero()
+            },
+            &raw,
+        );
+        assert_eq!(usage.total_tokens, 3_000_000);
+        assert_eq!(usage.cost_micros_usd, 12);
+    }
+
+    #[test]
+    fn enrich_usage_prices_tokens_when_provider_cost_is_missing() {
+        let endpoint = sample_config()
+            .endpoints
+            .remove("openrouter_responses_gemma4_26b")
+            .unwrap();
+        let usage = enrich_usage(
+            &endpoint,
+            Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 2_000_000,
+                total_tokens: 3_000_000,
+                ..Usage::zero()
+            },
+            &[],
+        );
+        assert_eq!(usage.cost_micros_usd, 780_000);
+    }
+
+    #[test]
     fn validates_completions_case_shape() {
         assert!(validate_case("bad", AdapterKind::OpenAiCompletions, SmokeCase::Text).is_err());
         assert!(validate_case("ok", AdapterKind::OpenAiCompletions, SmokeCase::Completion).is_ok());
@@ -1249,7 +1737,7 @@ output_price_per_million = 0.06
     fn resolves_credentials_with_skip_strict_policy() {
         let mut endpoint = sample_config()
             .endpoints
-            .remove("openrouter_responses_qwen35_9b")
+            .remove("openrouter_responses_gemma4_26b")
             .unwrap();
         assert!(resolve_api_key_with(&endpoint, |_| None).is_err());
         assert_eq!(missing_credential_status(false), CaseStatus::Skipped);

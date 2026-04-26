@@ -26,6 +26,7 @@ use crate::messages::{ClaudeRole, TextBlock, ThinkingBlock, ToolUseBlock};
 ///         output_tokens: Some(15),
 ///         cache_creation_input_tokens: None,
 ///         cache_read_input_tokens: None,
+///         cost: None,
 ///     },
 /// });
 ///
@@ -81,6 +82,7 @@ pub enum SseEvent {
 ///             output_tokens: Some(1),
 ///             cache_creation_input_tokens: None,
 ///             cache_read_input_tokens: None,
+///             cost: None,
 ///         },
 ///     },
 /// };
@@ -129,6 +131,7 @@ pub struct MessageStartEvent {
 ///         output_tokens: Some(15),
 ///         cache_creation_input_tokens: None,
 ///         cache_read_input_tokens: None,
+///         cost: None,
 ///     },
 /// };
 ///
@@ -300,6 +303,7 @@ pub struct ContentBlockStopEvent {
 ///         output_tokens: Some(15),
 ///         cache_creation_input_tokens: None,
 ///         cache_read_input_tokens: None,
+///         cost: None,
 ///     },
 /// };
 ///
@@ -347,12 +351,13 @@ pub struct MessageDelta {
 ///     output_tokens: Some(1),
 ///     cache_creation_input_tokens: None,
 ///     cache_read_input_tokens: None,
+///     cost: None,
 /// };
 ///
 /// assert_eq!(serde_json::to_value(&value).unwrap(), json);
 /// assert_eq!(serde_json::from_value::<MessageDeltaUsage>(json).unwrap(), value);
 /// ```
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageDeltaUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
@@ -362,6 +367,8 @@ pub struct MessageDeltaUsage {
     pub cache_creation_input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
 }
 
 impl MessageDeltaUsage {
@@ -376,10 +383,18 @@ impl MessageDeltaUsage {
             input_tokens,
             output_tokens,
             total_tokens: input_tokens + output_tokens,
-            cost_micros_usd: 0,
+            cost_micros_usd: self.cost.map(cost_to_micros_usd).unwrap_or_default(),
             cache_creation_tokens,
             cache_read_tokens,
         }
+    }
+}
+
+fn cost_to_micros_usd(cost: f64) -> u64 {
+    if cost.is_finite() && cost > 0.0 {
+        (cost * 1_000_000.0) as u64
+    } else {
+        0
     }
 }
 
