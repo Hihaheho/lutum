@@ -4,7 +4,9 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    process,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -242,19 +244,21 @@ async fn main() -> Result<()> {
             "estimated worst-case cost ${estimate:.4} exceeds max ${cap:.4}; pass --max-usd to raise the cap"
         );
     }
+    let raw_path = resolve_raw_dump_path(args.save_raw.as_deref())?;
+    prepare_raw_dump(&raw_path)
+        .with_context(|| format!("failed to initialize raw dump {}", raw_path.display()))?;
 
     println!(
         "running {} adapter smoke cases; estimated worst-case cost ${estimate:.4} (cap ${cap:.4})",
         selected.len()
     );
+    println!("raw dump: {}", raw_path.display());
 
     let mut reports = Vec::new();
     for case in selected {
         let report = run_case(case, &config.defaults, args.strict).await;
-        if let Some(path) = args.save_raw.as_deref() {
-            write_raw(path, &report)
-                .with_context(|| format!("failed to save raw trace to {}", path.display()))?;
-        }
+        write_raw(&raw_path, &report)
+            .with_context(|| format!("failed to save raw trace to {}", raw_path.display()))?;
         print_report(&report);
         reports.push(report);
     }
@@ -853,6 +857,39 @@ fn normalize_ok(text: &str) -> bool {
     trimmed == "OK" || trimmed.starts_with("OK\n") || trimmed.starts_with("OK.")
 }
 
+fn resolve_raw_dump_path(override_path: Option<&Path>) -> Result<PathBuf> {
+    match override_path {
+        Some(path) => Ok(path.to_path_buf()),
+        None => Ok(default_raw_dump_path(
+            current_unix_seconds()?,
+            process::id(),
+        )),
+    }
+}
+
+fn current_unix_seconds() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| anyhow!("system clock is before unix epoch: {err}"))?
+        .as_secs())
+}
+
+fn default_raw_dump_path(unix_seconds: u64, pid: u32) -> PathBuf {
+    PathBuf::from(format!(
+        "/tmp/lutum-adapter-smoke-{unix_seconds}-{pid}.jsonl"
+    ))
+}
+
+fn prepare_raw_dump(path: &Path) -> Result<()> {
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    Ok(())
+}
+
 fn print_report(report: &CaseReport) {
     let status = match report.status {
         CaseStatus::Passed => "PASS",
@@ -1072,6 +1109,57 @@ output_price_per_million = 0.06
 
     fn sample_config() -> SmokeConfig {
         eure::parse_content(SAMPLE, PathBuf::from("sample.eure")).unwrap()
+    }
+
+    #[test]
+    fn default_raw_dump_path_uses_tmp_timestamp_and_pid() {
+        assert_eq!(
+            default_raw_dump_path(1_777_189_191, 4242),
+            PathBuf::from("/tmp/lutum-adapter-smoke-1777189191-4242.jsonl")
+        );
+    }
+
+    #[test]
+    fn raw_dump_path_override_is_exact() {
+        let path = PathBuf::from("/tmp/custom-smoke.jsonl");
+        assert_eq!(resolve_raw_dump_path(Some(&path)).unwrap(), path);
+    }
+
+    #[test]
+    fn write_raw_writes_case_dump_with_raw_and_trace() {
+        let path = PathBuf::from(format!(
+            "/tmp/lutum-adapter-smoke-write-test-{}-{}.jsonl",
+            current_unix_seconds().unwrap(),
+            process::id()
+        ));
+        prepare_raw_dump(&path).unwrap();
+        let report = CaseReport {
+            case_id: "endpoint:text".into(),
+            status: CaseStatus::Passed,
+            message: "ok".into(),
+            usage: Usage {
+                total_tokens: 3,
+                ..Usage::zero()
+            },
+            raw: vec![RawTraceEntry::Request {
+                provider: "openai".into(),
+                api: "responses".into(),
+                operation: "text_turn".into(),
+                request_id: Some("req_1".into()),
+                body: "{\"model\":\"test\"}".into(),
+            }],
+            trace: empty_trace(),
+        };
+
+        write_raw(&path, &report).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        let lines = content.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let value = serde_json::from_str::<serde_json::Value>(lines[0]).unwrap();
+        assert_eq!(value["kind"], "case_dump");
+        assert_eq!(value["case_id"], "endpoint:text");
+        assert_eq!(value["raw"].as_array().unwrap().len(), 1);
+        assert!(value["trace"]["roots"].is_array());
     }
 
     #[test]
