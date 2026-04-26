@@ -1,0 +1,23 @@
+[package]
+name = "lutum-adapter-smoke"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+eure.workspace = true
+lutum.workspace = true
+lutum-claude.workspace = true
+lutum-openai.workspace = true
+lutum-openrouter.workspace = true
+lutum-protocol.workspace = true
+lutum-trace.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing.workspace = true

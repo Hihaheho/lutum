@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/lutum", "crates/lutum-claude",
+    "crates/lutum-adapter-smoke",
     "crates/lutum-eval",
     "crates/lutum-eval-runner",
     "crates/lutum-macros",
@@ -41,9 +42,12 @@ lutum-protocol = { path = "crates/lutum-protocol", version = "0.1.0" }
 lutum-trace = { path = "crates/lutum-trace", version = "0.1.0" }
 async-stream = "0.3"
 async-trait = "0.1.89"
+anyhow = "1"
 bon = "3"
 bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
 console = "0.15"
+eure = "0.1.9"
 futures = "0.3"
 heck = "0.5"
 proc-macro2 = "1"

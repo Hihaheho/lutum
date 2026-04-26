@@ -1,0 +1,135 @@
+@ defaults
+max_usd = 0.05
+text_max_output_tokens = 8
+structured_max_output_tokens = 64
+claude_thinking_budget_tokens = 1024
+openai_reasoning_effort = "minimal"
+
+@ endpoints.openai_completions_qwen25
+adapter = "openai-completions"
+base_url = "http://localhost:11434/v1"
+api_key_env = "LUTUM_SMOKE_COMPLETIONS_TOKEN"
+fallback_api_key = "local"
+model = "qwen2.5:0.5b"
+cases = ["completion"]
+input_price_per_million = 0.0
+output_price_per_million = 0.0
+
+@ endpoints.anthropic_messages_haiku45
+adapter = "claude-messages"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-haiku-4-5"
+cases = ["text", "structured", "tool", "thinking_roundtrip"]
+input_price_per_million = 1.0
+output_price_per_million = 5.0
+
+@ endpoints.openai_chat_gpt54_nano
+adapter = "openai-chat-completions"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model = "gpt-5.4-nano"
+cases = ["text", "structured", "tool", "reasoning_request"]
+input_price_per_million = 0.05
+output_price_per_million = 0.4
+
+@ endpoints.openai_responses_gpt54_nano
+adapter = "openai-responses"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model = "gpt-5.4-nano"
+cases = ["text", "structured", "tool", "structured_completion", "reasoning_request", "thinking_roundtrip"]
+input_price_per_million = 0.05
+output_price_per_million = 0.4
+
+@ endpoints.openrouter_messages_haiku45
+adapter = "claude-messages"
+base_url = "https://openrouter.ai/api"
+api_key_env = "OPENROUTER_API_KEY"
+model = "anthropic/claude-haiku-4.5"
+cases = ["text", "structured", "tool", "thinking_roundtrip"]
+expects_visible_thinking = true
+openrouter_usage_recovery = true
+recovery_base_url = "https://openrouter.ai/api/v1"
+input_price_per_million = 1.0
+output_price_per_million = 5.0
+
+@ endpoints.openrouter_messages_gpt54_nano
+adapter = "claude-messages"
+base_url = "https://openrouter.ai/api"
+api_key_env = "OPENROUTER_API_KEY"
+model = "openai/gpt-5.4-nano"
+cases = ["text", "structured", "tool", "thinking_roundtrip"]
+expects_visible_thinking = true
+openrouter_usage_recovery = true
+recovery_base_url = "https://openrouter.ai/api/v1"
+input_price_per_million = 0.05
+output_price_per_million = 0.4
+
+@ endpoints.openrouter_messages_qwen35_9b
+adapter = "claude-messages"
+base_url = "https://openrouter.ai/api"
+api_key_env = "OPENROUTER_API_KEY"
+model = "qwen/qwen3.5-9b"
+cases = ["text", "structured", "tool", "thinking_roundtrip"]
+expects_visible_thinking = true
+openrouter_usage_recovery = true
+recovery_base_url = "https://openrouter.ai/api/v1"
+input_price_per_million = 0.03
+output_price_per_million = 0.06
+
+@ endpoints.openrouter_responses_haiku45
+adapter = "openai-responses"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "anthropic/claude-haiku-4.5"
+cases = ["text", "structured", "tool", "thinking_roundtrip"]
+expects_visible_thinking = true
+openrouter_usage_recovery = true
+input_price_per_million = 1.0
+output_price_per_million = 5.0
+
+@ endpoints.openrouter_responses_gpt54_nano
+adapter = "openai-responses"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "openai/gpt-5.4-nano"
+cases = ["text", "structured", "tool", "thinking_roundtrip"]
+expects_visible_thinking = true
+openrouter_usage_recovery = true
+input_price_per_million = 0.05
+output_price_per_million = 0.4
+
+@ endpoints.openrouter_responses_qwen35_9b
+adapter = "openai-responses"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "qwen/qwen3.5-9b"
+cases = ["text", "structured", "tool", "thinking_roundtrip"]
+expects_visible_thinking = true
+openrouter_usage_recovery = true
+input_price_per_million = 0.03
+output_price_per_million = 0.06
+
+@ endpoints.openrouter_messages_fallback
+adapter = "claude-messages"
+base_url = "https://openrouter.ai/api"
+api_key_env = "OPENROUTER_API_KEY"
+model = "anthropic/claude-haiku-4.5"
+fallback_models = ["anthropic/claude-haiku-4.5", "openai/gpt-5.4-nano", "qwen/qwen3.5-9b"]
+cases = ["text"]
+openrouter_usage_recovery = true
+recovery_base_url = "https://openrouter.ai/api/v1"
+input_price_per_million = 1.0
+output_price_per_million = 5.0
+
+@ endpoints.openrouter_responses_fallback
+adapter = "openai-responses"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "anthropic/claude-haiku-4.5"
+fallback_models = ["anthropic/claude-haiku-4.5", "openai/gpt-5.4-nano", "qwen/qwen3.5-9b"]
+cases = ["text"]
+openrouter_usage_recovery = true
+input_price_per_million = 1.0
+output_price_per_million = 5.0

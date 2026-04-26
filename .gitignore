@@ -9,6 +9,7 @@
 !**/tests/ui/*.stderr
 target/
 !README.md
+!data/**/*.eure
 !docs/**/*.md
 !docs/**/*.eure
 !LICENSE-*
