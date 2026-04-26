@@ -16,7 +16,7 @@ use lutum::{
 };
 use lutum_claude::{ClaudeAdapter, MessagesRequest};
 use lutum_openai::{CompletionRequest, OpenAiAdapter, OpenAiReasoningEffort};
-use lutum_trace::RawTraceEntry;
+use lutum_trace::{EventRecord, FieldValue, RawTraceEntry, SpanNode, TraceSnapshot};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -75,6 +75,12 @@ struct EndpointConfig {
     input_price_per_million: f64,
     #[eure(default)]
     output_price_per_million: f64,
+    #[eure(default)]
+    text_max_output_tokens: Option<u32>,
+    #[eure(default)]
+    structured_max_output_tokens: Option<u32>,
+    #[eure(default)]
+    openai_reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +164,7 @@ struct CaseReport {
     message: String,
     usage: Usage,
     raw: Vec<RawTraceEntry>,
+    trace: TraceSnapshot,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -359,27 +366,31 @@ fn estimate_cases_usd(cases: &[CaseSpec], defaults: &DefaultsConfig) -> f64 {
 }
 
 fn estimate_case_usd(case: &CaseSpec, defaults: &DefaultsConfig) -> f64 {
-    let (input_tokens, output_tokens) = worst_case_tokens(case.kind, case.case, defaults);
+    let (input_tokens, output_tokens) = worst_case_tokens(case, defaults);
     let input_cost = input_tokens as f64 * case.endpoint.input_price_per_million / 1_000_000.0;
     let output_cost = output_tokens as f64 * case.endpoint.output_price_per_million / 1_000_000.0;
     input_cost + output_cost
 }
 
-fn worst_case_tokens(kind: AdapterKind, case: SmokeCase, defaults: &DefaultsConfig) -> (u64, u64) {
-    match case {
+fn worst_case_tokens(case: &CaseSpec, defaults: &DefaultsConfig) -> (u64, u64) {
+    match case.case {
         SmokeCase::Completion | SmokeCase::Text | SmokeCase::ReasoningRequest => {
-            (96, defaults.text_max_output_tokens as u64)
+            (96, text_max_output_tokens(&case.endpoint, defaults) as u64)
         }
-        SmokeCase::Structured | SmokeCase::StructuredCompletion | SmokeCase::Tool => {
-            (192, defaults.structured_max_output_tokens as u64)
-        }
+        SmokeCase::Structured | SmokeCase::StructuredCompletion | SmokeCase::Tool => (
+            192,
+            structured_max_output_tokens(&case.endpoint, defaults) as u64,
+        ),
         SmokeCase::ThinkingRoundtrip => {
-            let output = if kind == AdapterKind::ClaudeMessages {
+            let output = if case.kind == AdapterKind::ClaudeMessages {
                 defaults.claude_thinking_budget_tokens as u64 + 1024
             } else {
-                defaults.structured_max_output_tokens as u64
+                structured_max_output_tokens(&case.endpoint, defaults) as u64
             };
-            (256, output + defaults.text_max_output_tokens as u64)
+            (
+                256,
+                output + text_max_output_tokens(&case.endpoint, defaults) as u64,
+            )
         }
     }
 }
@@ -396,6 +407,7 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
                 message: err.to_string(),
                 usage,
                 raw: Vec::new(),
+                trace: empty_trace(),
             };
         }
     };
@@ -403,11 +415,13 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
     let run = async {
         let llm = build_lutum(&case, defaults, credential)?;
         let case_usage = match case.case {
-            SmokeCase::Completion => run_completion(&llm, defaults).await?,
-            SmokeCase::Text => run_text(&llm, defaults).await?,
-            SmokeCase::Structured => run_structured(&llm, defaults).await?,
-            SmokeCase::Tool => run_tool(&llm, defaults).await?,
-            SmokeCase::StructuredCompletion => run_structured_completion(&llm, defaults).await?,
+            SmokeCase::Completion => run_completion(&llm, &case, defaults).await?,
+            SmokeCase::Text => run_text(&llm, &case, defaults).await?,
+            SmokeCase::Structured => run_structured(&llm, &case, defaults).await?,
+            SmokeCase::Tool => run_tool(&llm, &case, defaults).await?,
+            SmokeCase::StructuredCompletion => {
+                run_structured_completion(&llm, &case, defaults).await?
+            }
             SmokeCase::ReasoningRequest => run_reasoning_request(&llm, &case, defaults).await?,
             SmokeCase::ThinkingRoundtrip => run_thinking_roundtrip(&llm, &case, defaults).await?,
         };
@@ -415,10 +429,12 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
     };
 
     let collected = lutum_trace::test::collect_raw(run).await;
-    match collected.output {
+    let output = collected.output;
+    let trace = collected.trace;
+    let raw = collected.raw.entries;
+    match output {
         Ok(case_usage) => {
             usage = usage.saturating_add(case_usage);
-            let raw = collected.raw.entries;
             if let Err(err) = verify_raw_expectations(&case, &raw) {
                 return CaseReport {
                     case_id: case.case_id,
@@ -426,6 +442,7 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
                     message: err.to_string(),
                     usage,
                     raw,
+                    trace,
                 };
             }
             CaseReport {
@@ -434,10 +451,10 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
                 message: "ok".into(),
                 usage,
                 raw,
+                trace,
             }
         }
         Err(err) => {
-            let raw = collected.raw.entries;
             let endpoint_unavailable = raw.iter().any(|entry| {
                 matches!(
                     entry,
@@ -463,6 +480,7 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
                 message,
                 usage,
                 raw,
+                trace,
             }
         }
     }
@@ -543,7 +561,10 @@ fn build_lutum(case: &CaseSpec, defaults: &DefaultsConfig, api_key: String) -> R
                 .with_recovery(recovery)
                 .with_extension(RawTelemetryConfig::all())
                 .with_extension(SmokeReasoningConfig(parse_reasoning_effort(
-                    &defaults.openai_reasoning_effort,
+                    case.endpoint
+                        .openai_reasoning_effort
+                        .as_deref()
+                        .unwrap_or(&defaults.openai_reasoning_effort),
                 )?))
                 .with_extension(usage_estimate))
         }
@@ -585,34 +606,46 @@ fn parse_reasoning_effort(value: &str) -> Result<OpenAiReasoningEffort> {
     }
 }
 
-async fn run_completion(llm: &Lutum, defaults: &DefaultsConfig) -> Result<Usage> {
+fn text_max_output_tokens(endpoint: &EndpointConfig, defaults: &DefaultsConfig) -> u32 {
+    endpoint
+        .text_max_output_tokens
+        .unwrap_or(defaults.text_max_output_tokens)
+}
+
+fn structured_max_output_tokens(endpoint: &EndpointConfig, defaults: &DefaultsConfig) -> u32 {
+    endpoint
+        .structured_max_output_tokens
+        .unwrap_or(defaults.structured_max_output_tokens)
+}
+
+async fn run_completion(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Result<Usage> {
     let result = llm
         .completion("Return exactly OK.")
-        .max_output_tokens(defaults.text_max_output_tokens)
+        .max_output_tokens(text_max_output_tokens(&case.endpoint, defaults))
         .collect()
         .await?;
     ensure_ok(&result.text, "completion")?;
     Ok(result.usage)
 }
 
-async fn run_text(llm: &Lutum, defaults: &DefaultsConfig) -> Result<Usage> {
+async fn run_text(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Result<Usage> {
     let mut session = Session::new(llm.clone());
     session.push_user("Return exactly OK.");
     let result = session
         .text_turn()
-        .max_output_tokens(defaults.text_max_output_tokens)
+        .max_output_tokens(text_max_output_tokens(&case.endpoint, defaults))
         .collect()
         .await?;
     ensure_ok(&result.assistant_text(), "text")?;
     Ok(result.usage)
 }
 
-async fn run_structured(llm: &Lutum, defaults: &DefaultsConfig) -> Result<Usage> {
+async fn run_structured(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Result<Usage> {
     let mut session = Session::new(llm.clone());
     session.push_user("Return JSON with ok true and text exactly OK.");
     let result = session
         .structured_turn::<SmokeStructured>()
-        .max_output_tokens(defaults.structured_max_output_tokens)
+        .max_output_tokens(structured_max_output_tokens(&case.endpoint, defaults))
         .collect()
         .await?;
     match result.semantic {
@@ -623,10 +656,14 @@ async fn run_structured(llm: &Lutum, defaults: &DefaultsConfig) -> Result<Usage>
     }
 }
 
-async fn run_structured_completion(llm: &Lutum, defaults: &DefaultsConfig) -> Result<Usage> {
+async fn run_structured_completion(
+    llm: &Lutum,
+    case: &CaseSpec,
+    defaults: &DefaultsConfig,
+) -> Result<Usage> {
     let result = llm
         .structured_completion::<SmokeStructured>("Return JSON with ok true and text exactly OK.")
-        .max_output_tokens(defaults.structured_max_output_tokens)
+        .max_output_tokens(structured_max_output_tokens(&case.endpoint, defaults))
         .collect()
         .await?;
     match result.semantic {
@@ -637,7 +674,7 @@ async fn run_structured_completion(llm: &Lutum, defaults: &DefaultsConfig) -> Re
     }
 }
 
-async fn run_tool(llm: &Lutum, defaults: &DefaultsConfig) -> Result<Usage> {
+async fn run_tool(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Result<Usage> {
     let mut session = Session::new(llm.clone());
     session.push_user("Call echo_word with word OK, then answer exactly OK.");
     let mut usage = Usage::zero();
@@ -647,7 +684,7 @@ async fn run_tool(llm: &Lutum, defaults: &DefaultsConfig) -> Result<Usage> {
             .text_turn()
             .tools::<SmokeTools>()
             .available_tools(vec![SmokeToolsSelector::EchoWord])
-            .max_output_tokens(defaults.structured_max_output_tokens);
+            .max_output_tokens(structured_max_output_tokens(&case.endpoint, defaults));
         if !saw_tool {
             turn = turn.require_tool(SmokeToolsSelector::EchoWord);
         }
@@ -688,8 +725,7 @@ async fn run_reasoning_request(
     case: &CaseSpec,
     defaults: &DefaultsConfig,
 ) -> Result<Usage> {
-    let usage = run_text(llm, defaults).await?;
-    let _ = case;
+    let usage = run_text(llm, case, defaults).await?;
     Ok(usage)
 }
 
@@ -703,7 +739,7 @@ async fn run_thinking_roundtrip(
     let max_tokens = if case.kind == AdapterKind::ClaudeMessages {
         defaults.claude_thinking_budget_tokens + 1024
     } else {
-        defaults.structured_max_output_tokens
+        structured_max_output_tokens(&case.endpoint, defaults)
     };
     let first = session
         .text_turn()
@@ -715,7 +751,7 @@ async fn run_thinking_roundtrip(
     session.push_user("Using the previous turn, answer exactly OK.");
     let second = session
         .text_turn()
-        .max_output_tokens(defaults.text_max_output_tokens)
+        .max_output_tokens(text_max_output_tokens(&case.endpoint, defaults))
         .collect()
         .await?;
     ensure_ok(&second.assistant_text(), "thinking replay turn")?;
@@ -838,16 +874,73 @@ fn write_raw(path: &Path, report: &CaseReport) -> Result<()> {
         .append(true)
         .open(path)
         .with_context(|| format!("open {}", path.display()))?;
-    for entry in &report.raw {
-        let line = json!({
-            "case_id": report.case_id,
-            "status": format!("{:?}", report.status),
-            "entry": raw_entry_json(entry),
-        });
-        serde_json::to_writer(&mut file, &line)?;
-        file.write_all(b"\n")?;
-    }
+    let line = json!({
+        "kind": "case_dump",
+        "case_id": report.case_id,
+        "status": format!("{:?}", report.status),
+        "message": report.message,
+        "usage": report.usage,
+        "raw": report.raw.iter().map(raw_entry_json).collect::<Vec<_>>(),
+        "trace": trace_snapshot_json(&report.trace),
+    });
+    serde_json::to_writer(&mut file, &line)?;
+    file.write_all(b"\n")?;
     Ok(())
+}
+
+fn empty_trace() -> TraceSnapshot {
+    TraceSnapshot {
+        roots: Vec::new(),
+        root_events: Vec::new(),
+    }
+}
+
+fn trace_snapshot_json(snapshot: &TraceSnapshot) -> serde_json::Value {
+    json!({
+        "roots": snapshot.roots.iter().map(span_node_json).collect::<Vec<_>>(),
+        "root_events": snapshot.root_events.iter().map(event_record_json).collect::<Vec<_>>(),
+    })
+}
+
+fn span_node_json(span: &SpanNode) -> serde_json::Value {
+    json!({
+        "name": span.name,
+        "target": span.target,
+        "level": span.level,
+        "fields": fields_json(&span.fields),
+        "events": span.events.iter().map(event_record_json).collect::<Vec<_>>(),
+        "children": span.children.iter().map(span_node_json).collect::<Vec<_>>(),
+    })
+}
+
+fn event_record_json(event: &EventRecord) -> serde_json::Value {
+    json!({
+        "target": event.target,
+        "level": event.level,
+        "message": event.message,
+        "fields": fields_json(&event.fields),
+    })
+}
+
+fn fields_json(fields: &[(String, FieldValue)]) -> serde_json::Value {
+    serde_json::Value::Object(
+        fields
+            .iter()
+            .map(|(name, value)| (name.clone(), field_value_json(value)))
+            .collect(),
+    )
+}
+
+fn field_value_json(value: &FieldValue) -> serde_json::Value {
+    match value {
+        FieldValue::Bool(value) => json!(value),
+        FieldValue::I64(value) => json!(value),
+        FieldValue::U64(value) => json!(value),
+        FieldValue::I128(value) => json!(value.to_string()),
+        FieldValue::U128(value) => json!(value.to_string()),
+        FieldValue::F64(value) => json!(value),
+        FieldValue::Str(value) => json!(value),
+    }
 }
 
 fn raw_entry_json(entry: &RawTraceEntry) -> serde_json::Value {

@@ -656,7 +656,7 @@ impl TurnAdapter for OpenAiAdapter {
                 .map_err(AgentError::from)?;
             prepared.body.response_format = Some(ResponseFormat::JsonSchema {
                 json_schema: JsonSchemaConfig {
-                    name: turn.output.schema_name.clone(),
+                    name: openai_schema_name(&turn.output.schema_name),
                     description: None,
                     schema: Some(turn.output.schema.clone()),
                     strict: Some(true),
@@ -683,7 +683,7 @@ impl TurnAdapter for OpenAiAdapter {
         }
 
         let text_format = Some(TextFormat::JsonSchema {
-            name: turn.output.schema_name.clone(),
+            name: openai_schema_name(&turn.output.schema_name),
             schema: turn.output.schema.clone(),
             description: None,
             strict: Some(true),
@@ -808,7 +808,7 @@ fn build_structured_completion_request(
         reasoning: None,
         text: Some(crate::responses::ResponsesTextConfig {
             format: TextFormat::JsonSchema {
-                name: request.output.schema_name.clone(),
+                name: openai_schema_name(&request.output.schema_name),
                 schema: request.output.schema.clone(),
                 description: None,
                 strict: Some(true),
@@ -818,6 +818,21 @@ fn build_structured_completion_request(
         models: None,
         seed: request.generation.seed,
     }
+}
+
+fn openai_schema_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len().min(64));
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    if out.is_empty() { "schema".into() } else { out }
 }
 
 fn map_erased_structured_completion_event(
@@ -3502,6 +3517,16 @@ mod tests {
             completion_request.models,
             Some(vec!["fallback".to_string()])
         );
+    }
+
+    #[test]
+    fn openai_schema_name_is_wire_safe() {
+        assert_eq!(
+            openai_schema_name("lutum_adapter_smoke::SmokeStructured"),
+            "lutum_adapter_smoke__SmokeStructured"
+        );
+        assert_eq!(openai_schema_name(""), "schema");
+        assert_eq!(openai_schema_name("ok-name_1"), "ok-name_1");
     }
 
     #[test]
