@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 #[cfg(target_family = "wasm")]
 use lutum_protocol::SendWrapper;
-use lutum_protocol::{AgentError, OperationKind, UsageRecoveryAdapter, budget::Usage};
+use lutum_protocol::{
+    AgentError, OperationKind, UsageRecoveryAdapter, budget::Usage, extensions::RequestExtensions,
+};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
 pub const OPENAI_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const ANTHROPIC_BASE_URL: &str = "https://openrouter.ai/api";
@@ -60,12 +63,28 @@ pub enum OpenRouterError {
     Http(#[from] reqwest::Error),
     #[error("missing OPENROUTER_API_KEY env var")]
     MissingApiKey,
+    #[error("invalid header value: {0}")]
+    InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
+}
+
+pub trait HeadersCustomizer: Send + Sync {
+    fn customize(&self, extensions: &RequestExtensions, headers: &mut HeaderMap);
+}
+
+impl<F> HeadersCustomizer for F
+where
+    F: Fn(&RequestExtensions, &mut HeaderMap) + Send + Sync,
+{
+    fn customize(&self, extensions: &RequestExtensions, headers: &mut HeaderMap) {
+        self(extensions, headers)
+    }
 }
 
 pub struct OpenRouterGenerationClient {
     client: Arc<reqwest::Client>,
     api_key: Arc<str>,
     base_url: Arc<str>,
+    headers_customizer: Option<Arc<dyn HeadersCustomizer>>,
 }
 
 impl OpenRouterGenerationClient {
@@ -80,6 +99,7 @@ impl OpenRouterGenerationClient {
             client: Arc::new(reqwest::Client::new()),
             api_key: api_key.into().into(),
             base_url: OPENAI_BASE_URL.into(),
+            headers_customizer: None,
         }
     }
 
@@ -88,15 +108,33 @@ impl OpenRouterGenerationClient {
         self
     }
 
+    pub fn with_headers_customizer(mut self, customizer: impl HeadersCustomizer + 'static) -> Self {
+        self.headers_customizer = Some(Arc::new(customizer));
+        self
+    }
+
+    fn request_headers(
+        &self,
+        extensions: &RequestExtensions,
+    ) -> Result<HeaderMap, OpenRouterError> {
+        let mut headers = HeaderMap::new();
+        let bearer = format!("Bearer {}", self.api_key);
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&bearer)?);
+        if let Some(customizer) = self.headers_customizer.as_ref() {
+            customizer.customize(extensions, &mut headers);
+        }
+        Ok(headers)
+    }
+
     pub async fn get_generation(&self, id: &str) -> Result<Generation, OpenRouterError> {
         let url = format!("{}/generation?id={id}", self.base_url);
         let client = self.client.clone();
-        let api_key = self.api_key.clone();
+        let headers = self.request_headers(&RequestExtensions::new())?;
         #[cfg(target_family = "wasm")]
         return SendWrapper::new(async move {
             let resp = client
                 .get(&url)
-                .bearer_auth(api_key.as_ref())
+                .headers(headers)
                 .send()
                 .await?
                 .error_for_status()?
@@ -109,7 +147,7 @@ impl OpenRouterGenerationClient {
         {
             let resp = client
                 .get(&url)
-                .bearer_auth(api_key.as_ref())
+                .headers(headers)
                 .send()
                 .await?
                 .error_for_status()?
@@ -183,5 +221,41 @@ mod tests {
         let usage = generation.to_usage();
 
         assert_eq!(usage.cache_read_tokens, 2);
+    }
+
+    #[test]
+    fn headers_customizer_appends_without_touching_defaults() {
+        use reqwest::header::HeaderName;
+
+        let client = OpenRouterGenerationClient::new("test-key").with_headers_customizer(
+            |_ext: &RequestExtensions, headers: &mut HeaderMap| {
+                headers.insert(
+                    HeaderName::from_static("http-referer"),
+                    HeaderValue::from_static("https://example.com"),
+                );
+            },
+        );
+
+        let headers = client
+            .request_headers(&RequestExtensions::new())
+            .expect("headers");
+
+        assert_eq!(headers.get("http-referer").unwrap(), "https://example.com");
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer test-key");
+    }
+
+    #[test]
+    fn headers_customizer_can_override_defaults() {
+        let client = OpenRouterGenerationClient::new("test-key").with_headers_customizer(
+            |_ext: &RequestExtensions, headers: &mut HeaderMap| {
+                headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer override"));
+            },
+        );
+
+        let headers = client
+            .request_headers(&RequestExtensions::new())
+            .expect("headers");
+
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer override");
     }
 }

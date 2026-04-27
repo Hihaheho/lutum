@@ -77,6 +77,19 @@ where
     }
 }
 
+pub trait HeadersCustomizer: Send + Sync {
+    fn customize(&self, extensions: &RequestExtensions, headers: &mut HeaderMap);
+}
+
+impl<F> HeadersCustomizer for F
+where
+    F: Fn(&RequestExtensions, &mut HeaderMap) + Send + Sync,
+{
+    fn customize(&self, extensions: &RequestExtensions, headers: &mut HeaderMap) {
+        self(extensions, headers)
+    }
+}
+
 #[lutum_macros::hooks]
 pub trait OpenAiHooks {
     #[hook(singleton)]
@@ -223,6 +236,7 @@ pub struct OpenAiAdapter {
     chat_message_json_serializer: Option<Arc<dyn ChatMessageJsonSerializer>>,
     claude_prompt_caching: bool,
     sse_event_recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
+    headers_customizer: Option<Arc<dyn HeadersCustomizer>>,
     use_chat_completions: bool,
 }
 
@@ -279,6 +293,7 @@ impl OpenAiAdapter {
             chat_message_json_serializer: None,
             claude_prompt_caching: false,
             sse_event_recovery_hook: None,
+            headers_customizer: None,
             use_chat_completions: false,
         }
     }
@@ -379,13 +394,21 @@ impl OpenAiAdapter {
         self.sse_event_recovery_hook = Some(hook.into());
     }
 
-    fn request_headers(&self) -> Result<HeaderMap, OpenAiError> {
+    pub fn with_headers_customizer(mut self, customizer: impl HeadersCustomizer + 'static) -> Self {
+        self.headers_customizer = Some(Arc::new(customizer));
+        self
+    }
+
+    fn request_headers(&self, extensions: &RequestExtensions) -> Result<HeaderMap, OpenAiError> {
         let mut headers = HeaderMap::new();
         let bearer = format!("Bearer {}", self.api_key);
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&bearer).map_err(OpenAiError::InvalidHeader)?,
         );
+        if let Some(customizer) = self.headers_customizer.as_ref() {
+            customizer.customize(extensions, &mut headers);
+        }
         Ok(headers)
     }
 
@@ -476,13 +499,14 @@ impl OpenAiAdapter {
         &self,
         path: &str,
         body: &T,
+        extensions: &RequestExtensions,
         raw: Option<&RawTelemetryEmitter>,
     ) -> Result<ByteStream, OpenAiError>
     where
         T: Serialize + ?Sized,
     {
         let url = format!("{}{}", self.base_url, path);
-        let headers = self.request_headers()?;
+        let headers = self.request_headers(extensions)?;
         let client = self.client.clone();
         #[cfg(target_family = "wasm")]
         return SendWrapper::new(async move {
@@ -531,9 +555,13 @@ impl OpenAiAdapter {
         }
     }
 
-    async fn get_json(&self, path: &str) -> Result<Value, OpenAiError> {
+    async fn get_json(
+        &self,
+        path: &str,
+        extensions: &RequestExtensions,
+    ) -> Result<Value, OpenAiError> {
         let url = format!("{}{}", self.base_url, path);
-        let headers = self.request_headers()?;
+        let headers = self.request_headers(extensions)?;
         let client = self.client.clone();
         #[cfg(target_family = "wasm")]
         return SendWrapper::new(async move {
@@ -596,7 +624,12 @@ impl TurnAdapter for OpenAiAdapter {
                 raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
             }
             let stream = self
-                .send_streaming_json("/chat/completions", &body, raw_chat.as_ref())
+                .send_streaming_json(
+                    "/chat/completions",
+                    &body,
+                    turn.extensions.as_ref(),
+                    raw_chat.as_ref(),
+                )
                 .await
                 .map_err(AgentError::from)?;
             return Ok(Box::pin(
@@ -611,7 +644,12 @@ impl TurnAdapter for OpenAiAdapter {
             raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
-            .send_streaming_json("/responses", &body, raw_responses.as_ref())
+            .send_streaming_json(
+                "/responses",
+                &body,
+                turn.extensions.as_ref(),
+                raw_responses.as_ref(),
+            )
             .await
             .map_err(AgentError::from)?;
         Ok(Box::pin(
@@ -676,7 +714,12 @@ impl TurnAdapter for OpenAiAdapter {
                 raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
             }
             let stream = self
-                .send_streaming_json("/chat/completions", &body, raw_chat.as_ref())
+                .send_streaming_json(
+                    "/chat/completions",
+                    &body,
+                    turn.extensions.as_ref(),
+                    raw_chat.as_ref(),
+                )
                 .await
                 .map_err(AgentError::from)?;
             return Ok(Box::pin(
@@ -706,7 +749,12 @@ impl TurnAdapter for OpenAiAdapter {
             raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
-            .send_streaming_json("/responses", &body, raw_responses.as_ref())
+            .send_streaming_json(
+                "/responses",
+                &body,
+                turn.extensions.as_ref(),
+                raw_responses.as_ref(),
+            )
             .await
             .map_err(AgentError::from)?;
         Ok(Box::pin(
@@ -739,7 +787,7 @@ impl CompletionAdapter for OpenAiAdapter {
             raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
-            .send_streaming_json("/completions", &body, raw.as_ref())
+            .send_streaming_json("/completions", &body, extensions, raw.as_ref())
             .await
             .map_err(AgentError::from)?;
         Ok(Box::pin(
@@ -764,7 +812,7 @@ impl CompletionAdapter for OpenAiAdapter {
             raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
-            .send_streaming_json("/responses", &body, raw.as_ref())
+            .send_streaming_json("/responses", &body, extensions, raw.as_ref())
             .await
             .map_err(AgentError::from)?;
         let stream = map_structured_stream(
@@ -916,7 +964,10 @@ impl UsageRecoveryAdapter for OpenAiAdapter {
             | OperationKind::StructuredTurn
             | OperationKind::StructuredCompletion => {
                 let value = self
-                    .get_json(&format!("/responses/{request_id}"))
+                    .get_json(
+                        &format!("/responses/{request_id}"),
+                        &RequestExtensions::new(),
+                    )
                     .await
                     .map_err(AgentError::from)?;
                 Ok(Some(parse_response_usage(&value)))
@@ -4967,5 +5018,43 @@ mod tests {
                 && *stage == ParseErrorStage::StructuredOutputParse
                 && payload == "{"
         )));
+    }
+
+    #[test]
+    fn headers_customizer_appends_without_touching_defaults() {
+        use reqwest::header::{HeaderName, HeaderValue};
+
+        let adapter = OpenAiAdapter::new("test-key").with_headers_customizer(
+            |_ext: &RequestExtensions, headers: &mut HeaderMap| {
+                headers.insert(
+                    HeaderName::from_static("openai-organization"),
+                    HeaderValue::from_static("org_abc"),
+                );
+            },
+        );
+
+        let headers = adapter
+            .request_headers(&RequestExtensions::new())
+            .expect("headers");
+
+        assert_eq!(headers.get("openai-organization").unwrap(), "org_abc");
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer test-key");
+    }
+
+    #[test]
+    fn headers_customizer_can_override_defaults() {
+        use reqwest::header::HeaderValue;
+
+        let adapter = OpenAiAdapter::new("test-key").with_headers_customizer(
+            |_ext: &RequestExtensions, headers: &mut HeaderMap| {
+                headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer override"));
+            },
+        );
+
+        let headers = adapter
+            .request_headers(&RequestExtensions::new())
+            .expect("headers");
+
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer override");
     }
 }

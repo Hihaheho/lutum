@@ -64,6 +64,19 @@ pub trait FallbackSerializer: Send + Sync {
     fn apply(&self, request: &mut MessagesRequest);
 }
 
+pub trait HeadersCustomizer: Send + Sync {
+    fn customize(&self, extensions: &RequestExtensions, headers: &mut HeaderMap);
+}
+
+impl<F> HeadersCustomizer for F
+where
+    F: Fn(&RequestExtensions, &mut HeaderMap) + Send + Sync,
+{
+    fn customize(&self, extensions: &RequestExtensions, headers: &mut HeaderMap) {
+        self(extensions, headers)
+    }
+}
+
 #[lutum_macros::hooks]
 pub trait ClaudeHooks {
     #[hook(singleton)]
@@ -183,6 +196,7 @@ pub struct ClaudeAdapter {
     hooks: ClaudeHooksSet<'static>,
     prompt_caching: bool,
     fallback_serializer: Option<Arc<dyn FallbackSerializer>>,
+    headers_customizer: Option<Arc<dyn HeadersCustomizer>>,
     usage_cache: UsageCache,
 }
 
@@ -257,6 +271,7 @@ impl ClaudeAdapter {
             hooks: ClaudeHooksSet::new(),
             prompt_caching: true,
             fallback_serializer: None,
+            headers_customizer: None,
             usage_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -307,6 +322,11 @@ impl ClaudeAdapter {
         self.fallback_serializer = Some(s.into());
     }
 
+    pub fn with_headers_customizer(mut self, customizer: impl HeadersCustomizer + 'static) -> Self {
+        self.headers_customizer = Some(Arc::new(customizer));
+        self
+    }
+
     /// Enable automatic explicit prompt caching.
     ///
     /// The adapter marks the last cacheable block before the first session
@@ -327,7 +347,7 @@ impl ClaudeAdapter {
         self.prompt_caching = enabled;
     }
 
-    fn request_headers(&self) -> Result<HeaderMap, ClaudeError> {
+    fn request_headers(&self, extensions: &RequestExtensions) -> Result<HeaderMap, ClaudeError> {
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("x-api-key"),
@@ -338,6 +358,9 @@ impl ClaudeAdapter {
             HeaderValue::from_static(ANTHROPIC_VERSION),
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        if let Some(customizer) = self.headers_customizer.as_ref() {
+            customizer.customize(extensions, &mut headers);
+        }
         Ok(headers)
     }
 
@@ -384,6 +407,7 @@ impl ClaudeAdapter {
         &self,
         path: &str,
         body: &T,
+        extensions: &RequestExtensions,
         raw: Option<&RawTelemetryEmitter>,
     ) -> Result<ByteStream, ClaudeError>
     where
@@ -392,7 +416,7 @@ impl ClaudeAdapter {
         let response = match self
             .client
             .post(format!("{}{}", self.base_url, path))
-            .headers(self.request_headers()?)
+            .headers(self.request_headers(extensions)?)
             .json(body)
             .send()
             .await
@@ -452,7 +476,12 @@ impl TurnAdapter for ClaudeAdapter {
             raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
-            .send_streaming_json("/v1/messages", &body, raw.as_ref())
+            .send_streaming_json(
+                "/v1/messages",
+                &body,
+                turn.extensions.as_ref(),
+                raw.as_ref(),
+            )
             .await
             .map_err(AgentError::from)?;
         Ok(Box::pin(
@@ -499,7 +528,12 @@ impl TurnAdapter for ClaudeAdapter {
             raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
         }
         let stream = self
-            .send_streaming_json("/v1/messages", &body, raw.as_ref())
+            .send_streaming_json(
+                "/v1/messages",
+                &body,
+                turn.extensions.as_ref(),
+                raw.as_ref(),
+            )
             .await
             .map_err(AgentError::from)?;
         Ok(Box::pin(
@@ -1388,6 +1422,7 @@ where
                     }
                     SseEvent::MessageStop(_) => {
                         let finish_reason = map_claude_stop_reason(stop_reason.as_deref());
+                        let finish_reason = override_finish_reason_for_tool_use(finish_reason, &blocks);
                         let final_usage = Usage {
                             cache_creation_tokens,
                             cache_read_tokens,
@@ -1596,6 +1631,7 @@ where
                         }
 
                         let finish_reason = map_claude_stop_reason(stop_reason.as_deref());
+                        let finish_reason = override_finish_reason_for_tool_use(finish_reason, &blocks);
                         let final_usage = Usage {
                             cache_creation_tokens,
                             cache_read_tokens,
@@ -1793,6 +1829,26 @@ fn map_claude_stop_reason(reason: Option<&str>) -> FinishReason {
         Some("tool_use") => FinishReason::ToolCall,
         Some("refusal") => FinishReason::ContentFilter,
         Some(other) => FinishReason::Unknown(other.to_string()),
+    }
+}
+
+// Some Anthropic-Messages compatible providers (notably OpenRouter wrapping
+// non-Anthropic models) emit a `tool_use` content block but report
+// `stop_reason: "end_turn"` — violating the Anthropic contract that tool-call
+// turns must report `tool_use`. Promote the finish reason to `ToolCall` so the
+// reducer surfaces a `NeedsTools` outcome instead of a finished text turn.
+fn override_finish_reason_for_tool_use(
+    finish_reason: FinishReason,
+    blocks: &BTreeMap<usize, ContentBlockState>,
+) -> FinishReason {
+    if matches!(finish_reason, FinishReason::Stop)
+        && blocks
+            .values()
+            .any(|b| matches!(b, ContentBlockState::ToolUse { .. }))
+    {
+        FinishReason::ToolCall
+    } else {
+        finish_reason
     }
 }
 
@@ -2499,5 +2555,32 @@ mod tests {
                 && *stage == ParseErrorStage::StructuredOutputParse
                 && payload == "{"
         )));
+    }
+
+    #[test]
+    fn headers_customizer_appends_and_can_override_defaults() {
+        let adapter = ClaudeAdapter::new("test-key").with_headers_customizer(
+            |_ext: &RequestExtensions, headers: &mut HeaderMap| {
+                headers.insert(
+                    HeaderName::from_static("anthropic-beta"),
+                    HeaderValue::from_static("prompt-caching-2024-07-31"),
+                );
+                headers.insert(
+                    HeaderName::from_static("x-api-key"),
+                    HeaderValue::from_static("override-key"),
+                );
+            },
+        );
+
+        let headers = adapter
+            .request_headers(&RequestExtensions::new())
+            .expect("headers");
+
+        assert_eq!(
+            headers.get("anthropic-beta").unwrap(),
+            "prompt-caching-2024-07-31"
+        );
+        assert_eq!(headers.get("x-api-key").unwrap(), "override-key");
+        assert_eq!(headers.get("anthropic-version").unwrap(), ANTHROPIC_VERSION);
     }
 }
