@@ -65,7 +65,7 @@ async fn session_ephemeral_marks_stable_openai_chat_message_in_wire_request() {
         serde_json::json!({ "type": "ephemeral" })
     );
     assert!(
-        messages[1].to_string().find("cache_control").is_none(),
+        !messages[1].to_string().contains("cache_control"),
         "ephemeral message itself must not be cache-marked"
     );
 }

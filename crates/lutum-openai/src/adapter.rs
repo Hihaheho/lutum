@@ -3367,7 +3367,7 @@ where
             });
         }
 
-        let finish_reason = stream_finish_reason.unwrap_or_else(|| if saw_tool_call {
+        let finish_reason = stream_finish_reason.unwrap_or(if saw_tool_call {
             FinishReason::ToolCall
         } else if saw_refusal {
             FinishReason::ContentFilter
@@ -3496,7 +3496,7 @@ where
         }
 
         if started {
-            let finish_reason = stream_finish_reason.unwrap_or_else(|| if saw_refusal {
+            let finish_reason = stream_finish_reason.unwrap_or(if saw_refusal {
                 FinishReason::ContentFilter
             } else {
                 FinishReason::Stop
@@ -3549,7 +3549,6 @@ fn parse_chat_usage(usage: &crate::chat::CompletionUsage) -> Usage {
         cache_read_tokens: prompt_tokens_details
             .and_then(|details| details.cached_tokens)
             .unwrap_or_default(),
-        ..Usage::zero()
     }
 }
 
@@ -3935,7 +3934,7 @@ mod tests {
 
         let typed_json = serde_json::to_value(&prepared.body).unwrap();
         assert!(
-            typed_json.to_string().find("cache_control").is_none(),
+            !typed_json.to_string().contains("cache_control"),
             "typed ChatCompletionRequest should remain cache-control free"
         );
     }

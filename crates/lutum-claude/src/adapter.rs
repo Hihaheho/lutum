@@ -364,6 +364,7 @@ impl ClaudeAdapter {
         Ok(headers)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_messages_request(
         &self,
         input: &ModelInput,
