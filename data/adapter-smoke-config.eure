@@ -31,8 +31,8 @@ api_key_env = "OPENAI_API_KEY"
 model = "gpt-5.4-nano"
 cases = ["text", "structured", "tool", "reasoning_request"]
 text_max_output_tokens = 64
-input_price_per_million = 0.05
-output_price_per_million = 0.4
+input_price_per_million = 0.20
+output_price_per_million = 1.25
 
 @ endpoints.openai_responses_gpt54_nano
 adapter = "openai-responses"
@@ -41,8 +41,8 @@ api_key_env = "OPENAI_API_KEY"
 model = "gpt-5.4-nano"
 cases = ["text", "structured", "tool", "structured_completion", "reasoning_request", "thinking_roundtrip"]
 text_max_output_tokens = 16
-input_price_per_million = 0.05
-output_price_per_million = 0.4
+input_price_per_million = 0.20
+output_price_per_million = 1.25
 
 @ endpoints.openrouter_messages_haiku45
 adapter = "claude-messages"
@@ -67,8 +67,8 @@ text_max_output_tokens = 16
 expects_visible_thinking = true
 openrouter_usage_recovery = true
 recovery_base_url = "https://openrouter.ai/api/v1"
-input_price_per_million = 0.05
-output_price_per_million = 0.4
+input_price_per_million = 0.20
+output_price_per_million = 1.25
 
 @ endpoints.openrouter_messages_gemma4_26b
 adapter = "claude-messages"
@@ -81,8 +81,8 @@ structured_max_output_tokens = 256
 expects_visible_thinking = true
 openrouter_usage_recovery = true
 recovery_base_url = "https://openrouter.ai/api/v1"
-input_price_per_million = 0.08
-output_price_per_million = 0.35
+input_price_per_million = 0.06
+output_price_per_million = 0.33
 
 @ endpoints.openrouter_responses_haiku45
 adapter = "openai-responses"
@@ -105,8 +105,8 @@ cases = ["text", "structured", "tool", "thinking_roundtrip"]
 text_max_output_tokens = 16
 expects_visible_thinking = true
 openrouter_usage_recovery = true
-input_price_per_million = 0.05
-output_price_per_million = 0.4
+input_price_per_million = 0.20
+output_price_per_million = 1.25
 
 @ endpoints.openrouter_responses_gemma4_26b
 adapter = "openai-responses"
@@ -118,8 +118,8 @@ text_max_output_tokens = 64
 structured_max_output_tokens = 256
 expects_visible_thinking = true
 openrouter_usage_recovery = true
-input_price_per_million = 0.08
-output_price_per_million = 0.35
+input_price_per_million = 0.06
+output_price_per_million = 0.33
 
 @ endpoints.openrouter_messages_fallback
 adapter = "claude-messages"
