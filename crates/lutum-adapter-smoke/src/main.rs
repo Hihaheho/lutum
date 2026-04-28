@@ -1034,7 +1034,19 @@ fn ensure_ok(text: &str, label: &str) -> Result<()> {
 
 fn normalize_ok(text: &str) -> bool {
     let trimmed = text.trim().trim_matches('"').trim();
-    trimmed == "OK" || trimmed.starts_with("OK\n") || trimmed.starts_with("OK.")
+    if trimmed == "OK" || trimmed.starts_with("OK\n") || trimmed.starts_with("OK.") {
+        return true;
+    }
+    // Some reasoning models (e.g. Gemma via OpenRouter Responses) leak
+    // chain-of-thought into the final message channel. Accept payloads
+    // whose last non-empty line is the answer.
+    if let Some(last) = trimmed.lines().rev().find(|line| !line.trim().is_empty()) {
+        let last = last.trim();
+        if last == "OK" || last.starts_with("OK.") {
+            return true;
+        }
+    }
+    false
 }
 
 fn resolve_raw_dump_path(override_path: Option<&Path>) -> Result<PathBuf> {
