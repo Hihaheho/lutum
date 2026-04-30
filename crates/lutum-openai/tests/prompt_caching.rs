@@ -1,9 +1,20 @@
 use std::sync::Arc;
 
 use lutum::{Lutum, RawTelemetryConfig, Session, SharedPoolBudgetManager, SharedPoolBudgetOptions};
-use lutum_openai::OpenAiAdapter;
+use lutum_openai::{HttpClient, HttpError, HttpRequest, HttpResponse, OpenAiAdapter};
 use lutum_trace::RawTraceEntry;
 use serde_json::Value;
+
+#[derive(Clone)]
+struct FailingHttpClient;
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+impl HttpClient for FailingHttpClient {
+    async fn send(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        Err(HttpError::message("test client stops before network"))
+    }
+}
 
 fn test_budget() -> SharedPoolBudgetManager {
     SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default())
@@ -40,8 +51,7 @@ fn raw_request_body(entries: &[RawTraceEntry]) -> Value {
 
 #[tokio::test]
 async fn session_ephemeral_marks_stable_openai_chat_message_in_wire_request() {
-    let adapter = OpenAiAdapter::new("test-key")
-        .with_base_url("http://127.0.0.1:9")
+    let adapter = OpenAiAdapter::new_with_http_client("test-key", FailingHttpClient)
         .with_chat_completions()
         .with_claude_prompt_caching();
     let ctx =

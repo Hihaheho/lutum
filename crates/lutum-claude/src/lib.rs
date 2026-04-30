@@ -3,6 +3,7 @@ pub mod error;
 pub mod messages;
 pub mod persistence;
 pub mod sse;
+pub mod transport;
 
 pub use adapter::{
     ClaudeAdapter, ClaudeHooks, ClaudeHooksSet, FallbackSerializer, HeadersCustomizer,
@@ -18,3 +19,6 @@ pub use messages::{
     ThinkingBlock, ThinkingConfig, ThinkingKind, ToolResultBlock, ToolUseBlock,
 };
 pub use persistence::{SessionPersistenceError, load_session, save_session};
+#[cfg(feature = "reqwest")]
+pub use transport::ReqwestHttpClient;
+pub use transport::{HttpByteStream, HttpClient, HttpError, HttpRequest, HttpResponse};

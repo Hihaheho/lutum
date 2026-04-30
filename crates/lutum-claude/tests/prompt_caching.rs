@@ -1,9 +1,20 @@
 use std::sync::Arc;
 
 use lutum::{Lutum, RawTelemetryConfig, Session, SharedPoolBudgetManager, SharedPoolBudgetOptions};
-use lutum_claude::ClaudeAdapter;
+use lutum_claude::{ClaudeAdapter, HttpClient, HttpError, HttpRequest, HttpResponse};
 use lutum_trace::RawTraceEntry;
 use serde_json::Value;
+
+#[derive(Clone)]
+struct FailingHttpClient;
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+impl HttpClient for FailingHttpClient {
+    async fn send(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        Err(HttpError::message("test client stops before network"))
+    }
+}
 
 fn test_budget() -> SharedPoolBudgetManager {
     SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default())
@@ -40,7 +51,7 @@ fn raw_request_body(entries: &[RawTraceEntry]) -> Value {
 
 #[tokio::test]
 async fn session_ephemeral_marks_stable_claude_block_in_wire_request() {
-    let adapter = ClaudeAdapter::new("test-key").with_base_url("http://127.0.0.1:9");
+    let adapter = ClaudeAdapter::new_with_http_client("test-key", FailingHttpClient);
     let ctx =
         Lutum::new(Arc::new(adapter), test_budget()).with_extension(request_only_raw_telemetry());
     let mut session = Session::new(ctx);

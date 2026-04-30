@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
     env,
-    pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -9,6 +8,10 @@ use std::{
 use async_stream::try_stream;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use http::{
+    HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
+    header::{CONTENT_TYPE, RETRY_AFTER},
+};
 use lutum_protocol::{
     AgentError,
     budget::Usage,
@@ -26,10 +29,6 @@ use lutum_protocol::{
     telemetry::{ParseErrorStage, RawTelemetryEmitter, RequestErrorDebugInfo, RequestErrorKind},
     transcript::{ToolResultItemView, TurnRole, TurnView},
 };
-use reqwest::{
-    Client,
-    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER},
-};
 use serde::Serialize;
 use serde_json::Value;
 use tracing::trace;
@@ -44,6 +43,7 @@ use crate::{
         TextBlock, ThinkingBlock, ThinkingConfig, ThinkingKind, ToolResultBlock, ToolUseBlock,
     },
     sse::ClaudeSseParser,
+    transport::{HttpByteStream, HttpClient, HttpError, HttpRequest},
 };
 
 const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
@@ -53,11 +53,6 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 const MIN_THINKING_BUDGET_TOKENS: u32 = 1024;
 const MIN_RESPONSE_TOKENS_WITH_THINKING: u32 = 1024;
 
-#[cfg(not(target_family = "wasm"))]
-type ByteStream =
-    Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync + 'static>>;
-#[cfg(target_family = "wasm")]
-type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + 'static>>;
 type UsageCache = Arc<Mutex<HashMap<String, Usage>>>;
 
 pub trait FallbackSerializer: Send + Sync {
@@ -113,7 +108,7 @@ fn emit_claude_request_error(
     raw: Option<&RawTelemetryEmitter>,
     request_id: Option<&str>,
     request_error_kind: RequestErrorKind,
-    status: Option<reqwest::StatusCode>,
+    status: Option<StatusCode>,
     payload: Option<&str>,
     error: &str,
     debug_info: &RequestErrorDebugInfo,
@@ -127,28 +122,6 @@ fn emit_claude_request_error(
             error,
             debug_info,
         );
-    }
-}
-
-fn reqwest_request_error_debug_info(error: &reqwest::Error) -> RequestErrorDebugInfo {
-    let mut source_chain = Vec::new();
-    let mut current = std::error::Error::source(error);
-    while let Some(source) = current {
-        source_chain.push(source.to_string());
-        current = source.source();
-    }
-
-    RequestErrorDebugInfo {
-        error_debug: format!("{error:?}"),
-        source_chain,
-        is_timeout: error.is_timeout(),
-        #[cfg(not(target_family = "wasm"))]
-        is_connect: error.is_connect(),
-        #[cfg(target_family = "wasm")]
-        is_connect: false,
-        is_request: error.is_request(),
-        is_body: error.is_body(),
-        is_decode: error.is_decode(),
     }
 }
 
@@ -170,9 +143,9 @@ fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
 fn emit_claude_stream_error(
     raw: Option<&RawTelemetryEmitter>,
     request_id: Option<&str>,
-    source: reqwest::Error,
+    source: HttpError,
 ) -> ClaudeError {
-    let debug_info = reqwest_request_error_debug_info(&source);
+    let debug_info = source.debug_info().clone();
     let error = ClaudeError::Request(source);
     emit_claude_request_error(
         raw,
@@ -188,7 +161,7 @@ fn emit_claude_stream_error(
 
 #[derive(Clone)]
 pub struct ClaudeAdapter {
-    client: Arc<Client>,
+    client: Arc<dyn HttpClient>,
     api_key: Arc<str>,
     base_url: Arc<str>,
     default_model: ModelName,
@@ -256,14 +229,30 @@ enum ContentBlockState {
 }
 
 impl ClaudeAdapter {
+    #[cfg(feature = "reqwest")]
     pub fn from_env() -> Result<Self, ClaudeError> {
         let api_key = env::var(ANTHROPIC_API_KEY_ENV).map_err(ClaudeError::MissingApiKey)?;
         Ok(Self::new(api_key))
     }
 
+    pub fn from_env_with_http_client(
+        client: impl HttpClient + 'static,
+    ) -> Result<Self, ClaudeError> {
+        let api_key = env::var(ANTHROPIC_API_KEY_ENV).map_err(ClaudeError::MissingApiKey)?;
+        Ok(Self::new_with_http_client(api_key, client))
+    }
+
+    #[cfg(feature = "reqwest")]
     pub fn new(api_key: impl Into<String>) -> Self {
+        Self::new_with_http_client(api_key, crate::transport::ReqwestHttpClient::new())
+    }
+
+    pub fn new_with_http_client(
+        api_key: impl Into<String>,
+        client: impl HttpClient + 'static,
+    ) -> Self {
         Self {
-            client: Arc::new(Client::new()),
+            client: Arc::new(client),
             api_key: Arc::from(api_key.into()),
             base_url: normalize_base_url(DEFAULT_BASE_URL),
             default_model: ModelName::new("claude-opus-4-5").unwrap(),
@@ -410,21 +399,23 @@ impl ClaudeAdapter {
         body: &T,
         extensions: &RequestExtensions,
         raw: Option<&RawTelemetryEmitter>,
-    ) -> Result<ByteStream, ClaudeError>
+    ) -> Result<HttpByteStream, ClaudeError>
     where
         T: Serialize + ?Sized,
     {
         let response = match self
             .client
-            .post(format!("{}{}", self.base_url, path))
-            .headers(self.request_headers(extensions)?)
-            .json(body)
-            .send()
+            .send(HttpRequest {
+                method: Method::POST,
+                url: format!("{}{}", self.base_url, path),
+                headers: self.request_headers(extensions)?,
+                body: Some(serde_json::to_vec(body).map_err(ClaudeError::Json)?),
+            })
             .await
         {
             Ok(response) => response,
             Err(source) => {
-                let debug_info = reqwest_request_error_debug_info(&source);
+                let debug_info = source.debug_info().clone();
                 let error = ClaudeError::Request(source);
                 emit_claude_request_error(
                     raw,
@@ -439,7 +430,7 @@ impl ClaudeAdapter {
             }
         };
         let response = error_for_status_with_body(raw, response).await?;
-        Ok(Box::pin(response.bytes_stream()))
+        Ok(response.body)
     }
 }
 
@@ -1279,7 +1270,7 @@ fn map_text_stream<S>(
     raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<ErasedTextTurnEvent, ClaudeError>> + lutum_protocol::MaybeSend + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
+    S: Stream<Item = Result<Bytes, HttpError>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = ClaudeSseParser::default();
@@ -1465,7 +1456,7 @@ fn map_structured_stream<S>(
 + lutum_protocol::MaybeSend
 + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
+    S: Stream<Item = Result<Bytes, HttpError>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = ClaudeSseParser::default();
@@ -1729,15 +1720,16 @@ fn normalize_base_url(url: impl Into<String>) -> Arc<str> {
 
 async fn error_for_status_with_body(
     raw: Option<&RawTelemetryEmitter>,
-    response: reqwest::Response,
-) -> Result<reqwest::Response, ClaudeError> {
-    let status = response.status();
+    response: crate::transport::HttpResponse,
+) -> Result<crate::transport::HttpResponse, ClaudeError> {
+    let status = response.status;
     if status.is_success() {
         return Ok(response);
     }
 
-    let retry_after = retry_after_from_headers(response.headers());
-    let body = response.text().await?;
+    let retry_after = retry_after_from_headers(&response.headers);
+    let body = collect_response_body(response).await?;
+    let body = String::from_utf8_lossy(&body).into_owned();
     let message = serde_json::from_str::<Value>(&body)
         .ok()
         .and_then(|value| {
@@ -1763,6 +1755,16 @@ async fn error_for_status_with_body(
         &basic_request_error_debug_info(&error),
     );
     Err(error)
+}
+
+async fn collect_response_body(
+    mut response: crate::transport::HttpResponse,
+) -> Result<Vec<u8>, ClaudeError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.body.next().await {
+        body.extend_from_slice(&chunk?);
+    }
+    Ok(body)
 }
 
 fn parse_sse_event(event: &Option<String>, data: &str) -> Result<SseEvent, ClaudeError> {
@@ -1878,6 +1880,8 @@ fn require_no_additional_properties(schema: &mut serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use futures::{StreamExt, executor::block_on};
 
     use lutum_protocol::{
@@ -1889,6 +1893,69 @@ mod tests {
     use lutum_trace::RawTraceEntry;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct CapturedHttpRequest {
+        method: Method,
+        url: String,
+        headers: HeaderMap,
+        body: Option<Vec<u8>>,
+    }
+
+    #[derive(Clone)]
+    struct FakeHttpClient {
+        captured: Arc<Mutex<Vec<CapturedHttpRequest>>>,
+        response: Arc<Mutex<Option<Result<crate::transport::HttpResponse, HttpError>>>>,
+    }
+
+    impl FakeHttpClient {
+        fn new(response: crate::transport::HttpResponse) -> Self {
+            Self {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: Arc::new(Mutex::new(Some(Ok(response)))),
+            }
+        }
+
+        fn captured(&self) -> Vec<CapturedHttpRequest> {
+            std::mem::take(&mut *self.captured.lock().unwrap())
+        }
+    }
+
+    #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+    impl HttpClient for FakeHttpClient {
+        async fn send(
+            &self,
+            request: HttpRequest,
+        ) -> Result<crate::transport::HttpResponse, HttpError> {
+            self.captured.lock().unwrap().push(CapturedHttpRequest {
+                method: request.method,
+                url: request.url,
+                headers: request.headers,
+                body: request.body,
+            });
+            self.response.lock().unwrap().take().expect("fake response")
+        }
+    }
+
+    fn fake_response(
+        status: StatusCode,
+        headers: HeaderMap,
+        chunks: Vec<Result<Bytes, HttpError>>,
+    ) -> crate::transport::HttpResponse {
+        crate::transport::HttpResponse {
+            status,
+            headers,
+            body: Box::pin(futures::stream::iter(chunks)),
+        }
+    }
+
+    fn test_claude_adapter(api_key: &str) -> ClaudeAdapter {
+        ClaudeAdapter::new_with_http_client(
+            api_key,
+            FakeHttpClient::new(fake_response(StatusCode::OK, HeaderMap::new(), Vec::new())),
+        )
+    }
 
     #[lutum_macros::impl_hook(SelectClaudeModel)]
     async fn prefer_claude_sonnet(
@@ -1912,9 +1979,158 @@ mod tests {
         extensions
     }
 
+    #[tokio::test]
+    async fn injected_http_client_receives_json_request_headers_and_streams_response() {
+        let fake = FakeHttpClient::new(fake_response(
+            StatusCode::OK,
+            HeaderMap::new(),
+            vec![Ok(Bytes::from_static(
+                b"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+            ))],
+        ));
+        let adapter = ClaudeAdapter::new_with_http_client("test-key", fake.clone());
+
+        let stream = adapter
+            .send_streaming_json(
+                "/v1/messages",
+                &serde_json::json!({"stream": true}),
+                &RequestExtensions::new(),
+                None,
+            )
+            .await
+            .expect("stream");
+        let chunks = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("chunks");
+        assert_eq!(
+            chunks,
+            vec![Bytes::from_static(
+                b"event: ping\ndata: {\"type\":\"ping\"}\n\n"
+            )]
+        );
+
+        let captured = fake.captured();
+        assert_eq!(captured.len(), 1);
+        let request = &captured[0];
+        assert_eq!(request.method, Method::POST);
+        assert_eq!(request.url, "https://api.anthropic.com/v1/messages");
+        assert_eq!(request.headers.get("x-api-key").unwrap(), "test-key");
+        assert_eq!(
+            request.headers.get("anthropic-version").unwrap(),
+            ANTHROPIC_VERSION
+        );
+        assert_eq!(
+            request.headers.get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let body = serde_json::from_slice::<Value>(request.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"stream": true}));
+    }
+
+    #[tokio::test]
+    async fn injected_http_client_status_error_preserves_retry_after() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("5"));
+        let fake = FakeHttpClient::new(fake_response(
+            StatusCode::BAD_GATEWAY,
+            headers,
+            vec![Ok(Bytes::from_static(
+                br#"{"error":{"message":"upstream overloaded"}}"#,
+            ))],
+        ));
+        let adapter = ClaudeAdapter::new_with_http_client("test-key", fake);
+
+        let error = match adapter
+            .send_streaming_json(
+                "/v1/messages",
+                &serde_json::json!({}),
+                &RequestExtensions::new(),
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("expected status error"),
+            Err(error) => error,
+        };
+
+        match error {
+            ClaudeError::HttpStatus {
+                status,
+                message,
+                retry_after,
+            } => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+                assert_eq!(message, "upstream overloaded");
+                assert_eq!(retry_after, Some(Duration::from_secs(5)));
+            }
+            other => panic!("expected status error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_http_client_stream_body_error_emits_raw_telemetry() {
+        let debug_info = RequestErrorDebugInfo {
+            error_debug: "native stream body error".into(),
+            is_body: true,
+            ..RequestErrorDebugInfo::default()
+        };
+        let fake = FakeHttpClient::new(fake_response(
+            StatusCode::OK,
+            HeaderMap::new(),
+            vec![
+                Ok(Bytes::from_static(
+                    b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_body_error\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                )),
+                Err(HttpError::message("broken stream").with_debug_info(debug_info)),
+            ],
+        ));
+        let adapter = ClaudeAdapter::new_with_http_client("test-key", fake);
+
+        let collected = lutum_trace::test::collect_raw(async move {
+            let extensions = raw_extensions();
+            let raw = RawTelemetryEmitter::new(&extensions, "claude", "messages", "text_turn");
+            let stream = adapter
+                .send_streaming_json(
+                    "/v1/messages",
+                    &serde_json::json!({}),
+                    &extensions,
+                    raw.as_ref(),
+                )
+                .await
+                .expect("stream");
+            let events = map_text_stream(
+                stream,
+                "claude-sonnet".into(),
+                Arc::new(Mutex::new(std::collections::HashMap::new())),
+                raw,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            assert!(events.into_iter().any(|event| event.is_err()));
+        })
+        .await;
+
+        assert!(collected.raw.entries.iter().any(|entry| matches!(
+            entry,
+            RawTraceEntry::RequestError {
+                request_id,
+                kind,
+                error_debug,
+                is_body,
+                ..
+            } if request_id.as_deref() == Some("msg_body_error")
+                && *kind == RequestErrorKind::Transport
+                && error_debug.contains("native stream body error")
+                && *is_body
+        )));
+    }
+
     #[test]
     fn prepare_messages_request_uses_explicit_model() {
-        let adapter = ClaudeAdapter::new("test-key");
+        let adapter = test_claude_adapter("test-key");
 
         let input = ModelInput::from_items(vec![ModelInputItem::text(
             lutum_protocol::InputMessageRole::User,
@@ -2033,7 +2249,7 @@ mod tests {
             }
         }
 
-        let mut adapter = ClaudeAdapter::new("test-key");
+        let mut adapter = test_claude_adapter("test-key");
         adapter.set_fallback_serializer(Box::new(TaggingSerializer));
 
         let input = ModelInput::from_items(vec![ModelInputItem::text(
@@ -2064,7 +2280,7 @@ mod tests {
 
     #[test]
     fn prompt_caching_defaults_to_last_cacheable_block_without_ephemerals() {
-        let adapter = ClaudeAdapter::new("test-key");
+        let adapter = test_claude_adapter("test-key");
         let input =
             ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
         let config = AdapterTurnConfig {
@@ -2093,7 +2309,7 @@ mod tests {
 
     #[test]
     fn prompt_caching_marks_block_before_first_ephemeral_item() {
-        let adapter = ClaudeAdapter::new("test-key");
+        let adapter = test_claude_adapter("test-key");
         let input = ModelInput::from_items(vec![
             ModelInputItem::text(InputMessageRole::User, "stable"),
             ModelInputItem::text(InputMessageRole::User, "dynamic"),
@@ -2130,7 +2346,7 @@ mod tests {
 
     #[test]
     fn prompt_caching_omits_breakpoint_when_first_wire_block_is_ephemeral() {
-        let adapter = ClaudeAdapter::new("test-key");
+        let adapter = test_claude_adapter("test-key");
         let input = ModelInput::from_items(vec![ModelInputItem::text(
             InputMessageRole::User,
             "dynamic",
@@ -2163,7 +2379,7 @@ mod tests {
 
     #[test]
     fn prompt_caching_can_mark_tool_before_ephemeral_message() {
-        let adapter = ClaudeAdapter::new("test-key");
+        let adapter = test_claude_adapter("test-key");
         let input = ModelInput::from_items(vec![ModelInputItem::text(
             InputMessageRole::User,
             "dynamic",
@@ -2204,7 +2420,7 @@ mod tests {
 
     #[test]
     fn prompt_caching_can_be_disabled() {
-        let adapter = ClaudeAdapter::new("test-key").without_prompt_caching();
+        let adapter = test_claude_adapter("test-key").without_prompt_caching();
         let input =
             ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
         let config = AdapterTurnConfig {
@@ -2247,7 +2463,7 @@ mod tests {
 
     #[test]
     fn recover_usage_returns_last_seen_usage_for_interrupted_stream() {
-        let adapter = ClaudeAdapter::new("test-key");
+        let adapter = test_claude_adapter("test-key");
         let payloads = vec![
             Ok(Bytes::from(
                 "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_interrupted\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
@@ -2299,7 +2515,7 @@ mod tests {
 
     #[test]
     fn completed_stream_removes_cached_usage() {
-        let adapter = ClaudeAdapter::new("test-key");
+        let adapter = test_claude_adapter("test-key");
         let payloads = vec![
             Ok(Bytes::from(
                 "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_done\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
@@ -2348,7 +2564,7 @@ mod tests {
 
     #[tokio::test]
     async fn raw_trace_captures_request_and_frame_payloads() {
-        let adapter = ClaudeAdapter::new("test-key");
+        let adapter = test_claude_adapter("test-key");
         let input = ModelInput::from_items(vec![ModelInputItem::text(
             lutum_protocol::InputMessageRole::User,
             "hello",
@@ -2419,7 +2635,7 @@ mod tests {
             let extensions = raw_extensions();
             let raw = RawTelemetryEmitter::new(&extensions, "claude", "messages", "text_turn");
             let error = ClaudeError::HttpStatus {
-                status: reqwest::StatusCode::BAD_GATEWAY,
+                status: StatusCode::BAD_GATEWAY,
                 message: "upstream overloaded".into(),
                 retry_after: None,
             };
@@ -2427,7 +2643,7 @@ mod tests {
                 raw.as_ref(),
                 None,
                 RequestErrorKind::HttpStatus,
-                Some(reqwest::StatusCode::BAD_GATEWAY),
+                Some(StatusCode::BAD_GATEWAY),
                 Some("{\"error\":{\"message\":\"upstream overloaded\"}}"),
                 &error.to_string(),
                 &RequestErrorDebugInfo {
@@ -2463,7 +2679,7 @@ mod tests {
                 && operation == "text_turn"
                 && request_id.is_none()
                 && *kind == RequestErrorKind::HttpStatus
-                && *status == Some(reqwest::StatusCode::BAD_GATEWAY.as_u16())
+                && *status == Some(StatusCode::BAD_GATEWAY.as_u16())
                 && payload.as_deref() == Some("{\"error\":{\"message\":\"upstream overloaded\"}}")
                 && error.contains("request failed with status")
                 && error_debug.contains("HttpStatus")
@@ -2560,7 +2776,7 @@ mod tests {
 
     #[test]
     fn headers_customizer_appends_and_can_override_defaults() {
-        let adapter = ClaudeAdapter::new("test-key").with_headers_customizer(
+        let adapter = test_claude_adapter("test-key").with_headers_customizer(
             |_ext: &RequestExtensions, headers: &mut HeaderMap| {
                 headers.insert(
                     HeaderName::from_static("anthropic-beta"),

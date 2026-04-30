@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
-    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -9,8 +8,10 @@ use std::{
 use async_stream::try_stream;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-#[cfg(target_family = "wasm")]
-use lutum_protocol::SendWrapper;
+use http::{
+    HeaderMap, HeaderValue, Method, StatusCode,
+    header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER},
+};
 use lutum_protocol::{
     AgentError, FinishReason,
     budget::Usage,
@@ -29,10 +30,6 @@ use lutum_protocol::{
     },
     telemetry::{ParseErrorStage, RawTelemetryEmitter, RequestErrorDebugInfo, RequestErrorKind},
     transcript::{TurnRole, TurnView},
-};
-use reqwest::{
-    Client,
-    header::{AUTHORIZATION, HeaderMap, HeaderValue, RETRY_AFTER},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,6 +53,7 @@ use crate::{
         ResponseOutputItem, SseEvent, SummaryText, TextFormat, ToolChoice,
     },
     sse::SseParser,
+    transport::{HttpByteStream, HttpClient, HttpError, HttpRequest},
 };
 
 pub trait FallbackSerializer: Send + Sync {
@@ -125,7 +123,7 @@ fn emit_openai_request_error(
     raw: Option<&RawTelemetryEmitter>,
     request_id: Option<&str>,
     request_error_kind: RequestErrorKind,
-    status: Option<reqwest::StatusCode>,
+    status: Option<StatusCode>,
     payload: Option<&str>,
     error: &str,
     debug_info: &RequestErrorDebugInfo,
@@ -139,28 +137,6 @@ fn emit_openai_request_error(
             error,
             debug_info,
         );
-    }
-}
-
-fn reqwest_request_error_debug_info(error: &reqwest::Error) -> RequestErrorDebugInfo {
-    let mut source_chain = Vec::new();
-    let mut current = std::error::Error::source(error);
-    while let Some(source) = current {
-        source_chain.push(source.to_string());
-        current = source.source();
-    }
-
-    RequestErrorDebugInfo {
-        error_debug: format!("{error:?}"),
-        source_chain,
-        is_timeout: error.is_timeout(),
-        #[cfg(not(target_family = "wasm"))]
-        is_connect: error.is_connect(),
-        #[cfg(target_family = "wasm")]
-        is_connect: false,
-        is_request: error.is_request(),
-        is_body: error.is_body(),
-        is_decode: error.is_decode(),
     }
 }
 
@@ -182,9 +158,9 @@ fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
 fn emit_openai_stream_error(
     raw: Option<&RawTelemetryEmitter>,
     request_id: Option<&str>,
-    source: reqwest::Error,
+    source: HttpError,
 ) -> OpenAiError {
-    let debug_info = reqwest_request_error_debug_info(&source);
+    let debug_info = source.debug_info().clone();
     let error = OpenAiError::Request(source);
     emit_openai_request_error(
         raw,
@@ -227,7 +203,7 @@ pub trait SseEventRecoveryHook: Send + Sync {
 
 #[derive(Clone)]
 pub struct OpenAiAdapter {
-    client: Arc<Client>,
+    client: Arc<dyn HttpClient>,
     api_key: Arc<str>,
     base_url: Arc<str>,
     default_model: ModelName,
@@ -270,21 +246,31 @@ struct ChatCacheMap {
     candidates: Vec<ChatCacheCandidate>,
 }
 
-#[cfg(not(target_family = "wasm"))]
-type ByteStream =
-    Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync + 'static>>;
-#[cfg(target_family = "wasm")]
-type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + 'static>>;
-
 impl OpenAiAdapter {
+    #[cfg(feature = "reqwest")]
     pub fn from_env() -> Result<Self, OpenAiError> {
         let api_key = env::var("OPENAI_API_KEY").map_err(OpenAiError::MissingApiKey)?;
         Ok(Self::new(api_key))
     }
 
+    pub fn from_env_with_http_client(
+        client: impl HttpClient + 'static,
+    ) -> Result<Self, OpenAiError> {
+        let api_key = env::var("OPENAI_API_KEY").map_err(OpenAiError::MissingApiKey)?;
+        Ok(Self::new_with_http_client(api_key, client))
+    }
+
+    #[cfg(feature = "reqwest")]
     pub fn new(api_key: impl Into<String>) -> Self {
+        Self::new_with_http_client(api_key, crate::transport::ReqwestHttpClient::new())
+    }
+
+    pub fn new_with_http_client(
+        api_key: impl Into<String>,
+        client: impl HttpClient + 'static,
+    ) -> Self {
         Self {
-            client: Arc::new(Client::new()),
+            client: Arc::new(client),
             api_key: Arc::from(api_key.into()),
             base_url: Arc::from("https://api.openai.com/v1"),
             default_model: ModelName::new("gpt-4.1").unwrap(),
@@ -406,6 +392,7 @@ impl OpenAiAdapter {
             AUTHORIZATION,
             HeaderValue::from_str(&bearer).map_err(OpenAiError::InvalidHeader)?,
         );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(customizer) = self.headers_customizer.as_ref() {
             customizer.customize(extensions, &mut headers);
         }
@@ -501,58 +488,38 @@ impl OpenAiAdapter {
         body: &T,
         extensions: &RequestExtensions,
         raw: Option<&RawTelemetryEmitter>,
-    ) -> Result<ByteStream, OpenAiError>
+    ) -> Result<HttpByteStream, OpenAiError>
     where
         T: Serialize + ?Sized,
     {
         let url = format!("{}{}", self.base_url, path);
         let headers = self.request_headers(extensions)?;
-        let client = self.client.clone();
-        #[cfg(target_family = "wasm")]
-        return SendWrapper::new(async move {
-            let response = match client.post(url).headers(headers).json(body).send().await {
-                Ok(response) => response,
-                Err(source) => {
-                    let debug_info = reqwest_request_error_debug_info(&source);
-                    let error = OpenAiError::Request(source);
-                    emit_openai_request_error(
-                        raw,
-                        None,
-                        RequestErrorKind::Transport,
-                        None,
-                        None,
-                        &error.to_string(),
-                        &debug_info,
-                    );
-                    return Err(error);
-                }
-            };
-            let response = error_for_status_with_body(raw, response).await?;
-            Ok(Box::pin(SendWrapper::new(response.bytes_stream())) as ByteStream)
-        })
-        .await;
-        #[cfg(not(target_family = "wasm"))]
-        {
-            let response = match client.post(url).headers(headers).json(body).send().await {
-                Ok(response) => response,
-                Err(source) => {
-                    let debug_info = reqwest_request_error_debug_info(&source);
-                    let error = OpenAiError::Request(source);
-                    emit_openai_request_error(
-                        raw,
-                        None,
-                        RequestErrorKind::Transport,
-                        None,
-                        None,
-                        &error.to_string(),
-                        &debug_info,
-                    );
-                    return Err(error);
-                }
-            };
-            let response = error_for_status_with_body(raw, response).await?;
-            Ok(Box::pin(response.bytes_stream()))
-        }
+        let body = serde_json::to_vec(body).map_err(OpenAiError::Json)?;
+        let request = HttpRequest {
+            method: Method::POST,
+            url,
+            headers,
+            body: Some(body),
+        };
+        let response = match self.client.send(request).await {
+            Ok(response) => response,
+            Err(source) => {
+                let debug_info = source.debug_info().clone();
+                let error = OpenAiError::Request(source);
+                emit_openai_request_error(
+                    raw,
+                    None,
+                    RequestErrorKind::Transport,
+                    None,
+                    None,
+                    &error.to_string(),
+                    &debug_info,
+                );
+                return Err(error);
+            }
+        };
+        let response = error_for_status_with_body(raw, response).await?;
+        Ok(response.body)
     }
 
     async fn get_json(
@@ -562,26 +529,18 @@ impl OpenAiAdapter {
     ) -> Result<Value, OpenAiError> {
         let url = format!("{}{}", self.base_url, path);
         let headers = self.request_headers(extensions)?;
-        let client = self.client.clone();
-        #[cfg(target_family = "wasm")]
-        return SendWrapper::new(async move {
-            let response = client.get(url).headers(headers).send().await?;
-            error_for_status_with_body(None, response)
-                .await?
-                .json::<Value>()
-                .await
-                .map_err(Into::into)
-        })
-        .await;
-        #[cfg(not(target_family = "wasm"))]
-        {
-            let response = client.get(url).headers(headers).send().await?;
-            error_for_status_with_body(None, response)
-                .await?
-                .json::<Value>()
-                .await
-                .map_err(Into::into)
-        }
+        let response = self
+            .client
+            .send(HttpRequest {
+                method: Method::GET,
+                url,
+                headers,
+                body: None,
+            })
+            .await?;
+        let response = error_for_status_with_body(None, response).await?;
+        let body = collect_response_body(response).await?;
+        serde_json::from_slice::<Value>(&body).map_err(OpenAiError::Json)
     }
 }
 
@@ -1042,15 +1001,16 @@ fn build_completion_request(request: &ProtocolCompletionRequest, model: &str) ->
 
 async fn error_for_status_with_body(
     raw: Option<&RawTelemetryEmitter>,
-    response: reqwest::Response,
-) -> Result<reqwest::Response, OpenAiError> {
-    let status = response.status();
+    response: crate::transport::HttpResponse,
+) -> Result<crate::transport::HttpResponse, OpenAiError> {
+    let status = response.status;
     if status.is_success() {
         return Ok(response);
     }
 
-    let retry_after = retry_after_from_headers(response.headers());
-    let body = response.text().await?;
+    let retry_after = retry_after_from_headers(&response.headers);
+    let body = collect_response_body(response).await?;
+    let body = String::from_utf8_lossy(&body).into_owned();
     let message = serde_json::from_str::<Value>(&body)
         .ok()
         .and_then(|value| {
@@ -1076,6 +1036,16 @@ async fn error_for_status_with_body(
         &basic_request_error_debug_info(&error),
     );
     Err(error)
+}
+
+async fn collect_response_body(
+    mut response: crate::transport::HttpResponse,
+) -> Result<Vec<u8>, OpenAiError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.body.next().await {
+        body.extend_from_slice(&chunk?);
+    }
+    Ok(body)
 }
 
 fn convert_model_input(input: &ModelInput) -> Result<Vec<InputItem>, OpenAiError> {
@@ -1875,7 +1845,7 @@ fn map_text_stream<S>(
     raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + lutum_protocol::MaybeSend + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
+    S: Stream<Item = Result<Bytes, HttpError>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = SseParser::default();
@@ -2166,7 +2136,7 @@ fn map_structured_stream<S>(
 + lutum_protocol::MaybeSend
 + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
+    S: Stream<Item = Result<Bytes, HttpError>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = SseParser::default();
@@ -2525,7 +2495,7 @@ fn map_completion_stream<S>(
     raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<CompletionEvent, OpenAiError>> + lutum_protocol::MaybeSend + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
+    S: Stream<Item = Result<Bytes, HttpError>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = SseParser::default();
@@ -3219,7 +3189,7 @@ fn map_chat_text_stream<S>(
     raw: Option<RawTelemetryEmitter>,
 ) -> impl Stream<Item = Result<ErasedTextTurnEvent, OpenAiError>> + lutum_protocol::MaybeSend + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
+    S: Stream<Item = Result<Bytes, HttpError>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = SseParser::default();
@@ -3407,7 +3377,7 @@ fn map_chat_structured_stream<S>(
 + lutum_protocol::MaybeSend
 + 'static
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + lutum_protocol::MaybeSend + 'static,
+    S: Stream<Item = Result<Bytes, HttpError>> + lutum_protocol::MaybeSend + 'static,
 {
     try_stream! {
         let mut parser = SseParser::default();
@@ -3562,7 +3532,7 @@ fn cost_to_micros_usd(cost: f64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use futures::{StreamExt, executor::block_on};
     use schemars::JsonSchema;
@@ -3579,6 +3549,69 @@ mod tests {
     use lutum_trace::RawTraceEntry;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct CapturedHttpRequest {
+        method: Method,
+        url: String,
+        headers: HeaderMap,
+        body: Option<Vec<u8>>,
+    }
+
+    #[derive(Clone)]
+    struct FakeHttpClient {
+        captured: Arc<Mutex<Vec<CapturedHttpRequest>>>,
+        response: Arc<Mutex<Option<Result<crate::transport::HttpResponse, HttpError>>>>,
+    }
+
+    impl FakeHttpClient {
+        fn new(response: crate::transport::HttpResponse) -> Self {
+            Self {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: Arc::new(Mutex::new(Some(Ok(response)))),
+            }
+        }
+
+        fn captured(&self) -> Vec<CapturedHttpRequest> {
+            std::mem::take(&mut *self.captured.lock().unwrap())
+        }
+    }
+
+    #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+    impl HttpClient for FakeHttpClient {
+        async fn send(
+            &self,
+            request: HttpRequest,
+        ) -> Result<crate::transport::HttpResponse, HttpError> {
+            self.captured.lock().unwrap().push(CapturedHttpRequest {
+                method: request.method,
+                url: request.url,
+                headers: request.headers,
+                body: request.body,
+            });
+            self.response.lock().unwrap().take().expect("fake response")
+        }
+    }
+
+    fn fake_response(
+        status: StatusCode,
+        headers: HeaderMap,
+        chunks: Vec<Result<Bytes, HttpError>>,
+    ) -> crate::transport::HttpResponse {
+        crate::transport::HttpResponse {
+            status,
+            headers,
+            body: Box::pin(futures::stream::iter(chunks)),
+        }
+    }
+
+    fn test_openai_adapter(api_key: &str) -> OpenAiAdapter {
+        OpenAiAdapter::new_with_http_client(
+            api_key,
+            FakeHttpClient::new(fake_response(StatusCode::OK, HeaderMap::new(), Vec::new())),
+        )
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
     struct WeatherArgs {
@@ -3796,6 +3829,142 @@ mod tests {
         extensions
     }
 
+    #[tokio::test]
+    async fn injected_http_client_receives_json_request_headers_and_streams_response() {
+        let fake = FakeHttpClient::new(fake_response(
+            StatusCode::OK,
+            HeaderMap::new(),
+            vec![Ok(Bytes::from_static(b"data: [DONE]\n\n"))],
+        ));
+        let adapter = OpenAiAdapter::new_with_http_client("test-key", fake.clone());
+
+        let stream = adapter
+            .send_streaming_json(
+                "/responses",
+                &serde_json::json!({"stream": true}),
+                &RequestExtensions::new(),
+                None,
+            )
+            .await
+            .expect("stream");
+        let chunks = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("chunks");
+        assert_eq!(chunks, vec![Bytes::from_static(b"data: [DONE]\n\n")]);
+
+        let captured = fake.captured();
+        assert_eq!(captured.len(), 1);
+        let request = &captured[0];
+        assert_eq!(request.method, Method::POST);
+        assert_eq!(request.url, "https://api.openai.com/v1/responses");
+        assert_eq!(
+            request.headers.get(AUTHORIZATION).unwrap(),
+            "Bearer test-key"
+        );
+        assert_eq!(
+            request.headers.get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let body = serde_json::from_slice::<Value>(request.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"stream": true}));
+    }
+
+    #[tokio::test]
+    async fn injected_http_client_status_error_preserves_retry_after() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("3"));
+        let fake = FakeHttpClient::new(fake_response(
+            StatusCode::BAD_GATEWAY,
+            headers,
+            vec![Ok(Bytes::from_static(
+                br#"{"error":{"message":"upstream overloaded"}}"#,
+            ))],
+        ));
+        let adapter = OpenAiAdapter::new_with_http_client("test-key", fake);
+
+        let error = match adapter
+            .send_streaming_json(
+                "/responses",
+                &serde_json::json!({}),
+                &RequestExtensions::new(),
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("expected status error"),
+            Err(error) => error,
+        };
+
+        match error {
+            OpenAiError::HttpStatus {
+                status,
+                message,
+                retry_after,
+            } => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+                assert_eq!(message, "upstream overloaded");
+                assert_eq!(retry_after, Some(Duration::from_secs(3)));
+            }
+            other => panic!("expected status error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_http_client_stream_body_error_emits_raw_telemetry() {
+        let debug_info = RequestErrorDebugInfo {
+            error_debug: "native stream body error".into(),
+            is_body: true,
+            ..RequestErrorDebugInfo::default()
+        };
+        let fake = FakeHttpClient::new(fake_response(
+            StatusCode::OK,
+            HeaderMap::new(),
+            vec![
+                Ok(Bytes::from_static(
+                    b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_body_error\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":null}}\n\n",
+                )),
+                Err(HttpError::message("broken stream").with_debug_info(debug_info)),
+            ],
+        ));
+        let adapter = OpenAiAdapter::new_with_http_client("test-key", fake);
+
+        let collected = lutum_trace::test::collect_raw(async move {
+            let extensions = raw_extensions();
+            let raw = RawTelemetryEmitter::new(&extensions, "openai", "responses", "text_turn");
+            let stream = adapter
+                .send_streaming_json(
+                    "/responses",
+                    &serde_json::json!({}),
+                    &extensions,
+                    raw.as_ref(),
+                )
+                .await
+                .expect("stream");
+            let events = map_text_stream(stream, "gpt-4.1".into(), None, raw)
+                .collect::<Vec<_>>()
+                .await;
+            assert!(events.into_iter().any(|event| event.is_err()));
+        })
+        .await;
+
+        assert!(collected.raw.entries.iter().any(|entry| matches!(
+            entry,
+            RawTraceEntry::RequestError {
+                request_id,
+                kind,
+                error_debug,
+                is_body,
+                ..
+            } if request_id.as_deref() == Some("resp_body_error")
+                && *kind == RequestErrorKind::Transport
+                && error_debug.contains("native stream body error")
+                && *is_body
+        )));
+    }
+
     struct TaggingFallbackSerializer;
 
     impl FallbackSerializer for TaggingFallbackSerializer {
@@ -3823,7 +3992,7 @@ mod tests {
 
     #[test]
     fn prepare_responses_request_uses_explicit_model() {
-        let adapter = OpenAiAdapter::new("test-key");
+        let adapter = test_openai_adapter("test-key");
 
         let input =
             ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
@@ -3864,7 +4033,7 @@ mod tests {
 
     #[test]
     fn fallback_serializer_is_applied_to_requests() {
-        let mut adapter = OpenAiAdapter::new("test-key");
+        let mut adapter = test_openai_adapter("test-key");
         adapter.set_fallback_serializer(Box::new(TaggingFallbackSerializer));
 
         let input =
@@ -3900,7 +4069,7 @@ mod tests {
 
     #[test]
     fn claude_prompt_caching_for_chat_changes_serialized_json_only() {
-        let adapter = OpenAiAdapter::new("test-key").with_claude_prompt_caching();
+        let adapter = test_openai_adapter("test-key").with_claude_prompt_caching();
         let input = ModelInput::from_items(vec![
             ModelInputItem::text(InputMessageRole::User, "stable"),
             ModelInputItem::text(InputMessageRole::User, "dynamic"),
@@ -3941,7 +4110,7 @@ mod tests {
 
     #[test]
     fn claude_prompt_caching_for_chat_is_opt_in() {
-        let adapter = OpenAiAdapter::new("test-key");
+        let adapter = test_openai_adapter("test-key");
         let input =
             ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "stable")]);
         let config = AdapterTurnConfig {
@@ -3973,7 +4142,7 @@ mod tests {
         }
 
         let adapter =
-            OpenAiAdapter::new("test-key").with_chat_message_json_serializer(add_provider_marker);
+            test_openai_adapter("test-key").with_chat_message_json_serializer(add_provider_marker);
         let input =
             ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
         let config = AdapterTurnConfig {
@@ -3998,7 +4167,7 @@ mod tests {
 
     #[test]
     fn claude_prompt_caching_does_not_touch_responses_or_completions() {
-        let adapter = OpenAiAdapter::new("test-key").with_claude_prompt_caching();
+        let adapter = test_openai_adapter("test-key").with_claude_prompt_caching();
         let input =
             ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
         let config = AdapterTurnConfig {
@@ -4041,7 +4210,7 @@ mod tests {
 
     #[test]
     fn prepare_responses_request_propagates_seed() {
-        let adapter = OpenAiAdapter::new("test-key");
+        let adapter = test_openai_adapter("test-key");
         let input =
             ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
         let config = AdapterTurnConfig {
@@ -4785,7 +4954,7 @@ mod tests {
 
     #[tokio::test]
     async fn raw_trace_captures_request_and_stream_payloads() {
-        let adapter = OpenAiAdapter::new("test-key");
+        let adapter = test_openai_adapter("test-key");
         let input =
             ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
         let config = AdapterTurnConfig {
@@ -4853,7 +5022,7 @@ mod tests {
                 None,
                 "request failed: error sending request for url (https://openrouter.ai/api/v1/responses)",
                 &RequestErrorDebugInfo {
-                    error_debug: "reqwest::Error { kind: Request, url: \"https://openrouter.ai/api/v1/responses\", source: hyper_util::client::legacy::Error(Connect, ConnectError(\"dns error\", Custom { kind: Uncategorized, error: \"failed to lookup address information\" })) }".into(),
+                    error_debug: "HttpError { kind: Request, url: \"https://openrouter.ai/api/v1/responses\", source: hyper_util::client::legacy::Error(Connect, ConnectError(\"dns error\", Custom { kind: Uncategorized, error: \"failed to lookup address information\" })) }".into(),
                     source_chain: vec![
                         "client error (Connect)".into(),
                         "dns error: failed to lookup address information".into(),
@@ -4893,7 +5062,7 @@ mod tests {
                 && status.is_none()
                 && payload.is_none()
                 && error.contains("error sending request for url")
-                && error_debug.contains("reqwest::Error")
+                && error_debug.contains("HttpError")
                 && source_chain.len() == 2
                 && !is_timeout
                 && !is_connect
@@ -4916,7 +5085,7 @@ mod tests {
                 None,
                 "request failed: error decoding response body",
                 &RequestErrorDebugInfo {
-                    error_debug: "reqwest::Error { kind: Body, source: hyper::Error(Body, Custom { kind: UnexpectedEof, error: \"unexpected EOF during chunk\" }) }".into(),
+                    error_debug: "HttpError { kind: Body, source: hyper::Error(Body, Custom { kind: UnexpectedEof, error: \"unexpected EOF during chunk\" }) }".into(),
                     source_chain: vec!["unexpected EOF during chunk".into()],
                     is_body: true,
                     ..RequestErrorDebugInfo::default()
@@ -5021,9 +5190,9 @@ mod tests {
 
     #[test]
     fn headers_customizer_appends_without_touching_defaults() {
-        use reqwest::header::{HeaderName, HeaderValue};
+        use http::{HeaderName, HeaderValue};
 
-        let adapter = OpenAiAdapter::new("test-key").with_headers_customizer(
+        let adapter = test_openai_adapter("test-key").with_headers_customizer(
             |_ext: &RequestExtensions, headers: &mut HeaderMap| {
                 headers.insert(
                     HeaderName::from_static("openai-organization"),
@@ -5042,9 +5211,9 @@ mod tests {
 
     #[test]
     fn headers_customizer_can_override_defaults() {
-        use reqwest::header::HeaderValue;
+        use http::HeaderValue;
 
-        let adapter = OpenAiAdapter::new("test-key").with_headers_customizer(
+        let adapter = test_openai_adapter("test-key").with_headers_customizer(
             |_ext: &RequestExtensions, headers: &mut HeaderMap| {
                 headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer override"));
             },

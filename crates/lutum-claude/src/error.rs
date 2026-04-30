@@ -1,19 +1,22 @@
 use std::{env, time::Duration};
 
+use http::StatusCode;
 use lutum_protocol::{AgentError, RequestFailureKind};
 use thiserror::Error;
+
+use crate::transport::HttpError;
 
 #[derive(Debug, Error)]
 pub enum ClaudeError {
     #[error("ANTHROPIC_API_KEY is not set: {0}")]
     MissingApiKey(#[source] env::VarError),
     #[error("invalid HTTP header: {0}")]
-    InvalidHeader(#[source] reqwest::header::InvalidHeaderValue),
+    InvalidHeader(#[source] http::header::InvalidHeaderValue),
     #[error("request failed: {0}")]
-    Request(#[from] reqwest::Error),
+    Request(#[from] HttpError),
     #[error("request failed with status {status}: {message}")]
     HttpStatus {
-        status: reqwest::StatusCode,
+        status: StatusCode,
         message: String,
         retry_after: Option<Duration>,
     },
@@ -29,7 +32,7 @@ pub enum ClaudeError {
     Sse { message: String },
 }
 
-fn classify_status(status: reqwest::StatusCode) -> RequestFailureKind {
+fn classify_status(status: StatusCode) -> RequestFailureKind {
     match status.as_u16() {
         401 | 403 => RequestFailureKind::Auth,
         429 => RequestFailureKind::RateLimit,
@@ -39,7 +42,7 @@ fn classify_status(status: reqwest::StatusCode) -> RequestFailureKind {
     }
 }
 
-fn classify_request_error(error: &reqwest::Error) -> RequestFailureKind {
+fn classify_request_error(error: &HttpError) -> RequestFailureKind {
     error
         .status()
         .map(classify_status)
@@ -85,7 +88,7 @@ mod tests {
     #[test]
     fn http_status_retryable_server_error_maps_to_request_failure() {
         let error: AgentError = ClaudeError::HttpStatus {
-            status: reqwest::StatusCode::BAD_GATEWAY,
+            status: StatusCode::BAD_GATEWAY,
             message: "upstream overloaded".into(),
             retry_after: Some(Duration::from_secs(2)),
         }
