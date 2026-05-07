@@ -169,14 +169,31 @@ the one workflow-level capture.
   "##": Raw Capture
 
   "body" = ```markdown
-`lutum_trace::capture_raw(...)` captures both a structured snapshot and the raw trace entries as a
-`Vec<TraceEntry>`. Useful for debugging or custom analysis:
+`lutum_trace::capture_raw(...)` captures both a structured snapshot and raw trace entries as a
+`RawTraceSnapshot`. Useful for debugging or custom analysis.
+
+`capture_raw` enables raw collection in the trace layer. To make Lutum adapters emit provider
+request bodies, SSE payloads, parse errors, and collect errors into that raw stream, attach
+`RawTelemetryConfig` to the `Lutum` context:
 ```
 
   "rust-example" = ```rust
+use std::sync::Arc;
+use lutum::{Lutum, RawTelemetryConfig, Session};
+use tracing::instrument::WithSubscriber as _;
+
+let llm = Lutum::new(Arc::new(adapter), budget)
+    .with_extension(RawTelemetryConfig::all());
+
 let collected = lutum_trace::capture_raw(
-    my_async_block.with_subscriber(subscriber)
-).await;
+    async {
+        let mut session = Session::new(llm.clone());
+        session.push_user("Say hello in one sentence.");
+        session.text_turn().collect().await
+    }
+    .with_subscriber(subscriber),
+)
+.await;
 
 let trace: &TraceSnapshot = &collected.trace;
 let raw: &RawTraceSnapshot = &collected.raw;
