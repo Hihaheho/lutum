@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
-use eure::value::Text;
 use eure::FromEure;
+use eure::value::Text;
 use eure_mark::{PageRenderer, parse_article_file};
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 use std::fs;
@@ -97,6 +97,8 @@ impl AdrStatus {
 
 struct GuidePage {
     public_path: String,
+    source_public_path: String,
+    source_path: PathBuf,
     title: String,
     description: String,
     html_body: String,
@@ -132,7 +134,15 @@ fn main() -> Result<()> {
 
     // Write guide pages
     for page in &guide_pages {
-        let markup = render_shell(&nav, &page.public_path, &page.title, &page.description, PreEscaped(page.html_body.clone()));
+        write_raw_source(dist_dir, &page.source_public_path, &page.source_path)?;
+        let body = render_guide_body(page);
+        let markup = render_shell(
+            &nav,
+            &page.public_path,
+            &page.title,
+            &page.description,
+            body,
+        );
         write_public_path(dist_dir, &page.public_path, markup.into_string())?;
     }
 
@@ -190,14 +200,21 @@ fn generate_llms_txt(nav: &NavDocument, guide_pages: &[GuidePage], adrs: &[AdrDo
             // Find the matching guide page for its description
             let description = guide_pages
                 .iter()
-                .find(|p| p.public_path == nav_page.path || p.public_path.trim_end_matches('/') == nav_page.path.trim_end_matches('/'))
+                .find(|p| {
+                    p.public_path == nav_page.path
+                        || p.public_path.trim_end_matches('/')
+                            == nav_page.path.trim_end_matches('/')
+                })
                 .map(|p| p.description.as_str())
                 .unwrap_or("");
             let url = format!("{}{}", BASE_URL, nav_page.path);
             if description.is_empty() {
                 out.push_str(&format!("- [{}]({})\n", nav_page.label, url));
             } else {
-                out.push_str(&format!("- [{}]({}): {}\n", nav_page.label, url, description));
+                out.push_str(&format!(
+                    "- [{}]({}): {}\n",
+                    nav_page.label, url, description
+                ));
             }
         }
         out.push('\n');
@@ -208,7 +225,13 @@ fn generate_llms_txt(nav: &NavDocument, guide_pages: &[GuidePage], adrs: &[AdrDo
         out.push_str("## ADRs\n\n");
         for adr in adrs {
             let url = format!("{}/docs/adrs/{}", BASE_URL, adr.id);
-            out.push_str(&format!("- [{}]({}): {} ({})\n", adr.title, url, adr.id, adr.status.label()));
+            out.push_str(&format!(
+                "- [{}]({}): {} ({})\n",
+                adr.title,
+                url,
+                adr.id,
+                adr.status.label()
+            ));
         }
         out.push('\n');
     }
@@ -227,16 +250,14 @@ fn generate_llms_txt(nav: &NavDocument, guide_pages: &[GuidePage], adrs: &[AdrDo
 
 fn parse_nav(docs_dir: &Path) -> Result<NavDocument> {
     let path = docs_dir.join("_nav.eure");
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     eure::parse_content(&content, path).map_err(|e| anyhow!("{e}"))
 }
 
 fn collect_guide_pages(docs_dir: &Path, renderer: &PageRenderer) -> Result<Vec<GuidePage>> {
     let mut pages = Vec::new();
-    let mut entries: Vec<_> = fs::read_dir(docs_dir)?
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut entries: Vec<_> = fs::read_dir(docs_dir)?.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.path());
 
     for entry in entries {
@@ -246,8 +267,8 @@ fn collect_guide_pages(docs_dir: &Path, renderer: &PageRenderer) -> Result<Vec<G
             if stem == "_nav" {
                 continue;
             }
-            let article = parse_article_file(&path)
-                .with_context(|| format!("parsing {}", path.display()))?;
+            let article =
+                parse_article_file(&path).with_context(|| format!("parsing {}", path.display()))?;
             let rendered = renderer
                 .render_article(&article)
                 .with_context(|| format!("rendering {}", path.display()))?;
@@ -256,8 +277,11 @@ fn collect_guide_pages(docs_dir: &Path, renderer: &PageRenderer) -> Result<Vec<G
             } else {
                 format!("/docs/{stem}")
             };
+            let source_public_path = format!("/docs/{stem}.eure");
             pages.push(GuidePage {
                 public_path,
+                source_public_path,
+                source_path: path,
                 title: rendered.title,
                 description: rendered.description,
                 html_body: rendered.html,
@@ -272,19 +296,17 @@ fn collect_adrs(docs_dir: &Path) -> Result<Vec<AdrDocument>> {
     if !adrs_dir.exists() {
         return Ok(Vec::new());
     }
-    let mut entries: Vec<_> = fs::read_dir(&adrs_dir)?
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut entries: Vec<_> = fs::read_dir(&adrs_dir)?.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.path());
 
     let mut adrs = Vec::new();
     for entry in entries {
         let path = entry.path();
         if path.extension().map_or(false, |e| e == "eure") {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let adr: AdrDocument = eure::parse_content(&content, path.clone())
-                .map_err(|e| anyhow!("{e}"))?;
+            let content =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let adr: AdrDocument =
+                eure::parse_content(&content, path.clone()).map_err(|e| anyhow!("{e}"))?;
             adrs.push(adr);
         }
     }
@@ -306,8 +328,24 @@ fn write_public_path(dist_dir: &Path, public_path: &str, content: String) -> Res
     if let Some(parent) = file_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&file_path, content)
-        .with_context(|| format!("writing {}", file_path.display()))?;
+    fs::write(&file_path, content).with_context(|| format!("writing {}", file_path.display()))?;
+    println!("  wrote {}", file_path.display());
+    Ok(())
+}
+
+fn write_raw_source(dist_dir: &Path, public_path: &str, source_path: &Path) -> Result<()> {
+    let rel = public_path.trim_start_matches('/');
+    let file_path = dist_dir.join(rel);
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(source_path, &file_path).with_context(|| {
+        format!(
+            "copying {} to {}",
+            source_path.display(),
+            file_path.display()
+        )
+    })?;
     println!("  wrote {}", file_path.display());
     Ok(())
 }
@@ -332,6 +370,15 @@ fn redirect_html(target: &str) -> String {
 // ---------------------------------------------------------------------------
 // Site shell template
 // ---------------------------------------------------------------------------
+
+fn render_guide_body(page: &GuidePage) -> Markup {
+    html! {
+        div class="page-source-link" {
+            a href=(page.source_public_path) { "Source" }
+        }
+        (PreEscaped(page.html_body.clone()))
+    }
+}
 
 fn render_shell(
     nav: &NavDocument,
@@ -693,6 +740,26 @@ a:hover { text-decoration: underline; }
   min-width: 0;
   padding: 2.5rem clamp(1rem, 4vw, 3rem);
   max-width: 860px;
+}
+
+.page-source-link {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 1rem;
+}
+
+.page-source-link a {
+  border: 1px solid var(--surface1);
+  border-radius: 6px;
+  color: var(--subtext1);
+  font-size: 0.8125rem;
+  padding: 0.25rem 0.6rem;
+}
+
+.page-source-link a:hover {
+  border-color: var(--blue);
+  color: var(--text);
+  text-decoration: none;
 }
 
 /* ---- Prose typography ---- */
