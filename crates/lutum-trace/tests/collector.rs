@@ -2,7 +2,22 @@ use tracing::{Instrument, field};
 use tracing_subscriber::layer::SubscriberExt as _;
 
 use lutum_protocol::ParseErrorStage;
-use lutum_trace::{FieldValue, RawTraceEntry};
+use lutum_trace::{FieldValue, RawTraceEntry, SpanNode};
+
+fn child_span_with_str_field<'a>(
+    parent: &'a SpanNode,
+    name: &str,
+    key: &str,
+    value: &str,
+) -> &'a SpanNode {
+    parent
+        .children()
+        .iter()
+        .find(|child| {
+            child.name == name && child.field(key) == Some(&FieldValue::Str(value.to_string()))
+        })
+        .unwrap_or_else(|| panic!("missing child span {name:?} with {key}={value:?}"))
+}
 
 #[tokio::test]
 async fn basic_tree() {
@@ -182,6 +197,91 @@ async fn lutum_capture_field_opt_in() {
     let span = collected.trace.span("user_span").expect("user span");
     assert_eq!(span.field("x"), Some(&FieldValue::U64(1)));
     assert!(span.event("hello").is_some());
+}
+
+#[tokio::test]
+async fn captured_workflow_keeps_parallel_agents_under_one_root() {
+    let collected = lutum_trace::test::collect(async {
+        let workflow =
+            tracing::info_span!("workflow", lutum.capture = true, workflow = "event_loop");
+
+        async {
+            let planner = async {
+                tokio::task::yield_now().await;
+                tracing::info!(target: "lutum", "planner done");
+            }
+            .instrument(tracing::info_span!(
+                "planner_agent",
+                lutum.capture = true,
+                agent = "planner"
+            ));
+
+            let reviewer = async {
+                tokio::task::yield_now().await;
+                tracing::info!(target: "lutum", "reviewer done");
+            }
+            .instrument(tracing::info_span!(
+                "reviewer_agent",
+                lutum.capture = true,
+                agent = "reviewer"
+            ));
+
+            tokio::join!(planner, reviewer);
+        }
+        .instrument(workflow)
+        .await;
+    })
+    .await;
+
+    assert_eq!(collected.trace.roots.len(), 1);
+
+    let workflow = collected.trace.span("workflow").expect("workflow span");
+    assert_eq!(
+        workflow.field("workflow"),
+        Some(&FieldValue::Str("event_loop".to_string()))
+    );
+
+    let planner = child_span_with_str_field(workflow, "planner_agent", "agent", "planner");
+    let reviewer = child_span_with_str_field(workflow, "reviewer_agent", "agent", "reviewer");
+    assert!(planner.event("planner done").is_some());
+    assert!(reviewer.event("reviewer done").is_some());
+}
+
+#[tokio::test]
+async fn captured_agent_can_hold_nested_sub_agent() {
+    let collected = lutum_trace::test::collect(async {
+        let workflow =
+            tracing::info_span!("workflow", lutum.capture = true, workflow = "hierarchical");
+
+        async {
+            let parent =
+                tracing::info_span!("parent_agent", lutum.capture = true, agent = "parent");
+
+            async {
+                tracing::info!(target: "lutum", "parent turn");
+
+                let sub_agent =
+                    tracing::info_span!("solver_agent", lutum.capture = true, agent = "sub");
+                async {
+                    tracing::info!(target: "lutum", "sub turn");
+                }
+                .instrument(sub_agent)
+                .await;
+            }
+            .instrument(parent)
+            .await;
+        }
+        .instrument(workflow)
+        .await;
+    })
+    .await;
+
+    let workflow = collected.trace.span("workflow").expect("workflow span");
+    let parent = child_span_with_str_field(workflow, "parent_agent", "agent", "parent");
+    assert!(parent.event("parent turn").is_some());
+
+    let sub_agent = child_span_with_str_field(parent, "solver_agent", "agent", "sub");
+    assert!(sub_agent.event("sub turn").is_some());
 }
 
 #[tokio::test]
