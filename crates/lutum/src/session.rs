@@ -138,6 +138,25 @@ impl Session {
             .push(ModelInputItem::text(InputMessageRole::User, text));
     }
 
+    /// Push a synthesized assistant text item (e.g. for prefilling or constructing
+    /// an input transcript without a real model call). For real model output, prefer
+    /// committing a [`CommittedTurn`] via the turn builders so provenance is preserved.
+    pub fn push_assistant_text(&mut self, text: impl Into<String>) {
+        self.input.push(ModelInputItem::assistant_text(text));
+    }
+
+    /// Push a synthesized assistant reasoning item. See [`push_assistant_text`](Self::push_assistant_text)
+    /// for guidance on synthesized vs real-model items.
+    pub fn push_assistant_reasoning(&mut self, text: impl Into<String>) {
+        self.input.push(ModelInputItem::assistant_reasoning(text));
+    }
+
+    /// Push a synthesized assistant refusal item. See [`push_assistant_text`](Self::push_assistant_text)
+    /// for guidance on synthesized vs real-model items.
+    pub fn push_assistant_refusal(&mut self, text: impl Into<String>) {
+        self.input.push(ModelInputItem::assistant_refusal(text));
+    }
+
     /// Push an arbitrary item that will be included in the next model request
     /// but not persisted to the session transcript.
     ///
@@ -163,6 +182,21 @@ impl Session {
     /// Push an ephemeral user message (stripped before commit).
     pub fn push_ephemeral_user(&mut self, text: impl Into<String>) {
         self.push_ephemeral(ModelInputItem::text(InputMessageRole::User, text));
+    }
+
+    /// Push an ephemeral assistant text item (stripped before commit).
+    pub fn push_ephemeral_assistant_text(&mut self, text: impl Into<String>) {
+        self.push_ephemeral(ModelInputItem::assistant_text(text));
+    }
+
+    /// Push an ephemeral assistant reasoning item (stripped before commit).
+    pub fn push_ephemeral_assistant_reasoning(&mut self, text: impl Into<String>) {
+        self.push_ephemeral(ModelInputItem::assistant_reasoning(text));
+    }
+
+    /// Push an ephemeral assistant refusal item (stripped before commit).
+    pub fn push_ephemeral_assistant_refusal(&mut self, text: impl Into<String>) {
+        self.push_ephemeral(ModelInputItem::assistant_refusal(text));
     }
 
     /// Push an ephemeral committed turn. The turn's wire-format items are
