@@ -110,6 +110,18 @@ pub struct ChatCompletionMessage {
     pub content: Option<String>,
     pub refusal: Option<String>,
     pub role: String,
+    /// Reasoning tokens returned by some OpenAI-compatible providers.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// Reasoning tokens returned by some OpenAI-compatible providers.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    /// Thinking tokens returned by some OpenAI-compatible providers.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_content: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Vec<ChatCompletionAnnotation>>,
@@ -360,6 +372,9 @@ pub struct ChatStreamDelta {
     pub refusal: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ChatStreamToolCall>>,
+    /// Reasoning tokens emitted by Ollama's OpenAI-compatible Chat Completions API.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     /// Reasoning tokens emitted by some models (e.g. DeepSeek, Qwen via reasoning_content).
     #[serde(default)]
     pub reasoning_content: Option<String>,

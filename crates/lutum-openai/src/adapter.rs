@@ -3196,10 +3196,11 @@ where
         let mut started = false;
         let mut request_id = None::<String>;
         let mut model = fallback_model;
-        let mut text_content = String::new();
         let mut saw_tool_call = false;
         let mut saw_refusal = false;
         let mut tool_calls = ToolCallTracker::default();
+        let mut pending_item = None::<BufferedTurnItem>;
+        let mut committed_items = Vec::<OpenAiTurnItem>::new();
         let mut stream_finish_reason = None::<FinishReason>;
         let mut last_usage = Usage::zero();
         let mut raw_sequence = 0_u64;
@@ -3250,22 +3251,43 @@ where
                     last_usage = parse_chat_usage(usage);
                 }
                 for choice in &event.choices {
+                    let item_id = choice.index.to_string();
                     if let Some(reason) = choice.finish_reason.as_deref() {
                         stream_finish_reason = Some(map_chat_finish_reason(reason));
                     }
                     let delta = &choice.delta;
                     if let Some(content) = &delta.content
                         && !content.is_empty() {
-                        text_content.push_str(content);
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Text,
+                            &item_id,
+                            content,
+                        );
                         yield ErasedTextTurnEvent::TextDelta { delta: content.clone() };
                     }
                     if let Some(refusal) = &delta.refusal
                         && !refusal.is_empty() {
                         saw_refusal = true;
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Refusal,
+                            &item_id,
+                            refusal,
+                        );
                         yield ErasedTextTurnEvent::RefusalDelta { delta: refusal.clone() };
                     }
-                    for reasoning in [&delta.reasoning_content, &delta.thinking_content].into_iter().flatten() {
+                    for reasoning in [&delta.reasoning, &delta.reasoning_content, &delta.thinking_content].into_iter().flatten() {
                         if !reasoning.is_empty() {
+                            push_buffered_content(
+                                &mut pending_item,
+                                &mut committed_items,
+                                BufferedTurnItemKind::Reasoning,
+                                &item_id,
+                                reasoning,
+                            );
                             yield ErasedTextTurnEvent::ReasoningDelta { delta: reasoning.clone() };
                         }
                     }
@@ -3312,10 +3334,7 @@ where
         }
 
         // Build committed turn.
-        let mut committed_items = Vec::new();
-        if !text_content.is_empty() {
-            committed_items.push(OpenAiTurnItem::Text { content: text_content });
-        }
+        flush_buffered_content(&mut pending_item, &mut committed_items);
         for finalized in tool_calls.finalized.values() {
             let arguments = match RawJson::parse(finalized.arguments_json.clone()) {
                 Ok(arguments) => arguments,
@@ -3385,6 +3404,8 @@ where
         let mut request_id = None::<String>;
         let mut model = fallback_model;
         let mut json_buffer = String::new();
+        let mut pending_item = None::<BufferedTurnItem>;
+        let mut committed_items = Vec::<OpenAiTurnItem>::new();
         let mut last_usage = Usage::zero();
         let mut saw_refusal = false;
         let mut stream_finish_reason = None::<FinishReason>;
@@ -3436,6 +3457,7 @@ where
                     last_usage = parse_chat_usage(usage);
                 }
                 for choice in &event.choices {
+                    let item_id = choice.index.to_string();
                     if let Some(reason) = choice.finish_reason.as_deref() {
                         stream_finish_reason = Some(map_chat_finish_reason(reason));
                     }
@@ -3443,6 +3465,13 @@ where
                     if let Some(content) = &delta.content
                         && !content.is_empty() {
                         json_buffer.push_str(content);
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Text,
+                            &item_id,
+                            content,
+                        );
                         yield ErasedStructuredTurnEvent::StructuredOutputChunk {
                             json_delta: content.clone(),
                         };
@@ -3450,12 +3479,26 @@ where
                     if let Some(refusal) = &delta.refusal
                         && !refusal.is_empty() {
                         saw_refusal = true;
+                        push_buffered_content(
+                            &mut pending_item,
+                            &mut committed_items,
+                            BufferedTurnItemKind::Refusal,
+                            &item_id,
+                            refusal,
+                        );
                         yield ErasedStructuredTurnEvent::RefusalDelta {
                             delta: refusal.clone(),
                         };
                     }
-                    for reasoning in [&delta.reasoning_content, &delta.thinking_content].into_iter().flatten() {
+                    for reasoning in [&delta.reasoning, &delta.reasoning_content, &delta.thinking_content].into_iter().flatten() {
                         if !reasoning.is_empty() {
+                            push_buffered_content(
+                                &mut pending_item,
+                                &mut committed_items,
+                                BufferedTurnItemKind::Reasoning,
+                                &item_id,
+                                reasoning,
+                            );
                             yield ErasedStructuredTurnEvent::ReasoningDelta {
                                 delta: reasoning.clone(),
                             };
@@ -3489,10 +3532,11 @@ where
                 yield ErasedStructuredTurnEvent::StructuredOutputReady(raw_json);
             }
 
+            flush_buffered_content(&mut pending_item, &mut committed_items);
             let committed_turn = Arc::new(OpenAiCommittedTurn {
                 request_id: request_id.clone(),
                 model: model.clone(),
-                items: vec![],
+                items: committed_items,
                 finish_reason: finish_reason.clone(),
                 usage: last_usage,
             });
@@ -3754,6 +3798,57 @@ mod tests {
     }
 
     #[test]
+    fn chat_sse_maps_ollama_reasoning_field_and_commits_it() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-reasoning\",\"model\":\"gemma4:26b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"thinking\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-reasoning\",\"model\":\"gemma4:26b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"OK\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-reasoning\",\"model\":\"gemma4:26b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14}}\n\n",
+            )),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+
+        let events = block_on(async {
+            map_chat_text_stream(futures::stream::iter(payloads), "gemma4:26b".into(), None)
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ErasedTextTurnEvent::ReasoningDelta { delta } if delta == "thinking"
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(event, ErasedTextTurnEvent::TextDelta { delta } if delta == "OK")
+        }));
+
+        let committed_turn = match events.last() {
+            Some(ErasedTextTurnEvent::Completed { committed_turn, .. }) => committed_turn,
+            other => panic!("expected completed event, got {other:?}"),
+        };
+        let committed_turn = committed_turn
+            .as_any()
+            .downcast_ref::<OpenAiCommittedTurn>()
+            .expect("OpenAI committed turn");
+        assert!(matches!(
+            committed_turn.items.as_slice(),
+            [
+                OpenAiTurnItem::Reasoning { content: reasoning, .. },
+                OpenAiTurnItem::Text { content: text }
+            ] if reasoning == "thinking" && text == "OK"
+        ));
+    }
+
+    #[test]
     fn chat_sse_preserves_length_finish_reason() {
         let payloads = vec![
             Ok(Bytes::from(
@@ -3821,6 +3916,59 @@ mod tests {
             }
             other => panic!("expected completed event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chat_structured_sse_maps_ollama_reasoning_field_and_commits_it() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-structured-reasoning\",\"model\":\"gemma4:26b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"thinking\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-structured-reasoning\",\"model\":\"gemma4:26b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"{\\\"answer\\\":\\\"OK\\\"}\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-structured-reasoning\",\"model\":\"gemma4:26b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":8,\"total_tokens\":18}}\n\n",
+            )),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+
+        let events = block_on(async {
+            map_chat_structured_stream(futures::stream::iter(payloads), "gemma4:26b".into(), None)
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ErasedStructuredTurnEvent::ReasoningDelta { delta } if delta == "thinking"
+            )
+        }));
+        assert!(
+            events.iter().any(|event| {
+                matches!(event, ErasedStructuredTurnEvent::StructuredOutputReady(_))
+            })
+        );
+
+        let committed_turn = match events.last() {
+            Some(ErasedStructuredTurnEvent::Completed { committed_turn, .. }) => committed_turn,
+            other => panic!("expected completed event, got {other:?}"),
+        };
+        let committed_turn = committed_turn
+            .as_any()
+            .downcast_ref::<OpenAiCommittedTurn>()
+            .expect("OpenAI committed turn");
+        assert!(matches!(
+            committed_turn.items.as_slice(),
+            [
+                OpenAiTurnItem::Reasoning { content: reasoning, .. },
+                OpenAiTurnItem::Text { content: text }
+            ] if reasoning == "thinking" && text == "{\"answer\":\"OK\"}"
+        ));
     }
 
     fn raw_extensions() -> RequestExtensions {

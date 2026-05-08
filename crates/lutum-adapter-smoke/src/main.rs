@@ -12,8 +12,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use lutum::{
-    CompletionOptions, Lutum, ModelName, RawTelemetryConfig, RequestExtensions, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredTurnOutcome,
+    AssistantTurnItem, CompletionOptions, Lutum, ModelName, RawTelemetryConfig, RequestExtensions,
+    Session, SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredTurnOutcome,
     TextStepOutcomeWithTools, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use lutum_claude::{ClaudeAdapter, MessagesRequest};
@@ -115,6 +115,7 @@ enum SmokeCase {
     Tool,
     StructuredCompletion,
     ReasoningRequest,
+    ReasoningCapture,
     ThinkingRoundtrip,
 }
 
@@ -127,6 +128,7 @@ impl SmokeCase {
             "tool" => Ok(Self::Tool),
             "structured_completion" => Ok(Self::StructuredCompletion),
             "reasoning_request" => Ok(Self::ReasoningRequest),
+            "reasoning_capture" => Ok(Self::ReasoningCapture),
             "thinking_roundtrip" => Ok(Self::ThinkingRoundtrip),
             _ => bail!("unknown smoke case {value:?}"),
         }
@@ -140,6 +142,7 @@ impl SmokeCase {
             Self::Tool => "tool",
             Self::StructuredCompletion => "structured_completion",
             Self::ReasoningRequest => "reasoning_request",
+            Self::ReasoningCapture => "reasoning_capture",
             Self::ThinkingRoundtrip => "thinking_roundtrip",
         }
     }
@@ -339,6 +342,10 @@ fn expand_cases(config: &SmokeConfig) -> Result<Vec<CaseSpec>> {
 
 fn validate_case(endpoint_id: &str, kind: AdapterKind, case: SmokeCase) -> Result<()> {
     match (kind, case) {
+        (AdapterKind::OpenAiChatCompletions, SmokeCase::ReasoningCapture) => Ok(()),
+        (_, SmokeCase::ReasoningCapture) => {
+            bail!("endpoint {endpoint_id} reasoning_capture requires openai-chat-completions")
+        }
         (AdapterKind::OpenAiCompletions, SmokeCase::Completion) => Ok(()),
         (AdapterKind::OpenAiCompletions, _) => {
             bail!("endpoint {endpoint_id} uses /completions and can only run completion cases")
@@ -396,6 +403,9 @@ fn worst_case_tokens(case: &CaseSpec, defaults: &DefaultsConfig) -> (u64, u64) {
         SmokeCase::Completion | SmokeCase::Text | SmokeCase::ReasoningRequest => {
             (96, text_max_output_tokens(&case.endpoint, defaults) as u64)
         }
+        SmokeCase::ReasoningCapture => {
+            (128, text_max_output_tokens(&case.endpoint, defaults) as u64)
+        }
         SmokeCase::Structured | SmokeCase::StructuredCompletion | SmokeCase::Tool => (
             192,
             structured_max_output_tokens(&case.endpoint, defaults) as u64,
@@ -442,6 +452,7 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
                 run_structured_completion(&llm, &case, defaults).await?
             }
             SmokeCase::ReasoningRequest => run_reasoning_request(&llm, &case, defaults).await?,
+            SmokeCase::ReasoningCapture => run_reasoning_capture(&llm, &case, defaults).await?,
             SmokeCase::ThinkingRoundtrip => run_thinking_roundtrip(&llm, &case, defaults).await?,
         };
         Ok::<Usage, anyhow::Error>(case_usage)
@@ -905,6 +916,47 @@ async fn run_reasoning_request(
     Ok(usage)
 }
 
+async fn run_reasoning_capture(
+    llm: &Lutum,
+    case: &CaseSpec,
+    defaults: &DefaultsConfig,
+) -> Result<Usage> {
+    let mut session = Session::new(llm.clone());
+    session.push_user("Think briefly, then answer exactly OK.");
+    let result = session
+        .text_turn()
+        .max_output_tokens(text_max_output_tokens(&case.endpoint, defaults))
+        .collect()
+        .await?;
+    ensure_ok(&result.assistant_text(), "reasoning_capture final answer")?;
+
+    if !result
+        .assistant_turn
+        .items()
+        .iter()
+        .any(|item| matches!(item, AssistantTurnItem::Reasoning(text) if !text.trim().is_empty()))
+    {
+        bail!("reasoning_capture did not decode any assistant reasoning items");
+    }
+
+    let committed_turn = session
+        .list_turns()
+        .last()
+        .ok_or_else(|| anyhow!("reasoning_capture did not commit an assistant turn"))?;
+    let committed_has_reasoning = (0..committed_turn.item_count()).any(|index| {
+        committed_turn
+            .item_at(index)
+            .and_then(|item| item.as_reasoning())
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false)
+    });
+    if !committed_has_reasoning {
+        bail!("reasoning_capture did not preserve reasoning in the committed transcript");
+    }
+
+    Ok(result.usage)
+}
+
 async fn run_thinking_roundtrip(
     llm: &Lutum,
     case: &CaseSpec,
@@ -937,7 +989,7 @@ async fn run_thinking_roundtrip(
 fn verify_raw_expectations(case: &CaseSpec, raw: &[RawTraceEntry]) -> Result<()> {
     if matches!(
         case.case,
-        SmokeCase::ReasoningRequest | SmokeCase::ThinkingRoundtrip
+        SmokeCase::ReasoningRequest | SmokeCase::ReasoningCapture | SmokeCase::ThinkingRoundtrip
     ) && case.kind == AdapterKind::OpenAiChatCompletions
         && !raw_request_contains(raw, &["reasoning_effort"])
     {
@@ -981,6 +1033,10 @@ fn verify_raw_expectations(case: &CaseSpec, raw: &[RawTraceEntry]) -> Result<()>
         {
             bail!("responses replay request did not preserve reasoning items");
         }
+    }
+
+    if case.case == SmokeCase::ReasoningCapture && !raw_stream_contains(raw, &["\"reasoning\""]) {
+        bail!("reasoning_capture expected Ollama delta.reasoning in the raw stream");
     }
 
     if !case.endpoint.fallback_models.is_empty() && !raw_request_contains(raw, &["models"]) {

@@ -15,6 +15,18 @@ cases = ["completion"]
 input_price_per_million = 0.0
 output_price_per_million = 0.0
 
+@ endpoints.ollama_chat_gemma4_26b
+adapter = "openai-chat-completions"
+base_url = "http://localhost:11434/v1"
+api_key_env = "LUTUM_SMOKE_OLLAMA_TOKEN"
+fallback_api_key = "local"
+model = "gemma4:26b"
+cases = ["reasoning_capture"]
+text_max_output_tokens = 128
+openai_reasoning_effort = "low"
+input_price_per_million = 0.0
+output_price_per_million = 0.0
+
 @ endpoints.anthropic_messages_haiku45
 adapter = "claude-messages"
 base_url = "https://api.anthropic.com"
