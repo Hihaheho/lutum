@@ -3404,8 +3404,10 @@ where
         let mut request_id = None::<String>;
         let mut model = fallback_model;
         let mut json_buffer = String::new();
+        let mut saw_tool_call = false;
         let mut pending_item = None::<BufferedTurnItem>;
         let mut committed_items = Vec::<OpenAiTurnItem>::new();
+        let mut tool_calls = ToolCallTracker::default();
         let mut last_usage = Usage::zero();
         let mut saw_refusal = false;
         let mut stream_finish_reason = None::<FinishReason>;
@@ -3504,18 +3506,59 @@ where
                             };
                         }
                     }
+                    for tc in delta.tool_calls.as_deref().unwrap_or(&[]) {
+                        let key = tc.index.to_string();
+                        if let (Some(id), Some(name)) =
+                            (tc.id.as_deref(), tc.function.name.as_deref())
+                        {
+                            tool_calls.observe_call(
+                                key.clone(),
+                                ToolCallId::from(id),
+                                ToolName::from(name),
+                            );
+                        }
+                        if let Some(args_delta) = tc.function.arguments.as_deref() {
+                            let dummy_id = tc
+                                .id
+                                .as_deref()
+                                .map(ToolCallId::from)
+                                .unwrap_or_else(|| ToolCallId::from(""));
+                            if let Some((id, name, delta)) = tool_calls.record_delta(
+                                key,
+                                dummy_id,
+                                tc.function.name.as_deref().map(ToolName::from),
+                                args_delta,
+                            ) {
+                                yield ErasedStructuredTurnEvent::ToolCallChunk {
+                                    id,
+                                    name,
+                                    arguments_json_delta: delta,
+                                };
+                            }
+                        }
+                    }
                 }
             }
+        }
+
+        for meta in tool_calls.finish_all()? {
+            saw_tool_call = true;
+            yield ErasedStructuredTurnEvent::ToolCallReady(meta.clone());
         }
 
         if started {
             let finish_reason = stream_finish_reason.unwrap_or(if saw_refusal {
                 FinishReason::ContentFilter
+            } else if saw_tool_call {
+                FinishReason::ToolCall
             } else {
                 FinishReason::Stop
             });
 
-            if finish_reason != FinishReason::Length && !json_buffer.is_empty() {
+            if finish_reason != FinishReason::Length
+                && finish_reason != FinishReason::ToolCall
+                && !json_buffer.is_empty()
+            {
                 let raw_json = match RawJson::parse(json_buffer.clone()) {
                     Ok(raw_json) => raw_json,
                     Err(err) => {
@@ -3533,6 +3576,26 @@ where
             }
 
             flush_buffered_content(&mut pending_item, &mut committed_items);
+            for finalized in tool_calls.finalized.values() {
+                let arguments = match RawJson::parse(finalized.arguments_json.clone()) {
+                    Ok(arguments) => arguments,
+                    Err(err) => {
+                        emit_openai_parse_error(
+                            raw.as_ref(),
+                            request_id.as_deref(),
+                            ParseErrorStage::ToolCallArgumentsParse,
+                            &finalized.arguments_json,
+                            &err,
+                        );
+                        Err(OpenAiError::Json(err))?
+                    }
+                };
+                committed_items.push(OpenAiTurnItem::ToolCall {
+                    id: finalized.id.clone(),
+                    name: finalized.name.clone(),
+                    arguments,
+                });
+            }
             let committed_turn = Arc::new(OpenAiCommittedTurn {
                 request_id: request_id.clone(),
                 model: model.clone(),
@@ -3969,6 +4032,111 @@ mod tests {
                 OpenAiTurnItem::Text { content: text }
             ] if reasoning == "thinking" && text == "{\"answer\":\"OK\"}"
         ));
+    }
+
+    #[test]
+    fn chat_structured_sse_maps_tool_call_and_commits_it() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-structured-tool\",\"model\":\"gemma4:26b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"thinking\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-structured-tool\",\"model\":\"gemma4:26b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"calling tool\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-structured-tool\",\"model\":\"gemma4:26b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"call-1\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-structured-tool\",\"model\":\"gemma4:26b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"id\":\"chatcmpl-structured-tool\",\"model\":\"gemma4:26b\",\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":12,\"total_tokens\":32}}\n\n",
+            )),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+
+        let events = block_on(async {
+            map_chat_structured_stream(futures::stream::iter(payloads), "gemma4:26b".into(), None)
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ErasedStructuredTurnEvent::ToolCallChunk {
+                    id,
+                    name,
+                    arguments_json_delta,
+                } if id.as_str() == "call-1"
+                    && name.as_str() == "weather"
+                    && arguments_json_delta == "{\"city\":\"Tokyo\"}"
+            )
+        }));
+
+        let ready = events
+            .iter()
+            .filter_map(|event| match event {
+                ErasedStructuredTurnEvent::ToolCallReady(invocation) => Some(invocation),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id.as_str(), "call-1");
+        assert_eq!(ready[0].name.as_str(), "weather");
+        assert_eq!(
+            ready[0]
+                .arguments
+                .deserialize::<WeatherArgs>()
+                .unwrap()
+                .city,
+            "Tokyo"
+        );
+
+        let committed_turn = match events.last() {
+            Some(ErasedStructuredTurnEvent::Completed {
+                finish_reason,
+                usage,
+                committed_turn,
+                ..
+            }) => {
+                assert_eq!(*finish_reason, FinishReason::ToolCall);
+                assert_eq!(usage.total_tokens, 32);
+                committed_turn
+            }
+            other => panic!("expected completed event, got {other:?}"),
+        };
+        let committed_turn = committed_turn
+            .as_any()
+            .downcast_ref::<OpenAiCommittedTurn>()
+            .expect("OpenAI committed turn");
+        assert_eq!(committed_turn.finish_reason, FinishReason::ToolCall);
+        match committed_turn.items.as_slice() {
+            [
+                OpenAiTurnItem::Reasoning {
+                    content: reasoning, ..
+                },
+                OpenAiTurnItem::Text { content: text },
+                OpenAiTurnItem::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                },
+            ] => {
+                assert_eq!(reasoning, "thinking");
+                assert_eq!(text, "calling tool");
+                assert_eq!(id.as_str(), "call-1");
+                assert_eq!(name.as_str(), "weather");
+                assert_eq!(
+                    arguments.deserialize::<WeatherArgs>().unwrap().city,
+                    "Tokyo"
+                );
+            }
+            other => panic!("unexpected committed items: {other:?}"),
+        }
     }
 
     fn raw_extensions() -> RequestExtensions {

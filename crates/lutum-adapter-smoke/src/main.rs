@@ -13,8 +13,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use lutum::{
     AssistantTurnItem, CompletionOptions, Lutum, ModelName, RawTelemetryConfig, RequestExtensions,
-    Session, SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredTurnOutcome,
-    TextStepOutcomeWithTools, Usage, UsageEstimate, UsageRecoveryAdapter,
+    Session, SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcomeWithTools,
+    StructuredTurnOutcome, TextStepOutcomeWithTools, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use lutum_claude::{ClaudeAdapter, MessagesRequest};
 use lutum_openai::{CompletionRequest, OpenAiAdapter, OpenAiReasoningEffort};
@@ -113,6 +113,7 @@ enum SmokeCase {
     Text,
     Structured,
     Tool,
+    StructuredTool,
     StructuredCompletion,
     ReasoningRequest,
     ReasoningCapture,
@@ -126,6 +127,7 @@ impl SmokeCase {
             "text" => Ok(Self::Text),
             "structured" => Ok(Self::Structured),
             "tool" => Ok(Self::Tool),
+            "structured_tool" => Ok(Self::StructuredTool),
             "structured_completion" => Ok(Self::StructuredCompletion),
             "reasoning_request" => Ok(Self::ReasoningRequest),
             "reasoning_capture" => Ok(Self::ReasoningCapture),
@@ -140,6 +142,7 @@ impl SmokeCase {
             Self::Text => "text",
             Self::Structured => "structured",
             Self::Tool => "tool",
+            Self::StructuredTool => "structured_tool",
             Self::StructuredCompletion => "structured_completion",
             Self::ReasoningRequest => "reasoning_request",
             Self::ReasoningCapture => "reasoning_capture",
@@ -406,7 +409,10 @@ fn worst_case_tokens(case: &CaseSpec, defaults: &DefaultsConfig) -> (u64, u64) {
         SmokeCase::ReasoningCapture => {
             (128, text_max_output_tokens(&case.endpoint, defaults) as u64)
         }
-        SmokeCase::Structured | SmokeCase::StructuredCompletion | SmokeCase::Tool => (
+        SmokeCase::Structured
+        | SmokeCase::StructuredCompletion
+        | SmokeCase::Tool
+        | SmokeCase::StructuredTool => (
             192,
             structured_max_output_tokens(&case.endpoint, defaults) as u64,
         ),
@@ -448,6 +454,7 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
             SmokeCase::Text => run_text(&llm, &case, defaults).await?,
             SmokeCase::Structured => run_structured(&llm, &case, defaults).await?,
             SmokeCase::Tool => run_tool(&llm, &case, defaults).await?,
+            SmokeCase::StructuredTool => run_structured_tool(&llm, &case, defaults).await?,
             SmokeCase::StructuredCompletion => {
                 run_structured_completion(&llm, &case, defaults).await?
             }
@@ -907,6 +914,48 @@ async fn run_tool(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Re
     bail!("tool case did not finish after tool result")
 }
 
+async fn run_structured_tool(
+    llm: &Lutum,
+    case: &CaseSpec,
+    defaults: &DefaultsConfig,
+) -> Result<Usage> {
+    let mut session = Session::new(llm.clone());
+    session.push_user(
+        "Call echo_word with word OK. Do not answer directly; request the tool call first.",
+    );
+    let outcome = session
+        .structured_turn::<SmokeStructured>()
+        .tools::<SmokeTools>()
+        .available_tools(vec![SmokeToolsSelector::EchoWord])
+        .require_tool(SmokeToolsSelector::EchoWord)
+        .max_output_tokens(structured_max_output_tokens(&case.endpoint, defaults))
+        .collect()
+        .await?;
+
+    match outcome {
+        StructuredStepOutcomeWithTools::NeedsTools(round) => {
+            match round.expect_one()? {
+                SmokeToolsCall::EchoWord(call) if normalize_ok(&call.input.word) => {}
+                SmokeToolsCall::EchoWord(call) => {
+                    bail!(
+                        "structured_tool expected echo_word word OK, got {:?}",
+                        call.input.word
+                    );
+                }
+            }
+            let usage = round.usage;
+            round.discard();
+            Ok(usage)
+        }
+        StructuredStepOutcomeWithTools::Finished(result) => {
+            bail!(
+                "structured_tool finished without requesting a tool call: {:?}",
+                result.semantic
+            )
+        }
+    }
+}
+
 async fn run_reasoning_request(
     llm: &Lutum,
     case: &CaseSpec,
@@ -1037,6 +1086,15 @@ fn verify_raw_expectations(case: &CaseSpec, raw: &[RawTraceEntry]) -> Result<()>
 
     if case.case == SmokeCase::ReasoningCapture && !raw_stream_contains(raw, &["\"reasoning\""]) {
         bail!("reasoning_capture expected Ollama delta.reasoning in the raw stream");
+    }
+
+    if case.case == SmokeCase::StructuredTool && case.kind == AdapterKind::OpenAiChatCompletions {
+        if !raw_request_contains(raw, &["response_format", "tools", "echo_word"]) {
+            bail!("structured_tool chat request did not include response_format and tool schema");
+        }
+        if !raw_stream_contains(raw, &["\"tool_calls\""]) {
+            bail!("structured_tool expected Chat Completions delta.tool_calls in the raw stream");
+        }
     }
 
     if !case.endpoint.fallback_models.is_empty() && !raw_request_contains(raw, &["models"]) {
