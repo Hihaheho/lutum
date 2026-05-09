@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
+    error::Error as StdError,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -12,9 +13,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use lutum::{
-    AssistantTurnItem, CompletionOptions, Lutum, ModelName, RawTelemetryConfig, RequestExtensions,
-    Session, SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcomeWithTools,
-    StructuredTurnOutcome, TextStepOutcomeWithTools, Usage, UsageEstimate, UsageRecoveryAdapter,
+    AssistantTurnItem, CompletionOptions, CompletionReductionError, Lutum, ModelName,
+    OutputLimitExceeded, RawTelemetryConfig, RequestExtensions, Session, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, StructuredStepOutcomeWithTools, StructuredTurnOutcome,
+    TextStepOutcomeWithTools, TextTurnReductionError, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use lutum_claude::{ClaudeAdapter, MessagesRequest};
 use lutum_openai::{CompletionRequest, OpenAiAdapter, OpenAiReasoningEffort};
@@ -111,6 +113,7 @@ impl AdapterKind {
 enum SmokeCase {
     Completion,
     Text,
+    OutputLimit,
     Structured,
     StructuredOptional,
     Tool,
@@ -127,6 +130,7 @@ impl SmokeCase {
         match value {
             "completion" => Ok(Self::Completion),
             "text" => Ok(Self::Text),
+            "output_limit" => Ok(Self::OutputLimit),
             "structured" => Ok(Self::Structured),
             "structured_optional" => Ok(Self::StructuredOptional),
             "tool" => Ok(Self::Tool),
@@ -144,6 +148,7 @@ impl SmokeCase {
         match self {
             Self::Completion => "completion",
             Self::Text => "text",
+            Self::OutputLimit => "output_limit",
             Self::Structured => "structured",
             Self::StructuredOptional => "structured_optional",
             Self::Tool => "tool",
@@ -210,6 +215,11 @@ struct EchoWordArgs {
 enum SmokeTools {
     EchoWord(EchoWordArgs),
 }
+
+const OUTPUT_LIMIT_MAX_OUTPUT_TOKENS: u32 = 16;
+const OUTPUT_LIMIT_PROMPT: &str = "\
+Write a numbered list with at least 20 short items explaining how to safely migrate a legacy data pipeline. \
+Do not summarize, do not stop early, and include concrete details in every item.";
 
 #[derive(Clone, Copy)]
 struct SmokeReasoningConfig(OpenAiReasoningEffort);
@@ -361,7 +371,7 @@ fn validate_case(endpoint_id: &str, kind: AdapterKind, case: SmokeCase) -> Resul
         (_, SmokeCase::ReasoningCapture) => {
             bail!("endpoint {endpoint_id} reasoning_capture requires openai-chat-completions")
         }
-        (AdapterKind::OpenAiCompletions, SmokeCase::Completion) => Ok(()),
+        (AdapterKind::OpenAiCompletions, SmokeCase::Completion | SmokeCase::OutputLimit) => Ok(()),
         (AdapterKind::OpenAiCompletions, _) => {
             bail!("endpoint {endpoint_id} uses /completions and can only run completion cases")
         }
@@ -424,6 +434,7 @@ fn worst_case_tokens(case: &CaseSpec, defaults: &DefaultsConfig) -> (u64, u64) {
         SmokeCase::Completion | SmokeCase::Text | SmokeCase::ReasoningRequest => {
             (96, text_max_output_tokens(&case.endpoint, defaults) as u64)
         }
+        SmokeCase::OutputLimit => (192, OUTPUT_LIMIT_MAX_OUTPUT_TOKENS as u64),
         SmokeCase::ReasoningCapture => {
             (128, text_max_output_tokens(&case.endpoint, defaults) as u64)
         }
@@ -472,6 +483,7 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
         let case_usage = match case.case {
             SmokeCase::Completion => run_completion(&llm, &case, defaults).await?,
             SmokeCase::Text => run_text(&llm, &case, defaults).await?,
+            SmokeCase::OutputLimit => run_output_limit(&llm, &case).await?,
             SmokeCase::Structured => run_structured(&llm, &case, defaults).await?,
             SmokeCase::StructuredOptional => run_structured_optional(&llm, &case, defaults).await?,
             SmokeCase::Tool => run_tool(&llm, &case, defaults).await?,
@@ -724,7 +736,10 @@ fn usage_from_raw(raw: &[RawTraceEntry]) -> Usage {
             == Some("chat.completion.chunk")
         {
             value.get("usage").map(usage_from_chat_value)
-        } else if value.get("type").and_then(|kind| kind.as_str()) == Some("response.completed") {
+        } else if matches!(
+            value.get("type").and_then(|kind| kind.as_str()),
+            Some("response.completed" | "response.incomplete")
+        ) {
             value
                 .get("response")
                 .and_then(|response| response.get("usage"))
@@ -856,6 +871,68 @@ async fn run_text(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Re
         .await?;
     ensure_ok(&result.assistant_text(), "text")?;
     Ok(result.usage)
+}
+
+async fn run_output_limit(llm: &Lutum, case: &CaseSpec) -> Result<Usage> {
+    if case.kind == AdapterKind::OpenAiCompletions {
+        let result = llm
+            .completion(OUTPUT_LIMIT_PROMPT)
+            .completion_options(CompletionOptions {
+                max_output_tokens: Some(OUTPUT_LIMIT_MAX_OUTPUT_TOKENS),
+                ..CompletionOptions::default()
+            })
+            .collect()
+            .await;
+        return expect_output_limit(result, "completion output_limit");
+    }
+
+    let mut session = Session::new();
+    session.push_user(OUTPUT_LIMIT_PROMPT);
+    let result = session
+        .text_turn(&llm)
+        .max_output_tokens(OUTPUT_LIMIT_MAX_OUTPUT_TOKENS)
+        .collect()
+        .await;
+    expect_output_limit(result, "text output_limit")
+}
+
+fn expect_output_limit<T, E>(result: Result<T, E>, label: &str) -> Result<Usage>
+where
+    E: StdError + 'static,
+{
+    match result {
+        Ok(_) => {
+            bail!(
+                "{label} unexpectedly completed within {OUTPUT_LIMIT_MAX_OUTPUT_TOKENS} output token(s)"
+            )
+        }
+        Err(err) => output_limit_from_error(&err)
+            .map(|limit| limit.usage)
+            .ok_or_else(|| anyhow!("{label} expected output-limit reduction error, got: {err}")),
+    }
+}
+
+fn output_limit_from_error<'a>(
+    error: &'a (dyn StdError + 'static),
+) -> Option<&'a OutputLimitExceeded> {
+    let mut current = Some(error);
+    while let Some(err) = current {
+        if let Some(limit) = err.downcast_ref::<OutputLimitExceeded>() {
+            return Some(limit);
+        }
+        if let Some(TextTurnReductionError::OutputLimitExceeded(limit)) =
+            err.downcast_ref::<TextTurnReductionError>()
+        {
+            return Some(limit);
+        }
+        if let Some(CompletionReductionError::OutputLimitExceeded(limit)) =
+            err.downcast_ref::<CompletionReductionError>()
+        {
+            return Some(limit);
+        }
+        current = err.source();
+    }
+    None
 }
 
 async fn run_structured(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Result<Usage> {
@@ -1156,6 +1233,14 @@ fn verify_raw_expectations(case: &CaseSpec, raw: &[RawTraceEntry]) -> Result<()>
         bail!("reasoning_capture expected Ollama delta.reasoning in the raw stream");
     }
 
+    if case.case == SmokeCase::OutputLimit
+        && !raw_request_contains_output_limit(raw, OUTPUT_LIMIT_MAX_OUTPUT_TOKENS)
+    {
+        bail!(
+            "output_limit request did not include a {OUTPUT_LIMIT_MAX_OUTPUT_TOKENS}-token output limit"
+        );
+    }
+
     if case.case == SmokeCase::StructuredTool && case.kind == AdapterKind::OpenAiChatCompletions {
         if !raw_request_contains(raw, &["response_format", "tools", "echo_word"]) {
             bail!("structured_tool chat request did not include response_format and tool schema");
@@ -1178,6 +1263,22 @@ fn raw_request_contains(raw: &[RawTraceEntry], needles: &[&str]) -> bool {
             needles
                 .iter()
                 .all(|needle| body.to_ascii_lowercase().contains(needle))
+        } else {
+            false
+        }
+    })
+}
+
+fn raw_request_contains_output_limit(raw: &[RawTraceEntry], tokens: u32) -> bool {
+    let needles = [
+        format!("\"max_output_tokens\":{tokens}"),
+        format!("\"max_completion_tokens\":{tokens}"),
+        format!("\"max_tokens\":{tokens}"),
+    ];
+    raw.iter().any(|entry| {
+        if let RawTraceEntry::Request { body, .. } = entry {
+            let body = body.to_ascii_lowercase();
+            needles.iter().any(|needle| body.contains(needle))
         } else {
             false
         }
@@ -1569,7 +1670,7 @@ adapter = "openai-responses"
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 model = "google/gemma-4-26b-a4b-it"
-cases = ["text", "structured", "tool", "thinking_roundtrip"]
+cases = ["text", "structured", "tool", "thinking_roundtrip", "output_limit"]
 expects_visible_thinking = true
 fallback_models = ["google/gemma-4-26b-a4b-it", "openai/gpt-5.4-nano"]
 input_price_per_million = 0.08
@@ -1782,6 +1883,11 @@ output_price_per_million = 0.35
             case.case_id == "openrouter_responses_fallback:text"
                 && !case.endpoint.fallback_models.is_empty()
         }));
+        assert!(
+            cases
+                .iter()
+                .any(|case| case.case_id == "openai_responses_gpt54_nano:output_limit")
+        );
     }
 
     #[test]
@@ -1799,6 +1905,7 @@ output_price_per_million = 0.35
                 "openrouter_responses_gemma4_26b:structured",
                 "openrouter_responses_gemma4_26b:tool",
                 "openrouter_responses_gemma4_26b:thinking_roundtrip",
+                "openrouter_responses_gemma4_26b:output_limit",
             ]
         );
     }
@@ -1817,7 +1924,7 @@ output_price_per_million = 0.35
             filter_cases(cases.clone(), &["openrouter_responses_gemma4_26b".into()])
                 .unwrap()
                 .len(),
-            4
+            5
         );
         assert!(filter_cases(cases, &["missing".into()]).is_err());
     }
@@ -1859,6 +1966,34 @@ output_price_per_million = 0.35
         assert_eq!(usage.output_tokens, 4);
         assert_eq!(usage.total_tokens, 7);
         assert_eq!(usage.cost_micros_usd, 12);
+    }
+
+    #[test]
+    fn usage_from_raw_extracts_responses_incomplete_usage() {
+        let raw = vec![RawTraceEntry::StreamEvent {
+            provider: "openai".into(),
+            api: "responses".into(),
+            operation: "text_turn".into(),
+            request_id: Some("resp_1".into()),
+            sequence: 1,
+            event_name: None,
+            payload: json!({
+                "type": "response.incomplete",
+                "response": {
+                    "usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 1,
+                        "total_tokens": 6,
+                    }
+                }
+            })
+            .to_string(),
+        }];
+
+        let usage = usage_from_raw(&raw);
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 1);
+        assert_eq!(usage.total_tokens, 6);
     }
 
     #[test]
@@ -1925,6 +2060,9 @@ output_price_per_million = 0.35
     fn validates_completions_case_shape() {
         assert!(validate_case("bad", AdapterKind::OpenAiCompletions, SmokeCase::Text).is_err());
         assert!(validate_case("ok", AdapterKind::OpenAiCompletions, SmokeCase::Completion).is_ok());
+        assert!(
+            validate_case("ok", AdapterKind::OpenAiCompletions, SmokeCase::OutputLimit).is_ok()
+        );
     }
 
     #[test]
