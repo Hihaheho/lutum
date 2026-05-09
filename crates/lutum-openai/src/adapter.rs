@@ -2231,9 +2231,10 @@ where
                     SseEvent::ResponseInProgress(_)
                     | SseEvent::ResponseContentPartAdded(_)
                     | SseEvent::ResponseContentPartDone(_)
-                    | SseEvent::ResponseReasoningSummaryTextDone(_)
-                    | SseEvent::ResponseCompleted(_)
-                    | SseEvent::ResponseIncomplete(_) => {}
+                    | SseEvent::ResponseReasoningSummaryTextDone(_) => {}
+                    // Terminal response events are handled before this match
+                    // so completed and incomplete share one accounting path.
+                    SseEvent::ResponseCompleted(_) | SseEvent::ResponseIncomplete(_) => {}
                     SseEvent::ResponseCreated(_) => {}
                     SseEvent::Unknown(value) => {
                         Err(OpenAiError::Sse {
@@ -2569,9 +2570,10 @@ where
                     SseEvent::ResponseInProgress(_)
                     | SseEvent::ResponseContentPartAdded(_)
                     | SseEvent::ResponseContentPartDone(_)
-                    | SseEvent::ResponseReasoningSummaryTextDone(_)
-                    | SseEvent::ResponseCompleted(_)
-                    | SseEvent::ResponseIncomplete(_) => {}
+                    | SseEvent::ResponseReasoningSummaryTextDone(_) => {}
+                    // Terminal response events are handled before this match
+                    // so completed and incomplete share one accounting path.
+                    SseEvent::ResponseCompleted(_) | SseEvent::ResponseIncomplete(_) => {}
                     SseEvent::ResponseCreated(_) => {}
                     SseEvent::Unknown(value) => {
                         Err(OpenAiError::Sse {
@@ -2739,6 +2741,7 @@ fn map_responses_finish_reason(reason: &str) -> FinishReason {
         "end_turn" | "stop_sequence" => FinishReason::Stop,
         "length" | "max_tokens" | "max_output_tokens" => FinishReason::Length,
         "tool_use" => FinishReason::ToolCall,
+        "content_filter" => FinishReason::ContentFilter,
         other => FinishReason::Unknown(other.to_string()),
     }
 }
@@ -5258,6 +5261,62 @@ mod tests {
             }
             other => panic!("expected completed event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn structured_sse_incomplete_does_not_parse_partial_json() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_structured_incomplete\",\"model\":\"gpt-5.4-nano\",\"output\":[],\"usage\":null}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"{\\\"answer\\\":\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_structured_incomplete\",\"model\":\"gpt-5.4-nano\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"incomplete\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"answer\\\":\",\"annotations\":[]}]}],\"max_output_tokens\":16,\"usage\":{\"input_tokens\":44,\"output_tokens\":16,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":60}}}\n\n",
+            )),
+        ];
+
+        let events = block_on(async {
+            map_structured_stream(
+                futures::stream::iter(payloads),
+                "gpt-5.4-nano".into(),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ErasedStructuredTurnEvent::StructuredOutputReady(_)))
+        );
+        match events.last() {
+            Some(ErasedStructuredTurnEvent::Completed {
+                finish_reason,
+                usage,
+                ..
+            }) => {
+                assert_eq!(*finish_reason, FinishReason::Length);
+                assert_eq!(usage.input_tokens, 44);
+                assert_eq!(usage.output_tokens, 16);
+                assert_eq!(usage.total_tokens, 60);
+            }
+            other => panic!("expected completed event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_finish_reason_maps_content_filter() {
+        assert_eq!(
+            map_responses_finish_reason("content_filter"),
+            FinishReason::ContentFilter
+        );
     }
 
     #[test]
