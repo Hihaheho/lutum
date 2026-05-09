@@ -860,7 +860,6 @@ fn sanitize_openai_strict_schema(schema: &mut serde_json::Value) {
         Value::Object(map) => {
             if schema_type_contains(map.get("type"), "object") {
                 let required = required_property_names(map.get("required"));
-                let mut optional_properties = Vec::new();
                 let mut property_names = Vec::new();
                 let mut has_properties = false;
 
@@ -868,13 +867,13 @@ fn sanitize_openai_strict_schema(schema: &mut serde_json::Value) {
                     has_properties = true;
                     property_names = properties.keys().cloned().collect();
                     for name in &property_names {
-                        if !required.contains(name) {
-                            optional_properties.push(name.clone());
+                        if required.contains(name) {
+                            continue;
                         }
-                    }
-                    for name in &optional_properties {
                         if let Some(property_schema) = properties.get_mut(name) {
-                            make_schema_nullable(property_schema);
+                            if should_make_missing_property_nullable(property_schema) {
+                                make_schema_nullable(property_schema);
+                            }
                         }
                     }
                 }
@@ -899,6 +898,17 @@ fn sanitize_openai_strict_schema(schema: &mut serde_json::Value) {
         }
         _ => {}
     }
+}
+
+fn should_make_missing_property_nullable(schema: &Value) -> bool {
+    !schema_has_non_null_default(schema)
+}
+
+fn schema_has_non_null_default(schema: &Value) -> bool {
+    schema
+        .as_object()
+        .and_then(|map| map.get("default"))
+        .is_some_and(|default| !default.is_null())
 }
 
 fn required_property_names(required: Option<&Value>) -> BTreeSet<String> {
@@ -3844,6 +3854,13 @@ mod tests {
         text: Option<String>,
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+    struct DefaultVecSummary {
+        ok: bool,
+        #[serde(default)]
+        items: Vec<String>,
+    }
+
     fn empty_turn_config() -> AdapterTurnConfig {
         AdapterTurnConfig {
             generation: GenerationParams::default(),
@@ -3857,6 +3874,10 @@ mod tests {
             schema_name: "OptionalSummary".to_string(),
             schema: serde_json::to_value(schemars::schema_for!(OptionalSummary)).unwrap(),
         }
+    }
+
+    fn default_vec_summary_schema() -> Value {
+        serde_json::to_value(schemars::schema_for!(DefaultVecSummary)).unwrap()
     }
 
     fn required_names(schema: &Value) -> BTreeSet<String> {
@@ -4536,6 +4557,20 @@ mod tests {
         assert_eq!(schema["additionalProperties"], Value::Bool(false));
         assert!(!schema_allows_null(&schema["properties"]["ok"]));
         assert!(schema_allows_null(&schema["properties"]["text"]));
+    }
+
+    #[test]
+    fn openai_strict_schema_keeps_default_vec_non_nullable() {
+        let mut schema = default_vec_summary_schema();
+
+        assert!(!required_names(&schema).contains("items"));
+        sanitize_openai_strict_schema(&mut schema);
+
+        assert_eq!(required_names(&schema), names(&["items", "ok"]));
+        let items = &schema["properties"]["items"];
+        assert_eq!(items["type"], Value::String("array".into()));
+        assert_eq!(items["default"], serde_json::json!([]));
+        assert!(!schema_allows_null(items));
     }
 
     #[test]
