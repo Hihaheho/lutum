@@ -56,13 +56,13 @@ async fn session_ephemeral_marks_stable_openai_chat_message_in_wire_request() {
         .with_claude_prompt_caching();
     let ctx =
         Lutum::new(Arc::new(adapter), test_budget()).with_extension(request_only_raw_telemetry());
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
 
     session.push_user("Stable prompt.");
     session.push_ephemeral_user("Dynamic prompt.");
 
     let collected = lutum_trace::test::collect_raw(async move {
-        let _ = session.text_turn().collect().await;
+        let _ = session.text_turn(&ctx).collect().await;
     })
     .await;
     let body = raw_request_body(&collected.raw.entries);

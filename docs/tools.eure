@@ -179,7 +179,7 @@ enum AppTools {
 }
 
 let outcome = session
-    .text_turn()
+    .text_turn(&llm)
     .tools::<AppTools>()
     .available_tools_default_plus([AppToolsSelector::DeleteFile])
     .collect()
@@ -213,7 +213,7 @@ assistant tool call.
 use lutum::TextStepOutcomeWithTools;
 
 loop {
-    let outcome = session.text_turn().tools::<AppTools>().collect().await?;
+    let outcome = session.text_turn(&llm).tools::<AppTools>().collect().await?;
 
     match outcome {
         TextStepOutcomeWithTools::NeedsTools(round) => {
@@ -479,7 +479,7 @@ same selector.
 let dynamic = tool_hooks.description_overrides().await;
 
 let outcome = session
-    .text_turn()
+    .text_turn(&llm)
     .tools::<AppTools>()
     .describe_many_tools(dynamic)
     .describe_tool(AppToolsSelector::WebSearch, "Search only public sources.")

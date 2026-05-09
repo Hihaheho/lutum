@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! loop {
-//!     outcome = session.text_turn().tools::<T>().collect_with(handler).await?;
+//!     outcome = session.text_turn(&llm).tools::<T>().collect_with(handler).await?;
 //!     match outcome {
 //!         Finished  => return usage,
 //!         NeedsTools(round) => {
@@ -25,8 +25,8 @@ use thiserror::Error;
 use lutum_protocol::{ToolAvailability, ToolResult, Toolset, budget::Usage};
 
 use crate::{
-    HandlerContext, HandlerDirective, Session, TextStepOutcomeWithTools, TextTurnEventWithTools,
-    TextTurnStateWithTools,
+    HandlerContext, HandlerDirective, Lutum, Session, TextStepOutcomeWithTools,
+    TextTurnEventWithTools, TextTurnStateWithTools,
 };
 
 // ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ pub enum AgentLoopError<E> {
 ///
 /// ```rust,ignore
 /// let output = session
-///     .agent_loop::<MyTools>()
+///     .agent_loop::<MyTools>(&llm)
 ///     .max_rounds(20)
 ///     .on_text_delta(move |delta| { let _ = tx.send(delta); })
 ///     .run(|call| async move {
@@ -82,6 +82,7 @@ pub enum AgentLoopError<E> {
 ///     .await?;
 /// ```
 pub struct AgentLoop<'s, T: Toolset> {
+    lutum: Lutum,
     session: &'s mut Session,
     max_rounds: usize,
     on_text_delta: Option<Box<dyn Fn(String) + Send + Sync>>,
@@ -93,8 +94,9 @@ impl<'s, T> AgentLoop<'s, T>
 where
     T: Toolset,
 {
-    pub(crate) fn new(session: &'s mut Session) -> Self {
+    pub(crate) fn new(session: &'s mut Session, lutum: &Lutum) -> Self {
         Self {
+            lutum: lutum.clone(),
             session,
             max_rounds: 20,
             on_text_delta: None,
@@ -155,6 +157,7 @@ where
         E: std::error::Error + 'static,
     {
         let AgentLoop {
+            lutum,
             session,
             max_rounds,
             on_text_delta,
@@ -171,7 +174,7 @@ where
         for _round in 0..max_rounds {
             let cb = on_text_delta.clone();
 
-            let mut turn = session.text_turn().tools::<T>();
+            let mut turn = session.text_turn(&lutum).tools::<T>();
             if let Some(ref availability) = available {
                 turn = match availability {
                     ToolAvailability::All => turn,

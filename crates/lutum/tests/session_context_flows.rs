@@ -96,11 +96,12 @@ fn structured_session_turn_auto_commits_on_collect() {
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Extract the email address.");
     let before_len = session.input().items().len();
 
-    let result = block_on(async { session.structured_turn::<Contact>().collect().await }).unwrap();
+    let result =
+        block_on(async { session.structured_turn::<Contact>(&ctx).collect().await }).unwrap();
 
     // collect() auto-commits
     assert_eq!(session.input().items().len(), before_len + 1);
@@ -141,14 +142,14 @@ fn session_commits_parallel_tool_results_in_order() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Get the weather and search for ramen.");
     let before_len = session.input().items().len();
     let before_turns = session.list_turns().count();
 
     let outcome = block_on(async {
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
             .collect()

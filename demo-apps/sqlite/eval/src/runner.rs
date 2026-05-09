@@ -191,12 +191,14 @@ pub async fn run_case(
         max_rounds: 10,
     };
 
-    let mut session = sqlite_agent::init_session(main_llm.clone(), &hooks).await;
+    let mut session = sqlite_agent::init_session(&hooks).await;
+    let main_run_llm = main_llm.clone();
 
     CaseEval::new(case.clone(), judge_llm.cloned())
         .run_future(main_llm, async move {
             let output = run_turn(
                 &mut session,
+                &main_run_llm,
                 &registry,
                 &hooks,
                 &config,

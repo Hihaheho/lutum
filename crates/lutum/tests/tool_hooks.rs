@@ -243,13 +243,13 @@ fn tool_round_commit_accepts_typed_handled_values() {
         Arc::new(adapter),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Check weather.");
     let before_len = session.input().items().len();
 
     let outcome = block_on(async {
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect()
@@ -322,12 +322,12 @@ fn tool_round_plan_commit_preserves_original_arguments_after_rewrite() {
         Arc::new(adapter),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("rewrite weather input");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect(),
@@ -404,12 +404,12 @@ fn apply_hooks_splits_handled_and_pending() {
         Arc::new(make_two_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("go");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
             .collect(),
@@ -447,12 +447,12 @@ fn apply_hooks_multi_pass_chaining_narrows_pending() {
         Arc::new(make_two_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("go");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
             .collect(),
@@ -490,13 +490,13 @@ fn tool_round_plan_commit_merges_handled_and_pending_results() {
         Arc::new(make_two_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("go");
     let before_len = session.input().items().len();
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
             .collect(),
@@ -569,12 +569,12 @@ fn tool_round_plan_commit_auto_commits_rejected_calls() {
         Arc::new(make_two_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("go");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
             .collect(),
@@ -637,12 +637,12 @@ fn apply_hooks_accepts_closure_via_blanket_impl() {
         Arc::new(make_two_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("go");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
             .collect(),
@@ -785,13 +785,13 @@ fn invalid_tool_call_is_rejected_and_reported() {
         Arc::new(adapter),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Search something.");
 
     // Weather のみ available に制限（Search の定義は LLM に送られない）
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect(),
@@ -836,12 +836,12 @@ fn invalid_tool_call_commit_auto_synthesizes_rejection_result() {
         Arc::new(make_disallowed_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Search something.");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect(),
@@ -883,12 +883,12 @@ fn recoverable_tool_call_issue_result_overrides_auto_rejection() {
         Arc::new(make_disallowed_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Search something.");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect(),
@@ -928,12 +928,12 @@ fn parse_failure_issue_result_overrides_auto_rejection() {
         Arc::new(make_bad_weather_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Get the weather.");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect(),
@@ -979,12 +979,12 @@ fn tool_call_parse_failure_is_recovered_and_suggests_continue() {
         Arc::new(make_bad_weather_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Get the weather.");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect(),
@@ -1021,12 +1021,12 @@ fn mixed_valid_and_parse_failed_tool_calls_still_expose_valid_calls() {
         Arc::new(make_mixed_parse_failure_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Get weather and then search.");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
             .collect(),
@@ -1094,12 +1094,12 @@ fn tool_call_parse_failure_commit_auto_synthesizes_rejection_result() {
         Arc::new(make_bad_weather_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Get the weather.");
 
     let outcome = block_on(
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect(),
@@ -1139,12 +1139,12 @@ fn unknown_tool_parse_failure_is_recovered() {
         Arc::new(make_unknown_tool_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Search for ramen.");
 
     // `NoTools` exposes no selectors, so the outer availability gate rejects the model-authored
     // tool call before toolset parsing.
-    let outcome = block_on(session.text_turn().tools::<lutum::NoTools>().collect()).unwrap();
+    let outcome = block_on(session.text_turn(&ctx).tools::<lutum::NoTools>().collect()).unwrap();
 
     match outcome {
         TextStepOutcomeWithTools::NeedsTools(round) => {

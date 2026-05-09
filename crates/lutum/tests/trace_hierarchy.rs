@@ -34,10 +34,11 @@ async fn run_session_turn(
     prompt: &'static str,
     answer: &'static str,
 ) -> String {
-    let mut session = Session::new(test_llm(request_id, answer));
+    let llm = test_llm(request_id, answer);
+    let mut session = Session::new();
     session.push_user(prompt);
     session
-        .text_turn()
+        .text_turn(&llm)
         .collect()
         .await
         .expect("mock text turn should collect")

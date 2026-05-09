@@ -83,7 +83,7 @@ let adapter = ClaudeAdapter::new(api_key)
 
 // Attach a per-request budget via RequestExtensions
 let result = session
-    .text_turn()
+    .text_turn(&llm)
     .ext(ThinkingBudget(8000))
     .collect()
     .await?;

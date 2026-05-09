@@ -50,7 +50,6 @@ impl SessionDefaults {
 
 #[derive(Clone)]
 pub struct Session {
-    lutum: Lutum,
     input: ModelInput,
     /// Indices into `input.items()` that were pushed as ephemeral (non-turn).
     ///
@@ -66,10 +65,17 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(lutum: Lutum) -> Self {
+    pub fn new() -> Self {
         Self {
-            lutum,
             input: ModelInput::new(),
+            ephemeral_indices: Vec::new(),
+            defaults: SessionDefaults::default(),
+        }
+    }
+
+    pub fn from_input(input: ModelInput) -> Self {
+        Self {
+            input,
             ephemeral_indices: Vec::new(),
             defaults: SessionDefaults::default(),
         }
@@ -82,10 +88,6 @@ impl Session {
 
     pub fn defaults(&self) -> &SessionDefaults {
         &self.defaults
-    }
-
-    pub fn lutum(&self) -> &Lutum {
-        &self.lutum
     }
 
     pub fn input(&self) -> &ModelInput {
@@ -102,25 +104,25 @@ impl Session {
 
     /// Create a text turn builder. Calling `collect()` on the builder will auto-commit the turn
     /// to this session. Use `collect_staged()` to opt out of auto-commit.
-    pub fn text_turn(&mut self) -> TextTurn<'_> {
-        TextTurn::from_session(self)
+    pub fn text_turn(&mut self, lutum: &Lutum) -> TextTurn<'_> {
+        TextTurn::from_session(self, lutum)
     }
 
     /// Create an [`AgentLoop`] builder for running a tool-calling agentic loop on this session.
     ///
     /// The loop drives the model through tool calls until it produces a text-only
     /// response or the round limit is reached.
-    pub fn agent_loop<T: Toolset>(&mut self) -> AgentLoop<'_, T> {
-        AgentLoop::new(self)
+    pub fn agent_loop<T: Toolset>(&mut self, lutum: &Lutum) -> AgentLoop<'_, T> {
+        AgentLoop::new(self, lutum)
     }
 
     /// Create a structured turn builder. Calling `collect()` on the builder will auto-commit the
     /// turn to this session. Use `collect_staged()` to opt out of auto-commit.
-    pub fn structured_turn<O>(&mut self) -> StructuredTurn<'_, O>
+    pub fn structured_turn<O>(&mut self, lutum: &Lutum) -> StructuredTurn<'_, O>
     where
         O: StructuredOutput,
     {
-        StructuredTurn::from_session(self)
+        StructuredTurn::from_session(self, lutum)
     }
 
     pub fn push_system(&mut self, text: impl Into<String>) {
@@ -260,6 +262,12 @@ impl Session {
             ModelInputItem::Turn(turn) if !turn.ephemeral() => Some(turn.as_ref() as &dyn TurnView),
             _ => None,
         })
+    }
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

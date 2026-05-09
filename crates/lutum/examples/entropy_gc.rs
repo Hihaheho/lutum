@@ -21,8 +21,8 @@ const HISTORY: &[&str] = &[
 fn approx_word_count(text: &str) -> usize {
     text.split_whitespace().count()
 }
-fn session(llm: &Lutum) -> Session {
-    Session::new(llm.clone())
+fn session() -> Session {
+    Session::new()
 }
 fn seed_history(session: &mut Session) {
     session.push_system(SYSTEM);
@@ -36,18 +36,18 @@ fn seed_history(session: &mut Session) {
         }
     }
 }
-async fn ask(session: &mut Session) -> anyhow::Result<(String, Usage)> {
-    let result = session.text_turn().collect().await?;
+async fn ask(session: &mut Session, llm: &Lutum) -> anyhow::Result<(String, Usage)> {
+    let result = session.text_turn(llm).collect().await?;
     Ok((result.assistant_text(), result.usage))
 }
 async fn ask_with_prompt(
     llm: &Lutum,
     prompt: impl Into<String>,
 ) -> anyhow::Result<(String, Usage)> {
-    let mut session = session(llm);
+    let mut session = session();
     seed_history(&mut session);
     session.push_user(prompt);
-    ask(&mut session).await
+    ask(&mut session, llm).await
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -79,13 +79,13 @@ async fn main() -> anyhow::Result<()> {
             approx_word_count(&summary)
         );
 
-        let mut compact = session(&llm);
+        let mut compact = session();
         compact.push_system(SYSTEM);
         compact.push_user(format!(
             "Summary of the previous troubleshooting session:\n{summary}"
         ));
         compact.push_user("What should the user try next?");
-        let (compacted_answer, _) = ask(&mut compact).await?;
+        let (compacted_answer, _) = ask(&mut compact, &llm).await?;
 
         println!("\nFull-history answer:   {full_answer}");
         println!("Compacted answer:      {compacted_answer}");

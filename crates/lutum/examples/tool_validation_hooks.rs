@@ -82,7 +82,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(adapter),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Check Tokyo and Atlantis weather.");
 
     let hooks = ToolsHooksSet::new()
@@ -90,7 +90,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_weather_hook(RejectAtlantis);
 
     let round = match session
-        .text_turn()
+        .text_turn(&ctx)
         .tools::<Tools>()
         .available_tools([ToolsSelector::Weather])
         .collect()

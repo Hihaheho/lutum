@@ -112,7 +112,7 @@ impl TuiApp {
         let (agent_event_tx, agent_event_rx) = mpsc::channel(16);
         let mode = Arc::new(RwLock::new(TransactionMode::ReadOnly));
 
-        let session = new_session(llm.clone());
+        let session = new_session();
         let display_session = session.clone();
 
         let mut app = Self {
@@ -173,22 +173,20 @@ impl TuiApp {
 
     pub fn load_persisted_session(&mut self) {
         let (session, warnings) = match self.session_path.as_deref() {
-            None => (new_session(self.llm.clone()), vec![]),
-            Some(path) => match load_session(self.llm.clone(), path) {
+            None => (new_session(), vec![]),
+            Some(path) => match load_session(path) {
                 Ok(session) => {
                     tracing::info!("session loaded from {}", path.display());
                     (session, vec![])
                 }
-                Err(SessionPersistenceError::NotFound(_)) => {
-                    (new_session(self.llm.clone()), vec![])
-                }
+                Err(SessionPersistenceError::NotFound(_)) => (new_session(), vec![]),
                 Err(e) => {
                     let message = format!(
                         "session file {} could not be loaded; starting fresh: {e}",
                         path.display()
                     );
                     tracing::warn!("{message}");
-                    (new_session(self.llm.clone()), vec![message])
+                    (new_session(), vec![message])
                 }
             },
         };
@@ -201,7 +199,7 @@ impl TuiApp {
 
     /// Reset to a fresh session and delete the saved session file.
     pub fn reset_session(&mut self) {
-        let fresh = new_session(self.llm.clone());
+        let fresh = new_session();
         self.display_session = fresh.clone();
         self.session = Some(fresh);
         self.streaming_text.clear();
@@ -266,10 +264,12 @@ impl TuiApp {
         let registry = self.registry.clone();
         let config = self.config.clone();
         let event_tx = self.agent_event_tx.clone();
+        let llm = self.llm.clone();
 
         self.running_task = Some(tokio::spawn(async move {
             let result = run_turn(
                 &mut session,
+                &llm,
                 &registry,
                 &hooks,
                 &config,
@@ -399,8 +399,8 @@ fn new_textarea() -> tui_textarea::TextArea<'static> {
     tui_textarea::TextArea::default()
 }
 
-fn new_session(llm: Lutum) -> Session {
-    let mut session = Session::new(llm);
+fn new_session() -> Session {
+    let mut session = Session::new();
     session.push_system(sqlite_agent::SYSTEM_PROMPT);
     session
 }
@@ -455,7 +455,7 @@ mod tests {
     }
 
     fn write_session_snapshot(path: &Path) {
-        let mut session = Session::new(test_lutum());
+        let mut session = Session::new();
         session.push_system(sqlite_agent::SYSTEM_PROMPT);
         session.push_user("remember this prompt");
         save_session(&session, path).unwrap();

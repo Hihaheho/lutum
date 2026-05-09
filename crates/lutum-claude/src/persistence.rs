@@ -218,7 +218,7 @@ pub fn save_session(session: &Session, path: &Path) -> Result<(), SessionPersist
 /// If the file exists but cannot be parsed, returns a descriptive error. Warnings
 /// about recoverable issues (e.g. future version tags) are returned alongside the
 /// session so callers can surface them to the user.
-pub fn load_session(lutum: lutum::Lutum, path: &Path) -> Result<Session, SessionPersistenceError> {
+pub fn load_session(path: &Path) -> Result<Session, SessionPersistenceError> {
     let json = std::fs::read_to_string(path).map_err(|source| {
         if source.kind() == ErrorKind::NotFound {
             SessionPersistenceError::NotFound(path.to_owned())
@@ -233,9 +233,7 @@ pub fn load_session(lutum: lutum::Lutum, path: &Path) -> Result<Session, Session
     let items: Vec<ClaudeModelInputItem> =
         serde_json::from_str(&json).map_err(SessionPersistenceError::Deserialize)?;
 
-    let mut session = Session::new(lutum);
-    *session.input_mut() = restore(items);
-    Ok(session)
+    Ok(Session::from_input(restore(items)))
 }
 
 // ---------------------------------------------------------------------------

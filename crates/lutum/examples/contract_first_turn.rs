@@ -32,10 +32,10 @@ fn add_usage(total: &mut Usage, usage: Usage) {
 
 #[rustfmt::skip]
 async fn ask(llm: &Lutum, system: &str, user: impl Into<String>) -> anyhow::Result<(String, Usage)> {
-    let mut session = Session::new(llm.clone());
+    let mut session = Session::new();
     session.push_system(system);
     session.push_user(user);
-    let result = session.text_turn().collect().await?;
+    let result = session.text_turn(&llm).collect().await?;
     Ok((result.assistant_text(), result.usage))
 }
 

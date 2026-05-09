@@ -4,7 +4,7 @@
 //! delegating to `Session`. The contrast shows what `Session` actually does:
 //!
 //! - `session.push_system(...)` → `input = ModelInput::new().system(...)`
-//! - `session.text_turn().tools::<T>().collect()` → `llm.text_turn(input.clone()).tools::<T>().collect()`
+//! - `session.text_turn(&llm).tools::<T>().collect()` → `llm.text_turn(input.clone()).tools::<T>().collect()`
 //! - `round.commit(&mut session, results)` → `round.commit_into(&mut input, results)?`
 //!
 //! Use this pattern when you need to branch transcripts, interleave turns from multiple

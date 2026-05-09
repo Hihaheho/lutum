@@ -142,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let llm = Lutum::new(Arc::new(adapter), budget);
 
-    let mut session = Session::new(llm);
+    let mut session = Session::new();
     session.push_system(
         "You are a calculator assistant. \
          Use the provided tools to compute results. \
@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
         let mut last_text = String::new();
 
         for _step in 1..=6 {
-            let outcome = session.text_turn().tools::<MathTools>().collect().await?;
+            let outcome = session.text_turn(&llm).tools::<MathTools>().collect().await?;
 
             match outcome {
                 TextStepOutcomeWithTools::NeedsTools(round) => {

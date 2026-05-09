@@ -146,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let llm = Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(llm);
+    let mut session = Session::new();
 
     session.push_system(
         "You are investigating an in-memory database through tools. \
@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
     session.push_user("Who is the top spender? Give their name and total.");
 
     for _step in 1..=10 {
-        let outcome = session.text_turn().tools::<DbTools>().collect().await?;
+        let outcome = session.text_turn(&llm).tools::<DbTools>().collect().await?;
 
         match outcome {
             TextStepOutcomeWithTools::NeedsTools(round) => {

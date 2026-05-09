@@ -76,8 +76,8 @@ impl<E: std::error::Error + 'static> From<AgentLoopError<E>> for AgentError {
 ///
 /// Use this instead of calling `Session::new` directly when you want the
 /// [`AgentHooksSet::system_prompt`] hook to control the system prompt.
-pub async fn init_session(llm: Lutum, hooks: &AgentHooksSet<'_>) -> Session {
-    let mut session = Session::new(llm);
+pub async fn init_session(hooks: &AgentHooksSet<'_>) -> Session {
+    let mut session = Session::new();
     session.push_system(hooks.system_prompt().await);
     session
 }
@@ -89,6 +89,7 @@ pub async fn init_session(llm: Lutum, hooks: &AgentHooksSet<'_>) -> Session {
 /// turns are appended to it).
 pub async fn run_turn(
     session: &mut Session,
+    llm: &Lutum,
     registry: &DbRegistry,
     hooks: &AgentHooksSet<'_>,
     config: &AgentConfig,
@@ -105,7 +106,7 @@ pub async fn run_turn(
     let history_ref = sql_history.clone();
 
     let mut builder = session
-        .agent_loop::<SqlTools>()
+        .agent_loop::<SqlTools>(llm)
         .max_rounds(config.max_rounds)
         .available_tools(available);
 

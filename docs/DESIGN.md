@@ -177,8 +177,10 @@ library's primary job.
 It owns:
 
 - a `ModelInput` (which contains `Turn` items for committed history)
-- an execution `Lutum`
 - optional turn defaults
+
+Execution `Lutum` contexts are passed to session turn builders per request, so callers can keep
+one transcript while switching providers, hooks, or budgets.
 
 It deliberately does not own:
 
@@ -190,7 +192,7 @@ It deliberately does not own:
 
 ### Explicit commit model
 
-- `Session::text_turn()` / `Session::structured_turn::<O>()` return executable builders
+- `Session::text_turn(&llm)` / `Session::structured_turn::<O>(&llm)` return executable builders
 - `builder.start()` / `builder.collect()` / `builder.collect_with(...)` do not mutate transcript
   state
 - transcript state changes only through explicit `commit_*`
@@ -221,8 +223,8 @@ Execution config is shared across text and structured turns:
 
 Public builders in `lutum`:
 
-- `Session::text_turn()` / `Lutum::text_turn(input)` return `TextTurn`
-- `Session::structured_turn::<O>()` / `Lutum::structured_turn::<O>(input)` return
+- `Session::text_turn(&llm)` / `Lutum::text_turn(input)` return `TextTurn`
+- `Session::structured_turn::<O>(&llm)` / `Lutum::structured_turn::<O>(input)` return
   `StructuredTurn<O>`
 - `.tools::<T>()` upgrades those into `TextTurnWithTools<T>` /
   `StructuredTurnWithTools<T, O>`
@@ -319,7 +321,7 @@ the transcript model.
 context returns an error; use `Lutum::from_parts(...)` when completion is needed.
 
 If you need transcript/session/replay but still do not need tools, use
-`Session::structured_turn::<O>()` or `Lutum::structured_turn::<O>(input)`.
+`Session::structured_turn::<O>(&llm)` or `Lutum::structured_turn::<O>(input)`.
 
 Budget reservation, tracing, and usage recovery follow the same path as turn execution.
 

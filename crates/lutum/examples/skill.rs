@@ -287,7 +287,7 @@ async fn run() -> anyhow::Result<()> {
         Arc::new(mock_adapter()),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_system(
         "You are a code reviewer with access to skill loading. \
          Load only the skills you need. Unload skills you are done with.",
@@ -316,7 +316,7 @@ async fn run() -> anyhow::Result<()> {
             .collect();
 
         let outcome = session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<AppTools>()
             .available_tools_default_plus(extra_selectors)
             .describe_tool(AppToolsSelector::LoadSkill, render_load_catalogue(&loaded))

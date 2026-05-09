@@ -20,10 +20,10 @@ struct RecoveryAction {
 }
 
 async fn ask(llm: &Lutum, system: &str, user: impl Into<String>) -> anyhow::Result<String> {
-    let mut session = Session::new(llm.clone());
+    let mut session = Session::new();
     session.push_system(system);
     session.push_user(user);
-    let result = session.text_turn().collect().await?;
+    let result = session.text_turn(&llm).collect().await?;
     Ok(result.assistant_text())
 }
 
@@ -32,11 +32,11 @@ async fn classify(
     system: &str,
     user: impl Into<String>,
 ) -> anyhow::Result<RecoveryAction> {
-    let mut session = Session::new(llm.clone());
+    let mut session = Session::new();
     session.push_system(system);
     session.push_user(user);
     let result = session
-        .structured_turn::<RecoveryAction>()
+        .structured_turn::<RecoveryAction>(&llm)
         .collect()
         .await?;
     match result.semantic {

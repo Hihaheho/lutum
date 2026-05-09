@@ -166,7 +166,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(adapter),
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user(
         "Check Tokyo and Osaka weather, and search for lunch near Tokyo Station. \
          Summarise everything in one reply.",
@@ -228,7 +228,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let outcome = session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(available.iter().cloned())
             .describe_many_tools(desc_overrides)

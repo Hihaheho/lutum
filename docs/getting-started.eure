@@ -65,12 +65,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
 
-    let mut session = Session::new(llm);
+    let mut session = Session::new();
     session.push_system("You are concise.");
     session.push_user("Explain what a borrow checker does in one sentence.");
 
     let result = session
-        .text_turn()
+        .text_turn(&llm)
         .collect()
         .await?;
 
@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Key points:
 
 - `Lutum::new(adapter, budget)` creates the execution context.
-- `Session::new(llm)` opens a transcript.
+- `Session::new()` opens a transcript.
 - `session.push_user(...)` and `session.push_system(...)` stage messages.
 - `.collect().await?` runs the turn and reduces the event stream into a result.
 - `session.commit_text(result)` stores the turn in the transcript. Nothing is stored until you call a `commit_*` method.
@@ -115,7 +115,7 @@ struct Sentiment {
 session.push_user("Classify the sentiment of: 'I love this crate!'");
 
 let result = session
-    .structured_turn::<Sentiment>()
+    .structured_turn::<Sentiment>(&llm)
     .collect()
     .await?;
 

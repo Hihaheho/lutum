@@ -59,11 +59,11 @@ async fn test_basic_text_turn() {
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
 
-    let mut session = Session::new(llm);
+    let mut session = Session::new();
     session.push_user("Say hello.");
 
     // collect() auto-commits when called on a session-originated turn
-    let result = session.text_turn().collect().await.unwrap();
+    let result = session.text_turn(&llm).collect().await.unwrap();
 
     assert_eq!(result.assistant_text(), "Hello, world!");
 
@@ -109,10 +109,10 @@ async fn test_structured_turn() {
         SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
     );
 
-    let mut session = Session::new(llm);
+    let mut session = Session::new();
     session.push_user("Classify sentiment of: 'Great crate!'");
 
-    let result = session.structured_turn::<Sentiment>().collect().await.unwrap();
+    let result = session.structured_turn::<Sentiment>(&llm).collect().await.unwrap();
 
     // collect() auto-commits; inspect the result directly
     match result.semantic.clone() {
@@ -152,12 +152,12 @@ async fn test_tool_round() {
     let adapter = MockLlmAdapter::new().with_text_scenario(scenario);
     let llm = Lutum::new(Arc::new(adapter), budget());
 
-    let mut session = Session::new(llm);
+    let mut session = Session::new();
     session.push_user("What is the weather in Tokyo?");
 
     loop {
         let outcome = session
-            .text_turn()
+            .text_turn(&llm)
             .tools::<AppTools>()
             .collect()
             .await

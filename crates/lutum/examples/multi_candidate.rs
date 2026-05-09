@@ -9,7 +9,7 @@ async fn ask(
     prompt: &str,
     temperature: Option<Temperature>,
 ) -> anyhow::Result<String> {
-    let mut session = Session::new(llm.clone());
+    let mut session = Session::new();
     if let Some(system) = system {
         session.push_system(system);
     }
@@ -17,12 +17,12 @@ async fn ask(
     let result = match temperature {
         Some(temperature) => {
             session
-                .text_turn()
+                .text_turn(&llm)
                 .temperature(temperature)
                 .collect()
                 .await?
         }
-        None => session.text_turn().collect().await?,
+        None => session.text_turn(&llm).collect().await?,
     };
     Ok(result.assistant_text())
 }

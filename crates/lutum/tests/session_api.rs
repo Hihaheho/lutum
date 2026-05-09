@@ -45,17 +45,89 @@ fn collect_auto_commits_collect_staged_does_not() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Hi.");
     let before_len = session.input().items().len();
 
     // collect() auto-commits immediately
     let result =
-        futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
+        futures::executor::block_on(async { session.text_turn(&ctx).collect().await }).unwrap();
 
     assert_eq!(result.assistant_text(), "hello");
     assert_eq!(session.input().items().len(), before_len + 1);
     assert_eq!(session.list_turns().count(), 1);
+}
+
+#[test]
+fn session_can_switch_lutum_instances_between_turns() {
+    let adapter_a = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-session-a".into()),
+            model: "model-a".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "from a".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-session-a".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 4,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let adapter_b = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-session-b".into()),
+            model: "model-b".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "from b".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-session-b".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 4,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let llm_a = lutum::Lutum::new(
+        Arc::new(adapter_a),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let llm_b = lutum::Lutum::new(
+        Arc::new(adapter_b),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+
+    session.push_user("first");
+    let first =
+        futures::executor::block_on(async { session.text_turn(&llm_a).collect().await }).unwrap();
+
+    session.push_user("second");
+    let second =
+        futures::executor::block_on(async { session.text_turn(&llm_b).collect().await }).unwrap();
+
+    assert_eq!(first.model, "model-a");
+    assert_eq!(first.assistant_text(), "from a");
+    assert_eq!(second.model, "model-b");
+    assert_eq!(second.assistant_text(), "from b");
+    assert_eq!(session.list_turns().count(), 2);
+
+    let committed = session
+        .list_turns()
+        .map(|turn| {
+            turn.item_at(0)
+                .and_then(|item| item.as_text())
+                .unwrap()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(committed, vec!["from a", "from b"]);
 }
 
 #[test]
@@ -79,12 +151,13 @@ fn collect_staged_does_not_commit_until_explicit() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Hi.");
     let before_len = session.input().items().len();
 
     let staged =
-        futures::executor::block_on(async { session.text_turn().collect_staged().await }).unwrap();
+        futures::executor::block_on(async { session.text_turn(&ctx).collect_staged().await })
+            .unwrap();
 
     // Not committed yet
     assert_eq!(session.input().items().len(), before_len);
@@ -120,14 +193,14 @@ fn tool_round_is_only_applied_on_explicit_commit() {
     ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Check weather.");
     let before_len = session.input().items().len();
     let before_turns = session.list_turns().count();
 
     let outcome = futures::executor::block_on(async {
         session
-            .text_turn()
+            .text_turn(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect()
@@ -208,12 +281,12 @@ fn session_auto_commits_across_multiple_turns() {
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
 
     // collect() auto-commits each turn; no explicit commit needed
     for prompt in ["step one", "step two"] {
         session.push_user(prompt);
-        futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
+        futures::executor::block_on(async { session.text_turn(&ctx).collect().await }).unwrap();
     }
 
     assert_eq!(session.input().items().len(), 4);
@@ -258,14 +331,14 @@ fn structured_tool_round_stays_explicit_until_commit() {
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Plan with a tool.");
     let before_len = session.input().items().len();
     let before_turns = session.list_turns().count();
 
     let outcome = futures::executor::block_on(async {
         session
-            .structured_turn::<Summary>()
+            .structured_turn::<Summary>(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect()
@@ -323,14 +396,14 @@ fn structured_tool_parse_failure_recovers_as_tool_round() {
         ]));
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Plan with a recoverable tool failure.");
     let before_len = session.input().items().len();
     let before_turns = session.list_turns().count();
 
     let outcome = futures::executor::block_on(async {
         session
-            .structured_turn::<Summary>()
+            .structured_turn::<Summary>(&ctx)
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .collect()
@@ -376,10 +449,7 @@ fn ephemeral_turn_view_returns_ephemeral_true() {
 
 #[test]
 fn push_ephemeral_turn_visible_in_input_but_not_in_list_turns() {
-    let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
-    let adapter = MockLlmAdapter::new();
-    let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Hello.");
 
     let inner = Arc::new(AssistantTurnView::from_items(&[])) as lutum::CommittedTurn;
@@ -424,7 +494,7 @@ fn ephemeral_turn_is_cleared_after_collect() {
     let observed = adapter.clone();
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
     session.push_user("Hello.");
 
     let ephemeral_turn = Arc::new(AssistantTurnView::from_items(&[])) as lutum::CommittedTurn;
@@ -434,7 +504,7 @@ fn ephemeral_turn_is_cleared_after_collect() {
 
     // collect() — ephemeral turn goes into the snapshot sent to the model,
     // then is cleared from the session. Only the new committed turn remains.
-    futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
+    futures::executor::block_on(async { session.text_turn(&ctx).collect().await }).unwrap();
 
     assert_eq!(observed.observed_ephemeral_indices(), vec![vec![1]]);
     assert_eq!(
@@ -472,12 +542,12 @@ fn ephemeral_message_indices_are_attached_to_session_turn_request() {
     let observed = adapter.clone();
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = lutum::Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(ctx);
+    let mut session = Session::new();
 
     session.push_user("Stable prompt.");
     session.push_ephemeral_user("Dynamic prompt.");
 
-    futures::executor::block_on(async { session.text_turn().collect().await }).unwrap();
+    futures::executor::block_on(async { session.text_turn(&ctx).collect().await }).unwrap();
 
     assert_eq!(observed.observed_ephemeral_indices(), vec![vec![1]]);
     assert_eq!(

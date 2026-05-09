@@ -94,7 +94,7 @@ You can consume the stream directly:
 use futures::StreamExt as _;
 use lutum::TextTurnEvent;
 
-let mut stream = session.text_turn().stream().await?;
+let mut stream = session.text_turn(&llm).stream().await?;
 
 while let Some(event) = stream.next().await {
     match event? {

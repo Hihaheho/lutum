@@ -105,13 +105,13 @@ fn build_prompt(source: &str, prior_failure: Option<&GateFailure>) -> String {
 }
 
 async fn extract(llm: &Lutum, prompt: &str) -> anyhow::Result<Contact> {
-    let mut session = Session::new(llm.clone());
+    let mut session = Session::new();
     session.push_system(
         "You extract contacts from source text. Rust decides whether the extraction passes verification. Use only values grounded in the source.",
     );
     session.push_user(prompt);
 
-    let result = session.structured_turn::<Contact>().collect().await?;
+    let result = session.structured_turn::<Contact>(&llm).collect().await?;
     match result.semantic {
         StructuredTurnOutcome::Structured(contact) => Ok(contact),
         StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),

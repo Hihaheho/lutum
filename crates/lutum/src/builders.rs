@@ -32,22 +32,28 @@ use crate::{
 };
 
 enum TurnTarget<'a> {
-    Lutum { lutum: &'a Lutum, input: ModelInput },
-    Session { session: &'a mut Session },
+    Lutum {
+        lutum: &'a Lutum,
+        input: ModelInput,
+    },
+    Session {
+        lutum: Lutum,
+        session: &'a mut Session,
+    },
 }
 
 impl<'a> TurnTarget<'a> {
     fn lutum_owned(&self) -> Lutum {
         match self {
             Self::Lutum { lutum, .. } => (*lutum).clone(),
-            Self::Session { session } => session.lutum().clone(),
+            Self::Session { lutum, .. } => lutum.clone(),
         }
     }
 
     fn input(&mut self, extensions: &mut RequestExtensions) -> ModelInput {
         match self {
             Self::Lutum { input, .. } => input.clone(),
-            Self::Session { session } => {
+            Self::Session { session, .. } => {
                 let (input, ephemeral_indices) = session.snapshot_input_with_ephemeral_indices();
                 if !ephemeral_indices.is_empty() {
                     extensions.insert(ephemeral_indices);
@@ -61,7 +67,7 @@ impl<'a> TurnTarget<'a> {
     where
         T: Toolset,
     {
-        if let Self::Session { session } = self {
+        if let Self::Session { session, .. } = self {
             session.apply_defaults(turn);
         }
     }
@@ -70,7 +76,7 @@ impl<'a> TurnTarget<'a> {
     fn commit_staged(self, turn: UncommittedAssistantTurn) {
         match self {
             Self::Lutum { .. } => turn.discard(),
-            Self::Session { session } => turn.commit_into(session.input_mut()),
+            Self::Session { session, .. } => turn.commit_into(session.input_mut()),
         }
     }
 }
@@ -105,9 +111,12 @@ impl<'a> TextTurn<'a> {
         }
     }
 
-    pub(crate) fn from_session(session: &'a mut Session) -> Self {
+    pub(crate) fn from_session(session: &'a mut Session, lutum: &Lutum) -> Self {
         Self {
-            target: TurnTarget::Session { session },
+            target: TurnTarget::Session {
+                lutum: lutum.clone(),
+                session,
+            },
             extensions: RequestExtensions::new(),
             turn: ProtocolTextTurn::new(),
         }
@@ -484,7 +493,7 @@ where
             }
         };
         let outcome = match target {
-            TurnTarget::Session { session } => {
+            TurnTarget::Session { session, .. } => {
                 TextStepOutcomeWithTools::from_staged(staged, Some(session.input_mut()))
             }
             TurnTarget::Lutum { .. } => TextStepOutcomeWithTools::from_staged(staged, None),
@@ -528,7 +537,7 @@ where
             }
         };
         let outcome = match target {
-            TurnTarget::Session { session } => {
+            TurnTarget::Session { session, .. } => {
                 TextStepOutcomeWithTools::from_staged(staged, Some(session.input_mut()))
             }
             TurnTarget::Lutum { .. } => TextStepOutcomeWithTools::from_staged(staged, None),
@@ -558,9 +567,12 @@ where
         }
     }
 
-    pub(crate) fn from_session(session: &'a mut Session) -> Self {
+    pub(crate) fn from_session(session: &'a mut Session, lutum: &Lutum) -> Self {
         Self {
-            target: TurnTarget::Session { session },
+            target: TurnTarget::Session {
+                lutum: lutum.clone(),
+                session,
+            },
             extensions: RequestExtensions::new(),
             turn: ProtocolStructuredTurn::new(),
         }
@@ -951,10 +963,12 @@ where
         match pending.collect_with(handler).await {
             Ok(staged) => {
                 let outcome = match target {
-                    TurnTarget::Session { session } => StructuredStepOutcomeWithTools::from_staged(
-                        staged,
-                        Some(session.input_mut()),
-                    ),
+                    TurnTarget::Session { session, .. } => {
+                        StructuredStepOutcomeWithTools::from_staged(
+                            staged,
+                            Some(session.input_mut()),
+                        )
+                    }
                     TurnTarget::Lutum { .. } => {
                         StructuredStepOutcomeWithTools::from_staged(staged, None)
                     }
@@ -1047,10 +1061,12 @@ where
         match pending.collect().await {
             Ok(staged) => {
                 let outcome = match target {
-                    TurnTarget::Session { session } => StructuredStepOutcomeWithTools::from_staged(
-                        staged,
-                        Some(session.input_mut()),
-                    ),
+                    TurnTarget::Session { session, .. } => {
+                        StructuredStepOutcomeWithTools::from_staged(
+                            staged,
+                            Some(session.input_mut()),
+                        )
+                    }
                     TurnTarget::Lutum { .. } => {
                         StructuredStepOutcomeWithTools::from_staged(staged, None)
                     }

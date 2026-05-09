@@ -417,7 +417,7 @@ read these values by type.
 struct Tenant(&'static str);
 
 let result = session
-    .text_turn()
+    .text_turn(&llm)
     .ext(Tenant("eu-prod"))
     .collect()
     .await?;

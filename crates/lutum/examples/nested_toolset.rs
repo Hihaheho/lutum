@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
         .with_default_model(model);
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let llm = Lutum::new(Arc::new(adapter), budget);
-    let mut session = Session::new(llm);
+    let mut session = Session::new();
 
     session.push_system(
         "You are a data analyst with access to a user database and a calculator. \
@@ -201,7 +201,11 @@ async fn main() -> anyhow::Result<()> {
     println!();
 
     for step in 1..=8 {
-        let outcome = session.text_turn().tools::<AppTools>().collect().await?;
+        let outcome = session
+            .text_turn(&llm)
+            .tools::<AppTools>()
+            .collect()
+            .await?;
 
         match outcome {
             TextStepOutcomeWithTools::NeedsTools(round) => {
