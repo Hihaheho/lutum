@@ -2030,6 +2030,32 @@ where
                     };
                 }
 
+                if let Some(response) = response_terminal_response(&event) {
+                    request_id = Some(response.id.clone());
+                    flush_buffered_content(&mut pending_item, &mut committed_items);
+                    let usage = parse_response_usage_value(&response.usage);
+                    let finish_reason = response_object_finish_reason(
+                        response,
+                        usage,
+                        saw_tool_call,
+                        saw_refusal,
+                        openai_turn_items_lack_terminal_semantic(&committed_items),
+                    );
+                    yield ErasedTextTurnEvent::Completed {
+                        request_id: request_id.clone(),
+                        finish_reason: finish_reason.clone(),
+                        usage,
+                        committed_turn: Arc::new(OpenAiCommittedTurn {
+                            request_id: request_id.clone(),
+                            model: model.clone(),
+                            items: committed_items.clone(),
+                            finish_reason,
+                            usage,
+                        }),
+                    };
+                    continue;
+                }
+
                 match event {
                     SseEvent::ResponseOutputTextDelta(event) => {
                         push_buffered_content(
@@ -2202,34 +2228,12 @@ where
                             | ResponseOutputItem::FunctionCallOutput { .. } => {}
                         }
                     }
-                    SseEvent::ResponseCompleted(event) => {
-                        request_id = Some(event.response.id.clone());
-                        flush_buffered_content(&mut pending_item, &mut committed_items);
-                        let usage = parse_response_usage_value(&event.response.usage);
-                        let finish_reason = response_object_finish_reason(
-                            &event.response,
-                            usage,
-                            saw_tool_call,
-                            saw_refusal,
-                            openai_turn_items_lack_terminal_semantic(&committed_items),
-                        );
-                        yield ErasedTextTurnEvent::Completed {
-                            request_id: request_id.clone(),
-                            finish_reason: finish_reason.clone(),
-                            usage,
-                            committed_turn: Arc::new(OpenAiCommittedTurn {
-                                request_id: request_id.clone(),
-                                model: model.clone(),
-                                items: committed_items.clone(),
-                                finish_reason,
-                                usage,
-                            }),
-                        };
-                    }
                     SseEvent::ResponseInProgress(_)
                     | SseEvent::ResponseContentPartAdded(_)
                     | SseEvent::ResponseContentPartDone(_)
-                    | SseEvent::ResponseReasoningSummaryTextDone(_) => {}
+                    | SseEvent::ResponseReasoningSummaryTextDone(_)
+                    | SseEvent::ResponseCompleted(_)
+                    | SseEvent::ResponseIncomplete(_) => {}
                     SseEvent::ResponseCreated(_) => {}
                     SseEvent::Unknown(value) => {
                         Err(OpenAiError::Sse {
@@ -2321,6 +2325,53 @@ where
                         request_id: request_id.clone(),
                         model: model.clone(),
                     };
+                }
+
+                if let Some(response) = response_terminal_response(&event) {
+                    request_id = Some(response.id.clone());
+                    let usage = parse_response_usage_value(&response.usage);
+                    let finish_reason = response_object_finish_reason(
+                        response,
+                        usage,
+                        saw_tool_call,
+                        saw_refusal,
+                        structured_buffer.is_empty() && !saw_tool_call && !saw_refusal,
+                    );
+                    if finish_reason != FinishReason::Length {
+                        let value = match maybe_parse_structured_output(
+                            &structured_buffer,
+                            &mut emitted_ready,
+                        ) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                emit_openai_parse_error(
+                                    raw.as_ref(),
+                                    request_id.as_deref(),
+                                    ParseErrorStage::StructuredOutputParse,
+                                    &structured_buffer,
+                                    &err,
+                                );
+                                Err(err)?
+                            }
+                        };
+                        if let Some(value) = value {
+                            yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
+                        }
+                    }
+                    flush_buffered_content(&mut pending_item, &mut committed_items);
+                    yield ErasedStructuredTurnEvent::Completed {
+                        request_id: request_id.clone(),
+                        finish_reason: finish_reason.clone(),
+                        usage,
+                        committed_turn: Arc::new(OpenAiCommittedTurn {
+                            request_id: request_id.clone(),
+                            model: model.clone(),
+                            items: committed_items.clone(),
+                            finish_reason,
+                            usage,
+                        }),
+                    };
+                    continue;
                 }
 
                 match event {
@@ -2515,55 +2566,12 @@ where
                             | ResponseOutputItem::FunctionCallOutput { .. } => {}
                         }
                     }
-                    SseEvent::ResponseCompleted(event) => {
-                        request_id = Some(event.response.id.clone());
-                        let usage = parse_response_usage_value(&event.response.usage);
-                        let finish_reason = response_object_finish_reason(
-                            &event.response,
-                            usage,
-                            saw_tool_call,
-                            saw_refusal,
-                            structured_buffer.is_empty() && !saw_tool_call && !saw_refusal,
-                        );
-                        if finish_reason != FinishReason::Length {
-                            let value = match maybe_parse_structured_output(
-                                &structured_buffer,
-                                &mut emitted_ready,
-                            ) {
-                                Ok(value) => value,
-                                Err(err) => {
-                                    emit_openai_parse_error(
-                                        raw.as_ref(),
-                                        request_id.as_deref(),
-                                        ParseErrorStage::StructuredOutputParse,
-                                        &structured_buffer,
-                                        &err,
-                                    );
-                                    Err(err)?
-                                }
-                            };
-                            if let Some(value) = value {
-                                yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
-                            }
-                        }
-                        flush_buffered_content(&mut pending_item, &mut committed_items);
-                        yield ErasedStructuredTurnEvent::Completed {
-                            request_id: request_id.clone(),
-                            finish_reason: finish_reason.clone(),
-                            usage,
-                            committed_turn: Arc::new(OpenAiCommittedTurn {
-                                request_id: request_id.clone(),
-                                model: model.clone(),
-                                items: committed_items.clone(),
-                                finish_reason,
-                                usage,
-                            }),
-                        };
-                    }
                     SseEvent::ResponseInProgress(_)
                     | SseEvent::ResponseContentPartAdded(_)
                     | SseEvent::ResponseContentPartDone(_)
-                    | SseEvent::ResponseReasoningSummaryTextDone(_) => {}
+                    | SseEvent::ResponseReasoningSummaryTextDone(_)
+                    | SseEvent::ResponseCompleted(_)
+                    | SseEvent::ResponseIncomplete(_) => {}
                     SseEvent::ResponseCreated(_) => {}
                     SseEvent::Unknown(value) => {
                         Err(OpenAiError::Sse {
@@ -2575,6 +2583,14 @@ where
                 }
             }
         }
+    }
+}
+
+fn response_terminal_response(event: &SseEvent) -> Option<&ResponseObject> {
+    match event {
+        SseEvent::ResponseCompleted(event) => Some(&event.response),
+        SseEvent::ResponseIncomplete(event) => Some(&event.response),
+        _ => None,
     }
 }
 
@@ -5196,6 +5212,49 @@ mod tests {
             }) => {
                 assert_eq!(*finish_reason, FinishReason::Length);
                 assert_eq!(usage.output_tokens, 16);
+            }
+            other => panic!("expected completed event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_sse_maps_response_incomplete_to_length() {
+        let payloads = vec![
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_incomplete\",\"model\":\"gpt-5.4-nano\",\"output\":[],\"usage\":null}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"1. Inventory all data sources\"}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_incomplete\",\"model\":\"gpt-5.4-nano\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"incomplete\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"1. Inventory all data sources\",\"annotations\":[]}]}],\"max_output_tokens\":16,\"usage\":{\"input_tokens\":44,\"output_tokens\":16,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":60}}}\n\n",
+            )),
+        ];
+
+        let events = block_on(async {
+            map_text_stream(
+                futures::stream::iter(payloads),
+                "gpt-5.4-nano".into(),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        match events.last() {
+            Some(ErasedTextTurnEvent::Completed {
+                finish_reason,
+                usage,
+                ..
+            }) => {
+                assert_eq!(*finish_reason, FinishReason::Length);
+                assert_eq!(usage.input_tokens, 44);
+                assert_eq!(usage.output_tokens, 16);
+                assert_eq!(usage.total_tokens, 60);
             }
             other => panic!("expected completed event, got {other:?}"),
         }

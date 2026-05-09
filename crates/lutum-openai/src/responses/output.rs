@@ -43,6 +43,7 @@ pub enum SseEvent {
     ResponseFunctionCallArgumentsDelta(ResponseFunctionCallArgumentsDeltaEvent),
     ResponseFunctionCallArgumentsDone(ResponseFunctionCallArgumentsDoneEvent),
     ResponseCompleted(ResponseCompletedEvent),
+    ResponseIncomplete(ResponseIncompleteEvent),
     Unknown(serde_json::Value),
 }
 
@@ -235,6 +236,8 @@ enum SseEventWire {
     },
     #[serde(rename = "response.completed")]
     Completed { response: ResponseObject },
+    #[serde(rename = "response.incomplete")]
+    Incomplete { response: ResponseObject },
     /// Catch-all for any event types not yet handled by this crate.
     #[serde(other)]
     Unknown,
@@ -425,6 +428,12 @@ impl From<SseEventWire> for SseEvent {
                     event_type: Default::default(),
                 })
             }
+            SseEventWire::Incomplete { response } => {
+                Self::ResponseIncomplete(ResponseIncompleteEvent {
+                    response,
+                    event_type: Default::default(),
+                })
+            }
         }
     }
 }
@@ -596,6 +605,9 @@ impl From<SseEvent> for SseEventWire {
             },
             SseEvent::ResponseCompleted(ResponseCompletedEvent { response, .. }) => {
                 Self::Completed { response }
+            }
+            SseEvent::ResponseIncomplete(ResponseIncompleteEvent { response, .. }) => {
+                Self::Incomplete { response }
             }
         }
     }
@@ -1229,9 +1241,16 @@ pub struct ResponseCompletedEvent {
     pub event_type: MustBe!("response.completed"),
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResponseIncompleteEvent {
+    pub response: ResponseObject,
+    #[serde(rename = "type")]
+    pub event_type: MustBe!("response.incomplete"),
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ResponseContentPartAddedEvent, ResponseOutputItem};
+    use super::{ResponseContentPartAddedEvent, ResponseOutputItem, SseEvent};
 
     #[test]
     fn response_content_part_added_allows_missing_annotations() {
@@ -1251,6 +1270,32 @@ mod tests {
         assert!(event.part.annotations.is_empty());
         assert_eq!(event.part.item_type, "reasoning_text");
         assert_eq!(event.part.text, "");
+    }
+
+    #[test]
+    fn response_incomplete_parses_as_typed_event() {
+        let json = serde_json::json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_1",
+                "model": "gpt-5.4-nano",
+                "status": "incomplete",
+                "incomplete_details": {
+                    "reason": "max_output_tokens"
+                },
+                "output": [],
+                "usage": {
+                    "input_tokens": 44,
+                    "output_tokens": 16,
+                    "total_tokens": 60
+                }
+            },
+            "sequence_number": 20
+        });
+
+        let event = serde_json::from_value::<SseEvent>(json).unwrap();
+
+        assert!(matches!(event, SseEvent::ResponseIncomplete(_)));
     }
 
     #[test]
