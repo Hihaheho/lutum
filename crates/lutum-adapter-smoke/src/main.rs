@@ -112,9 +112,11 @@ enum SmokeCase {
     Completion,
     Text,
     Structured,
+    StructuredOptional,
     Tool,
     StructuredTool,
     StructuredCompletion,
+    StructuredCompletionOptional,
     ReasoningRequest,
     ReasoningCapture,
     ThinkingRoundtrip,
@@ -126,9 +128,11 @@ impl SmokeCase {
             "completion" => Ok(Self::Completion),
             "text" => Ok(Self::Text),
             "structured" => Ok(Self::Structured),
+            "structured_optional" => Ok(Self::StructuredOptional),
             "tool" => Ok(Self::Tool),
             "structured_tool" => Ok(Self::StructuredTool),
             "structured_completion" => Ok(Self::StructuredCompletion),
+            "structured_completion_optional" => Ok(Self::StructuredCompletionOptional),
             "reasoning_request" => Ok(Self::ReasoningRequest),
             "reasoning_capture" => Ok(Self::ReasoningCapture),
             "thinking_roundtrip" => Ok(Self::ThinkingRoundtrip),
@@ -141,9 +145,11 @@ impl SmokeCase {
             Self::Completion => "completion",
             Self::Text => "text",
             Self::Structured => "structured",
+            Self::StructuredOptional => "structured_optional",
             Self::Tool => "tool",
             Self::StructuredTool => "structured_tool",
             Self::StructuredCompletion => "structured_completion",
+            Self::StructuredCompletionOptional => "structured_completion_optional",
             Self::ReasoningRequest => "reasoning_request",
             Self::ReasoningCapture => "reasoning_capture",
             Self::ThinkingRoundtrip => "thinking_roundtrip",
@@ -181,6 +187,12 @@ struct CaseReport {
 struct SmokeStructured {
     ok: bool,
     text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct SmokeOptionalStructured {
+    ok: bool,
+    text: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -362,6 +374,12 @@ fn validate_case(endpoint_id: &str, kind: AdapterKind, case: SmokeCase) -> Resul
         (AdapterKind::OpenAiChatCompletions, SmokeCase::StructuredCompletion) => {
             bail!("endpoint {endpoint_id} structured_completion requires openai-responses")
         }
+        (AdapterKind::ClaudeMessages, SmokeCase::StructuredCompletionOptional) => {
+            bail!("endpoint {endpoint_id} structured_completion_optional requires openai-responses")
+        }
+        (AdapterKind::OpenAiChatCompletions, SmokeCase::StructuredCompletionOptional) => {
+            bail!("endpoint {endpoint_id} structured_completion_optional requires openai-responses")
+        }
         _ => Ok(()),
     }
 }
@@ -410,7 +428,9 @@ fn worst_case_tokens(case: &CaseSpec, defaults: &DefaultsConfig) -> (u64, u64) {
             (128, text_max_output_tokens(&case.endpoint, defaults) as u64)
         }
         SmokeCase::Structured
+        | SmokeCase::StructuredOptional
         | SmokeCase::StructuredCompletion
+        | SmokeCase::StructuredCompletionOptional
         | SmokeCase::Tool
         | SmokeCase::StructuredTool => (
             192,
@@ -453,10 +473,14 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
             SmokeCase::Completion => run_completion(&llm, &case, defaults).await?,
             SmokeCase::Text => run_text(&llm, &case, defaults).await?,
             SmokeCase::Structured => run_structured(&llm, &case, defaults).await?,
+            SmokeCase::StructuredOptional => run_structured_optional(&llm, &case, defaults).await?,
             SmokeCase::Tool => run_tool(&llm, &case, defaults).await?,
             SmokeCase::StructuredTool => run_structured_tool(&llm, &case, defaults).await?,
             SmokeCase::StructuredCompletion => {
                 run_structured_completion(&llm, &case, defaults).await?
+            }
+            SmokeCase::StructuredCompletionOptional => {
+                run_structured_completion_optional(&llm, &case, defaults).await?
             }
             SmokeCase::ReasoningRequest => run_reasoning_request(&llm, &case, defaults).await?,
             SmokeCase::ReasoningCapture => run_reasoning_capture(&llm, &case, defaults).await?,
@@ -865,6 +889,50 @@ async fn run_structured_completion(
             Ok(result.usage)
         }
         other => bail!("structured completion output was not OK: {other:?}"),
+    }
+}
+
+async fn run_structured_optional(
+    llm: &Lutum,
+    case: &CaseSpec,
+    defaults: &DefaultsConfig,
+) -> Result<Usage> {
+    let mut session = Session::new(llm.clone());
+    session.push_user("Return JSON with ok true and text exactly OK.");
+    let result = session
+        .structured_turn::<SmokeOptionalStructured>()
+        .max_output_tokens(structured_max_output_tokens(&case.endpoint, defaults))
+        .collect()
+        .await?;
+    match result.semantic {
+        StructuredTurnOutcome::Structured(value)
+            if value.ok && value.text.as_deref().is_some_and(normalize_ok) =>
+        {
+            Ok(result.usage)
+        }
+        other => bail!("structured_optional output was not OK: {other:?}"),
+    }
+}
+
+async fn run_structured_completion_optional(
+    llm: &Lutum,
+    case: &CaseSpec,
+    defaults: &DefaultsConfig,
+) -> Result<Usage> {
+    let result = llm
+        .structured_completion::<SmokeOptionalStructured>(
+            "Return JSON with ok true and text exactly OK.",
+        )
+        .max_output_tokens(structured_max_output_tokens(&case.endpoint, defaults))
+        .collect()
+        .await?;
+    match result.semantic {
+        StructuredTurnOutcome::Structured(value)
+            if value.ok && value.text.as_deref().is_some_and(normalize_ok) =>
+        {
+            Ok(result.usage)
+        }
+        other => bail!("structured_completion_optional output was not OK: {other:?}"),
     }
 }
 

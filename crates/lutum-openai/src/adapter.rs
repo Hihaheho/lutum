@@ -653,7 +653,7 @@ impl TurnAdapter for OpenAiAdapter {
                 .prepare_chat_request(&input, &turn.config, model.as_ref(), reasoning_effort)
                 .map_err(AgentError::from)?;
             let mut schema = turn.output.schema.clone();
-            require_no_additional_properties(&mut schema);
+            sanitize_openai_strict_schema(&mut schema);
             prepared.body.response_format = Some(ResponseFormat::JsonSchema {
                 json_schema: JsonSchemaConfig {
                     name: openai_schema_name(&turn.output.schema_name),
@@ -688,7 +688,7 @@ impl TurnAdapter for OpenAiAdapter {
         }
 
         let mut schema = turn.output.schema.clone();
-        require_no_additional_properties(&mut schema);
+        sanitize_openai_strict_schema(&mut schema);
         let text_format = Some(TextFormat::JsonSchema {
             name: openai_schema_name(&turn.output.schema_name),
             schema,
@@ -807,7 +807,7 @@ fn build_structured_completion_request(
     )));
 
     let mut schema = request.output.schema.clone();
-    require_no_additional_properties(&mut schema);
+    sanitize_openai_strict_schema(&mut schema);
 
     crate::responses::ResponsesRequest {
         model: model.to_string(),
@@ -850,28 +850,135 @@ fn openai_schema_name(name: &str) -> String {
     if out.is_empty() { "schema".into() } else { out }
 }
 
-/// Recursively add `"additionalProperties": false` to object schemas.
+/// Normalize schemas for OpenAI `strict: true` structured outputs.
 ///
-/// OpenAI strict structured output rejects object schemas where this is absent,
-/// while `schemars` leaves it out by default.
-fn require_no_additional_properties(schema: &mut serde_json::Value) {
+/// OpenAI rejects object schemas unless they opt out of extra keys and list
+/// every property in `required`. Optional Rust fields therefore become required
+/// JSON keys whose schema also permits `null`.
+fn sanitize_openai_strict_schema(schema: &mut serde_json::Value) {
     match schema {
-        serde_json::Value::Object(map) => {
-            if map.get("type").and_then(|value| value.as_str()) == Some("object") {
-                map.entry("additionalProperties")
-                    .or_insert(serde_json::Value::Bool(false));
+        Value::Object(map) => {
+            if schema_type_contains(map.get("type"), "object") {
+                let required = required_property_names(map.get("required"));
+                let mut optional_properties = Vec::new();
+                let mut property_names = Vec::new();
+                let mut has_properties = false;
+
+                if let Some(Value::Object(properties)) = map.get_mut("properties") {
+                    has_properties = true;
+                    property_names = properties.keys().cloned().collect();
+                    for name in &property_names {
+                        if !required.contains(name) {
+                            optional_properties.push(name.clone());
+                        }
+                    }
+                    for name in &optional_properties {
+                        if let Some(property_schema) = properties.get_mut(name) {
+                            make_schema_nullable(property_schema);
+                        }
+                    }
+                }
+
+                if has_properties {
+                    map.insert(
+                        "required".to_string(),
+                        Value::Array(property_names.into_iter().map(Value::String).collect()),
+                    );
+                }
+                map.entry("additionalProperties".to_string())
+                    .or_insert(Value::Bool(false));
             }
             for value in map.values_mut() {
-                require_no_additional_properties(value);
+                sanitize_openai_strict_schema(value);
             }
         }
-        serde_json::Value::Array(values) => {
+        Value::Array(values) => {
             for value in values {
-                require_no_additional_properties(value);
+                sanitize_openai_strict_schema(value);
             }
         }
         _ => {}
     }
+}
+
+fn required_property_names(required: Option<&Value>) -> BTreeSet<String> {
+    required
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn schema_type_contains(value: Option<&Value>, needle: &str) -> bool {
+    match value {
+        Some(Value::String(schema_type)) => schema_type == needle,
+        Some(Value::Array(schema_types)) => schema_types
+            .iter()
+            .any(|schema_type| schema_type.as_str() == Some(needle)),
+        _ => false,
+    }
+}
+
+fn make_schema_nullable(schema: &mut Value) {
+    if schema_allows_null(schema) {
+        return;
+    }
+
+    match schema {
+        Value::Object(map) => match map.get_mut("type") {
+            Some(Value::String(schema_type)) => {
+                let schema_type = std::mem::take(schema_type);
+                map.insert(
+                    "type".to_string(),
+                    Value::Array(vec![
+                        Value::String(schema_type),
+                        Value::String("null".into()),
+                    ]),
+                );
+            }
+            Some(Value::Array(schema_types)) => {
+                schema_types.push(Value::String("null".into()));
+            }
+            _ => wrap_schema_in_nullable_any_of(schema),
+        },
+        _ => wrap_schema_in_nullable_any_of(schema),
+    }
+}
+
+fn wrap_schema_in_nullable_any_of(schema: &mut Value) {
+    let original = std::mem::replace(schema, Value::Null);
+    *schema = serde_json::json!({
+        "anyOf": [
+            original,
+            { "type": "null" }
+        ]
+    });
+}
+
+fn schema_allows_null(schema: &Value) -> bool {
+    let Value::Object(map) = schema else {
+        return false;
+    };
+
+    schema_type_contains(map.get("type"), "null")
+        || schema_branches_allow_null(map.get("anyOf"))
+        || schema_branches_allow_null(map.get("oneOf"))
+        || schema_enum_allows_null(map.get("enum"))
+        || map.get("const") == Some(&Value::Null)
+}
+
+fn schema_branches_allow_null(branches: Option<&Value>) -> bool {
+    branches
+        .and_then(Value::as_array)
+        .is_some_and(|branches| branches.iter().any(schema_allows_null))
+}
+
+fn schema_enum_allows_null(schema_enum: Option<&Value>) -> bool {
+    schema_enum
+        .and_then(Value::as_array)
+        .is_some_and(|values| values.iter().any(Value::is_null))
 }
 
 fn map_erased_structured_completion_event(
@@ -3647,6 +3754,7 @@ mod tests {
     use serde_json::Value;
 
     use lutum_protocol::{
+        AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
         AssistantTurnItem, AssistantTurnView, EphemeralInputIndices, ErasedStructuredTurnEvent,
         ErasedTextTurnEvent, GenerationParams, InputMessageRole, ModelInput, ModelInputItem,
@@ -3728,6 +3836,41 @@ mod tests {
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
     struct Summary {
         answer: String,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+    struct OptionalSummary {
+        ok: bool,
+        text: Option<String>,
+    }
+
+    fn empty_turn_config() -> AdapterTurnConfig {
+        AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        }
+    }
+
+    fn optional_summary_spec() -> AdapterStructuredOutputSpec {
+        AdapterStructuredOutputSpec {
+            schema_name: "OptionalSummary".to_string(),
+            schema: serde_json::to_value(schemars::schema_for!(OptionalSummary)).unwrap(),
+        }
+    }
+
+    fn required_names(schema: &Value) -> BTreeSet<String> {
+        schema["required"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn names(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
     }
 
     #[test]
@@ -4381,6 +4524,166 @@ mod tests {
         );
         assert_eq!(openai_schema_name(""), "schema");
         assert_eq!(openai_schema_name("ok-name_1"), "ok-name_1");
+    }
+
+    #[test]
+    fn openai_strict_schema_sanitizes_optional_property() {
+        let mut schema = optional_summary_spec().schema;
+
+        sanitize_openai_strict_schema(&mut schema);
+
+        assert_eq!(required_names(&schema), names(&["ok", "text"]));
+        assert_eq!(schema["additionalProperties"], Value::Bool(false));
+        assert!(!schema_allows_null(&schema["properties"]["ok"]));
+        assert!(schema_allows_null(&schema["properties"]["text"]));
+    }
+
+    #[test]
+    fn openai_strict_schema_sanitizes_nested_arrays_and_defs() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "child": {
+                    "type": "object",
+                    "properties": {
+                        "required_child": { "type": "string" },
+                        "maybe_child": { "type": "integer" }
+                    },
+                    "required": ["required_child"]
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "maybe_item": { "type": "string" }
+                        }
+                    }
+                },
+                "refed": { "$ref": "#/$defs/Refed" }
+            },
+            "required": ["child", "items"],
+            "$defs": {
+                "Refed": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "note": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+            },
+            "definitions": {
+                "Legacy": {
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "number" }
+                    }
+                }
+            }
+        });
+
+        sanitize_openai_strict_schema(&mut schema);
+
+        assert_eq!(required_names(&schema), names(&["child", "items", "refed"]));
+        assert!(schema_allows_null(&schema["properties"]["refed"]));
+
+        let child = &schema["properties"]["child"];
+        assert_eq!(
+            required_names(child),
+            names(&["required_child", "maybe_child"])
+        );
+        assert!(!schema_allows_null(&child["properties"]["required_child"]));
+        assert!(schema_allows_null(&child["properties"]["maybe_child"]));
+
+        let item = &schema["properties"]["items"]["items"];
+        assert_eq!(required_names(item), names(&["maybe_item"]));
+        assert!(schema_allows_null(&item["properties"]["maybe_item"]));
+
+        let def = &schema["$defs"]["Refed"];
+        assert_eq!(required_names(def), names(&["name", "note"]));
+        assert!(!schema_allows_null(&def["properties"]["name"]));
+        assert!(schema_allows_null(&def["properties"]["note"]));
+
+        let legacy = &schema["definitions"]["Legacy"];
+        assert_eq!(required_names(legacy), names(&["value"]));
+        assert!(schema_allows_null(&legacy["properties"]["value"]));
+    }
+
+    #[test]
+    fn openai_strict_schema_sanitization_is_idempotent() {
+        let mut schema = optional_summary_spec().schema;
+
+        sanitize_openai_strict_schema(&mut schema);
+        let sanitized_once = schema.clone();
+        sanitize_openai_strict_schema(&mut schema);
+
+        assert_eq!(schema, sanitized_once);
+    }
+
+    #[test]
+    fn structured_completion_request_sanitizes_optional_schema() {
+        let body = build_structured_completion_request(
+            &AdapterStructuredCompletionRequest {
+                system: None,
+                prompt: "Return OK.".into(),
+                generation: GenerationParams::default(),
+                output: optional_summary_spec(),
+            },
+            "gpt-4.1",
+        );
+
+        let text = body.text.expect("text config");
+        let TextFormat::JsonSchema { schema, .. } = text.format else {
+            panic!("expected json schema text format");
+        };
+        assert_eq!(required_names(&schema), names(&["ok", "text"]));
+        assert!(schema_allows_null(&schema["properties"]["text"]));
+    }
+
+    #[tokio::test]
+    async fn responses_structured_turn_request_sanitizes_optional_schema() {
+        let fake = FakeHttpClient::new(fake_response(StatusCode::OK, HeaderMap::new(), Vec::new()));
+        let adapter = OpenAiAdapter::new_with_http_client("test-key", fake.clone());
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let turn = AdapterStructuredTurn {
+            config: empty_turn_config(),
+            extensions: Arc::new(RequestExtensions::new()),
+            output: optional_summary_spec(),
+        };
+
+        let _stream = adapter.structured_turn(input, turn).await.unwrap();
+
+        let captured = fake.captured();
+        assert_eq!(captured.len(), 1);
+        let body = serde_json::from_slice::<Value>(captured[0].body.as_deref().unwrap()).unwrap();
+        let schema = &body["text"]["format"]["schema"];
+        assert_eq!(required_names(schema), names(&["ok", "text"]));
+        assert!(schema_allows_null(&schema["properties"]["text"]));
+    }
+
+    #[tokio::test]
+    async fn chat_structured_turn_request_sanitizes_optional_schema() {
+        let fake = FakeHttpClient::new(fake_response(StatusCode::OK, HeaderMap::new(), Vec::new()));
+        let adapter =
+            OpenAiAdapter::new_with_http_client("test-key", fake.clone()).with_chat_completions();
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let turn = AdapterStructuredTurn {
+            config: empty_turn_config(),
+            extensions: Arc::new(RequestExtensions::new()),
+            output: optional_summary_spec(),
+        };
+
+        let _stream = adapter.structured_turn(input, turn).await.unwrap();
+
+        let captured = fake.captured();
+        assert_eq!(captured.len(), 1);
+        let body = serde_json::from_slice::<Value>(captured[0].body.as_deref().unwrap()).unwrap();
+        let schema = &body["response_format"]["json_schema"]["schema"];
+        assert_eq!(required_names(schema), names(&["ok", "text"]));
+        assert!(schema_allows_null(&schema["properties"]["text"]));
     }
 
     #[test]
