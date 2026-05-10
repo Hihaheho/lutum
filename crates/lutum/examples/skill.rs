@@ -337,6 +337,14 @@ async fn run() -> anyhow::Result<()> {
                 );
                 return Ok(());
             }
+            TextStepOutcomeWithTools::FinishedNoOutput(_) => {
+                println!("\n=== final answer ===");
+                println!(
+                    "\n=== transcript markers ({} turns persisted) ===",
+                    session.list_turns().count()
+                );
+                return Ok(());
+            }
         };
 
         // 3. Dispatch tool calls. Skills' `load`/`unload` queue persistent

@@ -266,6 +266,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("Answer: {}", result.assistant_text().trim());
                 return Ok(());
             }
+            TextStepOutcomeWithTools::FinishedNoOutput(_) => {
+                println!();
+                println!("Answer:");
+                return Ok(());
+            }
         }
     }
 

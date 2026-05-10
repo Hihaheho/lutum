@@ -262,7 +262,12 @@ fn reducer_ignores_duplicate_tool_call_ready() {
         })
         .unwrap();
 
-    let result = reducer.into_result().unwrap();
+    let result = match reducer.into_result().unwrap() {
+        lutum::StagedTextTurnOutcomeWithTools::Turn(result) => result,
+        lutum::StagedTextTurnOutcomeWithTools::FinishedNoOutput(_) => {
+            panic!("expected assistant turn")
+        }
+    };
     assert_eq!(result.tool_calls.len(), 1);
 }
 

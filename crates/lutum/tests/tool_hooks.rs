@@ -277,6 +277,7 @@ fn tool_round_commit_accepts_typed_handled_values() {
             round.commit(&mut session, handled).unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected tool round"),
     }
 
     assert_eq!(session.input().items().len(), before_len + 2);
@@ -336,6 +337,7 @@ fn tool_round_plan_commit_preserves_original_arguments_after_rewrite() {
     let round = match outcome {
         TextStepOutcomeWithTools::NeedsTools(round) => round,
         TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected tool round"),
     };
 
     let plan = block_on(round.apply_hooks(&ToolsHooksSet::new().with_weather_hook(RewriteWeather)));
@@ -419,6 +421,7 @@ fn apply_hooks_splits_handled_and_pending() {
     let round = match outcome {
         TextStepOutcomeWithTools::NeedsTools(r) => r,
         TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected NeedsTools"),
     };
 
     // Hook only weather; search stays pending.
@@ -462,6 +465,7 @@ fn apply_hooks_multi_pass_chaining_narrows_pending() {
     let round = match outcome {
         TextStepOutcomeWithTools::NeedsTools(r) => r,
         TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected NeedsTools"),
     };
 
     let weather_hooks = ToolsHooksSet::new().with_weather_hook(Pass1Weather);
@@ -506,6 +510,7 @@ fn tool_round_plan_commit_merges_handled_and_pending_results() {
     let round = match outcome {
         TextStepOutcomeWithTools::NeedsTools(r) => r,
         TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected NeedsTools"),
     };
 
     let hooks = ToolsHooksSet::new().with_weather_hook(WeatherHookPlain);
@@ -584,6 +589,7 @@ fn tool_round_plan_commit_auto_commits_rejected_calls() {
     let round = match outcome {
         TextStepOutcomeWithTools::NeedsTools(r) => r,
         TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected NeedsTools"),
     };
 
     let hooks = ToolsHooksSet::new().with_search_hook(RejectSearch);
@@ -652,6 +658,7 @@ fn apply_hooks_accepts_closure_via_blanket_impl() {
     let round = match outcome {
         TextStepOutcomeWithTools::NeedsTools(r) => r,
         TextStepOutcomeWithTools::Finished(_) => panic!("expected NeedsTools"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected NeedsTools"),
     };
 
     // Pass a bare closure — exercising the blanket impl on Fn(T::ToolCall) -> Fut.
@@ -827,6 +834,9 @@ fn invalid_tool_call_is_rejected_and_reported() {
         TextStepOutcomeWithTools::Finished(_) => {
             panic!("expected NeedsTools (with recoverable issues) but got Finished");
         }
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => {
+            panic!("expected NeedsTools (with recoverable issues) but got FinishedNoOutput");
+        }
     }
 }
 
@@ -856,6 +866,7 @@ fn invalid_tool_call_commit_auto_synthesizes_rejection_result() {
                 .unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected tool round"),
     }
 
     let rejected_result = session
@@ -904,6 +915,7 @@ fn recoverable_tool_call_issue_result_overrides_auto_rejection() {
             round.commit(&mut session, vec![result]).unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected tool round"),
     }
 
     let tool_result = session
@@ -952,6 +964,7 @@ fn parse_failure_issue_result_overrides_auto_rejection() {
             round.commit(&mut session, vec![result]).unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected tool round"),
     }
 
     let tool_result = session
@@ -1012,6 +1025,7 @@ fn tool_call_parse_failure_is_recovered_and_suggests_continue() {
             );
         }
         TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected tool round"),
     }
 }
 
@@ -1062,6 +1076,7 @@ fn mixed_valid_and_parse_failed_tool_calls_still_expose_valid_calls() {
             round.commit(&mut session, results).unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected tool round"),
     }
 
     let tool_results: Vec<_> = session
@@ -1113,6 +1128,7 @@ fn tool_call_parse_failure_commit_auto_synthesizes_rejection_result() {
                 .unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected tool round"),
     }
 
     let rejected_result = session
@@ -1163,6 +1179,7 @@ fn unknown_tool_parse_failure_is_recovered() {
                 .unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => panic!("expected tool round"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected tool round"),
     }
 
     let rejected_result = session
@@ -1278,7 +1295,12 @@ fn invalid_tool_events_are_visible_in_collect_with_handler() {
     )
     .unwrap();
 
-    let staged = block_on(pending.collect_with(handler)).unwrap();
+    let staged = match block_on(pending.collect_with(handler)).unwrap() {
+        lutum::StagedTextTurnOutcomeWithTools::Turn(staged) => staged,
+        lutum::StagedTextTurnOutcomeWithTools::FinishedNoOutput(_) => {
+            panic!("expected assistant turn")
+        }
+    };
     staged.turn.discard();
 
     let seen = recorded.lock().unwrap();
@@ -1359,7 +1381,12 @@ fn parse_failure_events_are_visible_in_collect_with_handler() {
     )
     .unwrap();
 
-    let staged = block_on(pending.collect_with(handler)).unwrap();
+    let staged = match block_on(pending.collect_with(handler)).unwrap() {
+        lutum::StagedTextTurnOutcomeWithTools::Turn(staged) => staged,
+        lutum::StagedTextTurnOutcomeWithTools::FinishedNoOutput(_) => {
+            panic!("expected assistant turn")
+        }
+    };
     staged.turn.discard();
 
     let seen = recorded.lock().unwrap();

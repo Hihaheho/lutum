@@ -9,7 +9,8 @@ use lutum_protocol::{
     budget::Usage,
     conversation::EphemeralInputIndices,
     reducer::{
-        StagedStructuredTurnResultWithTools, StagedTextTurnResultWithTools,
+        NoOutputTextTurnResult, StagedStructuredTurnResultWithTools,
+        StagedTextTurnOutcomeWithTools, StagedTextTurnResultWithTools,
         StructuredTurnResultWithTools, TextTurnResultWithTools,
     },
     structured::StructuredOutput,
@@ -650,6 +651,8 @@ pub enum TextStepOutcomeWithTools<T: Toolset> {
     /// The model finished without requesting tool calls. The assistant turn has already been
     /// committed to the session.
     Finished(TextTurnResultWithTools<T>),
+    /// The model completed normally without emitting assistant text, reasoning, refusal, or tool calls.
+    FinishedNoOutput(NoOutputTextTurnResult),
     /// The model requested tool calls. Execute them, then call `round.commit(&mut session, uses)`.
     NeedsTools(UncommittedToolRound<T>),
 }
@@ -659,9 +662,16 @@ where
     T: Toolset,
 {
     pub(crate) fn from_staged(
-        staged: StagedTextTurnResultWithTools<T>,
+        staged: StagedTextTurnOutcomeWithTools<T>,
         session: Option<&mut ModelInput>,
     ) -> Self {
+        let staged = match staged {
+            StagedTextTurnOutcomeWithTools::Turn(staged) => staged,
+            StagedTextTurnOutcomeWithTools::FinishedNoOutput(result) => {
+                return Self::FinishedNoOutput(result);
+            }
+        };
+
         if staged.finish_reason == FinishReason::ToolCall
             && (!staged.tool_calls.is_empty() || !staged.recoverable_tool_call_issues.is_empty())
         {

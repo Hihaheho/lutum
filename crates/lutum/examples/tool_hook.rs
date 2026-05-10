@@ -118,6 +118,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
             return Ok(());
         }
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => {
+            println!("assistant completed without tools or text");
+            return Ok(());
+        }
     };
 
     // Apply hooks in batch — weather hits the cache, search stays pending.

@@ -236,10 +236,61 @@ fn tool_round_is_only_applied_on_explicit_commit() {
             round.commit(&mut session, tool_results).unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => unreachable!(),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => unreachable!(),
     }
 
     assert_eq!(session.input().items().len(), before_len + 2);
     assert_eq!(session.list_turns().count(), 1);
+}
+
+#[test]
+fn tools_text_no_output_completion_does_not_commit_turn() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-no-output".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-no-output".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 3,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Maybe call a tool.");
+    let before_len = session.input().items().len();
+    let before_turns = session.list_turns().count();
+
+    let outcome = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<Tools>()
+            .collect()
+            .await
+            .unwrap()
+    });
+
+    match outcome {
+        TextStepOutcomeWithTools::FinishedNoOutput(result) => {
+            assert_eq!(result.request_id.as_deref(), Some("req-no-output"));
+            assert_eq!(result.model, "gpt-4.1-mini");
+            assert_eq!(result.finish_reason, FinishReason::Stop);
+            assert_eq!(result.usage.total_tokens, 3);
+            assert_eq!(result.cumulative_usage.total_tokens, 3);
+        }
+        TextStepOutcomeWithTools::Finished(_) => panic!("expected no-output completion"),
+        TextStepOutcomeWithTools::NeedsTools(_) => panic!("expected no-output completion"),
+    }
+
+    assert_eq!(session.input().items().len(), before_len);
+    assert_eq!(session.list_turns().count(), before_turns);
 }
 
 #[test]

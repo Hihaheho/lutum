@@ -211,6 +211,10 @@ where
                     accumulate_usage(&mut output.usage, result.usage);
                     return Ok(output);
                 }
+                TextStepOutcomeWithTools::FinishedNoOutput(result) => {
+                    accumulate_usage(&mut output.usage, result.usage);
+                    return Ok(output);
+                }
                 TextStepOutcomeWithTools::NeedsTools(round) => {
                     accumulate_usage(&mut output.usage, round.usage);
 

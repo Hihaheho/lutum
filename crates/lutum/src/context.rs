@@ -32,8 +32,8 @@ use lutum_protocol::{
     },
     reducer::{
         CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
-        StagedStructuredTurnResult, StagedStructuredTurnResultWithTools, StagedTextTurnResult,
-        StagedTextTurnResultWithTools, StructuredCompletionReducer,
+        StagedStructuredTurnResult, StagedStructuredTurnResultWithTools,
+        StagedTextTurnOutcomeWithTools, StagedTextTurnResult, StructuredCompletionReducer,
         StructuredCompletionReductionError, StructuredCompletionResult, StructuredCompletionState,
         StructuredTurnReducer, StructuredTurnReducerWithTools, StructuredTurnReductionError,
         StructuredTurnState, StructuredTurnStateWithTools, TextTurnReducer,
@@ -1494,7 +1494,7 @@ where
         mut self,
         mut handler: H,
     ) -> Result<
-        StagedTextTurnResultWithTools<T>,
+        StagedTextTurnOutcomeWithTools<T>,
         CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
@@ -1701,9 +1701,18 @@ where
                             }
                             let partial = self.reducer.state().clone();
                             return match self.reducer.into_result() {
-                                Ok(mut result) => {
-                                    result.cumulative_usage = next_cumulative_usage;
-                                    Ok(result)
+                                Ok(mut outcome) => {
+                                    match &mut outcome {
+                                        StagedTextTurnOutcomeWithTools::Turn(result) => {
+                                            result.cumulative_usage = next_cumulative_usage;
+                                        }
+                                        StagedTextTurnOutcomeWithTools::FinishedNoOutput(
+                                            result,
+                                        ) => {
+                                            result.cumulative_usage = next_cumulative_usage;
+                                        }
+                                    }
+                                    Ok(outcome)
                                 }
                                 Err(source) => {
                                     emit_raw_collect_error(
@@ -1978,7 +1987,7 @@ where
     pub async fn collect(
         self,
     ) -> Result<
-        StagedTextTurnResultWithTools<T>,
+        StagedTextTurnOutcomeWithTools<T>,
         CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
     > {
         self.collect_with(NoopHandler).await

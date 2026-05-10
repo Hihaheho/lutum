@@ -203,6 +203,9 @@ async fn main() -> anyhow::Result<()> {
                     last_text = result.assistant_text();
                     break;
                 }
+                TextStepOutcomeWithTools::FinishedNoOutput(_) => {
+                    break;
+                }
             }
         }
 

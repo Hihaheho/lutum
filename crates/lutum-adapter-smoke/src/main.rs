@@ -1054,6 +1054,12 @@ async fn run_tool(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Re
                 ensure_ok(&result.assistant_text(), "tool final answer")?;
                 return Ok(usage);
             }
+            TextStepOutcomeWithTools::FinishedNoOutput(result) => {
+                bail!(
+                    "tool case finished without output (usage={:?})",
+                    result.usage
+                );
+            }
         }
     }
     bail!("tool case did not finish after tool result")

@@ -240,6 +240,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\nAnswer: {}", result.assistant_text().trim());
                 break;
             }
+            TextStepOutcomeWithTools::FinishedNoOutput(_) => {
+                println!("\nAnswer:");
+                break;
+            }
             TextStepOutcomeWithTools::NeedsTools(round) => {
                 let mut tool_results = Vec::with_capacity(round.tool_calls.len());
 

@@ -350,7 +350,7 @@ where
         Ok(())
     }
 
-    pub fn finish(self) -> Result<StagedTextTurnResultWithTools<T>, TextTurnReductionError> {
+    pub fn finish(self) -> Result<StagedTextTurnOutcomeWithTools<T>, TextTurnReductionError> {
         let finish_reason = self
             .finish_reason
             .ok_or(TextTurnReductionError::Incomplete)?;
@@ -360,6 +360,23 @@ where
                 OutputLimitExceeded::new(self.model, self.request_id, usage, self.event_count),
             ));
         }
+
+        if self.assistant_turn.is_empty()
+            && self.tool_calls.is_empty()
+            && self.recoverable_tool_call_issues.is_empty()
+            && finish_reason == FinishReason::Stop
+        {
+            return Ok(StagedTextTurnOutcomeWithTools::FinishedNoOutput(
+                NoOutputTextTurnResult {
+                    request_id: self.request_id,
+                    model: self.model,
+                    finish_reason,
+                    usage,
+                    cumulative_usage: usage,
+                },
+            ));
+        }
+
         let committed_turn = self
             .committed_turn
             .ok_or(TextTurnReductionError::Incomplete)?;
@@ -371,17 +388,19 @@ where
                 event_count: self.event_count,
             }
         })?;
-        Ok(StagedTextTurnResultWithTools {
-            request_id: self.request_id,
-            model: self.model,
-            turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
-            tool_calls: self.tool_calls,
-            recoverable_tool_call_issues: self.recoverable_tool_call_issues,
-            continue_suggestion: self.continue_suggestion,
-            finish_reason,
-            usage,
-            cumulative_usage: usage,
-        })
+        Ok(StagedTextTurnOutcomeWithTools::Turn(
+            StagedTextTurnResultWithTools {
+                request_id: self.request_id,
+                model: self.model,
+                turn: UncommittedAssistantTurn::new(assistant_turn, committed_turn),
+                tool_calls: self.tool_calls,
+                recoverable_tool_call_issues: self.recoverable_tool_call_issues,
+                continue_suggestion: self.continue_suggestion,
+                finish_reason,
+                usage,
+                cumulative_usage: usage,
+            },
+        ))
     }
 }
 
@@ -416,6 +435,16 @@ where
     }
 }
 
+/// Result metadata for a completed tool-enabled text turn that produced no assistant items.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoOutputTextTurnResult {
+    pub request_id: Option<String>,
+    pub model: String,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+    pub cumulative_usage: Usage,
+}
+
 /// Staged (not yet committed) result of a tool-enabled text turn.
 #[derive(Debug)]
 #[must_use = "call turn.commit_into() / CommitTurn::commit() to commit, or turn.discard() to opt out"]
@@ -429,6 +458,13 @@ pub struct StagedTextTurnResultWithTools<T: Toolset> {
     pub finish_reason: FinishReason,
     pub usage: Usage,
     pub cumulative_usage: Usage,
+}
+
+/// Staged outcome for a completed tool-enabled text turn.
+#[derive(Debug)]
+pub enum StagedTextTurnOutcomeWithTools<T: Toolset> {
+    Turn(StagedTextTurnResultWithTools<T>),
+    FinishedNoOutput(NoOutputTextTurnResult),
 }
 
 impl<T> StagedTextTurnResultWithTools<T>
@@ -1230,7 +1266,7 @@ where
         self.state.reset_for_retry();
     }
 
-    pub fn into_result(self) -> Result<StagedTextTurnResultWithTools<T>, TextTurnReductionError> {
+    pub fn into_result(self) -> Result<StagedTextTurnOutcomeWithTools<T>, TextTurnReductionError> {
         self.state.finish()
     }
 }
@@ -1694,9 +1730,73 @@ mod tests {
             })
             .unwrap();
 
-        let result = reducer.into_result().unwrap();
+        let result = match reducer.into_result().unwrap() {
+            StagedTextTurnOutcomeWithTools::Turn(result) => result,
+            StagedTextTurnOutcomeWithTools::FinishedNoOutput(_) => {
+                panic!("expected assistant turn")
+            }
+        };
         assert_eq!(result.turn.items().len(), 2);
         assert_eq!(result.turn.assistant_text(), "checking ");
+    }
+
+    #[test]
+    fn text_reducer_with_tools_accepts_empty_stop_as_no_output() {
+        let mut reducer = TextTurnReducerWithTools::<Tools>::new();
+        reducer
+            .apply(&TextTurnEventWithTools::Started {
+                request_id: Some("req-empty".into()),
+                model: "gpt-4.1".into(),
+            })
+            .unwrap();
+        reducer
+            .apply(&TextTurnEventWithTools::Completed {
+                request_id: Some("req-empty".into()),
+                finish_reason: FinishReason::Stop,
+                usage: Usage {
+                    total_tokens: 3,
+                    ..Usage::zero()
+                },
+                committed_turn: Arc::new(AssistantTurnView::from_items(&[])),
+            })
+            .unwrap();
+
+        let result = match reducer.into_result().unwrap() {
+            StagedTextTurnOutcomeWithTools::FinishedNoOutput(result) => result,
+            StagedTextTurnOutcomeWithTools::Turn(_) => panic!("expected no-output completion"),
+        };
+        assert_eq!(result.request_id.as_deref(), Some("req-empty"));
+        assert_eq!(result.model, "gpt-4.1");
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.total_tokens, 3);
+    }
+
+    #[test]
+    fn text_reducer_with_tools_rejects_empty_tool_call_completion() {
+        let mut reducer = TextTurnReducerWithTools::<Tools>::new();
+        reducer
+            .apply(&TextTurnEventWithTools::Started {
+                request_id: Some("req-empty-tool".into()),
+                model: "gpt-4.1".into(),
+            })
+            .unwrap();
+        reducer
+            .apply(&TextTurnEventWithTools::Completed {
+                request_id: Some("req-empty-tool".into()),
+                finish_reason: FinishReason::ToolCall,
+                usage: Usage::zero(),
+                committed_turn: Arc::new(AssistantTurnView::from_items(&[])),
+            })
+            .unwrap();
+
+        let err = reducer.into_result().unwrap_err();
+        assert!(matches!(
+            err,
+            TextTurnReductionError::EmptyAssistantOutput {
+                finish_reason: FinishReason::ToolCall,
+                ..
+            }
+        ));
     }
 
     #[test]

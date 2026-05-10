@@ -197,6 +197,7 @@ fn session_commits_parallel_tool_results_in_order() {
             round.commit(&mut session, tool_results).unwrap();
         }
         TextStepOutcomeWithTools::Finished(_) => unreachable!(),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => unreachable!(),
     }
 
     assert_eq!(session.input().items().len(), before_len + 3);

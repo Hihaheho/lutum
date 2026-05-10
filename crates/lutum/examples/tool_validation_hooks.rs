@@ -104,6 +104,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
             return Ok(());
         }
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => {
+            println!("assistant completed without tools or text");
+            return Ok(());
+        }
     };
 
     let plan = round.apply_hooks(&hooks).await;

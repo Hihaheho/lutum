@@ -136,7 +136,12 @@ fn text_turn_collects_assistant_output_and_tool_calls() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Lutum::new(Arc::new(adapter), budget);
     let pending = block_on(weather_turn(ctx.text_turn(input())).start()).unwrap();
-    let result = block_on(pending.collect()).unwrap();
+    let result = match block_on(pending.collect()).unwrap() {
+        lutum::StagedTextTurnOutcomeWithTools::Turn(result) => result,
+        lutum::StagedTextTurnOutcomeWithTools::FinishedNoOutput(_) => {
+            panic!("expected assistant turn")
+        }
+    };
 
     assert_eq!(result.assistant_text(), "looking up ");
     assert_eq!(result.tool_calls.len(), 1);
@@ -216,7 +221,12 @@ fn recorded_events_reduce_to_same_result_as_collect() {
     for event in &events {
         reducer.apply(event).unwrap();
     }
-    let reduced = reducer.into_result().unwrap();
+    let reduced = match reducer.into_result().unwrap() {
+        lutum::StagedTextTurnOutcomeWithTools::Turn(result) => result,
+        lutum::StagedTextTurnOutcomeWithTools::FinishedNoOutput(_) => {
+            panic!("expected assistant turn")
+        }
+    };
 
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
         Ok(lutum::mock::RawTextTurnEvent::Started {
@@ -243,7 +253,12 @@ fn recorded_events_reduce_to_same_result_as_collect() {
     let budget = SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default());
     let ctx = Lutum::new(Arc::new(adapter), budget);
     let pending = block_on(weather_turn(ctx.text_turn(input())).start()).unwrap();
-    let collected = block_on(pending.collect()).unwrap();
+    let collected = match block_on(pending.collect()).unwrap() {
+        lutum::StagedTextTurnOutcomeWithTools::Turn(result) => result,
+        lutum::StagedTextTurnOutcomeWithTools::FinishedNoOutput(_) => {
+            panic!("expected assistant turn")
+        }
+    };
 
     assert_eq!(*reduced.turn, *collected.turn);
     assert_eq!(reduced.tool_calls, collected.tool_calls);
@@ -647,7 +662,12 @@ fn tool_call_deserialize_error_is_collected_as_recoverable_failure() {
     )
     .unwrap();
 
-    let result = block_on(pending.collect()).unwrap();
+    let result = match block_on(pending.collect()).unwrap() {
+        lutum::StagedTextTurnOutcomeWithTools::Turn(result) => result,
+        lutum::StagedTextTurnOutcomeWithTools::FinishedNoOutput(_) => {
+            panic!("expected assistant turn")
+        }
+    };
 
     assert_eq!(result.request_id.as_deref(), Some("req-bad-tool"));
     assert_eq!(result.assistant_text(), "looking up ");
