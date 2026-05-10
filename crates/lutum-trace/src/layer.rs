@@ -13,7 +13,7 @@ use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 use crate::{
     filter::{event_interesting, should_mark_span},
     raw::parse_raw_entry,
-    snapshot::{EventRecord, TraceEvent, TraceSpanId},
+    snapshot::{EventRecord, TraceEvent, TraceSpanId, build_span},
     store::{CaptureLog, CaptureRecord, FieldVisitor},
 };
 
@@ -151,6 +151,21 @@ where
 fn emit_trace_event(log: &CaptureLog, event: TraceEvent) {
     if let Some(sink) = &log.event_sink {
         sink(event);
+    }
+}
+
+fn emit_completed_span(log: &CaptureLog, span_id: u64) {
+    let Some(sink) = &log.span_sink else {
+        return;
+    };
+
+    let span = {
+        let records = log.records.lock().unwrap_or_else(|err| err.into_inner());
+        build_span(&records, span_id)
+    };
+
+    if let Some(span) = span {
+        sink(span);
     }
 }
 
@@ -369,5 +384,6 @@ where
                 span_id: TraceSpanId(raw_id),
             },
         );
+        emit_completed_span(&log, raw_id);
     }
 }

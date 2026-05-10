@@ -1,8 +1,11 @@
+use std::sync::{Arc, Mutex};
+
+use tracing::instrument::WithSubscriber as _;
 use tracing::{Instrument, field};
 use tracing_subscriber::layer::SubscriberExt as _;
 
 use lutum_protocol::ParseErrorStage;
-use lutum_trace::{FieldValue, RawTraceEntry, SpanNode};
+use lutum_trace::{FieldValue, RawTraceEntry, SpanNode, TraceEvent};
 
 fn child_span_with_str_field<'a>(
     parent: &'a SpanNode,
@@ -43,6 +46,90 @@ async fn basic_tree() {
             .and_then(|event| event.field("kind")),
         Some(&FieldValue::Str("note".to_string()))
     );
+}
+
+#[tokio::test]
+async fn capture_builder_listens_trace_events() {
+    let subscriber = tracing_subscriber::registry().with(lutum_trace::layer());
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen_events = Arc::clone(&events);
+
+    let collected = lutum_trace::capture(async {
+        let root = tracing::info_span!(target: "lutum", "root", answer = 42_u64);
+        let _root = root.enter();
+        tracing::info!(target: "lutum", kind = "note", "live event");
+        11_u64
+    })
+    .listen_events(move |event| {
+        seen_events.lock().unwrap().push(event);
+    })
+    .with_subscriber(dispatch)
+    .await;
+
+    assert_eq!(collected.output, 11);
+
+    let events = events.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TraceEvent::SpanOpened { name, .. } if name == "root"))
+    );
+    assert!(events.iter().any(|event| {
+        matches!(event, TraceEvent::Event { record, .. } if record.message() == Some("live event"))
+    }));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TraceEvent::SpanClosed { .. }))
+    );
+}
+
+#[tokio::test]
+async fn capture_builder_listens_completed_spans() {
+    let subscriber = tracing_subscriber::registry().with(lutum_trace::layer());
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let spans = Arc::new(Mutex::new(Vec::new()));
+    let seen_spans = Arc::clone(&spans);
+
+    let collected = lutum_trace::capture(async {
+        let root = tracing::info_span!(
+            target: "lutum",
+            "root",
+            request_id = field::Empty
+        );
+        let _root = root.enter();
+        root.record("request_id", field::display("req-123"));
+
+        {
+            let child = tracing::info_span!(target: "lutum", "child", ok = true);
+            let _child = child.enter();
+            tracing::info!(target: "lutum", "child event");
+        }
+
+        17_u64
+    })
+    .listen_spans(move |span| {
+        seen_spans.lock().unwrap().push(span);
+    })
+    .with_subscriber(dispatch)
+    .await;
+
+    assert_eq!(collected.output, 17);
+
+    let spans = spans.lock().unwrap();
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0].name, "child");
+    assert!(spans[0].event("child event").is_some());
+
+    let root = &spans[1];
+    assert_eq!(root.name, "root");
+    assert_eq!(
+        root.field("request_id"),
+        Some(&FieldValue::Str("req-123".to_string()))
+    );
+    assert!(root.child("child").is_some());
+    assert!(collected.trace.span("root").is_some());
 }
 
 #[tokio::test]

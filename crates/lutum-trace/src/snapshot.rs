@@ -345,6 +345,71 @@ pub(crate) fn build_snapshot(records: &[CaptureRecord]) -> TraceSnapshot {
     }
 }
 
+pub(crate) fn build_span(records: &[CaptureRecord], target_id: u64) -> Option<SpanNode> {
+    let mut span_data: Vec<SpanData> = Vec::new();
+    let mut span_keys: HashMap<u64, usize> = HashMap::new();
+    let mut open_spans: HashMap<u64, usize> = HashMap::new();
+
+    for record in records {
+        match record {
+            CaptureRecord::SpanOpened {
+                id,
+                parent_id,
+                name,
+                target,
+                level,
+                fields,
+            } => {
+                let key = span_data.len();
+                span_data.push(SpanData {
+                    name,
+                    target,
+                    level: (*level).to_string(),
+                    fields: fields.clone(),
+                    events: Vec::new(),
+                    children: Vec::new(),
+                });
+
+                if let Some(parent_key) =
+                    parent_id.and_then(|parent| open_spans.get(&parent).copied())
+                {
+                    span_data[parent_key].children.push(key);
+                }
+
+                span_keys.insert(*id, key);
+                open_spans.insert(*id, key);
+            }
+            CaptureRecord::SpanRecorded { id, fields } => {
+                let Some(&key) = open_spans.get(id) else {
+                    continue;
+                };
+
+                let span = &mut span_data[key];
+                for (name, value) in fields {
+                    span.upsert_field(name.clone(), value.clone());
+                }
+            }
+            CaptureRecord::Event {
+                parent_span_id,
+                record,
+            } => {
+                if let Some(key) =
+                    parent_span_id.and_then(|parent| open_spans.get(&parent).copied())
+                {
+                    span_data[key].events.push(record.clone());
+                }
+            }
+            CaptureRecord::SpanClosed { id } => {
+                open_spans.remove(id);
+            }
+        }
+    }
+
+    span_keys
+        .get(&target_id)
+        .map(|&key| build_node(&span_data, key))
+}
+
 fn build_node(span_data: &[SpanData], key: usize) -> SpanNode {
     let data = &span_data[key];
 

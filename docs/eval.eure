@@ -83,23 +83,22 @@ if let Some(turn) = collected.trace.span("llm_turn") {
 `TraceSnapshot::span(name)` returns the first span with the given name. Each span exposes
 `field(key)` for accessing recorded field values and `events()` for child events.
 
-For live streaming of trace events alongside capture, use `capture_with_events`:
+For live streaming of trace events alongside capture, attach a listener to the capture future:
 ```
 
   "rust-example-2" = ```rust
-let collected = lutum_trace::capture_with_events(
-    my_async_block.with_subscriber(subscriber),
-    |event: TraceEvent| {
+let collected = lutum_trace::capture(my_async_block.with_subscriber(subscriber))
+    .listen_events(|event: TraceEvent| {
         // called for each span/event as it is recorded
-        println!("trace event: {:?}", event.name());
-    },
-)
-.await;
+        println!("trace event: {event:?}");
+    })
+    .await;
 ```
 
   "body-3" = ```markdown
-`capture_raw_with_events` combines the live callback with raw entry capture (same as
-`capture_raw` but with a streaming callback).
+`capture_raw(...).listen_events(...)` combines the live callback with raw entry capture.
+Use `.listen_spans(...)` when you want completed `SpanNode`s instead of low-level
+`TraceEvent`s.
 ```
 
 }

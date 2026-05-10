@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex};
 use tracing::field::{Field, Visit};
 
 use crate::raw::RawTraceEntry;
-use crate::snapshot::{EventRecord, FieldValue, TraceEvent};
+use crate::snapshot::{EventRecord, FieldValue, SpanNode, TraceEvent};
+
+pub(crate) type EventSink = Arc<dyn Fn(TraceEvent) + Send + Sync>;
+pub(crate) type SpanSink = Arc<dyn Fn(SpanNode) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CaptureRecord {
@@ -32,7 +35,8 @@ pub(crate) struct CaptureLog {
     pub(crate) records: Mutex<Vec<CaptureRecord>>,
     pub(crate) raw_entries: Mutex<Vec<RawTraceEntry>>,
     pub(crate) capture_raw: bool,
-    pub(crate) event_sink: Option<Arc<dyn Fn(TraceEvent) + Send + Sync>>,
+    pub(crate) event_sink: Option<EventSink>,
+    pub(crate) span_sink: Option<SpanSink>,
 }
 
 #[derive(Default)]

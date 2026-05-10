@@ -119,10 +119,11 @@ where
         let dispatcher = self.dispatcher.clone();
         let ctx = ctx.clone();
         let event_ctx = ctx.clone();
-        let collected = lutum_trace::capture_with_events(future, move |event| {
-            let _ = dispatcher.send_trace(event_ctx.clone(), event);
-        })
-        .await;
+        let collected = lutum_trace::capture(future)
+            .listen_events(move |event| {
+                let _ = dispatcher.send_trace(event_ctx.clone(), event);
+            })
+            .await;
 
         self.run_collected(&ctx, collected).await
     }
@@ -155,10 +156,11 @@ where
     {
         let dispatcher = self.dispatcher.clone();
         let event_ctx = ctx.clone();
-        let Collected { output, trace } = lutum_trace::capture_with_events(future, move |event| {
-            let _ = dispatcher.send_trace(event_ctx.clone(), event);
-        })
-        .await;
+        let Collected { output, trace } = lutum_trace::capture(future)
+            .listen_events(move |event| {
+                let _ = dispatcher.send_trace(event_ctx.clone(), event);
+            })
+            .await;
         let trace_clone = trace.clone();
         let result = self.run_parts(ctx, trace, output).await;
         (result, trace_clone)
@@ -178,8 +180,8 @@ where
     {
         let dispatcher = self.dispatcher.clone();
         let event_ctx = ctx.clone();
-        let CollectedRaw { output, trace, raw } =
-            lutum_trace::capture_raw_with_events(future, move |event| {
+        let CollectedRaw { output, trace, raw } = lutum_trace::capture_raw(future)
+            .listen_events(move |event| {
                 let _ = dispatcher.send_trace(event_ctx.clone(), event);
             })
             .await;
