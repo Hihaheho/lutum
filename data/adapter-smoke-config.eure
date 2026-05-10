@@ -57,6 +57,17 @@ text_max_output_tokens = 16
 input_price_per_million = 0.20
 output_price_per_million = 1.25
 
+@ endpoints.openai_responses_gpt54
+adapter = "openai-responses"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model = "gpt-5.4"
+cases = ["tool_no_output"]
+text_max_output_tokens = 64
+openai_reasoning_effort = "low"
+input_price_per_million = 2.50
+output_price_per_million = 15.00
+
 @ endpoints.openrouter_messages_haiku45
 adapter = "claude-messages"
 base_url = "https://openrouter.ai/api"

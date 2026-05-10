@@ -118,6 +118,7 @@ enum SmokeCase {
     StructuredOptional,
     Tool,
     StructuredTool,
+    ToolNoOutput,
     StructuredCompletion,
     StructuredCompletionOptional,
     ReasoningRequest,
@@ -135,6 +136,7 @@ impl SmokeCase {
             "structured_optional" => Ok(Self::StructuredOptional),
             "tool" => Ok(Self::Tool),
             "structured_tool" => Ok(Self::StructuredTool),
+            "tool_no_output" => Ok(Self::ToolNoOutput),
             "structured_completion" => Ok(Self::StructuredCompletion),
             "structured_completion_optional" => Ok(Self::StructuredCompletionOptional),
             "reasoning_request" => Ok(Self::ReasoningRequest),
@@ -153,6 +155,7 @@ impl SmokeCase {
             Self::StructuredOptional => "structured_optional",
             Self::Tool => "tool",
             Self::StructuredTool => "structured_tool",
+            Self::ToolNoOutput => "tool_no_output",
             Self::StructuredCompletion => "structured_completion",
             Self::StructuredCompletionOptional => "structured_completion_optional",
             Self::ReasoningRequest => "reasoning_request",
@@ -378,6 +381,10 @@ fn validate_case(endpoint_id: &str, kind: AdapterKind, case: SmokeCase) -> Resul
         (_, SmokeCase::Completion) => {
             bail!("endpoint {endpoint_id} completion case requires openai-completions adapter")
         }
+        (AdapterKind::OpenAiResponses, SmokeCase::ToolNoOutput) => Ok(()),
+        (_, SmokeCase::ToolNoOutput) => {
+            bail!("endpoint {endpoint_id} tool_no_output requires openai-responses")
+        }
         (AdapterKind::ClaudeMessages, SmokeCase::StructuredCompletion) => {
             bail!("endpoint {endpoint_id} structured_completion requires openai-responses")
         }
@@ -447,6 +454,7 @@ fn worst_case_tokens(case: &CaseSpec, defaults: &DefaultsConfig) -> (u64, u64) {
             192,
             structured_max_output_tokens(&case.endpoint, defaults) as u64,
         ),
+        SmokeCase::ToolNoOutput => (96, text_max_output_tokens(&case.endpoint, defaults) as u64),
         SmokeCase::ThinkingRoundtrip => {
             let output = if case.kind == AdapterKind::ClaudeMessages {
                 defaults.claude_thinking_budget_tokens as u64 + 1024
@@ -487,6 +495,7 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
             SmokeCase::Structured => run_structured(&llm, &case, defaults).await?,
             SmokeCase::StructuredOptional => run_structured_optional(&llm, &case, defaults).await?,
             SmokeCase::Tool => run_tool(&llm, &case, defaults).await?,
+            SmokeCase::ToolNoOutput => run_tool_no_output(&llm, &case, defaults).await?,
             SmokeCase::StructuredTool => run_structured_tool(&llm, &case, defaults).await?,
             SmokeCase::StructuredCompletion => {
                 run_structured_completion(&llm, &case, defaults).await?
@@ -1063,6 +1072,48 @@ async fn run_tool(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Re
         }
     }
     bail!("tool case did not finish after tool result")
+}
+
+async fn run_tool_no_output(
+    llm: &Lutum,
+    case: &CaseSpec,
+    defaults: &DefaultsConfig,
+) -> Result<Usage> {
+    let mut session = Session::new();
+    session.push_user("Do not call any tool. Return no assistant output at all.");
+    let before_len = session.input().items().len();
+    let before_turns = session.list_turns().count();
+
+    let outcome = session
+        .text_turn(&llm)
+        .tools::<SmokeTools>()
+        .available_tools(vec![SmokeToolsSelector::EchoWord])
+        .max_output_tokens(text_max_output_tokens(&case.endpoint, defaults))
+        .collect()
+        .await?;
+
+    match outcome {
+        TextStepOutcomeWithTools::FinishedNoOutput(result) => {
+            if session.input().items().len() != before_len
+                || session.list_turns().count() != before_turns
+            {
+                bail!("tool_no_output committed an empty assistant turn");
+            }
+            Ok(result.usage)
+        }
+        TextStepOutcomeWithTools::Finished(result) => {
+            bail!(
+                "tool_no_output produced assistant output: {:?}",
+                result.assistant_text()
+            )
+        }
+        TextStepOutcomeWithTools::NeedsTools(round) => {
+            bail!(
+                "tool_no_output requested {} tool call(s)",
+                round.tool_calls.len()
+            )
+        }
+    }
 }
 
 async fn run_structured_tool(
@@ -1894,6 +1945,11 @@ output_price_per_million = 0.35
                 .iter()
                 .any(|case| case.case_id == "openai_responses_gpt54_nano:output_limit")
         );
+        assert!(
+            cases
+                .iter()
+                .any(|case| case.case_id == "openai_responses_gpt54:tool_no_output")
+        );
     }
 
     #[test]
@@ -2068,6 +2124,15 @@ output_price_per_million = 0.35
         assert!(validate_case("ok", AdapterKind::OpenAiCompletions, SmokeCase::Completion).is_ok());
         assert!(
             validate_case("ok", AdapterKind::OpenAiCompletions, SmokeCase::OutputLimit).is_ok()
+        );
+        assert!(validate_case("ok", AdapterKind::OpenAiResponses, SmokeCase::ToolNoOutput).is_ok());
+        assert!(
+            validate_case(
+                "bad",
+                AdapterKind::OpenAiChatCompletions,
+                SmokeCase::ToolNoOutput
+            )
+            .is_err()
         );
     }
 
