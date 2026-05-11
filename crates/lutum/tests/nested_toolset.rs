@@ -236,6 +236,29 @@ fn nested_field_accessible_for_registration() {
 }
 
 #[test]
+fn hooks_set_extend_merges_nested_hooks() {
+    let mut outer_hooks =
+        OuterToolsHooksSet::new(InnerToolsHooksSet::new(), SearchToolsHooksSet::new());
+    let mut other_hooks =
+        OuterToolsHooksSet::new(InnerToolsHooksSet::new(), SearchToolsHooksSet::new());
+    other_hooks.inner.register_weather_hook(CachedWeather);
+
+    outer_hooks.extend(other_hooks);
+
+    let meta = make_metadata("id5", "weather", r#"{"city":"Tokyo"}"#);
+    let call = OuterTools::parse_tool_call(meta).unwrap();
+
+    let outcome = block_on(call.hook(&outer_hooks));
+    assert!(
+        matches!(
+            outcome,
+            ToolHookOutcome::Handled(OuterToolsHandled::Inner(_))
+        ),
+        "expected Handled(Inner(...)), got: {outcome:?}"
+    );
+}
+
+#[test]
 fn hook_dispatch_to_nested_complete() {
     let mut outer_hooks =
         OuterToolsHooksSet::new(InnerToolsHooksSet::new(), SearchToolsHooksSet::new());

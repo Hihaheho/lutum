@@ -49,6 +49,7 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
     let mut fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut field_inits: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut register_methods: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut extend_bodies: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut dispatch_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut default_methods: Vec<proc_macro2::TokenStream> = Vec::new();
 
@@ -80,6 +81,7 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
         fields.push(slot.field);
         field_inits.push(slot.field_init);
         register_methods.push(slot.register_methods);
+        extend_bodies.push(slot.extend_body);
         dispatch_methods.push(slot.dispatch_method);
         default_methods.push(slot.default_method);
     }
@@ -94,6 +96,10 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
         .map(|(fid, fty)| {
             quote! { #fid: <#fty as ::std::default::Default>::default(), }
         })
+        .collect();
+    let nested_extend_bodies: Vec<proc_macro2::TokenStream> = nested_hooks_entries
+        .iter()
+        .map(|(fid, _)| quote! { self.#fid.extend(other.#fid); })
         .collect();
 
     // new() signature: no args when no nested hooks (backwards-compat), positional args otherwise.
@@ -178,6 +184,17 @@ pub fn expand_hooks(item_trait: ItemTrait) -> proc_macro2::TokenStream {
                 H: #register_trait_ident<'__lutum_hooks>,
             {
                 hooks.__lutum_register_hooks(self);
+                self
+            }
+
+            pub fn extend(&mut self, other: Self) -> &mut Self {
+                #(#nested_extend_bodies)*
+                #(#extend_bodies)*
+                self
+            }
+
+            pub fn with_extended(mut self, other: Self) -> Self {
+                self.extend(other);
                 self
             }
 

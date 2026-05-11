@@ -10,6 +10,7 @@ pub struct SlotExpansion {
     pub field: proc_macro2::TokenStream,
     pub field_init: proc_macro2::TokenStream,
     pub register_methods: proc_macro2::TokenStream,
+    pub extend_body: proc_macro2::TokenStream,
     pub dispatch_method: proc_macro2::TokenStream,
     pub default_method: proc_macro2::TokenStream,
 }
@@ -44,6 +45,7 @@ pub fn expand_slot(
     let default_method_ident = format_ident!("__lutum_hook_default_{}", fn_ident);
     let with_fn_ident = format_ident!("with_{}", fn_ident);
     let register_fn_ident = format_ident!("register_{}", fn_ident);
+    let register_erased_fn_ident = format_ident!("__lutum_register_erased_{}", fn_ident);
     let field_ident = fn_ident.clone();
     let chain_field_ident = format_ident!("{}_chain", fn_ident);
     let with_chain_fn_ident = format_ident!("with_{}_chain", fn_ident);
@@ -266,20 +268,18 @@ pub fn expand_slot(
                 (finalize_field_ty, finalize_field_init, finalize_call)
             });
 
-    let (field_ty, field_init, register_impl) = match &kind {
+    let (field_ty, field_init, register_erased_impl) = match &kind {
         HookKind::Always(_) | HookKind::Fallback(_) => (
             quote! { ::std::vec::Vec<::std::sync::Arc<dyn #dyn_hook_trait_ident + '__lutum_hooks>> },
             quote! { ::std::vec::Vec::new() },
             quote! {
-                self.#field_ident.push(::std::sync::Arc::new(hook));
+                self.#field_ident.push(hook);
             },
         ),
         HookKind::Singleton => (
             quote! { ::std::option::Option<::std::sync::Arc<dyn #dyn_hook_trait_ident + '__lutum_hooks>> },
             quote! { ::std::option::Option::None },
             quote! {
-                let hook = ::std::sync::Arc::new(hook)
-                    as ::std::sync::Arc<dyn #dyn_hook_trait_ident + '__lutum_hooks>;
                 if self.#field_ident.replace(hook).is_some() {
                     ::tracing::warn!(
                         target: "lutum",
@@ -403,6 +403,66 @@ pub fn expand_slot(
                 ) {
                     self.#finalize_field_ident =
                         ::std::option::Option::Some(::std::sync::Arc::new(h));
+                }
+            }
+        })
+        .unwrap_or_default();
+    let extend_slot_body = match &kind {
+        HookKind::Always(_) | HookKind::Fallback(_) => quote! {
+            for hook in other.#field_ident {
+                self.#register_erased_fn_ident(hook);
+            }
+        },
+        HookKind::Singleton => quote! {
+            if let ::std::option::Option::Some(hook) = other.#field_ident {
+                self.#register_erased_fn_ident(hook);
+            }
+        },
+    };
+    let extend_chain_body = chain_companion_tokens
+        .as_ref()
+        .map(|_| {
+            quote! {
+                if let ::std::option::Option::Some(hook) = other.#chain_field_ident {
+                    if self.#chain_field_ident.replace(hook).is_some() {
+                        ::tracing::warn!(
+                            target: "lutum",
+                            slot = ::std::concat!(#hook_name, ".chain"),
+                            "companion chain overwritten; last registered wins"
+                        );
+                    }
+                }
+            }
+        })
+        .unwrap_or_default();
+    let extend_aggregate_body = aggregate_companion_tokens
+        .as_ref()
+        .map(|_| {
+            quote! {
+                if let ::std::option::Option::Some(hook) = other.#aggregate_field_ident {
+                    if self.#aggregate_field_ident.replace(hook).is_some() {
+                        ::tracing::warn!(
+                            target: "lutum",
+                            slot = ::std::concat!(#hook_name, ".aggregate"),
+                            "companion aggregate overwritten; last registered wins"
+                        );
+                    }
+                }
+            }
+        })
+        .unwrap_or_default();
+    let extend_finalize_body = finalize_companion_tokens
+        .as_ref()
+        .map(|_| {
+            quote! {
+                if let ::std::option::Option::Some(hook) = other.#finalize_field_ident {
+                    if self.#finalize_field_ident.replace(hook).is_some() {
+                        ::tracing::warn!(
+                            target: "lutum",
+                            slot = ::std::concat!(#hook_name, ".finalize"),
+                            "companion finalize overwritten; last registered wins"
+                        );
+                    }
                 }
             }
         })
@@ -688,12 +748,22 @@ pub fn expand_slot(
         #finalize_field_init
     };
     let register_methods = quote! {
+        fn #register_erased_fn_ident(
+            &mut self,
+            hook: ::std::sync::Arc<dyn #dyn_hook_trait_ident + '__lutum_hooks>,
+        ) {
+            #register_erased_impl
+        }
+
         #[allow(dead_code)]
         pub fn #with_fn_ident(
             mut self,
             hook: impl #hook_trait_ident + '__lutum_hooks,
         ) -> Self {
-            #register_impl
+            self.#register_erased_fn_ident(
+                ::std::sync::Arc::new(hook)
+                    as ::std::sync::Arc<dyn #dyn_hook_trait_ident + '__lutum_hooks>
+            );
             self
         }
 
@@ -702,13 +772,22 @@ pub fn expand_slot(
             &mut self,
             hook: impl #hook_trait_ident + '__lutum_hooks,
         ) -> &mut Self {
-            #register_impl
+            self.#register_erased_fn_ident(
+                ::std::sync::Arc::new(hook)
+                    as ::std::sync::Arc<dyn #dyn_hook_trait_ident + '__lutum_hooks>
+            );
             self
         }
 
         #chain_methods
         #aggregate_methods
         #finalize_methods
+    };
+    let extend_body = quote! {
+        #extend_slot_body
+        #extend_chain_body
+        #extend_aggregate_body
+        #extend_finalize_body
     };
     let dispatch_method = quote! {
         #[allow(dead_code)]
@@ -745,6 +824,7 @@ pub fn expand_slot(
         field,
         field_init,
         register_methods,
+        extend_body,
         dispatch_method,
         default_method,
     })

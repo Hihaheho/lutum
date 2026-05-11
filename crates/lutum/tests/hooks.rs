@@ -510,6 +510,28 @@ async fn singleton_hook_warns_and_uses_last_registered_override() {
 }
 
 #[test]
+fn hooks_set_extend_merges_registered_hooks() {
+    let mut hooks = AccumulateHooksSet::new().with_accumulate_label(AccumulateHookA);
+    let other = AccumulateHooksSet::new().with_accumulate_label(AccumulateHookB);
+
+    hooks.extend(other);
+
+    let result = block_on(hooks.accumulate_label("x"));
+    assert_eq!(result, "default:x, hook-a:x, hook-b:x");
+}
+
+#[test]
+fn hooks_set_extend_singleton_last_wins() {
+    let mut hooks = TestHooksSet::new().with_select_label(PrefixLabel);
+    let other = TestHooksSet::new().with_select_label(SuffixLabel);
+
+    hooks.extend(other);
+
+    let result = block_on(hooks.select_label("x".to_owned()));
+    assert_eq!(result, "x:suffix");
+}
+
+#[test]
 fn always_hook_uses_default_without_last_when_unregistered() {
     let hooks = TestHooksSet::new();
 
