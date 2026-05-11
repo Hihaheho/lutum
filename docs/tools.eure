@@ -308,6 +308,7 @@ Tool hook sets support the same hook API as ordinary `#[hooks]` sets:
 | `.with_weather_hook(h)` / `.register_weather_hook(h)` | Register one execution hook. |
 | `.with_weather_description_hook(h)` | Register one description hook. |
 | `.with_hooks(policy)` / `.register_hooks(policy)` | Register multiple methods from one `#[impl_hooks]` implementation. |
+| `.with_extended(other)` / `.extend(other)` | Merge another hook set of the same type. |
 | Borrowed policy values | `AppToolsHooksSet::new().with_hooks(&policy)` stores hooks for the hook-set lifetime. |
 
 Single-function `#[impl_hook(WeatherHook)]` remains supported when one function should implement

@@ -66,6 +66,7 @@ let hooks = AppHooksSet::new();
 | `StatefulValidatePrompt`, ... | Mutable-state variants used with `Stateful<T>`. |
 | `with_<method>` / `register_<method>` | Register one slot implementation. |
 | `with_hooks` / `register_hooks` | Register all methods present in one `#[impl_hooks]` impl block. |
+| `with_extended` / `extend` | Merge another hook set of the same type into this one. |
 
 The old generated-owner style (`AppHooks::new()`) is intentionally replaced by
 `AppHooksSet::new()`.
@@ -184,6 +185,40 @@ let hooks = AppHooksSet::new().with_validate_prompt(RejectApiKeys);
   "body-2" = ```markdown
 `with_<method>(hook)` consumes and returns the hook set, so it is convenient for builder chains.
 `register_<method>(&mut self, hook)` mutates an existing hook set and returns `&mut Self`.
+```
+}
+
+@ "combining" {
+  "##": Combining Hook Sets
+
+  "body" = ```markdown
+Every generated hook-set owner can merge another hook set of the same type.
+
+Use `extend(other)` when mutating an existing hook set. Use `with_extended(other)` in builder
+chains.
+```
+
+  "rust-example" = ```rust
+let mut hooks = AppHooksSet::new().with_validate_prompt(RejectApiKeys);
+
+let tenant_hooks = AppHooksSet::new()
+    .with_choose_model(ChooseTenantModel)
+    .with_cost_center(TenantCostCenter);
+
+hooks.extend(tenant_hooks);
+```
+
+  "body-2" = ```markdown
+`extend` consumes the other hook set and registers its contents into the receiver:
+
+| Slot kind | Merge behaviour |
+|---|---|
+| `always` / `fallback` | Hooks from `other` are appended after hooks already registered on `self`. |
+| `singleton` | A singleton from `other` replaces the receiver's singleton, with the same overwrite warning as a direct registration. |
+| nested hook sets | Nested hook sets are extended recursively. |
+
+This is useful when different modules own independent policy bundles and the application wants to
+assemble them into one hook set before constructing `Lutum`, an adapter, or a tool loop.
 ```
 }
 
@@ -400,6 +435,81 @@ Lutum exports built-in hook traits and hook sets:
 
 Adapter/context hook sets are commonly stored at `'static`, so borrowed hooks only work there if
 the surrounding adapter/context also has a compatible lifetime.
+```
+
+  "lutum-runtime" = ```markdown
+`LutumHooks` currently provides runtime-level hooks:
+
+| Method | Kind | When it runs |
+|---|---|---|
+| `resolve_usage_estimate` | `singleton` | Before budget reservation for every text turn, structured turn, completion, and structured completion. |
+| `on_model_input` | `always` | After defaults/extensions are applied and before a text or structured turn is erased for the adapter. |
+| `on_stream_event` | `always` | For every adapter stream event before Lutum maps it into typed user-facing events and reducers consume it. |
+
+`on_model_input` receives `ModelInputHookContext`, which exposes `extensions()`, `kind()`, and
+`input()`. It is available for operations backed by `ModelInput`: text turns and structured turns.
+
+`on_stream_event` receives `StreamEventHookContext`, which exposes `extensions()`, `kind()`, and
+`event()`. `event()` returns a `LutumStreamEvent` enum:
+
+| Variant | Payload |
+|---|---|
+| `TextTurn(&ErasedTextTurnEvent)` | Raw text-turn adapter event, before tool availability checks and typed tool parsing. |
+| `StructuredTurn(&ErasedStructuredTurnEvent)` | Raw structured-turn adapter event, before semantic output deserialization and typed tool parsing. |
+| `Completion(&CompletionEvent)` | Completion event. |
+| `StructuredCompletion(&ErasedStructuredCompletionEvent)` | Raw structured-completion event, before semantic output deserialization. |
+```
+
+  "lutum-example" = ```rust
+use std::sync::{Arc, Mutex};
+
+use lutum::{
+    impl_hooks, Lutum, LutumHooks, LutumHooksSet, LutumStreamEvent,
+    ModelInputHookContext, StreamEventHookContext,
+};
+
+struct Observer {
+    seen: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[impl_hooks(LutumHooksSet)]
+impl LutumHooks for Observer {
+    async fn on_model_input(&self, cx: &ModelInputHookContext<'_>) {
+        let _input = cx.input();
+        self.seen.lock().unwrap().push("input");
+    }
+
+    async fn on_stream_event(&self, cx: &StreamEventHookContext<'_>) {
+        match cx.event() {
+            LutumStreamEvent::TextTurn(_) => self.seen.lock().unwrap().push("text-event"),
+            LutumStreamEvent::StructuredTurn(_) => self.seen.lock().unwrap().push("structured-event"),
+            LutumStreamEvent::Completion(_) => self.seen.lock().unwrap().push("completion-event"),
+            LutumStreamEvent::StructuredCompletion(_) => {
+                self.seen.lock().unwrap().push("structured-completion-event")
+            }
+        }
+    }
+}
+
+let observer = Observer {
+    seen: Arc::new(Mutex::new(Vec::new())),
+};
+let hooks = LutumHooksSet::new().with_hooks(observer);
+
+let llm = Lutum::with_hooks(adapter, budget, hooks);
+```
+
+  "lutum-extend" = ```markdown
+You can add runtime hooks after constructing `Lutum`:
+```
+
+  "lutum-extend-example" = ```rust
+let mut llm = Lutum::new(adapter, budget);
+llm.extend_hooks(LutumHooksSet::new().with_hooks(observer));
+```
+
+  "lutum-extend-2" = ```markdown
+For chained construction, use `with_extended_hooks(...)`.
 ```
 }
 
