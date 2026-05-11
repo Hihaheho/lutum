@@ -32,10 +32,7 @@ pub struct HookSlotFlags {
 /// Computed once by [`compute_hook_arg_tokens`] and consumed by the
 /// trait-definition, blanket-impl, and dispatch-method generators.
 pub struct HookArgTokens {
-    /// `fi: ParamType` params for hook trait methods (without `last`).
-    #[allow(dead_code)]
-    pub trait_args_no_last: Vec<proc_macro2::TokenStream>,
-    /// Same with `last: Option<Output>` appended when `trait_has_last`.
+    /// Hook trait method params, with `last: Option<Output>` appended when needed.
     pub trait_args: Vec<proc_macro2::TokenStream>,
     /// Trait args with any non-`str` references tied to a named lifetime.
     pub dyn_trait_args: Vec<proc_macro2::TokenStream>,
@@ -64,7 +61,7 @@ pub fn compute_hook_arg_tokens(
     output_ty: &Type,
     trait_has_last: bool,
 ) -> HookArgTokens {
-    let trait_args_no_last: Vec<proc_macro2::TokenStream> = explicit_args
+    let mut trait_args: Vec<proc_macro2::TokenStream> = explicit_args
         .iter()
         .zip(args_field_idents.iter())
         .map(|((_, ty), fi)| {
@@ -73,7 +70,6 @@ pub fn compute_hook_arg_tokens(
         })
         .collect();
 
-    let mut trait_args = trait_args_no_last.clone();
     let dyn_lifetime: syn::Lifetime = syn::parse_quote!('__lutum_hook);
     let mut dyn_trait_args: Vec<proc_macro2::TokenStream> = explicit_args
         .iter()
@@ -150,7 +146,6 @@ pub fn compute_hook_arg_tokens(
     };
 
     HookArgTokens {
-        trait_args_no_last,
         trait_args,
         dyn_trait_args,
         trait_call_arg_names,

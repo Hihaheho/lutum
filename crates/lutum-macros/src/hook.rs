@@ -1,17 +1,17 @@
-mod def_local;
-mod def_shared;
 #[allow(clippy::module_inception)]
 mod hook;
 mod hooks;
 mod impl_hooks;
+mod slot_set;
+mod slot_traits;
 
 use std::collections::HashSet;
 
-pub use def_local::*;
-pub use def_shared::*;
 pub use hook::*;
 pub use hooks::*;
 pub use impl_hooks::*;
+pub use slot_set::*;
+pub use slot_traits::*;
 
 use quote::{format_ident, quote};
 use syn::{
