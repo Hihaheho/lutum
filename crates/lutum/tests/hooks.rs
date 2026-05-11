@@ -5,10 +5,12 @@ use futures::executor::block_on;
 use lutum::{
     AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn, AgentError,
     CompletionAdapter, CompletionEventStream, CompletionRequest,
-    ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
-    ErasedTextTurnEventStream, HookReentrancyError, InputMessageRole, Lutum, LutumHooksSet,
-    MockLlmAdapter, ModelInput, ModelInputItem, OperationKind, RequestExtensions,
-    ResolveUsageEstimate, SharedPoolBudgetManager, SharedPoolBudgetOptions, Stateful, TurnAdapter,
+    ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
+    ErasedTextTurnEventStream, FinishReason, HookReentrancyError, InputMessageRole, Lutum,
+    LutumHooksSet, LutumStreamEvent, MockLlmAdapter, MockTextScenario, ModelInput,
+    ModelInputHookContext, ModelInputItem, OnModelInput, OnStreamEvent, OperationKind,
+    RawTextTurnEvent, RequestExtensions, ResolveUsageEstimate, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, Stateful, StreamEventHookContext, TurnAdapter, Usage,
     budget::UsageEstimate,
 };
 use lutum_trace::FieldValue;
@@ -446,6 +448,38 @@ impl ResolveUsageEstimate for RecordOperationKinds {
     }
 }
 
+struct RecordModelInputs {
+    seen: Arc<Mutex<Vec<(OperationKind, usize)>>>,
+}
+
+impl OnModelInput for RecordModelInputs {
+    async fn call(&self, cx: &ModelInputHookContext<'_>) {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((cx.kind(), cx.input().items().len()));
+    }
+}
+
+struct RecordStreamEvents {
+    seen: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl OnStreamEvent for RecordStreamEvents {
+    async fn call(&self, cx: &StreamEventHookContext<'_>) {
+        let label = match cx.event() {
+            LutumStreamEvent::TextTurn(ErasedTextTurnEvent::Started { .. }) => "text.started",
+            LutumStreamEvent::TextTurn(ErasedTextTurnEvent::TextDelta { .. }) => "text.delta",
+            LutumStreamEvent::TextTurn(ErasedTextTurnEvent::Completed { .. }) => "text.completed",
+            LutumStreamEvent::TextTurn(_) => "text.other",
+            LutumStreamEvent::StructuredTurn(_) => "structured",
+            LutumStreamEvent::Completion(_) => "completion",
+            LutumStreamEvent::StructuredCompletion(_) => "structured_completion",
+        };
+        self.seen.lock().unwrap().push(label);
+    }
+}
+
 struct RecordExtensionEstimate {
     seen: Arc<Mutex<Vec<u64>>>,
 }
@@ -774,6 +808,79 @@ fn context_entrypoints_pass_operation_kind_to_resolve_usage_estimate() {
             OperationKind::Completion,
             OperationKind::StructuredCompletion,
         ]
+    );
+}
+
+#[test]
+fn lutum_hook_observes_model_input_before_adapter_call() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = test_context(LutumHooksSet::new().with_on_model_input(RecordModelInputs {
+        seen: Arc::clone(&seen),
+    }));
+
+    block_on(ctx.text_turn(input()).start()).unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![(OperationKind::TextTurn, 1)]);
+}
+
+#[test]
+fn lutum_hook_observes_stream_events_in_real_time() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(RawTextTurnEvent::Started {
+            request_id: Some("req-hook".into()),
+            model: "gpt-4.1".into(),
+        }),
+        Ok(RawTextTurnEvent::TextDelta {
+            delta: "hello".into(),
+        }),
+        Ok(RawTextTurnEvent::Completed {
+            request_id: Some("req-hook".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 3,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let ctx = Lutum::with_hooks(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+        LutumHooksSet::new().with_on_stream_event(RecordStreamEvents {
+            seen: Arc::clone(&seen),
+        }),
+    );
+
+    block_on(ctx.text_turn(input()).collect()).unwrap();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["text.started", "text.delta", "text.completed"]
+    );
+}
+
+#[test]
+fn lutum_extend_hooks_merges_runtime_hook_sets() {
+    let estimate_seen = Arc::new(Mutex::new(Vec::new()));
+    let input_seen = Arc::new(Mutex::new(Vec::new()));
+    let mut ctx = test_context(LutumHooksSet::new().with_resolve_usage_estimate(
+        RecordOperationKinds {
+            seen: Arc::clone(&estimate_seen),
+        },
+    ));
+    ctx.extend_hooks(LutumHooksSet::new().with_on_model_input(RecordModelInputs {
+        seen: Arc::clone(&input_seen),
+    }));
+
+    block_on(ctx.text_turn(input()).start()).unwrap();
+
+    assert_eq!(
+        *estimate_seen.lock().unwrap(),
+        vec![OperationKind::TextTurn]
+    );
+    assert_eq!(
+        *input_seen.lock().unwrap(),
+        vec![(OperationKind::TextTurn, 1)]
     );
 }
 

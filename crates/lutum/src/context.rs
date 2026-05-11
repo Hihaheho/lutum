@@ -49,7 +49,10 @@ use lutum_protocol::{
     },
 };
 
-use crate::hooks::{LutumHooksSet, MaybeSend, MaybeSync};
+use crate::hooks::{
+    LutumHooksSet, LutumStreamEvent, MaybeSend, MaybeSync, ModelInputHookContext,
+    StreamEventHookContext,
+};
 
 pub type LutumError = AgentError;
 
@@ -172,6 +175,16 @@ impl Lutum {
         self.default_extensions.as_ref()
     }
 
+    pub fn extend_hooks(&mut self, hooks: LutumHooksSet<'static>) -> &mut Self {
+        Arc::make_mut(&mut self.hooks).extend(hooks);
+        self
+    }
+
+    pub fn with_extended_hooks(mut self, hooks: LutumHooksSet<'static>) -> Self {
+        self.extend_hooks(hooks);
+        self
+    }
+
     pub fn text_turn(&self, input: ModelInput) -> crate::builders::TextTurn<'_> {
         crate::builders::TextTurn::from_lutum(self, input)
     }
@@ -216,6 +229,20 @@ impl Lutum {
         } else {
             raw_collect_errors_enabled(&self.default_extensions)
         }
+    }
+
+    async fn emit_model_input_hook(
+        &self,
+        span: &Span,
+        extensions: &RequestExtensions,
+        kind: OperationKind,
+        input: &ModelInput,
+    ) {
+        let cx = ModelInputHookContext::new(extensions, kind, input);
+        self.hooks
+            .on_model_input(&cx)
+            .instrument(span.clone())
+            .await;
     }
 }
 
@@ -359,6 +386,7 @@ pub struct PendingTextTurn {
     owned_lease: OwnedLease,
     recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     turns: Arc<dyn TurnAdapter>,
+    hooks: Arc<LutumHooksSet<'static>>,
     input: ModelInput,
     turn: AdapterTextTurn,
     estimate: UsageEstimate,
@@ -375,6 +403,7 @@ where
     owned_lease: OwnedLease,
     recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     turns: Arc<dyn TurnAdapter>,
+    hooks: Arc<LutumHooksSet<'static>>,
     input: ModelInput,
     turn: AdapterTextTurn,
     availability: ToolAvailability<T::Selector>,
@@ -392,6 +421,7 @@ where
     owned_lease: OwnedLease,
     recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     turns: Arc<dyn TurnAdapter>,
+    hooks: Arc<LutumHooksSet<'static>>,
     input: ModelInput,
     turn: AdapterStructuredTurn,
     estimate: UsageEstimate,
@@ -409,6 +439,7 @@ where
     owned_lease: OwnedLease,
     recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     turns: Arc<dyn TurnAdapter>,
+    hooks: Arc<LutumHooksSet<'static>>,
     input: ModelInput,
     turn: AdapterStructuredTurn,
     availability: ToolAvailability<T::Selector>,
@@ -502,6 +533,7 @@ pub struct PendingCompletion {
     owned_lease: OwnedLease,
     recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     completion: Arc<dyn CompletionAdapter>,
+    hooks: Arc<LutumHooksSet<'static>>,
     request: CompletionRequest,
     estimate: UsageEstimate,
     retry_policy: RetryPolicy,
@@ -517,6 +549,7 @@ where
     owned_lease: OwnedLease,
     recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
     completion: Arc<dyn CompletionAdapter>,
+    hooks: Arc<LutumHooksSet<'static>>,
     request: AdapterStructuredCompletionRequest,
     estimate: UsageEstimate,
     retry_policy: RetryPolicy,
@@ -542,6 +575,8 @@ impl Lutum {
         let extensions = Arc::new(extensions);
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("text_turn", estimate);
+        self.emit_model_input_hook(&span, extensions.as_ref(), OperationKind::TextTurn, &input)
+            .await;
         log_input_transcript(&span, &input);
         let turn = erase_text_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingTextTurn {
@@ -552,6 +587,7 @@ impl Lutum {
             },
             recovery: self.recovery.clone(),
             turns: Arc::clone(&self.turns),
+            hooks: Arc::clone(&self.hooks),
             input,
             turn,
             estimate,
@@ -583,6 +619,8 @@ impl Lutum {
         let extensions = Arc::new(extensions);
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("text_turn", estimate);
+        self.emit_model_input_hook(&span, extensions.as_ref(), OperationKind::TextTurn, &input)
+            .await;
         log_input_transcript(&span, &input);
         let turn = erase_text_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingTextTurnWithTools {
@@ -593,6 +631,7 @@ impl Lutum {
             },
             recovery: self.recovery.clone(),
             turns: Arc::clone(&self.turns),
+            hooks: Arc::clone(&self.hooks),
             input,
             turn,
             availability,
@@ -623,6 +662,13 @@ impl Lutum {
         let extensions = Arc::new(extensions);
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("structured_turn", estimate);
+        self.emit_model_input_hook(
+            &span,
+            extensions.as_ref(),
+            OperationKind::StructuredTurn,
+            &input,
+        )
+        .await;
         log_input_transcript(&span, &input);
         let turn = erase_structured_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingStructuredTurn {
@@ -633,6 +679,7 @@ impl Lutum {
             },
             recovery: self.recovery.clone(),
             turns: Arc::clone(&self.turns),
+            hooks: Arc::clone(&self.hooks),
             input,
             turn,
             estimate,
@@ -665,6 +712,13 @@ impl Lutum {
         let extensions = Arc::new(extensions);
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("structured_turn", estimate);
+        self.emit_model_input_hook(
+            &span,
+            extensions.as_ref(),
+            OperationKind::StructuredTurn,
+            &input,
+        )
+        .await;
         log_input_transcript(&span, &input);
         let turn = erase_structured_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingStructuredTurnWithTools {
@@ -675,6 +729,7 @@ impl Lutum {
             },
             recovery: self.recovery.clone(),
             turns: Arc::clone(&self.turns),
+            hooks: Arc::clone(&self.hooks),
             input,
             turn,
             availability,
@@ -708,6 +763,7 @@ impl Lutum {
             },
             recovery: self.recovery.clone(),
             completion: Arc::clone(&self.completion),
+            hooks: Arc::clone(&self.hooks),
             request,
             estimate,
             retry_policy,
@@ -742,6 +798,7 @@ impl Lutum {
             },
             recovery: self.recovery.clone(),
             completion: Arc::clone(&self.completion),
+            hooks: Arc::clone(&self.hooks),
             request: erase_structured_completion_request(request)?,
             estimate,
             retry_policy,
@@ -757,6 +814,11 @@ impl PendingTextTurn {
             .turns
             .text_turn(self.input.clone(), self.turn.clone())
             .await?;
+        let stream = observe_text_stream(
+            stream,
+            Arc::clone(&self.hooks),
+            Arc::clone(&self.extensions),
+        );
         Ok(map_text_stream(stream))
     }
 
@@ -767,6 +829,8 @@ impl PendingTextTurn {
         let Self {
             recovery,
             turns,
+            hooks,
+            extensions,
             input,
             turn,
             estimate,
@@ -781,7 +845,11 @@ impl PendingTextTurn {
             'attempts: loop {
                 let stream = turns.text_turn(input.clone(), turn.clone()).await;
                 let mut stream = match stream {
-                    Ok(stream) => map_text_stream(stream),
+                    Ok(stream) => map_text_stream(observe_text_stream(
+                        stream,
+                        Arc::clone(&hooks),
+                        Arc::clone(&extensions),
+                    )),
                     Err(source) => {
                         if let Some((next_attempt, after, status, kind)) =
                             maybe_retry_plan(&retry_policy, attempt, &source)
@@ -1379,6 +1447,11 @@ where
             .turns
             .text_turn(self.input.clone(), self.turn.clone())
             .await?;
+        let stream = observe_text_stream(
+            stream,
+            Arc::clone(&self.hooks),
+            Arc::clone(&self.extensions),
+        );
         Ok(map_text_stream_with_tools::<T>(
             stream,
             self.availability.clone(),
@@ -1392,6 +1465,8 @@ where
         let Self {
             recovery,
             turns,
+            hooks,
+            extensions,
             input,
             turn,
             availability,
@@ -1407,7 +1482,14 @@ where
             'attempts: loop {
                 let stream = turns.text_turn(input.clone(), turn.clone()).await;
                 let mut stream = match stream {
-                    Ok(stream) => map_text_stream_with_tools::<T>(stream, availability.clone()),
+                    Ok(stream) => map_text_stream_with_tools::<T>(
+                        observe_text_stream(
+                            stream,
+                            Arc::clone(&hooks),
+                            Arc::clone(&extensions),
+                        ),
+                        availability.clone(),
+                    ),
                     Err(source) => {
                         if let Some((next_attempt, after, status, kind)) =
                             maybe_retry_plan(&retry_policy, attempt, &source)
@@ -2019,6 +2101,11 @@ where
             .turns
             .structured_turn(self.input.clone(), self.turn.clone())
             .await?;
+        let stream = observe_structured_stream(
+            stream,
+            Arc::clone(&self.hooks),
+            Arc::clone(&self.extensions),
+        );
         Ok(map_structured_stream::<O>(stream))
     }
 
@@ -2029,6 +2116,8 @@ where
         let Self {
             recovery,
             turns,
+            hooks,
+            extensions,
             input,
             turn,
             estimate,
@@ -2043,7 +2132,11 @@ where
             'attempts: loop {
                 let stream = turns.structured_turn(input.clone(), turn.clone()).await;
                 let mut stream = match stream {
-                    Ok(stream) => map_structured_stream::<O>(stream),
+                    Ok(stream) => map_structured_stream::<O>(observe_structured_stream(
+                        stream,
+                        Arc::clone(&hooks),
+                        Arc::clone(&extensions),
+                    )),
                     Err(source) => {
                         if let Some((next_attempt, after, status, kind)) =
                             maybe_retry_plan(&retry_policy, attempt, &source)
@@ -2654,6 +2747,11 @@ where
             .turns
             .structured_turn(self.input.clone(), self.turn.clone())
             .await?;
+        let stream = observe_structured_stream(
+            stream,
+            Arc::clone(&self.hooks),
+            Arc::clone(&self.extensions),
+        );
         Ok(map_structured_stream_with_tools::<T, O>(
             stream,
             self.availability.clone(),
@@ -2667,6 +2765,8 @@ where
         let Self {
             recovery,
             turns,
+            hooks,
+            extensions,
             input,
             turn,
             availability,
@@ -2682,7 +2782,14 @@ where
             'attempts: loop {
                 let stream = turns.structured_turn(input.clone(), turn.clone()).await;
                 let mut stream = match stream {
-                    Ok(stream) => map_structured_stream_with_tools::<T, O>(stream, availability.clone()),
+                    Ok(stream) => map_structured_stream_with_tools::<T, O>(
+                        observe_structured_stream(
+                            stream,
+                            Arc::clone(&hooks),
+                            Arc::clone(&extensions),
+                        ),
+                        availability.clone(),
+                    ),
                     Err(source) => {
                         if let Some((next_attempt, after, status, kind)) =
                             maybe_retry_plan(&retry_policy, attempt, &source)
@@ -3305,9 +3412,15 @@ where
 
 impl PendingCompletion {
     async fn start_attempt(&self) -> Result<CompletionEventStream, AgentError> {
-        self.completion
+        let stream = self
+            .completion
             .completion(self.request.clone(), self.extensions.as_ref())
-            .await
+            .await?;
+        Ok(observe_completion_stream(
+            stream,
+            Arc::clone(&self.hooks),
+            Arc::clone(&self.extensions),
+        ))
     }
 
     /// Returns the raw typed event stream.
@@ -3317,6 +3430,7 @@ impl PendingCompletion {
         let Self {
             recovery,
             completion,
+            hooks,
             request,
             estimate,
             retry_policy,
@@ -3331,7 +3445,11 @@ impl PendingCompletion {
             'attempts: loop {
                 let stream = completion.completion(request.clone(), extensions.as_ref()).await;
                 let mut stream = match stream {
-                    Ok(stream) => stream,
+                    Ok(stream) => observe_completion_stream(
+                        stream,
+                        Arc::clone(&hooks),
+                        Arc::clone(&extensions),
+                    ),
                     Err(source) => {
                         if let Some((next_attempt, after, status, kind)) =
                             maybe_retry_plan(&retry_policy, attempt, &source)
@@ -3931,6 +4049,11 @@ where
             .completion
             .structured_completion(self.request.clone(), self.extensions.as_ref())
             .await?;
+        let stream = observe_structured_completion_stream(
+            stream,
+            Arc::clone(&self.hooks),
+            Arc::clone(&self.extensions),
+        );
         Ok(map_structured_completion_stream::<O>(stream))
     }
 
@@ -3941,6 +4064,7 @@ where
         let Self {
             recovery,
             completion,
+            hooks,
             request,
             estimate,
             retry_policy,
@@ -3957,7 +4081,13 @@ where
                     .structured_completion(request.clone(), extensions.as_ref())
                     .await;
                 let mut stream = match stream {
-                    Ok(stream) => map_structured_completion_stream::<O>(stream),
+                    Ok(stream) => map_structured_completion_stream::<O>(
+                        observe_structured_completion_stream(
+                            stream,
+                            Arc::clone(&hooks),
+                            Arc::clone(&extensions),
+                        ),
+                    ),
                     Err(source) => {
                         if let Some((next_attempt, after, status, kind)) =
                             maybe_retry_plan(&retry_policy, attempt, &source)
@@ -4724,6 +4854,25 @@ fn map_text_stream(stream: ErasedTextTurnEventStream) -> TextTurnEventStream {
     Box::pin(stream.map(|item| item.and_then(map_text_event)))
 }
 
+fn observe_text_stream(
+    mut stream: ErasedTextTurnEventStream,
+    hooks: Arc<LutumHooksSet<'static>>,
+    extensions: Arc<RequestExtensions>,
+) -> ErasedTextTurnEventStream {
+    boxed_sync_stream(try_stream! {
+        while let Some(item) = stream.next().await {
+            let event = item?;
+            let cx = StreamEventHookContext::new(
+                extensions.as_ref(),
+                OperationKind::TextTurn,
+                LutumStreamEvent::TextTurn(&event),
+            );
+            hooks.on_stream_event(&cx).await;
+            yield event;
+        }
+    })
+}
+
 fn map_text_stream_with_tools<T>(
     stream: ErasedTextTurnEventStream,
     availability: ToolAvailability<T::Selector>,
@@ -4741,6 +4890,25 @@ where
     O: StructuredOutput,
 {
     Box::pin(stream.map(|item| item.and_then(map_structured_event::<O>)))
+}
+
+fn observe_structured_stream(
+    mut stream: ErasedStructuredTurnEventStream,
+    hooks: Arc<LutumHooksSet<'static>>,
+    extensions: Arc<RequestExtensions>,
+) -> ErasedStructuredTurnEventStream {
+    boxed_sync_stream(try_stream! {
+        while let Some(item) = stream.next().await {
+            let event = item?;
+            let cx = StreamEventHookContext::new(
+                extensions.as_ref(),
+                OperationKind::StructuredTurn,
+                LutumStreamEvent::StructuredTurn(&event),
+            );
+            hooks.on_stream_event(&cx).await;
+            yield event;
+        }
+    })
 }
 
 fn map_structured_stream_with_tools<T, O>(
@@ -4763,6 +4931,44 @@ where
     O: StructuredOutput,
 {
     Box::pin(stream.map(|item| item.and_then(map_structured_completion_event::<O>)))
+}
+
+fn observe_completion_stream(
+    mut stream: CompletionEventStream,
+    hooks: Arc<LutumHooksSet<'static>>,
+    extensions: Arc<RequestExtensions>,
+) -> CompletionEventStream {
+    boxed_sync_stream(try_stream! {
+        while let Some(item) = stream.next().await {
+            let event = item?;
+            let cx = StreamEventHookContext::new(
+                extensions.as_ref(),
+                OperationKind::Completion,
+                LutumStreamEvent::Completion(&event),
+            );
+            hooks.on_stream_event(&cx).await;
+            yield event;
+        }
+    })
+}
+
+fn observe_structured_completion_stream(
+    mut stream: ErasedStructuredCompletionEventStream,
+    hooks: Arc<LutumHooksSet<'static>>,
+    extensions: Arc<RequestExtensions>,
+) -> ErasedStructuredCompletionEventStream {
+    boxed_sync_stream(try_stream! {
+        while let Some(item) = stream.next().await {
+            let event = item?;
+            let cx = StreamEventHookContext::new(
+                extensions.as_ref(),
+                OperationKind::StructuredCompletion,
+                LutumStreamEvent::StructuredCompletion(&event),
+            );
+            hooks.on_stream_event(&cx).await;
+            yield event;
+        }
+    })
 }
 
 fn map_text_event(event: ErasedTextTurnEvent) -> Result<TextTurnEvent, AgentError> {

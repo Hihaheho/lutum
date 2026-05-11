@@ -60,10 +60,11 @@ pub use context::{
     StructuredTurnPartial, StructuredTurnPartialWithTools,
 };
 pub use hooks::{
-    Aggregate, AggregateInto, Chain, DynAggregate, DynAggregateInto, DynChain, DynFinalize,
-    DynFinalizeInto, Finalize, FinalizeInto, FirstSuccess, HookFuture, HookObject,
-    HookReentrancyError, LutumHooks, LutumHooksSet, MaybeSend, MaybeSync, ResolveUsageEstimate,
-    ShortCircuit, Stateful, boxed_hook_future,
+    Aggregate, AggregateInto, Chain, ContinueChain, DynAggregate, DynAggregateInto, DynChain,
+    DynFinalize, DynFinalizeInto, Finalize, FinalizeInto, FirstSuccess, HookFuture, HookObject,
+    HookReentrancyError, LutumHooks, LutumHooksSet, LutumStreamEvent, MaybeSend, MaybeSync,
+    ModelInputHookContext, OnModelInput, OnStreamEvent, ResolveUsageEstimate, ShortCircuit,
+    Stateful, StreamEventHookContext, boxed_hook_future,
 };
 pub use session::{CommitTurn, ToolRoundPlan, UncommittedToolRound};
 

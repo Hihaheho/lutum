@@ -62,7 +62,12 @@
 //! Built-in helper implementations such as [`ShortCircuit`] and [`FirstSuccess`] are provided
 //! because they are common enough to deserve first-class support.
 
-use crate::{OperationKind, RequestExtensions, budget::UsageEstimate};
+use std::ops::ControlFlow;
+
+use crate::{
+    CompletionEvent, ErasedStructuredCompletionEvent, ErasedStructuredTurnEvent,
+    ErasedTextTurnEvent, ModelInput, OperationKind, RequestExtensions, budget::UsageEstimate,
+};
 
 pub use lutum_protocol::hooks::{
     HookFuture, HookObject, HookReentrancyError, MaybeSend, MaybeSync, Stateful, boxed_hook_future,
@@ -272,6 +277,91 @@ pub async fn first_success<T: Send + Sync + 'static>(
     }
 }
 
+/// Default chain implementation for notification hooks — always continues dispatch.
+#[derive(Default)]
+pub struct ContinueChain;
+
+impl<Output> Chain<Output> for ContinueChain
+where
+    Output: MaybeSync,
+{
+    async fn call<'a>(&'a self, _output: &'a Output) -> ControlFlow<()> {
+        ControlFlow::Continue(())
+    }
+}
+
+pub struct ModelInputHookContext<'a> {
+    extensions: &'a RequestExtensions,
+    kind: OperationKind,
+    input: &'a ModelInput,
+}
+
+impl<'a> ModelInputHookContext<'a> {
+    pub fn new(
+        extensions: &'a RequestExtensions,
+        kind: OperationKind,
+        input: &'a ModelInput,
+    ) -> Self {
+        Self {
+            extensions,
+            kind,
+            input,
+        }
+    }
+
+    pub fn extensions(&self) -> &'a RequestExtensions {
+        self.extensions
+    }
+
+    pub fn kind(&self) -> OperationKind {
+        self.kind
+    }
+
+    pub fn input(&self) -> &'a ModelInput {
+        self.input
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum LutumStreamEvent<'a> {
+    TextTurn(&'a ErasedTextTurnEvent),
+    StructuredTurn(&'a ErasedStructuredTurnEvent),
+    Completion(&'a CompletionEvent),
+    StructuredCompletion(&'a ErasedStructuredCompletionEvent),
+}
+
+pub struct StreamEventHookContext<'a> {
+    extensions: &'a RequestExtensions,
+    kind: OperationKind,
+    event: LutumStreamEvent<'a>,
+}
+
+impl<'a> StreamEventHookContext<'a> {
+    pub fn new(
+        extensions: &'a RequestExtensions,
+        kind: OperationKind,
+        event: LutumStreamEvent<'a>,
+    ) -> Self {
+        Self {
+            extensions,
+            kind,
+            event,
+        }
+    }
+
+    pub fn extensions(&self) -> &'a RequestExtensions {
+        self.extensions
+    }
+
+    pub fn kind(&self) -> OperationKind {
+        self.kind
+    }
+
+    pub fn event(&self) -> LutumStreamEvent<'a> {
+        self.event
+    }
+}
+
 #[lutum_macros::hooks]
 pub trait LutumHooks {
     #[hook(singleton)]
@@ -284,4 +374,10 @@ pub trait LutumHooks {
             .copied()
             .unwrap_or_else(UsageEstimate::zero)
     }
+
+    #[hook(always, chain = ContinueChain)]
+    async fn on_model_input(_cx: &ModelInputHookContext<'_>) {}
+
+    #[hook(always, chain = ContinueChain)]
+    async fn on_stream_event(_cx: &StreamEventHookContext<'_>) {}
 }
