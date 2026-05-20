@@ -16,8 +16,8 @@ use lutum_protocol::{
     AgentError, FinishReason,
     budget::Usage,
     conversation::{
-        AssistantInputItem, EphemeralInputIndices, InputMessageRole, MessageContent, ModelInput,
-        ModelInputItem, RawJson, ToolCallId, ToolMetadata, ToolName, ToolResult,
+        AssistantInputItem, EphemeralInputIndices, Image, InputMessageRole, MessageContent,
+        ModelInput, ModelInputItem, RawJson, ToolCallId, ToolMetadata, ToolName, ToolResult,
     },
     extensions::RequestExtensions,
     llm::{
@@ -36,19 +36,20 @@ use serde_json::Value;
 
 use crate::{
     chat::{
-        AssistantContent, ChatAssistantMessage, ChatDeveloperMessage, ChatFunctionCallArgs,
-        ChatFunctionTool, ChatMessageFunctionToolCall, ChatMessageParam, ChatMessageToolCall,
-        ChatNamedFunctionToolChoice, ChatStreamChunk, ChatStreamOptions, ChatSystemMessage,
-        ChatTextContent, ChatToolChoice, ChatToolMessage, ChatUserContent, ChatUserMessage,
-        FunctionDefinition, JsonSchemaConfig, ResponseFormat,
+        AssistantContent, AssistantContentPart, ChatAssistantMessage, ChatContentPart,
+        ChatDeveloperMessage, ChatFunctionCallArgs, ChatFunctionTool, ChatMessageFunctionToolCall,
+        ChatMessageParam, ChatMessageToolCall, ChatNamedFunctionToolChoice, ChatStreamChunk,
+        ChatStreamOptions, ChatSystemMessage, ChatTextContent, ChatToolChoice, ChatToolMessage,
+        ChatUserContent, ChatUserMessage, FunctionDefinition, ImageUrl, JsonSchemaConfig,
+        ResponseFormat,
     },
     completion::CompletionRequest,
     error::OpenAiError,
     responses::{
-        FunctionCallItem, FunctionCallOutputItem, FunctionToolChoice, InputContent, InputItem,
-        InputMessage, InputTextContent, MessageRole, OpenAiCommittedTurn, OpenAiReasoningEffort,
-        OpenAiTool, OpenAiTurnItem, OutputTextContent, ReasoningItem, ReasoningText,
-        RefusalContent, ResponseFunctionCallArgumentsDeltaEvent,
+        FunctionCallItem, FunctionCallOutputItem, FunctionToolChoice, InputContent,
+        InputImageContent, InputItem, InputMessage, InputTextContent, MessageRole,
+        OpenAiCommittedTurn, OpenAiReasoningEffort, OpenAiTool, OpenAiTurnItem, OutputTextContent,
+        ReasoningItem, ReasoningText, RefusalContent, ResponseFunctionCallArgumentsDeltaEvent,
         ResponseFunctionCallArgumentsDoneEvent, ResponseObject, ResponseOutputContent,
         ResponseOutputItem, SseEvent, SummaryText, TextFormat, ToolChoice,
     },
@@ -1176,7 +1177,7 @@ fn convert_model_input(input: &ModelInput) -> Result<Vec<InputItem>, OpenAiError
                 flush_assistant_message(&mut assistant_message_content, &mut items);
                 items.push(InputItem::Message(InputMessage::new(
                     message_role(role),
-                    content.iter().map(message_content).collect(),
+                    message_contents(role, content.iter())?,
                 )));
             }
             ModelInputItem::Assistant(assistant) => {
@@ -1222,6 +1223,11 @@ fn lower_assistant_input_item(
             message_content.push(InputContent::OutputText(OutputTextContent::new(
                 text.clone(),
             )));
+        }
+        AssistantInputItem::Image(image) => {
+            message_content.push(InputContent::InputImage(InputImageContent::new(image_url(
+                image,
+            ))));
         }
         AssistantInputItem::Refusal(text) => {
             message_content.push(InputContent::Refusal(RefusalContent::new(text.clone())));
@@ -1440,9 +1446,38 @@ fn turn_role(role: TurnRole) -> MessageRole {
     }
 }
 
-fn message_content(content: &MessageContent) -> InputContent {
-    match content {
-        MessageContent::Text(text) => InputContent::InputText(InputTextContent::new(text.clone())),
+fn message_contents<'a>(
+    role: &InputMessageRole,
+    content: impl IntoIterator<Item = &'a MessageContent>,
+) -> Result<Vec<InputContent>, OpenAiError> {
+    content
+        .into_iter()
+        .map(|content| match content {
+            MessageContent::Text(text) => {
+                Ok(InputContent::InputText(InputTextContent::new(text.clone())))
+            }
+            MessageContent::Image(image) => match role {
+                InputMessageRole::User => Ok(InputContent::InputImage(InputImageContent::new(
+                    image_url(image),
+                ))),
+                InputMessageRole::System | InputMessageRole::Developer => {
+                    Err(unsupported_openai_image_role(role))
+                }
+            },
+        })
+        .collect()
+}
+
+fn image_url(image: &Image) -> String {
+    match image {
+        Image::Base64 { data, media_type } => format!("data:{media_type};base64,{data}"),
+        Image::Uri(url) => url.to_string(),
+    }
+}
+
+fn unsupported_openai_image_role(role: &InputMessageRole) -> OpenAiError {
+    OpenAiError::InvalidRequest {
+        message: format!("OpenAI image input is not supported for {role:?} messages"),
     }
 }
 
@@ -2943,25 +2978,19 @@ fn convert_model_input_to_chat_messages(
         match item {
             ModelInputItem::Message { role, content } => {
                 flush_pending_chat_assistant(&mut pending_assistant, &mut compilation);
-                let text: String = content
-                    .iter()
-                    .map(|c| match c {
-                        MessageContent::Text(t) => t.as_str(),
-                    })
-                    .collect();
                 let msg = match role {
                     InputMessageRole::System => ChatMessageParam::System(ChatSystemMessage {
-                        content: ChatTextContent::Text(text),
+                        content: chat_text_content(role, content.iter())?,
                         name: None,
                     }),
                     InputMessageRole::Developer => {
                         ChatMessageParam::Developer(ChatDeveloperMessage {
-                            content: ChatTextContent::Text(text),
+                            content: chat_text_content(role, content.iter())?,
                             name: None,
                         })
                     }
                     InputMessageRole::User => ChatMessageParam::User(ChatUserMessage {
-                        content: ChatUserContent::Text(text),
+                        content: chat_user_content(content.iter()),
                         name: None,
                     }),
                 };
@@ -2972,11 +3001,12 @@ fn convert_model_input_to_chat_messages(
                     AssistantInputItem::Text(text) => {
                         let pending = pending_chat_assistant(&mut pending_assistant);
                         push_source_index(&mut pending.sources, source_index);
-                        let existing = pending.message.content.take();
-                        pending.message.content = Some(AssistantContent::Text(match existing {
-                            Some(AssistantContent::Text(t)) => format!("{t}{text}"),
-                            _ => text.clone(),
-                        }));
+                        push_assistant_text_content(&mut pending.message, text);
+                    }
+                    AssistantInputItem::Image(image) => {
+                        let pending = pending_chat_assistant(&mut pending_assistant);
+                        push_source_index(&mut pending.sources, source_index);
+                        push_assistant_image_content(&mut pending.message, image);
                     }
                     AssistantInputItem::Refusal(text) => {
                         let pending = pending_chat_assistant(&mut pending_assistant);
@@ -3061,6 +3091,98 @@ fn flush_pending_chat_assistant(
             ChatMessageParam::Assistant(pending.message),
             pending.sources,
         );
+    }
+}
+
+fn chat_text_content<'a>(
+    role: &InputMessageRole,
+    content: impl IntoIterator<Item = &'a MessageContent>,
+) -> Result<ChatTextContent, OpenAiError> {
+    let mut text = String::new();
+    for content in content {
+        match content {
+            MessageContent::Text(part) => text.push_str(part),
+            MessageContent::Image(_) => return Err(unsupported_openai_image_role(role)),
+        }
+    }
+    Ok(ChatTextContent::Text(text))
+}
+
+fn chat_user_content<'a>(content: impl IntoIterator<Item = &'a MessageContent>) -> ChatUserContent {
+    let content = content.into_iter().collect::<Vec<_>>();
+    if content
+        .iter()
+        .all(|content| matches!(content, MessageContent::Text(_)))
+    {
+        return ChatUserContent::Text(
+            content
+                .into_iter()
+                .filter_map(|content| match content {
+                    MessageContent::Text(text) => Some(text.as_str()),
+                    MessageContent::Image(_) => None,
+                })
+                .collect(),
+        );
+    }
+
+    ChatUserContent::Parts(
+        content
+            .into_iter()
+            .map(|content| match content {
+                MessageContent::Text(text) => ChatContentPart::Text { text: text.clone() },
+                MessageContent::Image(image) => chat_image_part(image),
+            })
+            .collect(),
+    )
+}
+
+fn push_assistant_text_content(msg: &mut ChatAssistantMessage, text: &str) {
+    let existing = msg.content.take();
+    msg.content = Some(match existing {
+        Some(AssistantContent::Text(existing)) => {
+            AssistantContent::Text(format!("{existing}{text}"))
+        }
+        Some(AssistantContent::Parts(mut parts)) => {
+            parts.push(AssistantContentPart::Text {
+                text: text.to_string(),
+            });
+            AssistantContent::Parts(parts)
+        }
+        None => AssistantContent::Text(text.to_string()),
+    });
+}
+
+fn push_assistant_image_content(msg: &mut ChatAssistantMessage, image: &Image) {
+    let existing = msg.content.take();
+    msg.content = Some(match existing {
+        Some(AssistantContent::Parts(mut parts)) => {
+            parts.push(chat_assistant_image_part(image));
+            AssistantContent::Parts(parts)
+        }
+        Some(AssistantContent::Text(text)) => AssistantContent::Parts(vec![
+            AssistantContentPart::Text { text },
+            chat_assistant_image_part(image),
+        ]),
+        None => AssistantContent::Parts(vec![chat_assistant_image_part(image)]),
+    });
+}
+
+fn chat_image_part(image: &Image) -> ChatContentPart {
+    ChatContentPart::ImageUrl {
+        image_url: chat_image_url(image),
+    }
+}
+
+fn chat_assistant_image_part(image: &Image) -> AssistantContentPart {
+    AssistantContentPart::ImageUrl {
+        image_url: chat_image_url(image),
+    }
+}
+
+fn chat_image_url(image: &Image) -> ImageUrl {
+    ImageUrl {
+        url: image_url(image),
+        detail: None,
     }
 }
 
@@ -3787,8 +3909,8 @@ mod tests {
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
         AssistantTurnItem, AssistantTurnView, EphemeralInputIndices, ErasedStructuredTurnEvent,
         ErasedTextTurnEvent, GenerationParams, InputMessageRole, ModelInput, ModelInputItem,
-        ModelName, ParseErrorStage, RawTelemetryConfig, RequestErrorDebugInfo, RequestErrorKind,
-        RequestExtensions, ToolResult,
+        ModelName, NonEmpty, ParseErrorStage, RawTelemetryConfig, RequestErrorDebugInfo,
+        RequestErrorKind, RequestExtensions, ToolResult,
     };
     use lutum_trace::RawTraceEntry;
 
@@ -5010,6 +5132,96 @@ mod tests {
         assert!(matches!(&items[0], InputItem::Reasoning(_)));
         assert!(matches!(&items[1], InputItem::Message(_)));
         assert!(matches!(&items[2], InputItem::FunctionCall(_)));
+    }
+
+    #[test]
+    fn convert_model_input_maps_image_content_for_responses() {
+        let input = ModelInput::from_items(vec![
+            ModelInputItem::message(
+                InputMessageRole::User,
+                NonEmpty::try_from_vec(vec![
+                    MessageContent::Text("what is this?".into()),
+                    MessageContent::Image(Image::Uri(
+                        "https://example.com/image.png".parse().unwrap(),
+                    )),
+                ])
+                .unwrap(),
+            ),
+            ModelInputItem::assistant_image(Image::Base64 {
+                data: "abc123".into(),
+                media_type: "image/png".into(),
+            }),
+        ]);
+
+        let items = convert_model_input(&input).unwrap();
+
+        let InputItem::Message(user_message) = &items[0] else {
+            panic!("expected user message");
+        };
+        assert_eq!(user_message.role, MessageRole::User);
+        assert!(matches!(
+            &user_message.content[1],
+            InputContent::InputImage(InputImageContent { image_url, .. })
+                if image_url == "https://example.com/image.png"
+        ));
+
+        let InputItem::Message(assistant_message) = &items[1] else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(assistant_message.role, MessageRole::Assistant);
+        assert!(matches!(
+            &assistant_message.content[0],
+            InputContent::InputImage(InputImageContent { image_url, .. })
+                if image_url == "data:image/png;base64,abc123"
+        ));
+    }
+
+    #[test]
+    fn convert_model_input_to_chat_messages_maps_user_and_assistant_images() {
+        let input = ModelInput::from_items(vec![
+            ModelInputItem::message(
+                InputMessageRole::User,
+                NonEmpty::try_from_vec(vec![
+                    MessageContent::Text("what is this?".into()),
+                    MessageContent::Image(Image::Uri(
+                        "https://example.com/image.png".parse().unwrap(),
+                    )),
+                ])
+                .unwrap(),
+            ),
+            ModelInputItem::assistant_text("it is"),
+            ModelInputItem::assistant_image(Image::Base64 {
+                data: "abc123".into(),
+                media_type: "image/jpeg".into(),
+            }),
+        ]);
+
+        let compilation = convert_model_input_to_chat_messages(&input).unwrap();
+        let messages = compilation.messages;
+
+        let ChatMessageParam::User(user_message) = &messages[0] else {
+            panic!("expected user message");
+        };
+        let ChatUserContent::Parts(user_parts) = &user_message.content else {
+            panic!("expected user content parts");
+        };
+        assert!(matches!(
+            &user_parts[1],
+            ChatContentPart::ImageUrl { image_url }
+                if image_url.url == "https://example.com/image.png"
+        ));
+
+        let ChatMessageParam::Assistant(assistant_message) = &messages[1] else {
+            panic!("expected assistant message");
+        };
+        let Some(AssistantContent::Parts(assistant_parts)) = &assistant_message.content else {
+            panic!("expected assistant content parts");
+        };
+        assert!(matches!(
+            &assistant_parts[1],
+            AssistantContentPart::ImageUrl { image_url }
+                if image_url.url == "data:image/jpeg;base64,abc123"
+        ));
     }
 
     #[test]

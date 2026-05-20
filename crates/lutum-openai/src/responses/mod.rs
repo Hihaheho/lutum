@@ -5,9 +5,9 @@ pub mod tool;
 pub mod turn;
 
 pub use input::{
-    FunctionCallItem, FunctionCallOutputItem, InputContent, InputItem, InputMessage,
-    InputTextContent, MessageRole, OutputTextContent, ReasoningItem, ReasoningText, RefusalContent,
-    SummaryText,
+    FunctionCallItem, FunctionCallOutputItem, InputContent, InputImageContent, InputItem,
+    InputMessage, InputTextContent, MessageRole, OutputTextContent, ReasoningItem, ReasoningText,
+    RefusalContent, SummaryText,
 };
 pub use output::{
     ResponseCompletedEvent, ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,

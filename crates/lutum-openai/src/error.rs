@@ -24,6 +24,8 @@ pub enum OpenAiError {
     Json(#[from] serde_json::Error),
     #[error("failed to parse structured output: {0}")]
     StructuredOutput(serde_json::Error),
+    #[error("invalid OpenAI request: {message}")]
+    InvalidRequest { message: String },
     #[error("unexpected SSE payload: {message}")]
     Sse { message: String },
 }

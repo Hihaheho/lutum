@@ -171,6 +171,10 @@ impl ModelInputItem {
         Self::Assistant(AssistantInputItem::Text(text.into()))
     }
 
+    pub fn assistant_image(image: Image) -> Self {
+        Self::Assistant(AssistantInputItem::Image(image))
+    }
+
     pub fn assistant_reasoning(text: impl Into<String>) -> Self {
         Self::Assistant(AssistantInputItem::Reasoning(text.into()))
     }
@@ -207,6 +211,13 @@ pub enum InputMessageRole {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MessageContent {
     Text(String),
+    Image(Image),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum Image {
+    Base64 { data: String, media_type: String },
+    Uri(url::Url),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -216,6 +227,7 @@ pub enum MessageContent {
 /// as [`ToolResult`] at the surrounding [`ModelInputItem`] level so call/result pairs stay bundled.
 pub enum AssistantInputItem {
     Text(String),
+    Image(Image),
     Reasoning(String),
     Refusal(String),
 }

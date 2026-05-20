@@ -64,3 +64,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 monostate = "1.0"
 paste = "1"
+url = { version = "2", features = ["serde"] }

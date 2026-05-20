@@ -79,7 +79,7 @@ pub use lutum_protocol::{
     CompletionTurnState, ContinueSuggestionReason, EmptyNonEmptyError, EphemeralInputIndices,
     EphemeralTurnView, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
     ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-    ErasedTextTurnEventStream, FinishReason, GenerationParams, HandledTool, HookableToolset,
+    ErasedTextTurnEventStream, FinishReason, GenerationParams, HandledTool, HookableToolset, Image,
     InputMessageRole, IntoToolResult, ItemView, MessageContent, ModelInput, ModelInputItem,
     ModelInputValidationError, ModelName, ModelNameError, NoOutputTextTurnResult, NoToolSelector,
     NoTools, NonEmpty, OperationKind, OutputLimitExceeded, ParseErrorStage, RAW_FIELD_API,

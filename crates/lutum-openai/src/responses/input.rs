@@ -130,6 +130,7 @@ pub enum InputContent {
     InputText(InputTextContent),
     Refusal(RefusalContent),
     OutputText(OutputTextContent),
+    InputImage(InputImageContent),
 }
 
 impl From<InputTextContent> for InputContent {
@@ -147,6 +148,12 @@ impl From<OutputTextContent> for InputContent {
 impl From<RefusalContent> for InputContent {
     fn from(value: RefusalContent) -> Self {
         Self::Refusal(value)
+    }
+}
+
+impl From<InputImageContent> for InputContent {
+    fn from(value: InputImageContent) -> Self {
+        Self::InputImage(value)
     }
 }
 
@@ -174,6 +181,34 @@ impl InputTextContent {
         Self {
             text: text.into(),
             item_type: Default::default(),
+        }
+    }
+}
+
+/// ```
+/// use lutum_openai::responses::InputImageContent;
+/// use serde_json::Value;
+///
+/// let json = serde_json::from_str::<Value>(
+///     r#"{ "type": "input_image", "image_url": "https://example.com/image.png" }"#,
+/// )
+/// .unwrap();
+/// let content = serde_json::from_value::<InputImageContent>(json.clone()).unwrap();
+/// assert_eq!(serde_json::to_value(&content).unwrap(), json);
+/// assert_eq!(serde_json::from_value::<InputImageContent>(json).unwrap(), content);
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InputImageContent {
+    pub image_url: String,
+    #[serde(rename = "type")]
+    pub item_type: String,
+}
+
+impl InputImageContent {
+    pub fn new(image_url: impl Into<String>) -> Self {
+        Self {
+            image_url: image_url.into(),
+            item_type: "input_image".to_string(),
         }
     }
 }

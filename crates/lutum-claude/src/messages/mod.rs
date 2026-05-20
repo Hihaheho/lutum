@@ -5,8 +5,8 @@ pub mod tool;
 pub mod turn;
 
 pub use content::{
-    ClaudeContentBlock, ClaudeMessage, ClaudeRole, TextBlock, ThinkingBlock, ToolResultBlock,
-    ToolUseBlock,
+    ClaudeContentBlock, ClaudeMessage, ClaudeRole, ImageBlock, ImageSource, TextBlock,
+    ThinkingBlock, ToolResultBlock, ToolUseBlock,
 };
 pub use request::{
     CacheControl, MessagesRequest, OutputConfig, OutputFormat, SystemBlock, ThinkingConfig,

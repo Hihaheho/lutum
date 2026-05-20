@@ -25,7 +25,7 @@ pub use budget::{
 };
 pub use conversation::{
     AssistantInputItem, AssistantTurn, AssistantTurnInputError, AssistantTurnItem,
-    EmptyNonEmptyError, EphemeralInputIndices, InputMessageRole, MessageContent, ModelInput,
+    EmptyNonEmptyError, EphemeralInputIndices, Image, InputMessageRole, MessageContent, ModelInput,
     ModelInputItem, ModelInputValidationError, NonEmpty, REJECTED_TOOL_RESULT_PREFIX, RawJson,
     ToolCallId, ToolMetadata, ToolName, ToolResult, UncommittedAssistantTurn,
 };

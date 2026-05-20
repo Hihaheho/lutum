@@ -112,9 +112,9 @@ fn render_conversation(f: &mut Frame, area: Rect, app: &TuiApp) {
             } => {
                 let text = content
                     .iter()
-                    .map(|c| {
-                        let MessageContent::Text(t) = c;
-                        t.as_str()
+                    .map(|c| match c {
+                        MessageContent::Text(t) => t.as_str(),
+                        MessageContent::Image(_) => "[image]",
                     })
                     .collect::<Vec<_>>()
                     .join(" ");

@@ -78,6 +78,7 @@ pub struct ClaudeMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClaudeContentBlock {
     Text(TextBlock),
+    Image(ImageBlock),
     ToolUse(ToolUseBlock),
     ToolResult(ToolResultBlock),
     Thinking(ThinkingBlock),
@@ -103,6 +104,36 @@ pub struct TextBlock {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+}
+
+/// Image content block.
+///
+/// ```
+/// use lutum_claude::messages::content::{ImageBlock, ImageSource};
+///
+/// let json = serde_json::from_str::<serde_json::Value>(
+///     r#"{"source":{"type":"url","url":"https://example.com/image.png"}}"#,
+/// ).unwrap();
+/// let value = ImageBlock {
+///     source: ImageSource::Url {
+///         url: "https://example.com/image.png".to_string(),
+///     },
+/// };
+///
+/// assert_eq!(serde_json::to_value(&value).unwrap(), json);
+/// assert_eq!(serde_json::from_value::<ImageBlock>(json).unwrap(), value);
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImageBlock {
+    pub source: ImageSource,
+}
+
+/// Image source for Anthropic Messages inputs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 { data: String, media_type: String },
+    Url { url: String },
 }
 
 /// Tool use block.

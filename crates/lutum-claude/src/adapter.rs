@@ -16,8 +16,8 @@ use lutum_protocol::{
     AgentError,
     budget::Usage,
     conversation::{
-        AssistantInputItem, EphemeralInputIndices, InputMessageRole, MessageContent, ModelInput,
-        ModelInputItem, RawJson, ToolCallId, ToolMetadata, ToolName, ToolResult,
+        AssistantInputItem, EphemeralInputIndices, Image, InputMessageRole, MessageContent,
+        ModelInput, ModelInputItem, RawJson, ToolCallId, ToolMetadata, ToolName, ToolResult,
     },
     extensions::RequestExtensions,
     llm::{
@@ -38,9 +38,10 @@ use crate::{
     messages::{
         ClaudeCommittedTurn, ClaudeContentBlock, ClaudeMessage, ClaudeRole, ClaudeTool,
         ClaudeToolChoice, ClaudeTurnItem, ContentBlockDeltaEvent, ContentBlockStartEvent,
-        ContentBlockStopEvent, ErrorEvent, MessageDeltaEvent, MessageStartEvent, MessagesRequest,
-        OutputConfig, OutputFormat, SseContentBlock, SseContentDelta, SseEvent, SystemBlock,
-        TextBlock, ThinkingBlock, ThinkingConfig, ThinkingKind, ToolResultBlock, ToolUseBlock,
+        ContentBlockStopEvent, ErrorEvent, ImageBlock, ImageSource, MessageDeltaEvent,
+        MessageStartEvent, MessagesRequest, OutputConfig, OutputFormat, SseContentBlock,
+        SseContentDelta, SseEvent, SystemBlock, TextBlock, ThinkingBlock, ThinkingConfig,
+        ThinkingKind, ToolResultBlock, ToolUseBlock,
     },
     sse::ClaudeSseParser,
     transport::{HttpByteStream, HttpClient, HttpError, HttpRequest},
@@ -914,6 +915,7 @@ fn mark_claude_cache_target(request: &mut MessagesRequest, target: ClaudeCacheTa
                     block.cache_control = Some(crate::messages::CacheControl::ephemeral());
                 }
                 ClaudeContentBlock::ToolUse(_)
+                | ClaudeContentBlock::Image(_)
                 | ClaudeContentBlock::Thinking(_)
                 | ClaudeContentBlock::RedactedThinking { .. } => {}
             }
@@ -985,8 +987,18 @@ fn emit_message<'a>(
     match role {
         InputMessageRole::System | InputMessageRole::Developer => {
             for item in content {
-                let MessageContent::Text(text) = item;
-                compiled.push_system_text(text, Some(source_index));
+                match item {
+                    MessageContent::Text(text) => {
+                        compiled.push_system_text(text, Some(source_index))
+                    }
+                    MessageContent::Image(_) => {
+                        return Err(ClaudeError::InvalidRequest {
+                            message: format!(
+                                "Claude image input is not supported for {role:?} messages"
+                            ),
+                        });
+                    }
+                }
             }
         }
         InputMessageRole::User => {
@@ -1196,6 +1208,7 @@ fn emit_turn_from_view(
 fn message_content_block(content: &MessageContent) -> ClaudeContentBlock {
     match content {
         MessageContent::Text(text) => text_block(text),
+        MessageContent::Image(image) => image_block(image),
     }
 }
 
@@ -1204,6 +1217,7 @@ fn assistant_replay_block(item: &AssistantInputItem) -> ClaudeContentBlock {
         AssistantInputItem::Text(text)
         | AssistantInputItem::Reasoning(text)
         | AssistantInputItem::Refusal(text) => text_block(text),
+        AssistantInputItem::Image(image) => image_block(image),
     }
 }
 
@@ -1212,6 +1226,24 @@ fn text_block(text: &str) -> ClaudeContentBlock {
         text: text.to_string(),
         cache_control: None,
     })
+}
+
+fn image_block(image: &Image) -> ClaudeContentBlock {
+    ClaudeContentBlock::Image(ImageBlock {
+        source: image_source(image),
+    })
+}
+
+fn image_source(image: &Image) -> ImageSource {
+    match image {
+        Image::Base64 { data, media_type } => ImageSource::Base64 {
+            data: data.clone(),
+            media_type: media_type.clone(),
+        },
+        Image::Uri(url) => ImageSource::Url {
+            url: url.to_string(),
+        },
+    }
 }
 
 fn tool_use_block(
@@ -1886,7 +1918,7 @@ mod tests {
 
     use lutum_protocol::{
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, EphemeralInputIndices,
-        ErasedTextTurnEvent, GenerationParams, ModelInput, ModelInputItem, ModelName,
+        ErasedTextTurnEvent, GenerationParams, ModelInput, ModelInputItem, ModelName, NonEmpty,
         OperationKind, ParseErrorStage, RawTelemetryConfig, RequestErrorDebugInfo,
         RequestErrorKind, RequestExtensions, UsageRecoveryAdapter, budget::Usage,
     };
@@ -2444,6 +2476,44 @@ mod tests {
         assert!(matches!(
             &request.messages[0].content[0],
             ClaudeContentBlock::Text(block) if block.cache_control.is_none()
+        ));
+    }
+
+    #[test]
+    fn compile_model_input_maps_user_and_assistant_images() {
+        let input = ModelInput::from_items(vec![
+            ModelInputItem::message(
+                InputMessageRole::User,
+                NonEmpty::try_from_vec(vec![
+                    MessageContent::Text("what is this?".into()),
+                    MessageContent::Image(Image::Uri(
+                        "https://example.com/image.png".parse().unwrap(),
+                    )),
+                ])
+                .unwrap(),
+            ),
+            ModelInputItem::assistant_image(Image::Base64 {
+                data: "abc123".into(),
+                media_type: "image/webp".into(),
+            }),
+        ]);
+
+        let (messages, _) = compile_model_input(&input).unwrap().into_messages();
+
+        assert_eq!(messages[0].role, ClaudeRole::User);
+        assert!(matches!(
+            &messages[0].content[1],
+            ClaudeContentBlock::Image(ImageBlock {
+                source: ImageSource::Url { url },
+            }) if url == "https://example.com/image.png"
+        ));
+
+        assert_eq!(messages[1].role, ClaudeRole::Assistant);
+        assert!(matches!(
+            &messages[1].content[0],
+            ClaudeContentBlock::Image(ImageBlock {
+                source: ImageSource::Base64 { data, media_type },
+            }) if data == "abc123" && media_type == "image/webp"
         ));
     }
 

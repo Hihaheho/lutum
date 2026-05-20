@@ -113,7 +113,7 @@ pub enum ChatContentPart {
     File { file: FileInput },
 }
 
-/// Content part for assistant messages: text or refusal.
+/// Content part for assistant messages: text, refusal, or third-party vision input.
 ///
 /// ```
 /// use lutum_openai::chat::AssistantContentPart;
@@ -128,6 +128,7 @@ pub enum ChatContentPart {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantContentPart {
     Text { text: String },
+    ImageUrl { image_url: ImageUrl },
     Refusal { refusal: String },
 }
 

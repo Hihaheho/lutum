@@ -5452,6 +5452,7 @@ fn log_input_transcript(span: &Span, input: &ModelInput) {
                 for c in content.iter() {
                     match c {
                         MessageContent::Text(t) => buf.push_str(t),
+                        MessageContent::Image(_) => buf.push_str("[image]"),
                     }
                 }
                 buf.push('\n');
@@ -5462,6 +5463,9 @@ fn log_input_transcript(span: &Span, input: &ModelInput) {
                     AssistantInputItem::Text(t) => {
                         buf.push_str(t);
                         buf.push('\n');
+                    }
+                    AssistantInputItem::Image(_) => {
+                        buf.push_str("[image]\n");
                     }
                     AssistantInputItem::Reasoning(t) => {
                         buf.push_str("<reasoning>");
