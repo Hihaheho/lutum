@@ -1,0 +1,5 @@
+error: #[dynamic] variant payload must be `lutum::DynamicTool`
+ --> tests/ui/dynamic_wrong_payload.rs:7:13
+  |
+7 |     Dynamic(String),
+  |             ^^^^^^

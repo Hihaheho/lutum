@@ -92,7 +92,7 @@ async fn delete_file(path: String) -> Result<String, Infallible> {
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, lutum::Toolset)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, lutum::Toolset)]
 enum FsTools {
     ListFiles(ListFiles),
     ReadFile(ReadFile),

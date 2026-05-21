@@ -9,7 +9,7 @@ async fn ask(llm: &Lutum, system: &str, prompt: impl Into<String>) -> anyhow::Re
     let mut session = Session::new();
     session.push_system(system);
     session.push_user(prompt);
-    let result = session.text_turn(&llm).collect().await?;
+    let result = session.text_turn(llm).collect().await?;
     Ok(result.assistant_text())
 }
 

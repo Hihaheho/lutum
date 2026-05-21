@@ -15,6 +15,8 @@ enum VariantKind {
         /// `{TypeName}HooksSet` — naming convention.
         hooks_ty: Ident,
     },
+    /// Runtime-defined tool marker; annotated with `#[dynamic]`.
+    Dynamic,
 }
 
 fn has_toolset_attr(variant: &Variant) -> bool {
@@ -22,6 +24,13 @@ fn has_toolset_attr(variant: &Variant) -> bool {
         .attrs
         .iter()
         .any(|attr| attr.path().is_ident("toolset"))
+}
+
+fn has_dynamic_attr(variant: &Variant) -> bool {
+    variant
+        .attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("dynamic"))
 }
 
 /// True iff the variant is marked default-off via `#[toolset(off)]` (nested)
@@ -63,6 +72,22 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
 
     // Whether any variant is a nested toolset.
     let has_nested = variants.iter().any(has_toolset_attr);
+    let dynamic_variants = variants
+        .iter()
+        .filter(|variant| has_dynamic_attr(variant))
+        .collect::<Vec<_>>();
+    if dynamic_variants.len() > 1 {
+        return syn::Error::new_spanned(
+            dynamic_variants[1],
+            "at most one #[dynamic] variant is permitted per Toolset",
+        )
+        .to_compile_error();
+    }
+    let has_dynamic = !dynamic_variants.is_empty();
+    let dynamic_variant_ident = dynamic_variants
+        .first()
+        .map(|variant| variant.ident.clone());
+    let uses_dynamic_codegen = has_nested || has_dynamic;
 
     let mut wrapper_variants = Vec::new();
     let mut handled_variants = Vec::new();
@@ -70,11 +95,15 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     let mut metadata_arms = Vec::new();
     let mut handled_metadata_arms = Vec::new();
     let mut call_selector_arms = Vec::new();
+    let mut call_selector_option_arms = Vec::new();
     let mut call_into_input_arms = Vec::new();
+    let mut call_into_input_option_arms = Vec::new();
     let mut call_into_parts_arms = Vec::new();
+    let mut call_into_parts_option_arms = Vec::new();
     let mut parse_arms = Vec::new();
     // Nested toolset parse fallbacks tried after the main match.
     let mut nested_parse_fallbacks: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut nested_selector_try_from_arms: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut defs = Vec::new();
     // Regular-variant defs accumulator for the OnceLock vec (declaration order).
     let mut defs_push: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -123,7 +152,25 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             }
         };
 
-        let kind = if has_toolset_attr(&variant) {
+        let kind = if has_dynamic_attr(&variant) {
+            match &input_ty {
+                Type::Path(path)
+                    if path
+                        .path
+                        .segments
+                        .last()
+                        .map(|segment| segment.ident == "DynamicTool")
+                        .unwrap_or(false) => {}
+                _ => {
+                    return syn::Error::new_spanned(
+                        &input_ty,
+                        "#[dynamic] variant payload must be `lutum::DynamicTool`",
+                    )
+                    .to_compile_error();
+                }
+            }
+            VariantKind::Dynamic
+        } else if has_toolset_attr(&variant) {
             // Derive the hooks type name: last path segment + "Hooks".
             let hooks_ty = hooks_ident_for_type(&input_ty);
             VariantKind::Nested {
@@ -161,13 +208,27 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                 call_selector_arms.push(
                     quote! { Self::#variant_ident(_) => #selector_enum_ident::#variant_ident },
                 );
+                call_selector_option_arms.push(quote! {
+                    Self::#variant_ident(_) => ::std::option::Option::Some(#selector_enum_ident::#variant_ident)
+                });
                 call_into_input_arms.push(
                     quote! { Self::#variant_ident(inner) => #enum_ident::#variant_ident(inner.into_input()) },
                 );
+                call_into_input_option_arms.push(quote! {
+                    Self::#variant_ident(inner) => {
+                        ::std::option::Option::Some(#enum_ident::#variant_ident(inner.into_input()))
+                    }
+                });
                 call_into_parts_arms.push(quote! {
                     Self::#variant_ident(inner) => {
                         let (metadata, input) = inner.into_parts();
                         (metadata, #enum_ident::#variant_ident(input))
+                    }
+                });
+                call_into_parts_option_arms.push(quote! {
+                    Self::#variant_ident(inner) => {
+                        let (metadata, input) = inner.into_parts();
+                        (metadata, ::std::option::Option::Some(#enum_ident::#variant_ident(input)))
                     }
                 });
 
@@ -186,7 +247,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                     enum_ident.to_string().to_uppercase(),
                     variant_ident.to_string().to_uppercase()
                 );
-                if has_nested {
+                if uses_dynamic_codegen {
                     // Use per-variant static to avoid index coupling with nested toolsets.
                     selector_definition_arms.push(quote! {
                         Self::#variant_ident => {
@@ -313,7 +374,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                     }
                 });
 
-                if has_nested {
+                if uses_dynamic_codegen {
                     // Find def by tool name since combined-slice index is not compile-time known.
                     desc_overrides_arms.push(quote! {
                         if let ::std::option::Option::Some(desc) = self.#desc_method_ident(
@@ -359,13 +420,29 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                 call_selector_arms.push(quote! {
                     Self::#variant_ident(inner) => #selector_enum_ident::#variant_ident(inner.selector())
                 });
+                call_selector_option_arms.push(quote! {
+                    Self::#variant_ident(inner) => {
+                        ::std::option::Option::Some(#selector_enum_ident::#variant_ident(inner.selector()))
+                    }
+                });
                 call_into_input_arms.push(quote! {
                     Self::#variant_ident(inner) => #enum_ident::#variant_ident(inner.into_input())
+                });
+                call_into_input_option_arms.push(quote! {
+                    Self::#variant_ident(inner) => {
+                        ::std::option::Option::Some(#enum_ident::#variant_ident(inner.into_input()))
+                    }
                 });
                 call_into_parts_arms.push(quote! {
                     Self::#variant_ident(inner) => {
                         let (metadata, input) = inner.into_parts();
                         (metadata, #enum_ident::#variant_ident(input))
+                    }
+                });
+                call_into_parts_option_arms.push(quote! {
+                    Self::#variant_ident(inner) => {
+                        let (metadata, input) = inner.into_parts();
+                        (metadata, ::std::option::Option::Some(#enum_ident::#variant_ident(input)))
                     }
                 });
 
@@ -384,11 +461,13 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                     Self::#variant_ident(inner) => inner.definition()
                 });
 
-                // selector::try_from_name — tried as fallback in the try_from_arms match
-                // (we add it as .or_else after the main match block)
-                selector_try_from_arms.push(quote! {
-                    // This entry is handled via fallback below
-                    _ if false => unreachable!()
+                // selector::try_from_name — try nested selectors after regular selectors.
+                nested_selector_try_from_arms.push(quote! {
+                    if let ::std::option::Option::Some(__s) =
+                        <<#toolset_ty as ::lutum::Toolset>::Selector as ::lutum::toolset::ToolSelector<#toolset_ty>>::try_from_name(name)
+                    {
+                        return ::std::option::Option::Some(Self::#variant_ident(__s));
+                    }
                 });
 
                 // For selector::all — push nested selectors
@@ -448,6 +527,36 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
 
                 nested_hooks_entries.push((field_ident, hooks_ty.clone()));
             }
+
+            // ────────────────────────────────────────────────────────────────
+            // Dynamic tool marker variant
+            // ────────────────────────────────────────────────────────────────
+            VariantKind::Dynamic => {
+                wrapper_variants.push(quote! {
+                    #variant_ident(::lutum::DynamicToolCall)
+                });
+                handled_variants.push(quote! {
+                    #variant_ident(::lutum::HandledDynamicTool)
+                });
+                metadata_arms.push(quote! { Self::#variant_ident(inner) => inner.metadata() });
+                handled_metadata_arms
+                    .push(quote! { Self::#variant_ident(inner) => inner.metadata() });
+                handled_into_tool_result_arms.push(quote! {
+                    Self::#variant_ident(inner) => inner.into_tool_result()
+                });
+                handled_from_impls.push(quote! {
+                    impl From<::lutum::HandledDynamicTool> for #handled_enum_ident {
+                        fn from(value: ::lutum::HandledDynamicTool) -> Self {
+                            Self::#variant_ident(value)
+                        }
+                    }
+                });
+                call_hook_arms.push(quote! {
+                    Self::#variant_ident(call) => {
+                        ::lutum::ToolHookOutcome::Unhandled(Self::#variant_ident(call))
+                    }
+                });
+            }
         }
     }
 
@@ -463,35 +572,8 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         }
     };
 
-    // Build selector try_from fallback chain for nested toolsets.
-    let nested_try_from_fallbacks: Vec<proc_macro2::TokenStream> = nested_hooks_entries
-        .iter()
-        .zip(
-            // We need the toolset types here — collect them from the nested variants.
-            // Re-derive: for each (field_ident, _hooks_ty) we need (variant_ident, toolset_ty).
-            // Since we have them in call_hook_arms order, we re-collect here.
-            selector_variants
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| {
-                    // This is fragile — instead, track a parallel Vec during the loop.
-                    // Actually let's just do it simply in the loop above.
-                    // We'll use a separate parallel vec.
-                    let _ = i;
-                    false // placeholder — see fix below
-                })
-                .map(|(_, v)| v.clone()),
-        )
-        .map(|_| quote! {})
-        .collect();
-
-    // Actually, let's re-track nested variant info properly.
-    // The approach above was getting complex. Re-do via a separate tracking vec.
-    // (The nested_try_from_fallbacks built above is empty/wrong — we'll build it differently.)
-    drop(nested_try_from_fallbacks);
-
     // Build the definitions() body.
-    let defs_body = if has_nested {
+    let defs_body = if uses_dynamic_codegen {
         quote! {
             static DEFS: ::std::sync::OnceLock<::std::vec::Vec<::lutum::ToolDef>> =
                 ::std::sync::OnceLock::new();
@@ -510,7 +592,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     };
 
     // Build selector::all() impl.
-    let selector_all_impl = if has_nested {
+    let selector_all_impl = if uses_dynamic_codegen {
         quote! {
             fn all() -> &'static [Self] {
                 static ALL: ::std::sync::OnceLock<::std::vec::Vec<#selector_enum_ident>> =
@@ -531,7 +613,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     };
 
     // Build JsonSchema impl — dynamic when nested variants present.
-    let json_schema_impl = if has_nested {
+    let json_schema_impl = if uses_dynamic_codegen {
         quote! {
             impl ::schemars::JsonSchema for #selector_enum_ident {
                 fn inline_schema() -> bool {
@@ -582,7 +664,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
     };
 
     // selector::ALL const — only emitted when no nested variants.
-    let selector_all_const = if has_nested {
+    let selector_all_const = if uses_dynamic_codegen {
         quote! {}
     } else {
         quote! {
@@ -590,87 +672,146 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         }
     };
 
-    // Build the try_from_name body with nested fallbacks.
-    // The nested_hooks_entries only has (field_ident, hooks_ty), not toolset_ty.
-    // We need to re-derive. During the loop we collected selector_variants entries for
-    // nested variants as `V(<T as Toolset>::Selector)`. Instead, let's track a separate
-    // Vec<(variant_ident, toolset_ty)> for nested variants.
-    // Unfortunately the current structure already iterated. Let me just build this
-    // from the already-collected data: nested_hooks_entries has (field_ident = method_ident, hooks_ty).
-    // We need the toolset_ty and variant_ident. The only way is to track them during the loop.
-    // Since we already iterated, we need to use info we embedded in the tokens.
-    //
-    // WORKAROUND: We track a separate Vec during the loop and use it here.
-    // The `selector_try_from_arms` already has placeholder `_ if false => unreachable!()` for nested.
-    // We'll build the actual try_from match differently below.
-    //
-    // Actually: let me re-derive from `call_hook_arms` — no, that's tokens.
-    // The cleanest fix: add a `nested_selector_info: Vec<(Ident, Ident, Type)>` tracking vec
-    // in the loop. But we already finished the loop...
-    //
-    // Quick fix: strip the placeholder `_ if false` arms from selector_try_from_arms
-    // (they were pushed for nested variants). The real try_from impl is built below
-    // using `nested_parse_fallbacks`-style logic but for selectors.
-    // We track this via a parallel vec added during the loop in the Nested branch.
-    // Since we can't go back, we'll rebuild it from what we have.
-    //
-    // REAL FIX: Move the code to track (variant_ident, toolset_ty) into the loop.
-    // Since this is a single-pass generator, I'll use the `nested_hooks_entries` list
-    // (which has field_ident = snake_case of variant_ident) combined with the
-    // raw selector_variants tokens... but tokens aren't inspectable.
-    //
-    // The cleanest solution: use a separate tracking Vec. Since we already wrote the loop,
-    // let me add it via a second pass over the original variants vec — but we moved it.
-    //
-    // CONCLUSION: Refactor the function to make two passes or track the info explicitly.
-    // For now, the `selector_try_from_arms` placeholder approach won't compile.
-    // Let's accept a small refactor: track Vec<(Ident, Ident, Type)> as we go.
-
-    // NOTE: The code above has a structural issue with try_from_name for nested variants.
-    // This will be addressed in the final emit below using a different approach.
-    // We pass selector_try_from_arms filtering out the placeholder arms, and append
-    // .or_else() chains after the match, stored in nested_selector_try_from.
-    //
-    // For now emit what we have with a note — the nested selector try_from is handled
-    // via the `_ => None` arm which then calls each nested Selector::try_from_name.
-
-    // Filter out placeholder nested arms from selector_try_from_arms.
-    // The placeholder `_ if false => unreachable!()` must be removed for valid match syntax.
-    // We'll rebuild try_from without those.
-    let regular_try_from_arms: Vec<_> = selector_try_from_arms
-        .iter()
-        .filter(|t| {
-            let s = t.to_string();
-            !s.contains("if false")
-        })
-        .cloned()
-        .collect();
-
-    // The try_from fallback for nested — each entry is a separate .or_else.
-    // We need (variant_ident, toolset_ty) pairs; the nested_hooks_entries has
-    // (field_ident, hooks_ty) but NOT the variant_ident or toolset_ty directly.
-    // This is the structural gap. We'll fix by also tracking selector_nested_try_from in loop.
-    // Since the loop already ran, we must re-derive: the `selector_variants` vec has
-    // `V(<T as Toolset>::Selector)` token streams for nested, but they're not inspectable.
-    //
-    // DEFERRED: use a separate `nested_variant_info` vec that must be populated in the loop.
-    // For this emit, we'll generate a compile-time-valid but less-optimal try_from that
-    // iterates over ALL (via the dynamic all() impl) for nested variants.
-    // This is correct but O(n). It's acceptable.
-    let nested_selector_try_from = if has_nested {
+    let nested_selector_try_from = if nested_selector_try_from_arms.is_empty() {
+        quote! { None }
+    } else {
         quote! {
-            // Try by iterating all nested selectors (correct but O(n)).
-            <#selector_enum_ident as ::lutum::toolset::ToolSelector<#enum_ident>>::all()
-                .iter()
-                .copied()
-                .find(|__s| __s.name() == name)
+            #(#nested_selector_try_from_arms)*
+            ::std::option::Option::None
+        }
+    };
+
+    let parse_tool_call_body = if let Some(dynamic_variant_ident) = dynamic_variant_ident.as_ref() {
+        quote! {
+            fn parse_tool_call(
+                metadata: ::lutum::ToolMetadata,
+            ) -> Result<Self::ToolCall, ::lutum::ToolCallError> {
+                match metadata.name.as_str() {
+                    #(#parse_arms,)*
+                    _ => {
+                        #(#nested_parse_fallbacks)*
+                        Ok(#call_enum_ident::#dynamic_variant_ident(
+                            ::lutum::DynamicToolCall::new(metadata)
+                        ))
+                    }
+                }
+            }
         }
     } else {
-        quote! { None }
+        quote! {
+            fn parse_tool_call(
+                metadata: ::lutum::ToolMetadata,
+            ) -> Result<Self::ToolCall, ::lutum::ToolCallError> {
+                let __name = metadata.name.as_str().to_string();
+                match metadata.name.as_str() {
+                    #(#parse_arms,)*
+                    _ => {
+                        #(#nested_parse_fallbacks)*
+                        Err(::lutum::ToolCallError::UnknownTool { name: __name })
+                    }
+                }
+            }
+        }
+    };
+
+    let call_enum_methods = if let Some(dynamic_variant_ident) = dynamic_variant_ident.as_ref() {
+        quote! {
+            pub fn selector(&self) -> ::std::option::Option<#selector_enum_ident> {
+                match self {
+                    #(#call_selector_option_arms,)*
+                    Self::#dynamic_variant_ident(_) => ::std::option::Option::None,
+                }
+            }
+
+            pub fn into_input(self) -> ::std::option::Option<#enum_ident> {
+                match self {
+                    #(#call_into_input_option_arms,)*
+                    Self::#dynamic_variant_ident(_) => ::std::option::Option::None,
+                }
+            }
+
+            pub fn into_parts(self) -> (::lutum::ToolMetadata, ::std::option::Option<#enum_ident>) {
+                match self {
+                    #(#call_into_parts_option_arms,)*
+                    Self::#dynamic_variant_ident(inner) => {
+                        let metadata = inner.metadata().clone();
+                        (metadata, ::std::option::Option::None)
+                    }
+                }
+            }
+
+            pub fn as_dynamic(&self) -> ::std::option::Option<&::lutum::DynamicToolCall> {
+                if let Self::#dynamic_variant_ident(inner) = self {
+                    ::std::option::Option::Some(inner)
+                } else {
+                    ::std::option::Option::None
+                }
+            }
+
+            pub fn into_dynamic(
+                self,
+            ) -> ::std::result::Result<::lutum::DynamicToolCall, Self> {
+                if let Self::#dynamic_variant_ident(inner) = self {
+                    ::std::result::Result::Ok(inner)
+                } else {
+                    ::std::result::Result::Err(self)
+                }
+            }
+        }
+    } else {
+        quote! {
+            pub fn selector(&self) -> #selector_enum_ident {
+                match self {
+                    #(#call_selector_arms,)*
+                }
+            }
+
+            pub fn into_input(self) -> #enum_ident {
+                match self {
+                    #(#call_into_input_arms,)*
+                }
+            }
+
+            pub fn into_parts(self) -> (::lutum::ToolMetadata, #enum_ident) {
+                match self {
+                    #(#call_into_parts_arms,)*
+                }
+            }
+        }
+    };
+
+    let from_call_impl = if has_dynamic {
+        quote! {}
+    } else {
+        quote! {
+            impl From<#call_enum_ident> for #enum_ident {
+                fn from(value: #call_enum_ident) -> Self {
+                    value.into_input()
+                }
+            }
+        }
+    };
+
+    let has_dynamic_slot_impl = if has_dynamic {
+        quote! {
+            impl ::lutum::HasDynamicSlot for #enum_ident {}
+        }
+    } else {
+        quote! {}
+    };
+
+    let toolset_has_dynamic_slot_method = if has_dynamic {
+        quote! {
+            fn has_dynamic_slot() -> bool {
+                true
+            }
+        }
+    } else {
+        quote! {}
     };
 
     quote! {
-        #[derive(Clone, Debug, Eq, PartialEq)]
+        #[derive(Clone, Debug, PartialEq)]
         #vis enum #call_enum_ident {
             #(#wrapper_variants,)*
         }
@@ -702,7 +843,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         }
 
         // Extra impl block: description_overrides() aggregates multiple slots and nested hooks.
-        #[allow(dead_code)]
+        #[allow(dead_code, unused_variables)]
         impl<'__lutum_hooks> #hooks_struct_ident<'__lutum_hooks> {
             pub async fn description_overrides(
                 &self,
@@ -755,7 +896,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
 
             pub fn try_from_name(name: &str) -> Option<Self> {
                 let result = match name {
-                    #(#regular_try_from_arms,)*
+                    #(#selector_try_from_arms,)*
                     _ => None,
                 };
                 if result.is_some() {
@@ -825,19 +966,12 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
                 __v
             }
 
-            fn parse_tool_call(
-                metadata: ::lutum::ToolMetadata,
-            ) -> Result<Self::ToolCall, ::lutum::ToolCallError> {
-                let __name = metadata.name.as_str().to_string();
-                match metadata.name.as_str() {
-                    #(#parse_arms,)*
-                    _ => {
-                        #(#nested_parse_fallbacks)*
-                        Err(::lutum::ToolCallError::UnknownTool { name: __name })
-                    }
-                }
-            }
+            #toolset_has_dynamic_slot_method
+
+            #parse_tool_call_body
         }
+
+        #has_dynamic_slot_impl
 
         impl ::lutum::toolset::ToolCallWrapper for #call_enum_ident {
             fn metadata(&self) -> &::lutum::ToolMetadata {
@@ -848,23 +982,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
         }
 
         impl #call_enum_ident {
-            pub fn selector(&self) -> #selector_enum_ident {
-                match self {
-                    #(#call_selector_arms,)*
-                }
-            }
-
-            pub fn into_input(self) -> #enum_ident {
-                match self {
-                    #(#call_into_input_arms,)*
-                }
-            }
-
-            pub fn into_parts(self) -> (::lutum::ToolMetadata, #enum_ident) {
-                match self {
-                    #(#call_into_parts_arms,)*
-                }
-            }
+            #call_enum_methods
 
             pub async fn hook(
                 self,
@@ -876,11 +994,7 @@ pub fn expand_toolset(input: DeriveInput) -> proc_macro2::TokenStream {
             }
         }
 
-        impl From<#call_enum_ident> for #enum_ident {
-            fn from(value: #call_enum_ident) -> Self {
-                value.into_input()
-            }
-        }
+        #from_call_impl
 
         impl ::lutum::toolset::ToolSelector<#enum_ident> for #selector_enum_ident {
             fn name(self) -> &'static str {

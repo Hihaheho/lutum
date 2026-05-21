@@ -1,0 +1,22 @@
+error[E0599]: the method `with_dynamic_tools` exists for struct `TextTurnWithTools<'_, Tools>`, but its trait bounds were not satisfied
+  --> tests/ui/dynamic_without_slot.rs:29:10
+   |
+17 |   enum Tools {
+   |   ---------- doesn't satisfy `Tools: HasDynamicSlot`
+...
+26 |       let _turn = ctx
+   |  _________________-
+27 | |         .text_turn(lutum::ModelInput::new().user("hello"))
+28 | |         .tools::<Tools>()
+29 | |         .with_dynamic_tools([lutum::DynamicTool::new(
+   | |         -^^^^^^^^^^^^^^^^^^ method cannot be called on `TextTurnWithTools<'_, Tools>` due to unsatisfied trait bounds
+   | |_________|
+   |
+   |
+   = note: the following trait bounds were not satisfied:
+           `Tools: HasDynamicSlot`
+note: the trait `HasDynamicSlot` must be implemented
+  --> $WORKSPACE/crates/lutum-protocol/src/toolset.rs
+   |
+   | pub trait HasDynamicSlot: Toolset {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

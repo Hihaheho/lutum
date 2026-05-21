@@ -259,6 +259,21 @@ Selectors also retain a typed path back to `ToolDef`:
 - `selector.definition()`
 - `Toolset::definitions_for(selectors)`
 
+### Dynamic tools
+
+Toolsets can opt into per-turn runtime tool definitions with one
+`#[dynamic] Dynamic(lutum::DynamicTool)` variant. That marker does not add a selector or a static
+`ToolDef`; it only enables `.with_dynamic_tools(...)` on the text and structured turn builders.
+
+Dynamic calls are surfaced as `DynamicToolCall` values carrying the original `ToolMetadata` and
+raw JSON arguments. Lutum forwards the supplied schema to the adapter but does not validate dynamic
+arguments or execute dynamic tools. Registration is per turn; sessions and the built-in
+`AgentLoop` do not retain dynamic tools in this version.
+
+The generated `Toolset::parse_tool_call` fallback does not know a turn's dynamic registry. Direct
+callers of `parse_tool_call` should check names against their registered dynamic tools themselves;
+the turn runtime performs that check before surfacing dynamic calls.
+
 ## Streaming and reducers
 
 Execution is streaming-first.

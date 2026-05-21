@@ -407,6 +407,7 @@ where
     input: ModelInput,
     turn: AdapterTextTurn,
     availability: ToolAvailability<T::Selector>,
+    dynamic_names: Vec<String>,
     estimate: UsageEstimate,
     retry_policy: RetryPolicy,
     span: Span,
@@ -443,6 +444,7 @@ where
     input: ModelInput,
     turn: AdapterStructuredTurn,
     availability: ToolAvailability<T::Selector>,
+    dynamic_names: Vec<String>,
     estimate: UsageEstimate,
     retry_policy: RetryPolicy,
     span: Span,
@@ -616,6 +618,13 @@ impl Lutum {
             .reserve(&extensions, &estimate, turn.config.budget)?;
         // Extract availability before erase_text_turn consumes the turn config.
         let availability = turn.config.tools.available.clone();
+        let dynamic_names = turn
+            .config
+            .tools
+            .dynamic_tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
         let extensions = Arc::new(extensions);
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("text_turn", estimate);
@@ -635,6 +644,7 @@ impl Lutum {
             input,
             turn,
             availability,
+            dynamic_names,
             estimate,
             retry_policy,
             span,
@@ -709,6 +719,13 @@ impl Lutum {
             .reserve(&extensions, &estimate, turn.config.budget)?;
         // Extract availability before erase_structured_turn consumes the turn config.
         let availability = turn.config.tools.available.clone();
+        let dynamic_names = turn
+            .config
+            .tools
+            .dynamic_tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
         let extensions = Arc::new(extensions);
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("structured_turn", estimate);
@@ -733,6 +750,7 @@ impl Lutum {
             input,
             turn,
             availability,
+            dynamic_names,
             estimate,
             retry_policy,
             span,
@@ -1455,6 +1473,7 @@ where
         Ok(map_text_stream_with_tools::<T>(
             stream,
             self.availability.clone(),
+            self.dynamic_names.clone(),
         ))
     }
 
@@ -1470,6 +1489,7 @@ where
             input,
             turn,
             availability,
+            dynamic_names,
             estimate,
             retry_policy,
             span,
@@ -1489,6 +1509,7 @@ where
                             Arc::clone(&extensions),
                         ),
                         availability.clone(),
+                        dynamic_names.clone(),
                     ),
                     Err(source) => {
                         if let Some((next_attempt, after, status, kind)) =
@@ -2755,6 +2776,7 @@ where
         Ok(map_structured_stream_with_tools::<T, O>(
             stream,
             self.availability.clone(),
+            self.dynamic_names.clone(),
         ))
     }
 
@@ -2770,6 +2792,7 @@ where
             input,
             turn,
             availability,
+            dynamic_names,
             estimate,
             retry_policy,
             span,
@@ -2789,6 +2812,7 @@ where
                             Arc::clone(&extensions),
                         ),
                         availability.clone(),
+                        dynamic_names.clone(),
                     ),
                     Err(source) => {
                         if let Some((next_attempt, after, status, kind)) =
@@ -4754,7 +4778,31 @@ where
         available,
         requirement,
         description_overrides,
+        dynamic_tools,
     } = config.tools;
+
+    if !dynamic_tools.is_empty() && !T::has_dynamic_slot() {
+        return Err(AgentError::InvalidToolConstraints {
+            tool: dynamic_tools
+                .first()
+                .map(|tool| tool.name.clone())
+                .unwrap_or_else(|| "(dynamic tools)".to_string()),
+        });
+    }
+
+    let mut dynamic_name_set = std::collections::HashSet::new();
+    for tool in &dynamic_tools {
+        if !dynamic_name_set.insert(tool.name.as_str()) {
+            return Err(AgentError::InvalidToolConstraints {
+                tool: tool.name.clone(),
+            });
+        }
+        if T::Selector::try_from_name(tool.name.as_str()).is_some() {
+            return Err(AgentError::InvalidToolConstraints {
+                tool: tool.name.clone(),
+            });
+        }
+    }
 
     // Validate: require_tool(x) must be in the available set when availability is restricted.
     if let ToolRequirement::Specific(ref selector) = requirement {
@@ -4788,36 +4836,13 @@ where
         }
     };
 
-    // When the resolved tool list is empty, tools are effectively disabled.
-    // AtLeastOne with no available tools is a constraint violation.
-    if tool_defs.is_empty() {
-        if let ToolRequirement::AtLeastOne = requirement {
-            return Err(AgentError::InvalidToolConstraints {
-                tool: "(none available)".to_string(),
-            });
-        }
-        return Ok(AdapterTurnConfig {
-            generation: config.generation,
-            tools: vec![],
-            tool_choice: AdapterToolChoice::None,
-        });
-    }
-
-    let tool_choice = match requirement {
-        ToolRequirement::Optional => AdapterToolChoice::Auto,
-        ToolRequirement::AtLeastOne => AdapterToolChoice::Required,
-        ToolRequirement::Specific(selector) => {
-            AdapterToolChoice::Specific(selector.name().to_string())
-        }
-    };
-
     // Build a last-write-wins override map from selector name → description.
     let mut override_map: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for (sel, desc) in &description_overrides {
         override_map.insert(sel.name(), desc.as_str());
     }
 
-    let tools = tool_defs
+    let mut tools = tool_defs
         .into_iter()
         .map(|tool| {
             let description = override_map
@@ -4842,6 +4867,37 @@ where
             })
         })
         .collect::<Result<Vec<_>, serde_json::Error>>()?;
+
+    for tool in dynamic_tools {
+        tools.push(AdapterToolDefinition {
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.input_schema,
+        });
+    }
+
+    // When the resolved tool list is empty, tools are effectively disabled.
+    // AtLeastOne with no available tools is a constraint violation.
+    if tools.is_empty() {
+        if let ToolRequirement::AtLeastOne = requirement {
+            return Err(AgentError::InvalidToolConstraints {
+                tool: "(none available)".to_string(),
+            });
+        }
+        return Ok(AdapterTurnConfig {
+            generation: config.generation,
+            tools: vec![],
+            tool_choice: AdapterToolChoice::None,
+        });
+    }
+
+    let tool_choice = match requirement {
+        ToolRequirement::Optional => AdapterToolChoice::Auto,
+        ToolRequirement::AtLeastOne => AdapterToolChoice::Required,
+        ToolRequirement::Specific(selector) => {
+            AdapterToolChoice::Specific(selector.name().to_string())
+        }
+    };
 
     Ok(AdapterTurnConfig {
         generation: config.generation,
@@ -4876,12 +4932,13 @@ fn observe_text_stream(
 fn map_text_stream_with_tools<T>(
     stream: ErasedTextTurnEventStream,
     availability: ToolAvailability<T::Selector>,
+    dynamic_names: Vec<String>,
 ) -> TextTurnEventStreamWithTools<T>
 where
     T: Toolset,
 {
     Box::pin(stream.map(move |item| {
-        item.and_then(|event| map_text_event_with_tools::<T>(event, &availability))
+        item.and_then(|event| map_text_event_with_tools::<T>(event, &availability, &dynamic_names))
     }))
 }
 
@@ -4914,13 +4971,16 @@ fn observe_structured_stream(
 fn map_structured_stream_with_tools<T, O>(
     stream: ErasedStructuredTurnEventStream,
     availability: ToolAvailability<T::Selector>,
+    dynamic_names: Vec<String>,
 ) -> StructuredTurnEventStreamWithTools<T, O>
 where
     T: Toolset,
     O: StructuredOutput,
 {
     Box::pin(stream.map(move |item| {
-        item.and_then(|event| map_structured_event_with_tools::<T, O>(event, &availability))
+        item.and_then(|event| {
+            map_structured_event_with_tools::<T, O>(event, &availability, &dynamic_names)
+        })
     }))
 }
 
@@ -5010,7 +5070,14 @@ fn map_text_event(event: ErasedTextTurnEvent) -> Result<TextTurnEvent, AgentErro
 fn is_tool_name_allowed<T: Toolset>(
     name: &str,
     availability: &ToolAvailability<T::Selector>,
+    dynamic_names: &[String],
 ) -> bool {
+    if dynamic_names
+        .iter()
+        .any(|dynamic_name| dynamic_name == name)
+    {
+        return true;
+    }
     // This is only the outer availability-policy gate for the current round.
     // With `ToolAvailability::All`, names are not restricted here, so a name may still fail the
     // inner toolset parse step and become `UnknownTool` instead of `NotAvailable`. `NoTools`
@@ -5026,9 +5093,46 @@ fn is_tool_name_allowed<T: Toolset>(
     }
 }
 
+fn is_registered_dynamic_tool_name(name: &str, dynamic_names: &[String]) -> bool {
+    dynamic_names
+        .iter()
+        .any(|dynamic_name| dynamic_name == name)
+}
+
+fn is_static_tool_name<T: Toolset>(name: &str) -> bool {
+    T::Selector::try_from_name(name).is_some()
+}
+
+enum ReadyToolNameClass {
+    Available,
+    NotAvailable,
+    Unknown,
+}
+
+fn classify_ready_tool_name<T: Toolset>(
+    name: &str,
+    availability: &ToolAvailability<T::Selector>,
+    dynamic_names: &[String],
+) -> ReadyToolNameClass {
+    if T::has_dynamic_slot()
+        && !is_registered_dynamic_tool_name(name, dynamic_names)
+        && !is_static_tool_name::<T>(name)
+        && matches!(availability, ToolAvailability::All)
+    {
+        return ReadyToolNameClass::Unknown;
+    }
+
+    if is_tool_name_allowed::<T>(name, availability, dynamic_names) {
+        ReadyToolNameClass::Available
+    } else {
+        ReadyToolNameClass::NotAvailable
+    }
+}
+
 fn map_text_event_with_tools<T>(
     event: ErasedTextTurnEvent,
     availability: &ToolAvailability<T::Selector>,
+    dynamic_names: &[String],
 ) -> Result<TextTurnEventWithTools<T>, AgentError>
 where
     T: Toolset,
@@ -5050,7 +5154,7 @@ where
             name,
             arguments_json_delta,
         } => {
-            if is_tool_name_allowed::<T>(name.as_str(), availability) {
+            if is_tool_name_allowed::<T>(name.as_str(), availability, dynamic_names) {
                 Ok(TextTurnEventWithTools::ToolCallChunk {
                     id,
                     name,
@@ -5066,19 +5170,35 @@ where
         }
         // Level 2 validation: check tool name after assembly, before parse_tool_call.
         ErasedTextTurnEvent::ToolCallReady(metadata) => {
-            if is_tool_name_allowed::<T>(metadata.name.as_str(), availability) {
-                let original_metadata = metadata.clone();
-                match T::parse_tool_call(metadata) {
-                    Ok(tool_call) => Ok(TextTurnEventWithTools::ToolCallReady(tool_call)),
-                    // All current toolset parse errors are model-authored and recoverable here.
-                    Err(error) => Ok(TextTurnEventWithTools::ToolCallIssue(
-                        RecoverableToolCallIssue::from_tool_call_error(original_metadata, error),
-                    )),
+            let tool_name = metadata.name.as_str();
+            match classify_ready_tool_name::<T>(tool_name, availability, dynamic_names) {
+                ReadyToolNameClass::Unknown => {
+                    let original_metadata = metadata.clone();
+                    Ok(TextTurnEventWithTools::ToolCallIssue(
+                        RecoverableToolCallIssue::from_tool_call_error(
+                            original_metadata,
+                            lutum_protocol::ToolCallError::UnknownTool {
+                                name: tool_name.to_string(),
+                            },
+                        ),
+                    ))
                 }
-            } else {
-                Ok(TextTurnEventWithTools::ToolCallIssue(
+                ReadyToolNameClass::Available => {
+                    let original_metadata = metadata.clone();
+                    match T::parse_tool_call(metadata) {
+                        Ok(tool_call) => Ok(TextTurnEventWithTools::ToolCallReady(tool_call)),
+                        // All current toolset parse errors are model-authored and recoverable here.
+                        Err(error) => Ok(TextTurnEventWithTools::ToolCallIssue(
+                            RecoverableToolCallIssue::from_tool_call_error(
+                                original_metadata,
+                                error,
+                            ),
+                        )),
+                    }
+                }
+                ReadyToolNameClass::NotAvailable => Ok(TextTurnEventWithTools::ToolCallIssue(
                     RecoverableToolCallIssue::not_available(metadata),
-                ))
+                )),
             }
         }
         ErasedTextTurnEvent::Completed {
@@ -5148,6 +5268,7 @@ where
 fn map_structured_event_with_tools<T, O>(
     event: ErasedStructuredTurnEvent,
     availability: &ToolAvailability<T::Selector>,
+    dynamic_names: &[String],
 ) -> Result<StructuredTurnEventWithTools<T, O>, AgentError>
 where
     T: Toolset,
@@ -5177,7 +5298,7 @@ where
             name,
             arguments_json_delta,
         } => {
-            if is_tool_name_allowed::<T>(name.as_str(), availability) {
+            if is_tool_name_allowed::<T>(name.as_str(), availability, dynamic_names) {
                 Ok(StructuredTurnEventWithTools::ToolCallChunk {
                     id,
                     name,
@@ -5193,19 +5314,37 @@ where
         }
         // Level 2 validation: check tool name after assembly, before parse_tool_call.
         ErasedStructuredTurnEvent::ToolCallReady(metadata) => {
-            if is_tool_name_allowed::<T>(metadata.name.as_str(), availability) {
-                let original_metadata = metadata.clone();
-                match T::parse_tool_call(metadata) {
-                    Ok(tool_call) => Ok(StructuredTurnEventWithTools::ToolCallReady(tool_call)),
-                    // All current toolset parse errors are model-authored and recoverable here.
-                    Err(error) => Ok(StructuredTurnEventWithTools::ToolCallIssue(
-                        RecoverableToolCallIssue::from_tool_call_error(original_metadata, error),
-                    )),
+            let tool_name = metadata.name.as_str();
+            match classify_ready_tool_name::<T>(tool_name, availability, dynamic_names) {
+                ReadyToolNameClass::Unknown => {
+                    let original_metadata = metadata.clone();
+                    Ok(StructuredTurnEventWithTools::ToolCallIssue(
+                        RecoverableToolCallIssue::from_tool_call_error(
+                            original_metadata,
+                            lutum_protocol::ToolCallError::UnknownTool {
+                                name: tool_name.to_string(),
+                            },
+                        ),
+                    ))
                 }
-            } else {
-                Ok(StructuredTurnEventWithTools::ToolCallIssue(
-                    RecoverableToolCallIssue::not_available(metadata),
-                ))
+                ReadyToolNameClass::Available => {
+                    let original_metadata = metadata.clone();
+                    match T::parse_tool_call(metadata) {
+                        Ok(tool_call) => Ok(StructuredTurnEventWithTools::ToolCallReady(tool_call)),
+                        // All current toolset parse errors are model-authored and recoverable here.
+                        Err(error) => Ok(StructuredTurnEventWithTools::ToolCallIssue(
+                            RecoverableToolCallIssue::from_tool_call_error(
+                                original_metadata,
+                                error,
+                            ),
+                        )),
+                    }
+                }
+                ReadyToolNameClass::NotAvailable => {
+                    Ok(StructuredTurnEventWithTools::ToolCallIssue(
+                        RecoverableToolCallIssue::not_available(metadata),
+                    ))
+                }
             }
         }
         ErasedStructuredTurnEvent::Completed {
@@ -5618,6 +5757,30 @@ where
     match event {
         StructuredTurnEventWithTools::Completed { usage, .. } => Some(*usage),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_tools_on_non_dynamic_toolset_are_rejected() {
+        let mut config = TurnConfig::<NoTools>::new();
+        config
+            .tools
+            .dynamic_tools
+            .push(lutum_protocol::DynamicTool::new(
+                "runtime",
+                "Runtime tool",
+                serde_json::json!({"type": "object"}),
+            ));
+
+        let err = erase_turn_config::<NoTools>(config).unwrap_err();
+        assert!(matches!(
+            err,
+            AgentError::InvalidToolConstraints { ref tool } if tool == "runtime"
+        ));
     }
 }
 

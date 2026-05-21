@@ -21,7 +21,9 @@ use lutum_protocol::{
         TextTurnReductionError, TextTurnState as TextTurnCollectedState, TextTurnStateWithTools,
     },
     structured::StructuredOutput,
-    toolset::{ToolAvailability, ToolConstraints, ToolRequirement, Toolset},
+    toolset::{
+        DynamicTool, HasDynamicSlot, ToolAvailability, ToolConstraints, ToolRequirement, Toolset,
+    },
 };
 
 use crate::{
@@ -543,6 +545,22 @@ where
             TurnTarget::Lutum { .. } => TextStepOutcomeWithTools::from_staged(staged, None),
         };
         Ok(outcome)
+    }
+}
+
+impl<'a, T> TextTurnWithTools<'a, T>
+where
+    T: Toolset + HasDynamicSlot,
+{
+    /// Register runtime-defined tools for this turn.
+    ///
+    /// Dynamic tools are not persisted on the session. Each turn that wants
+    /// them must register them explicitly. Dynamic tools cannot be targeted by
+    /// `require_tool`; use `require_any_tool` to require one tool call among
+    /// the static and dynamic tools available on this turn.
+    pub fn with_dynamic_tools(mut self, tools: impl IntoIterator<Item = DynamicTool>) -> Self {
+        self.turn.config.tools.dynamic_tools.extend(tools);
+        self
     }
 }
 
@@ -1116,6 +1134,23 @@ where
             }
             Err(err) => Err(err),
         }
+    }
+}
+
+impl<'a, T, O> StructuredTurnWithTools<'a, T, O>
+where
+    T: Toolset + HasDynamicSlot,
+    O: StructuredOutput,
+{
+    /// Register runtime-defined tools for this turn.
+    ///
+    /// Dynamic tools are not persisted on the session. Each turn that wants
+    /// them must register them explicitly. Dynamic tools cannot be targeted by
+    /// `require_tool`; use `require_any_tool` to require one tool call among
+    /// the static and dynamic tools available on this turn.
+    pub fn with_dynamic_tools(mut self, tools: impl IntoIterator<Item = DynamicTool>) -> Self {
+        self.turn.config.tools.dynamic_tools.extend(tools);
+        self
     }
 }
 

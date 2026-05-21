@@ -33,7 +33,7 @@ pub fn expand_tool_input_struct(item: ItemStruct, args: ToolInputArgs) -> proc_m
             }
         }
 
-        #[derive(Clone, Debug, Eq, PartialEq)]
+        #[derive(Clone, Debug, PartialEq)]
         #vis struct #call_ident {
             pub metadata: ::lutum::ToolMetadata,
             pub input: #ident,
@@ -114,7 +114,7 @@ pub fn expand_tool_input_enum(item: ItemEnum, args: ToolInputArgs) -> proc_macro
             }
         }
 
-        #[derive(Clone, Debug, Eq, PartialEq)]
+        #[derive(Clone, Debug, PartialEq)]
         #vis struct #call_ident {
             pub metadata: ::lutum::ToolMetadata,
             pub input: #ident,

@@ -54,7 +54,6 @@ pub fn expand_tool_fn(item_fn: ItemFn, args: ToolFnArgs) -> proc_macro2::TokenSt
         #[derive(
             Clone,
             Debug,
-            Eq,
             PartialEq,
             ::serde::Serialize,
             ::serde::Deserialize,
@@ -80,7 +79,7 @@ pub fn expand_tool_fn(item_fn: ItemFn, args: ToolFnArgs) -> proc_macro2::TokenSt
             }
         }
 
-        #[derive(Clone, Debug, Eq, PartialEq)]
+        #[derive(Clone, Debug, PartialEq)]
         #vis struct #call_ident {
             pub metadata: ::lutum::ToolMetadata,
             pub input: #input_ident,

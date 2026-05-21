@@ -111,7 +111,7 @@ async fn extract(llm: &Lutum, prompt: &str) -> anyhow::Result<Contact> {
     );
     session.push_user(prompt);
 
-    let result = session.structured_turn::<Contact>(&llm).collect().await?;
+    let result = session.structured_turn::<Contact>(llm).collect().await?;
     match result.semantic {
         StructuredTurnOutcome::Structured(contact) => Ok(contact),
         StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),

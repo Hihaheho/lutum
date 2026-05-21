@@ -42,7 +42,7 @@ async fn multiply(a: i64, b: i64) -> Result<AddResult, Infallible> {
     Ok(AddResult { result: a * b })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, lutum::Toolset)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, lutum::Toolset)]
 enum MathTools {
     Add(AddArgs),
     Multiply(Multiply),

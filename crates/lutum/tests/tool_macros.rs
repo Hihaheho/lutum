@@ -40,9 +40,36 @@ async fn get_weather(
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, lutum::Toolset)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, lutum::Toolset)]
 enum FnTools {
     GetWeather(GetWeather),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct ScaleResult {
+    scaled: f64,
+}
+
+/// Scale a floating-point value.
+#[lutum::tool_input(name = "scale", output = ScaleResult)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct ScaleArgs {
+    value: f64,
+    factor: f64,
+}
+
+#[lutum::tool_fn]
+/// Normalize a floating-point score.
+async fn normalize_score(score: f64) -> Result<ScaleResult, Infallible> {
+    Ok(ScaleResult {
+        scaled: score / 100.0,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, lutum::Toolset)]
+enum FloatTools {
+    Scale(ScaleArgs),
+    NormalizeScore(NormalizeScore),
 }
 
 #[test]
@@ -150,4 +177,42 @@ fn tool_fn_wrapper_executes_with_skipped_args() {
     };
 
     assert_eq!(tool_result.result.get(), "{\"forecast\":\"wx:7:Osaka\"}");
+}
+
+#[test]
+fn float_tool_inputs_do_not_require_eq() {
+    let tool_call = FloatTools::parse_tool_call(ToolMetadata::new(
+        "call-3",
+        "scale",
+        RawJson::parse("{\"value\":2.5,\"factor\":4.0}").unwrap(),
+    ))
+    .unwrap();
+
+    let tool_result = match tool_call {
+        FloatToolsCall::Scale(call) => {
+            assert_eq!(call.input().value, 2.5);
+            assert_eq!(call.input().factor, 4.0);
+            call.complete(ScaleResult { scaled: 10.0 }).unwrap()
+        }
+        FloatToolsCall::NormalizeScore(_) => panic!("expected scale tool call"),
+    };
+
+    assert_eq!(tool_result.result.get(), "{\"scaled\":10.0}");
+
+    let tool_call = FloatTools::parse_tool_call(ToolMetadata::new(
+        "call-4",
+        "normalize_score",
+        RawJson::parse("{\"score\":42.0}").unwrap(),
+    ))
+    .unwrap();
+
+    let tool_result = match tool_call {
+        FloatToolsCall::NormalizeScore(call) => {
+            assert_eq!(call.input().score, 42.0);
+            block_on(call.call()).unwrap()
+        }
+        FloatToolsCall::Scale(_) => panic!("expected normalize_score tool call"),
+    };
+
+    assert_eq!(tool_result.result.get(), "{\"scaled\":0.42}");
 }

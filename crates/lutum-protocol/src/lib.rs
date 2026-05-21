@@ -77,11 +77,12 @@ pub use telemetry::{
     raw_collect_errors_enabled,
 };
 pub use toolset::{
-    ContinueSuggestionReason, HandledTool, HookableToolset, IntoToolResult, NoToolSelector,
-    NoTools, RecoverableToolCallIssue, RecoverableToolCallIssueReason, RejectedToolCall,
-    RejectedToolSource, ToolAvailability, ToolCallError, ToolCallWrapper, ToolConstraints,
-    ToolDecision, ToolDef, ToolExecutionError, ToolHookOutcome, ToolHooks, ToolInput,
-    ToolRequirement, ToolResultError, ToolSelector, Toolset,
+    ContinueSuggestionReason, DynamicTool, DynamicToolCall, HandledDynamicTool, HandledTool,
+    HasDynamicSlot, HookableToolset, IntoToolResult, NoToolSelector, NoTools,
+    RecoverableToolCallIssue, RecoverableToolCallIssueReason, RejectedToolCall, RejectedToolSource,
+    ToolAvailability, ToolCallError, ToolCallWrapper, ToolConstraints, ToolDecision, ToolDef,
+    ToolExecutionError, ToolHookOutcome, ToolHooks, ToolInput, ToolRequirement, ToolResultError,
+    ToolSelector, Toolset,
 };
 pub use transcript::{
     AssistantTurnView, CommittedTurn, EphemeralTurnView, ItemView, ToolCallItemView,

@@ -1,0 +1,6 @@
+error: at most one #[dynamic] variant is permitted per Toolset
+ --> tests/ui/dynamic_multiple_slots.rs:8:5
+  |
+8 | /     #[dynamic]
+9 | |     DynamicB(lutum::DynamicTool),
+  | |________________________________^

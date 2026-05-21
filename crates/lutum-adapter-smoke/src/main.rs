@@ -874,7 +874,7 @@ async fn run_text(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Re
     let mut session = Session::new();
     session.push_user("Return exactly OK.");
     let result = session
-        .text_turn(&llm)
+        .text_turn(llm)
         .max_output_tokens(text_max_output_tokens(&case.endpoint, defaults))
         .collect()
         .await?;
@@ -898,7 +898,7 @@ async fn run_output_limit(llm: &Lutum, case: &CaseSpec) -> Result<Usage> {
     let mut session = Session::new();
     session.push_user(OUTPUT_LIMIT_PROMPT);
     let result = session
-        .text_turn(&llm)
+        .text_turn(llm)
         .max_output_tokens(OUTPUT_LIMIT_MAX_OUTPUT_TOKENS)
         .collect()
         .await;
@@ -948,7 +948,7 @@ async fn run_structured(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig)
     let mut session = Session::new();
     session.push_user("Return JSON with ok true and text exactly OK.");
     let result = session
-        .structured_turn::<SmokeStructured>(&llm)
+        .structured_turn::<SmokeStructured>(llm)
         .max_output_tokens(structured_max_output_tokens(&case.endpoint, defaults))
         .collect()
         .await?;
@@ -986,7 +986,7 @@ async fn run_structured_optional(
     let mut session = Session::new();
     session.push_user("Return JSON with ok true and text exactly OK.");
     let result = session
-        .structured_turn::<SmokeOptionalStructured>(&llm)
+        .structured_turn::<SmokeOptionalStructured>(llm)
         .max_output_tokens(structured_max_output_tokens(&case.endpoint, defaults))
         .collect()
         .await?;
@@ -1029,7 +1029,7 @@ async fn run_tool(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig) -> Re
     let mut saw_tool = false;
     for _ in 0..4 {
         let mut turn = session
-            .text_turn(&llm)
+            .text_turn(llm)
             .tools::<SmokeTools>()
             .available_tools(vec![SmokeToolsSelector::EchoWord])
             .max_output_tokens(structured_max_output_tokens(&case.endpoint, defaults));
@@ -1085,7 +1085,7 @@ async fn run_tool_no_output(
     let before_turns = session.list_turns().count();
 
     let outcome = session
-        .text_turn(&llm)
+        .text_turn(llm)
         .tools::<SmokeTools>()
         .available_tools(vec![SmokeToolsSelector::EchoWord])
         .max_output_tokens(text_max_output_tokens(&case.endpoint, defaults))
@@ -1126,7 +1126,7 @@ async fn run_structured_tool(
         "Call echo_word with word OK. Do not answer directly; request the tool call first.",
     );
     let outcome = session
-        .structured_turn::<SmokeStructured>(&llm)
+        .structured_turn::<SmokeStructured>(llm)
         .tools::<SmokeTools>()
         .available_tools(vec![SmokeToolsSelector::EchoWord])
         .require_tool(SmokeToolsSelector::EchoWord)
@@ -1175,7 +1175,7 @@ async fn run_reasoning_capture(
     let mut session = Session::new();
     session.push_user("Think briefly, then answer exactly OK.");
     let result = session
-        .text_turn(&llm)
+        .text_turn(llm)
         .max_output_tokens(text_max_output_tokens(&case.endpoint, defaults))
         .collect()
         .await?;
@@ -1221,7 +1221,7 @@ async fn run_thinking_roundtrip(
         structured_max_output_tokens(&case.endpoint, defaults)
     };
     let first = session
-        .text_turn(&llm)
+        .text_turn(llm)
         .max_output_tokens(max_tokens)
         .collect()
         .await?;
@@ -1229,7 +1229,7 @@ async fn run_thinking_roundtrip(
 
     session.push_user("Using the previous turn, answer exactly OK.");
     let second = session
-        .text_turn(&llm)
+        .text_turn(llm)
         .max_output_tokens(text_max_output_tokens(&case.endpoint, defaults))
         .collect()
         .await?;

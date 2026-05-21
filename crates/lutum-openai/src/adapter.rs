@@ -873,10 +873,10 @@ fn sanitize_openai_strict_schema(schema: &mut serde_json::Value) {
                         if required.contains(name) {
                             continue;
                         }
-                        if let Some(property_schema) = properties.get_mut(name) {
-                            if should_make_missing_property_nullable(property_schema) {
-                                make_schema_nullable(property_schema);
-                            }
+                        if let Some(property_schema) = properties.get_mut(name)
+                            && should_make_missing_property_nullable(property_schema)
+                        {
+                            make_schema_nullable(property_schema);
                         }
                     }
                 }

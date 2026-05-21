@@ -50,6 +50,102 @@ impl ToolDef {
     }
 }
 
+/// A tool whose schema is determined at runtime.
+///
+/// Dynamic tools are registered per turn via `with_dynamic_tools(...)` on a
+/// toolset that declares a `#[dynamic]` variant. Lutum does not inspect or
+/// validate the schema beyond forwarding it to the configured adapter.
+#[derive(
+    Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct DynamicTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+impl DynamicTool {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+        }
+    }
+}
+
+/// A model-issued call to a dynamic tool.
+///
+/// User code dispatches by inspecting [`name`](Self::name) and
+/// [`arguments`](Self::arguments), then returns a [`HandledDynamicTool`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DynamicToolCall {
+    metadata: ToolMetadata,
+}
+
+impl DynamicToolCall {
+    pub fn new(metadata: ToolMetadata) -> Self {
+        Self { metadata }
+    }
+
+    pub fn metadata(&self) -> &ToolMetadata {
+        &self.metadata
+    }
+
+    pub fn name(&self) -> &str {
+        self.metadata.name.as_str()
+    }
+
+    pub fn arguments(&self) -> &crate::conversation::RawJson {
+        &self.metadata.arguments
+    }
+
+    pub fn handled(self, output: crate::conversation::RawJson) -> HandledDynamicTool {
+        HandledDynamicTool {
+            metadata: self.metadata,
+            output,
+        }
+    }
+}
+
+impl ToolCallWrapper for DynamicToolCall {
+    fn metadata(&self) -> &ToolMetadata {
+        &self.metadata
+    }
+}
+
+/// A dynamic tool call paired with user-provided raw JSON output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HandledDynamicTool {
+    metadata: ToolMetadata,
+    output: crate::conversation::RawJson,
+}
+
+impl HandledDynamicTool {
+    pub fn metadata(&self) -> &ToolMetadata {
+        &self.metadata
+    }
+
+    pub fn output(&self) -> &crate::conversation::RawJson {
+        &self.output
+    }
+
+    pub fn into_parts(self) -> (ToolMetadata, crate::conversation::RawJson) {
+        (self.metadata, self.output)
+    }
+}
+
+impl IntoToolResult for HandledDynamicTool {
+    fn into_tool_result(self) -> Result<ToolResult, ToolResultError> {
+        let (metadata, output) = self.into_parts();
+        Ok(metadata.into_tool_result(output))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ToolCallError {
     #[error("unknown tool `{name}`")]
@@ -398,10 +494,14 @@ where
 }
 
 pub trait Toolset: Send + Sync + 'static {
-    type ToolCall: ToolCallWrapper + Clone + fmt::Debug + Eq + PartialEq + Send + Sync + 'static;
+    type ToolCall: ToolCallWrapper + Clone + fmt::Debug + PartialEq + Send + Sync + 'static;
     type Selector: ToolSelector<Self>;
 
     fn definitions() -> &'static [ToolDef];
+
+    fn has_dynamic_slot() -> bool {
+        false
+    }
 
     fn definitions_for<I>(selectors: I) -> Vec<&'static ToolDef>
     where
@@ -425,8 +525,18 @@ pub trait Toolset: Send + Sync + 'static {
         Self::Selector::all().to_vec()
     }
 
+    /// Parse an assembled provider tool call into this toolset's typed call enum.
+    ///
+    /// For toolsets that declare a dynamic slot, the generated parser wraps
+    /// fallback names as dynamic calls because dynamic registration is turn
+    /// scoped and not available to this pure parser. Turn execution validates
+    /// registered dynamic names before calling this method; direct callers
+    /// should apply the same registry check when they need that distinction.
     fn parse_tool_call(metadata: ToolMetadata) -> Result<Self::ToolCall, ToolCallError>;
 }
+
+/// Marker trait for toolsets that declare a `#[dynamic]` variant.
+pub trait HasDynamicSlot: Toolset {}
 
 /// Policy describing which tools the model is allowed to call on a turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -464,6 +574,8 @@ pub struct ToolConstraints<T: Toolset> {
     /// sent to the adapter. Last entry wins when the same selector appears more
     /// than once.
     pub description_overrides: Vec<(T::Selector, String)>,
+    /// Runtime tools appended to the request alongside typed tool definitions.
+    pub dynamic_tools: Vec<DynamicTool>,
 }
 
 impl<T: Toolset> Default for ToolConstraints<T> {
@@ -476,6 +588,7 @@ impl<T: Toolset> Default for ToolConstraints<T> {
             available: ToolAvailability::Default,
             requirement: ToolRequirement::Optional,
             description_overrides: Vec::new(),
+            dynamic_tools: Vec::new(),
         }
     }
 }

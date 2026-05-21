@@ -121,7 +121,7 @@ struct GetOrdersArgs {
     user_id: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, lutum::Toolset)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, lutum::Toolset)]
 enum DbTools {
     ListUsers(ListUsers),
     GetOrders(GetOrdersArgs),
