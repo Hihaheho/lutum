@@ -17,7 +17,8 @@ use lutum_protocol::{
     budget::Usage,
     conversation::{
         AssistantInputItem, EphemeralInputIndices, Image, InputMessageRole, MessageContent,
-        ModelInput, ModelInputItem, RawJson, ToolCallId, ToolMetadata, ToolName, ToolResult,
+        ModelInput, ModelInputItem, RawJson, ToolCallId, ToolMetadata, ToolName, ToolOutput,
+        ToolOutputPart, ToolResult,
     },
     extensions::RequestExtensions,
     llm::{
@@ -1288,11 +1289,49 @@ fn parse_tool_input(arguments: &RawJson) -> Result<Value, ClaudeError> {
 }
 
 fn tool_result_content(result: &RawJson) -> Result<Value, ClaudeError> {
+    if let Some(parts) = parse_tool_output(result)? {
+        return claude_tool_output_content(&parts);
+    }
+
     let value = serde_json::from_str::<Value>(result.get())?;
     Ok(match value {
         Value::String(text) => Value::String(text),
         other => Value::String(serde_json::to_string(&other)?),
     })
+}
+
+fn parse_tool_output(result: &RawJson) -> Result<Option<Vec<ToolOutputPart>>, ClaudeError> {
+    Ok(ToolOutput::from_raw_json(result)?.map(ToolOutput::into_parts))
+}
+
+fn claude_tool_output_content(parts: &[ToolOutputPart]) -> Result<Value, ClaudeError> {
+    if !parts
+        .iter()
+        .any(|part| matches!(part, ToolOutputPart::Image { .. }))
+    {
+        return Ok(Value::String(tool_output_text(parts)));
+    }
+
+    let mut content = Vec::new();
+    for part in parts {
+        let block = match part {
+            ToolOutputPart::Text { text } => text_block(text),
+            ToolOutputPart::Image { image } => image_block(image),
+        };
+        content.push(serde_json::to_value(block)?);
+    }
+    Ok(Value::Array(content))
+}
+
+fn tool_output_text(parts: &[ToolOutputPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ToolOutputPart::Text { text } => Some(text.as_str()),
+            ToolOutputPart::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn map_text_stream<S>(
@@ -2515,6 +2554,58 @@ mod tests {
                 source: ImageSource::Base64 { data, media_type },
             }) if data == "abc123" && media_type == "image/webp"
         ));
+    }
+
+    #[test]
+    fn compile_model_input_maps_image_tool_output() {
+        let tool_output = ToolOutput::parts([
+            ToolOutputPart::text("plot generated"),
+            ToolOutputPart::image(Image::Base64 {
+                data: "abc123".into(),
+                media_type: "image/png".into(),
+            }),
+        ]);
+        let input = ModelInput::from_items(vec![ModelInputItem::ToolResult(ToolResult::new(
+            "call-1",
+            "plot",
+            RawJson::parse("{}").unwrap(),
+            RawJson::from_serializable(&tool_output).unwrap(),
+        ))]);
+
+        let (messages, _) = compile_model_input(&input).unwrap().into_messages();
+
+        let ClaudeContentBlock::ToolResult(block) = &messages[1].content[0] else {
+            panic!("expected tool result block");
+        };
+        assert_eq!(
+            block.content,
+            serde_json::json!([
+                {
+                    "type": "text",
+                    "text": "plot generated",
+                },
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "data": "abc123",
+                        "media_type": "image/png",
+                    },
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn compile_model_input_rejects_malformed_marked_tool_output() {
+        let input = ModelInput::from_items(vec![ModelInputItem::ToolResult(ToolResult::new(
+            "call-1",
+            "plot",
+            RawJson::parse("{}").unwrap(),
+            RawJson::parse(r#"{"__lutum_tool_output":"lutum.tool_output.v1"}"#).unwrap(),
+        ))]);
+
+        assert!(compile_model_input(&input).is_err());
     }
 
     #[test]

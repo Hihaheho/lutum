@@ -1,7 +1,8 @@
 use std::{borrow::Borrow, fmt, ops::Deref};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
-use serde_json::value::RawValue;
+use serde_json::{Value, value::RawValue};
 use thiserror::Error;
 
 use crate::transcript::CommittedTurn;
@@ -214,10 +215,75 @@ pub enum MessageContent {
     Image(Image),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum Image {
     Base64 { data: String, media_type: String },
-    Uri(url::Url),
+    Uri(#[schemars(with = "String")] url::Url),
+}
+
+pub const TOOL_OUTPUT_MARKER: &str = "lutum.tool_output.v1";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+enum ToolOutputMarker {
+    #[serde(rename = "lutum.tool_output.v1")]
+    V1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolOutput {
+    #[serde(rename = "__lutum_tool_output")]
+    marker: ToolOutputMarker,
+    parts: Vec<ToolOutputPart>,
+}
+
+impl ToolOutput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::parts([ToolOutputPart::text(text)])
+    }
+
+    pub fn image(image: Image) -> Self {
+        Self::parts([ToolOutputPart::image(image)])
+    }
+
+    pub fn parts(parts: impl Into<Vec<ToolOutputPart>>) -> Self {
+        Self {
+            marker: ToolOutputMarker::V1,
+            parts: parts.into(),
+        }
+    }
+
+    pub fn is_lutum_tool_output(&self) -> bool {
+        self.marker == ToolOutputMarker::V1
+    }
+
+    pub fn from_raw_json(raw: &RawJson) -> Result<Option<Self>, serde_json::Error> {
+        let value = serde_json::from_str::<Value>(raw.get())?;
+        if value.get("__lutum_tool_output").is_none() {
+            return Ok(None);
+        }
+        serde_json::from_value(value).map(Some)
+    }
+
+    pub fn into_parts(self) -> Vec<ToolOutputPart> {
+        self.parts
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolOutputPart {
+    Text { text: String },
+    Image { image: Image },
+}
+
+impl ToolOutputPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub fn image(image: Image) -> Self {
+        Self::Image { image }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

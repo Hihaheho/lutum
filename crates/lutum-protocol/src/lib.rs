@@ -27,7 +27,8 @@ pub use conversation::{
     AssistantInputItem, AssistantTurn, AssistantTurnInputError, AssistantTurnItem,
     EmptyNonEmptyError, EphemeralInputIndices, Image, InputMessageRole, MessageContent, ModelInput,
     ModelInputItem, ModelInputValidationError, NonEmpty, REJECTED_TOOL_RESULT_PREFIX, RawJson,
-    ToolCallId, ToolMetadata, ToolName, ToolResult, UncommittedAssistantTurn,
+    ToolCallId, ToolMetadata, ToolName, ToolOutput, ToolOutputPart, ToolResult,
+    UncommittedAssistantTurn,
 };
 pub use error::{
     AgentError, BoxError, NoToolsContractViolation, RequestFailure, RequestFailureKind,

@@ -332,7 +332,7 @@ impl FunctionCallItem {
 }
 
 /// ```
-/// use lutum_openai::responses::FunctionCallOutputItem;
+/// use lutum_openai::responses::{FunctionCallOutput, FunctionCallOutputItem};
 /// use serde_json::Value;
 ///
 /// let json = serde_json::from_str::<Value>(
@@ -350,7 +350,7 @@ impl FunctionCallItem {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FunctionCallOutputItem {
     pub call_id: String,
-    pub output: Value,
+    pub output: FunctionCallOutput,
     #[serde(rename = "type")]
     pub item_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -360,14 +360,58 @@ pub struct FunctionCallOutputItem {
 }
 
 impl FunctionCallOutputItem {
-    pub fn new(call_id: impl Into<String>, output: Value) -> Self {
+    pub fn new(call_id: impl Into<String>, output: impl Into<FunctionCallOutput>) -> Self {
         Self {
             call_id: call_id.into(),
-            output,
+            output: output.into(),
             item_type: "function_call_output".to_string(),
             id: None,
             status: None,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FunctionCallOutput {
+    Text(String),
+    Content(Vec<FunctionCallOutputContent>),
+}
+
+impl From<String> for FunctionCallOutput {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for FunctionCallOutput {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+impl From<Vec<FunctionCallOutputContent>> for FunctionCallOutput {
+    fn from(value: Vec<FunctionCallOutputContent>) -> Self {
+        Self::Content(value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FunctionCallOutputContent {
+    InputText(InputTextContent),
+    InputImage(InputImageContent),
+}
+
+impl From<InputTextContent> for FunctionCallOutputContent {
+    fn from(value: InputTextContent) -> Self {
+        Self::InputText(value)
+    }
+}
+
+impl From<InputImageContent> for FunctionCallOutputContent {
+    fn from(value: InputImageContent) -> Self {
+        Self::InputImage(value)
     }
 }
 

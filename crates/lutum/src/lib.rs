@@ -108,10 +108,10 @@ pub use lutum_protocol::{
     TextTurnResultWithTools, TextTurnState, TextTurnStateWithTools, ToolAvailability,
     ToolCallError, ToolCallId, ToolCallItemView, ToolCallWrapper, ToolConstraints, ToolDecision,
     ToolDef, ToolExecutionError, ToolHookOutcome, ToolHooks, ToolInput, ToolMetadata, ToolName,
-    ToolRequirement, ToolResult, ToolResultError, ToolResultItemView, ToolSelector, Toolset,
-    TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView, UncommittedAssistantTurn, Usage,
-    UsageEstimate, UsageRecoveryAdapter, assistant_json, emit_collect_error_enabled,
-    find_tool_call_arguments, raw_collect_errors_enabled,
+    ToolOutput, ToolOutputPart, ToolRequirement, ToolResult, ToolResultError, ToolResultItemView,
+    ToolSelector, Toolset, TurnAdapter, TurnConfig, TurnItemIter, TurnRole, TurnView,
+    UncommittedAssistantTurn, Usage, UsageEstimate, UsageRecoveryAdapter, assistant_json,
+    emit_collect_error_enabled, find_tool_call_arguments, raw_collect_errors_enabled,
 };
 pub use mock::{
     MockCompletionScenario, MockError, MockLlmAdapter, MockStructuredCompletionScenario,

@@ -17,7 +17,8 @@ use lutum_protocol::{
     budget::Usage,
     conversation::{
         AssistantInputItem, EphemeralInputIndices, Image, InputMessageRole, MessageContent,
-        ModelInput, ModelInputItem, RawJson, ToolCallId, ToolMetadata, ToolName, ToolResult,
+        ModelInput, ModelInputItem, RawJson, ToolCallId, ToolMetadata, ToolName, ToolOutput,
+        ToolOutputPart, ToolResult,
     },
     extensions::RequestExtensions,
     llm::{
@@ -46,12 +47,13 @@ use crate::{
     completion::CompletionRequest,
     error::OpenAiError,
     responses::{
-        FunctionCallItem, FunctionCallOutputItem, FunctionToolChoice, InputContent,
-        InputImageContent, InputItem, InputMessage, InputTextContent, MessageRole,
-        OpenAiCommittedTurn, OpenAiReasoningEffort, OpenAiTool, OpenAiTurnItem, OutputTextContent,
-        ReasoningItem, ReasoningText, RefusalContent, ResponseFunctionCallArgumentsDeltaEvent,
-        ResponseFunctionCallArgumentsDoneEvent, ResponseObject, ResponseOutputContent,
-        ResponseOutputItem, SseEvent, SummaryText, TextFormat, ToolChoice,
+        FunctionCallItem, FunctionCallOutput, FunctionCallOutputContent, FunctionCallOutputItem,
+        FunctionToolChoice, InputContent, InputImageContent, InputItem, InputMessage,
+        InputTextContent, MessageRole, OpenAiCommittedTurn, OpenAiReasoningEffort, OpenAiTool,
+        OpenAiTurnItem, OutputTextContent, ReasoningItem, ReasoningText, RefusalContent,
+        ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
+        ResponseObject, ResponseOutputContent, ResponseOutputItem, SseEvent, SummaryText,
+        TextFormat, ToolChoice,
     },
     sse::SseParser,
     transport::{HttpByteStream, HttpClient, HttpError, HttpRequest},
@@ -1247,16 +1249,35 @@ fn lower_tool_result(
     emit_call: bool,
     out: &mut Vec<InputItem>,
 ) -> Result<(), OpenAiError> {
+    lower_tool_result_parts(
+        &tool_result.id,
+        &tool_result.name,
+        &tool_result.arguments,
+        &tool_result.result,
+        emit_call,
+        out,
+    )
+}
+
+fn lower_tool_result_parts(
+    id: &ToolCallId,
+    name: &ToolName,
+    arguments: &RawJson,
+    result: &RawJson,
+    emit_call: bool,
+    out: &mut Vec<InputItem>,
+) -> Result<(), OpenAiError> {
     if emit_call {
         out.push(InputItem::FunctionCall(FunctionCallItem::new(
-            tool_result.id.as_str(),
-            tool_result.name.as_str(),
-            tool_result.arguments.get(),
+            id.as_str(),
+            name.as_str(),
+            arguments.get(),
         )));
     }
+    let parsed_output = parse_tool_output(result)?;
     out.push(InputItem::FunctionCallOutput(FunctionCallOutputItem::new(
-        tool_result.id.as_str(),
-        Value::String(tool_result.result.get().to_string()),
+        id.as_str(),
+        responses_tool_output(result, parsed_output.as_deref()),
     )));
     Ok(())
 }
@@ -1396,15 +1417,14 @@ fn emit_message_turn_from_view(
         if let Some(tool_result) = item.as_tool_result() {
             replayed_tool_call_ids.insert(tool_result.id.clone());
             flush_message(turn_role(role), &mut message_content, out);
-            out.push(InputItem::FunctionCall(FunctionCallItem::new(
-                tool_result.id.as_str(),
-                tool_result.name.as_str(),
-                tool_result.arguments.get(),
-            )));
-            out.push(InputItem::FunctionCallOutput(FunctionCallOutputItem::new(
-                tool_result.id.as_str(),
-                Value::String(tool_result.result.get().to_string()),
-            )));
+            lower_tool_result_parts(
+                tool_result.id,
+                tool_result.name,
+                tool_result.arguments,
+                tool_result.result,
+                true,
+                out,
+            )?;
         }
     }
     flush_message(turn_role(role), &mut message_content, out);
@@ -1473,6 +1493,59 @@ fn image_url(image: &Image) -> String {
         Image::Base64 { data, media_type } => format!("data:{media_type};base64,{data}"),
         Image::Uri(url) => url.to_string(),
     }
+}
+
+fn parse_tool_output(result: &RawJson) -> Result<Option<Vec<ToolOutputPart>>, OpenAiError> {
+    Ok(ToolOutput::from_raw_json(result)?.map(ToolOutput::into_parts))
+}
+
+fn tool_output_has_image(parts: &[ToolOutputPart]) -> bool {
+    parts
+        .iter()
+        .any(|part| matches!(part, ToolOutputPart::Image { .. }))
+}
+
+fn responses_tool_output(result: &RawJson, parts: Option<&[ToolOutputPart]>) -> FunctionCallOutput {
+    parts
+        .map(|parts| {
+            if tool_output_has_image(parts) {
+                FunctionCallOutput::Content(tool_output_function_call_content(parts))
+            } else {
+                FunctionCallOutput::Text(tool_output_text(parts))
+            }
+        })
+        .unwrap_or_else(|| FunctionCallOutput::Text(result.get().to_string()))
+}
+
+fn chat_tool_output_text(result: &RawJson, parts: Option<&[ToolOutputPart]>) -> String {
+    parts
+        .map(tool_output_text)
+        .unwrap_or_else(|| result.get().to_string())
+}
+
+fn tool_output_text(parts: &[ToolOutputPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ToolOutputPart::Text { text } => Some(text.as_str()),
+            ToolOutputPart::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn tool_output_function_call_content(parts: &[ToolOutputPart]) -> Vec<FunctionCallOutputContent> {
+    parts
+        .iter()
+        .map(|part| match part {
+            ToolOutputPart::Text { text } => {
+                FunctionCallOutputContent::InputText(InputTextContent::new(text))
+            }
+            ToolOutputPart::Image { image } => {
+                FunctionCallOutputContent::InputImage(InputImageContent::new(image_url(image)))
+            }
+        })
+        .collect()
 }
 
 fn unsupported_openai_image_role(role: &InputMessageRole) -> OpenAiError {
@@ -2973,6 +3046,7 @@ fn convert_model_input_to_chat_messages(
 ) -> Result<ChatCompilation, OpenAiError> {
     let mut compilation = ChatCompilation::default();
     let mut pending_assistant: Option<PendingChatAssistant> = None;
+    let mut replayed_tool_call_ids = BTreeSet::new();
 
     for (source_index, item) in input.items().iter().enumerate() {
         match item {
@@ -3020,14 +3094,9 @@ fn convert_model_input_to_chat_messages(
             }
             ModelInputItem::ToolResult(tool_result) => {
                 flush_pending_chat_assistant(&mut pending_assistant, &mut compilation);
-                push_chat_message(
-                    &mut compilation,
-                    ChatMessageParam::Tool(ChatToolMessage {
-                        content: ChatTextContent::Text(tool_result.result.get().to_string()),
-                        tool_call_id: tool_result.id.as_str().to_string(),
-                    }),
-                    vec![source_index],
-                );
+                let emit_call = !replayed_tool_call_ids.contains(&tool_result.id);
+                push_chat_tool_result(&mut compilation, tool_result, emit_call, source_index)?;
+                replayed_tool_call_ids.insert(tool_result.id.clone());
             }
             ModelInputItem::Turn(committed_turn) => {
                 flush_pending_chat_assistant(&mut pending_assistant, &mut compilation);
@@ -3037,8 +3106,13 @@ fn convert_model_input_to_chat_messages(
                     .as_any()
                     .downcast_ref::<OpenAiCommittedTurn>()
                 {
+                    record_openai_turn_tool_calls(openai_turn, &mut replayed_tool_call_ids);
                     emit_openai_turn_as_chat_messages(openai_turn, &mut compilation, source_index);
                 } else {
+                    record_turn_view_tool_calls(
+                        committed_turn.as_ref(),
+                        &mut replayed_tool_call_ids,
+                    );
                     emit_turn_view_as_chat_messages(
                         committed_turn.as_ref(),
                         &mut compilation,
@@ -3059,6 +3133,82 @@ fn push_chat_message(
 ) {
     compilation.messages.push(message);
     compilation.message_sources.push(source_indices);
+}
+
+fn push_chat_tool_result(
+    compilation: &mut ChatCompilation,
+    tool_result: &ToolResult,
+    emit_call: bool,
+    source_index: usize,
+) -> Result<(), OpenAiError> {
+    if emit_call {
+        push_chat_message(
+            compilation,
+            ChatMessageParam::Assistant(ChatAssistantMessage {
+                content: None,
+                refusal: None,
+                audio: None,
+                name: None,
+                tool_calls: Some(vec![ChatMessageToolCall::Function(
+                    ChatMessageFunctionToolCall {
+                        id: tool_result.id.as_str().to_string(),
+                        type_: "function".to_string(),
+                        function: ChatFunctionCallArgs {
+                            name: tool_result.name.as_str().to_string(),
+                            arguments: tool_result.arguments.get().to_string(),
+                        },
+                    },
+                )]),
+                function_call: None,
+            }),
+            vec![source_index],
+        );
+    }
+
+    let parsed_output = parse_tool_output(&tool_result.result)?;
+    push_chat_message(
+        compilation,
+        ChatMessageParam::Tool(ChatToolMessage {
+            content: ChatTextContent::Text(chat_tool_output_text(
+                &tool_result.result,
+                parsed_output.as_deref(),
+            )),
+            tool_call_id: tool_result.id.as_str().to_string(),
+        }),
+        vec![source_index],
+    );
+    if let Some(parts) = parsed_output.as_deref()
+        && tool_output_has_image(parts)
+    {
+        push_chat_message(
+            compilation,
+            ChatMessageParam::User(ChatUserMessage {
+                content: ChatUserContent::Parts(tool_output_chat_content(parts)),
+                name: None,
+            }),
+            vec![source_index],
+        );
+    }
+    Ok(())
+}
+
+fn record_openai_turn_tool_calls(turn: &OpenAiCommittedTurn, out: &mut BTreeSet<ToolCallId>) {
+    for item in &turn.items {
+        if let OpenAiTurnItem::ToolCall { id, .. } = item {
+            out.insert(id.clone());
+        }
+    }
+}
+
+fn record_turn_view_tool_calls(turn: &dyn TurnView, out: &mut BTreeSet<ToolCallId>) {
+    for index in 0..turn.item_count() {
+        let Some(item) = turn.item_at(index) else {
+            continue;
+        };
+        if let Some(tool_call) = item.as_tool_call() {
+            out.insert(tool_call.id.clone());
+        }
+    }
 }
 
 fn pending_chat_assistant(pending: &mut Option<PendingChatAssistant>) -> &mut PendingChatAssistant {
@@ -3134,6 +3284,16 @@ fn chat_user_content<'a>(content: impl IntoIterator<Item = &'a MessageContent>) 
             })
             .collect(),
     )
+}
+
+fn tool_output_chat_content(parts: &[ToolOutputPart]) -> Vec<ChatContentPart> {
+    parts
+        .iter()
+        .map(|part| match part {
+            ToolOutputPart::Text { text } => ChatContentPart::Text { text: text.clone() },
+            ToolOutputPart::Image { image } => chat_image_part(image),
+        })
+        .collect()
 }
 
 fn push_assistant_text_content(msg: &mut ChatAssistantMessage, text: &str) {
@@ -5177,6 +5337,52 @@ mod tests {
     }
 
     #[test]
+    fn convert_model_input_maps_image_tool_output_for_responses() {
+        let tool_output = ToolOutput::parts([
+            ToolOutputPart::text("plot generated"),
+            ToolOutputPart::image(Image::Base64 {
+                data: "abc123".into(),
+                media_type: "image/jpeg".into(),
+            }),
+        ]);
+        let input = ModelInput::from_items(vec![ModelInputItem::ToolResult(ToolResult::new(
+            "call-1",
+            "plot",
+            RawJson::parse("{}").unwrap(),
+            RawJson::from_serializable(&tool_output).unwrap(),
+        ))]);
+
+        let items = convert_model_input(&input).unwrap();
+
+        assert!(matches!(&items[0], InputItem::FunctionCall(_)));
+        let InputItem::FunctionCallOutput(FunctionCallOutputItem { output, .. }) = &items[1] else {
+            panic!("expected function call output");
+        };
+        assert_eq!(
+            output,
+            &FunctionCallOutput::Content(vec![
+                FunctionCallOutputContent::InputText(InputTextContent::new("plot generated")),
+                FunctionCallOutputContent::InputImage(InputImageContent::new(
+                    "data:image/jpeg;base64,abc123"
+                )),
+            ])
+        );
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn convert_model_input_rejects_malformed_marked_tool_output() {
+        let input = ModelInput::from_items(vec![ModelInputItem::ToolResult(ToolResult::new(
+            "call-1",
+            "plot",
+            RawJson::parse("{}").unwrap(),
+            RawJson::parse(r#"{"__lutum_tool_output":"lutum.tool_output.v1"}"#).unwrap(),
+        ))]);
+
+        assert!(convert_model_input(&input).is_err());
+    }
+
+    #[test]
     fn convert_model_input_to_chat_messages_maps_user_and_assistant_images() {
         let input = ModelInput::from_items(vec![
             ModelInputItem::message(
@@ -5221,6 +5427,55 @@ mod tests {
             &assistant_parts[1],
             AssistantContentPart::ImageUrl { image_url }
                 if image_url.url == "data:image/jpeg;base64,abc123"
+        ));
+    }
+
+    #[test]
+    fn convert_model_input_to_chat_messages_maps_image_tool_output() {
+        let tool_output = ToolOutput::parts([
+            ToolOutputPart::text("plot generated"),
+            ToolOutputPart::image(Image::Base64 {
+                data: "abc123".into(),
+                media_type: "image/png".into(),
+            }),
+        ]);
+        let input = ModelInput::from_items(vec![ModelInputItem::ToolResult(ToolResult::new(
+            "call-1",
+            "plot",
+            RawJson::parse("{}").unwrap(),
+            RawJson::from_serializable(&tool_output).unwrap(),
+        ))]);
+
+        let compilation = convert_model_input_to_chat_messages(&input).unwrap();
+        let messages = compilation.messages;
+
+        assert!(matches!(
+            &messages[0],
+            ChatMessageParam::Assistant(ChatAssistantMessage { tool_calls: Some(tool_calls), .. })
+                if matches!(
+                    &tool_calls[0],
+                    ChatMessageToolCall::Function(call) if call.id == "call-1"
+                )
+        ));
+        assert!(matches!(
+            &messages[1],
+            ChatMessageParam::Tool(ChatToolMessage { content: ChatTextContent::Text(text), .. })
+                if text == "plot generated"
+        ));
+        let ChatMessageParam::User(user_message) = &messages[2] else {
+            panic!("expected user image message");
+        };
+        let ChatUserContent::Parts(parts) = &user_message.content else {
+            panic!("expected user content parts");
+        };
+        assert!(matches!(
+            &parts[0],
+            ChatContentPart::Text { text } if text == "plot generated"
+        ));
+        assert!(matches!(
+            &parts[1],
+            ChatContentPart::ImageUrl { image_url }
+                if image_url.url == "data:image/png;base64,abc123"
         ));
     }
 
