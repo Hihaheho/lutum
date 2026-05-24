@@ -205,6 +205,31 @@ where
 pub struct StructuredOutputSpec<O: StructuredOutput> {
     #[builder(skip = PhantomData)]
     _marker: PhantomData<fn() -> O>,
+    pub schema_name: Option<String>,
+    pub schema: Option<serde_json::Value>,
+}
+
+impl<O> StructuredOutputSpec<O>
+where
+    O: StructuredOutput,
+{
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Override the JSON Schema sent to the model for this structured output.
+    ///
+    /// The model response is still deserialized as `O`. Use `serde_json::Value`
+    /// as `O` when both the schema and the decoded shape are runtime-defined.
+    pub fn with_json_schema(
+        mut self,
+        schema_name: impl Into<String>,
+        schema: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.schema_name = Some(schema_name.into());
+        self.schema = Some(schema.into());
+        self
+    }
 }
 
 impl<O> Default for StructuredOutputSpec<O>
@@ -214,6 +239,8 @@ where
     fn default() -> Self {
         Self {
             _marker: PhantomData,
+            schema_name: None,
+            schema: None,
         }
     }
 }
@@ -236,6 +263,15 @@ where
             config: TurnConfig::new(),
             output: StructuredOutputSpec::default(),
         }
+    }
+
+    pub fn with_output_schema(
+        mut self,
+        schema_name: impl Into<String>,
+        schema: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.output = self.output.with_json_schema(schema_name, schema);
+        self
     }
 }
 
@@ -279,6 +315,15 @@ where
 
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
         self.system = Some(system.into());
+        self
+    }
+
+    pub fn with_output_schema(
+        mut self,
+        schema_name: impl Into<String>,
+        schema: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.output = self.output.with_json_schema(schema_name, schema);
         self
     }
 }

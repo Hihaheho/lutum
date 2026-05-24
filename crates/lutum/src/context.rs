@@ -4743,13 +4743,11 @@ where
     T: Toolset,
     O: StructuredOutput,
 {
+    let output = erase_structured_output_spec(turn.output)?;
     Ok(AdapterStructuredTurn {
         config: erase_turn_config(turn.config)?,
         extensions,
-        output: AdapterStructuredOutputSpec {
-            schema_name: <O as StructuredOutput>::schema_name().into_owned(),
-            schema: serde_json::to_value(<O as StructuredOutput>::json_schema())?,
-        },
+        output,
     })
 }
 
@@ -4759,13 +4757,28 @@ fn erase_structured_completion_request<O>(
 where
     O: StructuredOutput,
 {
+    let output = erase_structured_output_spec(request.output)?;
     Ok(AdapterStructuredCompletionRequest {
         system: request.system,
         prompt: request.prompt,
         generation: request.generation,
-        output: AdapterStructuredOutputSpec {
-            schema_name: <O as StructuredOutput>::schema_name().into_owned(),
-            schema: serde_json::to_value(<O as StructuredOutput>::json_schema())?,
+        output,
+    })
+}
+
+fn erase_structured_output_spec<O>(
+    output: lutum_protocol::StructuredOutputSpec<O>,
+) -> Result<AdapterStructuredOutputSpec, AgentError>
+where
+    O: StructuredOutput,
+{
+    Ok(AdapterStructuredOutputSpec {
+        schema_name: output
+            .schema_name
+            .unwrap_or_else(|| <O as StructuredOutput>::schema_name().into_owned()),
+        schema: match output.schema {
+            Some(schema) => schema,
+            None => serde_json::to_value(<O as StructuredOutput>::json_schema())?,
         },
     })
 }

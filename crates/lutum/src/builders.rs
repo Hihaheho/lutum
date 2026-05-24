@@ -634,6 +634,19 @@ where
         self
     }
 
+    /// Override the JSON Schema sent to the model for this structured output.
+    ///
+    /// The response is still deserialized as `O`. Use `serde_json::Value` as
+    /// `O` when both the schema and decoded shape are runtime-defined.
+    pub fn output_schema(
+        mut self,
+        schema_name: impl Into<String>,
+        schema: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.turn.output = self.turn.output.with_json_schema(schema_name, schema);
+        self
+    }
+
     pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.extensions.insert(retry_policy);
         self
@@ -856,6 +869,19 @@ where
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.turn.config.generation = generation;
+        self
+    }
+
+    /// Override the JSON Schema sent to the model for this structured output.
+    ///
+    /// The response is still deserialized as `O`. Use `serde_json::Value` as
+    /// `O` when both the schema and decoded shape are runtime-defined.
+    pub fn output_schema(
+        mut self,
+        schema_name: impl Into<String>,
+        schema: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.turn.output = self.turn.output.with_json_schema(schema_name, schema);
         self
     }
 
@@ -1329,6 +1355,19 @@ where
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.request.generation = generation;
+        self
+    }
+
+    /// Override the JSON Schema sent to the model for this structured output.
+    ///
+    /// The response is still deserialized as `O`. Use `serde_json::Value` as
+    /// `O` when both the schema and decoded shape are runtime-defined.
+    pub fn output_schema(
+        mut self,
+        schema_name: impl Into<String>,
+        schema: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.request.output = self.request.output.with_json_schema(schema_name, schema);
         self
     }
 

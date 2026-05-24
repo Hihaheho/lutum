@@ -75,7 +75,7 @@ pub use lutum_protocol::{
     AssistantInputItem, AssistantTurn, AssistantTurnInputError, AssistantTurnItem,
     AssistantTurnView, BackoffPolicy, BudgetLease, BudgetManager, CollectErrorKind, CommittedTurn,
     CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionOptions,
-    CompletionReducer, CompletionReductionError, CompletionRequest,     CompletionTurnResult,
+    CompletionReducer, CompletionReductionError, CompletionRequest, CompletionTurnResult,
     CompletionTurnState, ContinueSuggestionReason, DynamicTool, DynamicToolCall,
     EmptyNonEmptyError, EphemeralInputIndices, EphemeralTurnView, ErasedStructuredCompletionEvent,
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEvent,

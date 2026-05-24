@@ -202,3 +202,38 @@ matters more than creative variation.
 ```
 
 }
+
+@ "dynamic-schema" {
+  "##": Dynamic JSON Schema
+
+  "body" = ```markdown
+When the output shape is known only at runtime, override the schema sent to the provider with
+`.output_schema(name, schema)`. The decoded type is still `O`; use `serde_json::Value` when the
+decoded shape is runtime-defined too:
+```
+
+  "rust-example" = ```rust
+let schema = serde_json::json!({
+    "type": "object",
+    "properties": {
+        "email": { "type": "string" }
+    },
+    "required": ["email"],
+    "additionalProperties": false
+});
+
+let result = llm
+    .structured_turn::<serde_json::Value>(
+        lutum::ModelInput::new().user("Extract the email address.")
+    )
+    .output_schema("runtime_contact", schema)
+    .collect()
+    .await?;
+```
+
+  "body-2" = ```markdown
+The same `.output_schema(name, schema)` method is available on `structured_completion` and on
+tool-enabled structured turns.
+```
+
+}
