@@ -663,6 +663,57 @@ pub enum TextStepOutcomeWithTools<T: Toolset> {
     NeedsTools(UncommittedToolRound<T>),
 }
 
+#[derive(Debug)]
+pub enum StagedTextStepOutcomeWithTools<T: Toolset> {
+    /// The model finished without requesting tool calls. The assistant turn is not committed.
+    Finished(StagedTextTurnResultWithTools<T>),
+    /// The model completed normally without emitting assistant text, reasoning, refusal, or tool calls.
+    FinishedNoOutput(NoOutputTextTurnResult),
+    /// The model requested tool calls. Execute them, then call `round.commit(&mut session, uses)`.
+    NeedsTools(UncommittedToolRound<T>),
+}
+
+impl<T> StagedTextStepOutcomeWithTools<T>
+where
+    T: Toolset,
+{
+    pub(crate) fn from_staged(staged: StagedTextTurnOutcomeWithTools<T>) -> Self {
+        let staged = match staged {
+            StagedTextTurnOutcomeWithTools::Turn(staged) => staged,
+            StagedTextTurnOutcomeWithTools::FinishedNoOutput(result) => {
+                return Self::FinishedNoOutput(result);
+            }
+        };
+
+        if !staged.tool_calls.is_empty() || !staged.recoverable_tool_call_issues.is_empty() {
+            let StagedTextTurnResultWithTools {
+                request_id,
+                model,
+                turn,
+                tool_calls,
+                recoverable_tool_call_issues,
+                continue_suggestion,
+                finish_reason,
+                usage,
+                cumulative_usage,
+            } = staged;
+            Self::NeedsTools(UncommittedToolRound {
+                request_id,
+                model,
+                turn,
+                tool_calls,
+                recoverable_tool_call_issues,
+                finish_reason,
+                usage,
+                cumulative_usage,
+                continue_suggestion,
+            })
+        } else {
+            Self::Finished(staged)
+        }
+    }
+}
+
 impl<T> TextStepOutcomeWithTools<T>
 where
     T: Toolset,
@@ -678,9 +729,7 @@ where
             }
         };
 
-        if staged.finish_reason == FinishReason::ToolCall
-            && (!staged.tool_calls.is_empty() || !staged.recoverable_tool_call_issues.is_empty())
-        {
+        if !staged.tool_calls.is_empty() || !staged.recoverable_tool_call_issues.is_empty() {
             let StagedTextTurnResultWithTools {
                 request_id,
                 model,

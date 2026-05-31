@@ -11,9 +11,10 @@ use thiserror::Error;
 use tracing::{Instrument, Span, field};
 
 use lutum_protocol::{
-    AgentError, AssistantInputItem, CommittedTurn, NoTools, NoToolsContractViolation,
+    AgentError, AssistantInputItem, AssistantTurnItem, AssistantTurnView, CommittedTurn, NoTools,
+    NoToolsContractViolation, UncommittedAssistantTurn,
     budget::{BudgetLease, BudgetManager, Remaining, Usage, UsageEstimate},
-    conversation::{MessageContent, ModelInput, ModelInputItem},
+    conversation::{MessageContent, ModelInput, ModelInputItem, ToolMetadata},
     error::RequestFailure,
     extensions::RequestExtensions,
     llm::{
@@ -33,19 +34,21 @@ use lutum_protocol::{
     reducer::{
         CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
         StagedStructuredTurnResult, StagedStructuredTurnResultWithTools,
-        StagedTextTurnOutcomeWithTools, StagedTextTurnResult, StructuredCompletionReducer,
-        StructuredCompletionReductionError, StructuredCompletionResult, StructuredCompletionState,
-        StructuredTurnReducer, StructuredTurnReducerWithTools, StructuredTurnReductionError,
-        StructuredTurnState, StructuredTurnStateWithTools, TextTurnReducer,
-        TextTurnReducerWithTools, TextTurnReductionError, TextTurnState, TextTurnStateWithTools,
+        StagedTextTurnOutcomeWithTools, StagedTextTurnResult, StagedTextTurnResultWithTools,
+        StructuredCompletionReducer, StructuredCompletionReductionError,
+        StructuredCompletionResult, StructuredCompletionState, StructuredTurnReducer,
+        StructuredTurnReducerWithTools, StructuredTurnReductionError, StructuredTurnState,
+        StructuredTurnStateWithTools, TextTurnReducer, TextTurnReducerWithTools,
+        TextTurnReductionError, TextTurnState, TextTurnStateWithTools,
     },
     structured::StructuredOutput,
     telemetry::{
         CollectErrorKind, RawTelemetryConfig, emit_collect_error, raw_collect_errors_enabled,
     },
     toolset::{
-        RecoverableToolCallIssue, ToolAvailability, ToolConstraints, ToolRequirement, ToolSelector,
-        Toolset,
+        RecoverableToolCallIssue, RecoveredTextToolCalls, TextToolCallFallbackContext,
+        TextToolCallFallbackParser, ToolAvailability, ToolCallFallbackError, ToolCallWrapper,
+        ToolConstraints, ToolRequirement, ToolSelector, Toolset,
     },
 };
 
@@ -555,8 +558,11 @@ where
     hooks: Arc<LutumHooksSet<'static>>,
     input: ModelInput,
     turn: AdapterTextTurn,
+    tool_constraints: ToolConstraints<T>,
+    tool_definitions: Vec<AdapterToolDefinition>,
     availability: ToolAvailability<T::Selector>,
     dynamic_names: Vec<String>,
+    fallback_parser: Option<Arc<dyn TextToolCallFallbackParser<T>>>,
     estimate: UsageEstimate,
     retry_policy: RetryPolicy,
     span: Span,
@@ -832,6 +838,7 @@ impl Lutum {
         extensions: RequestExtensions,
         input: ModelInput,
         turn: ProtocolTextTurn<T>,
+        fallback_parser: Option<Arc<dyn TextToolCallFallbackParser<T>>>,
     ) -> Result<PendingTextTurnWithTools<T>, LutumError>
     where
         T: Toolset,
@@ -844,6 +851,12 @@ impl Lutum {
         let max_output_tokens = turn.config.generation.max_output_tokens;
         // Extract availability before erase_text_turn consumes the turn config.
         let availability = turn.config.tools.available.clone();
+        let tool_constraints = ToolConstraints {
+            available: turn.config.tools.available.clone(),
+            requirement: turn.config.tools.requirement.clone(),
+            description_overrides: turn.config.tools.description_overrides.clone(),
+            dynamic_tools: turn.config.tools.dynamic_tools.clone(),
+        };
         let dynamic_names = turn
             .config
             .tools
@@ -853,6 +866,7 @@ impl Lutum {
             .collect::<Vec<_>>();
         let extensions = Arc::new(extensions);
         let turn = erase_text_turn(turn, Arc::clone(&extensions))?;
+        let tool_definitions = turn.config.tools.clone();
         let estimate = self
             .estimate_text_turn_usage(extensions.as_ref(), &input, &turn, max_output_tokens)
             .await?;
@@ -875,8 +889,11 @@ impl Lutum {
             hooks: Arc::clone(&self.hooks),
             input,
             turn,
+            tool_constraints,
+            tool_definitions,
             availability,
             dynamic_names,
+            fallback_parser,
             estimate,
             retry_policy,
             span,
@@ -2060,7 +2077,27 @@ where
                                             result.cumulative_usage = next_cumulative_usage;
                                         }
                                     }
-                                    Ok(outcome)
+                                    match recover_required_text_tool_outcome(
+                                        outcome,
+                                        &partial,
+                                        self.fallback_parser.as_deref(),
+                                        &self.tool_constraints,
+                                        &self.tool_definitions,
+                                        self.extensions.as_ref(),
+                                    ) {
+                                        Ok(outcome) => Ok(outcome),
+                                        Err(source) => {
+                                            emit_raw_collect_error(
+                                                self.extensions.as_ref(),
+                                                OperationKind::TextTurn,
+                                                partial.request_id.as_deref(),
+                                                CollectErrorKind::Reduction,
+                                                summarize_text_state_with_tools(&partial),
+                                                source.to_string(),
+                                            );
+                                            Err(CollectError::Reduction { source, partial })
+                                        }
+                                    }
                                 }
                                 Err(source) => {
                                     emit_raw_collect_error(
@@ -2355,6 +2392,232 @@ where
             remaining_budget: self.owned_lease.budget.remaining(self.extensions.as_ref()),
         };
         handler.on_event(event, &cx).await
+    }
+}
+
+fn recover_required_text_tool_outcome<T>(
+    outcome: StagedTextTurnOutcomeWithTools<T>,
+    partial: &TextTurnStateWithTools<T>,
+    fallback_parser: Option<&dyn TextToolCallFallbackParser<T>>,
+    constraints: &ToolConstraints<T>,
+    tool_definitions: &[AdapterToolDefinition],
+    extensions: &RequestExtensions,
+) -> Result<StagedTextTurnOutcomeWithTools<T>, TextTurnReductionError>
+where
+    T: Toolset,
+{
+    if matches!(constraints.requirement, ToolRequirement::Optional) {
+        return Ok(outcome);
+    }
+
+    match outcome {
+        StagedTextTurnOutcomeWithTools::FinishedNoOutput(result) => {
+            Err(unmet_tool_requirement_error::<T>(
+                result.model,
+                result.request_id,
+                &constraints.requirement,
+                partial.event_count,
+            ))
+        }
+        StagedTextTurnOutcomeWithTools::Turn(staged)
+            if !staged.tool_calls.is_empty() || !staged.recoverable_tool_call_issues.is_empty() =>
+        {
+            Ok(StagedTextTurnOutcomeWithTools::Turn(staged))
+        }
+        StagedTextTurnOutcomeWithTools::Turn(staged) => recover_required_text_tool_turn(
+            staged,
+            partial,
+            fallback_parser,
+            constraints,
+            tool_definitions,
+            extensions,
+        )
+        .map(StagedTextTurnOutcomeWithTools::Turn),
+    }
+}
+
+fn recover_required_text_tool_turn<T>(
+    staged: StagedTextTurnResultWithTools<T>,
+    partial: &TextTurnStateWithTools<T>,
+    fallback_parser: Option<&dyn TextToolCallFallbackParser<T>>,
+    constraints: &ToolConstraints<T>,
+    tool_definitions: &[AdapterToolDefinition],
+    extensions: &RequestExtensions,
+) -> Result<StagedTextTurnResultWithTools<T>, TextTurnReductionError>
+where
+    T: Toolset,
+{
+    let Some(fallback_parser) = fallback_parser else {
+        return Err(unmet_tool_requirement_error::<T>(
+            staged.model,
+            staged.request_id,
+            &constraints.requirement,
+            partial.event_count,
+        ));
+    };
+
+    let cx = TextToolCallFallbackContext {
+        assistant_turn: staged.turn.assistant_turn(),
+        constraints,
+        tool_definitions,
+        requirement: &constraints.requirement,
+        request_id: staged.request_id.as_deref(),
+        model: staged.model.as_str(),
+        finish_reason: staged.finish_reason.clone(),
+        usage: staged.usage,
+        event_count: partial.event_count,
+        extensions,
+    };
+    let recovered = fallback_parser
+        .parse_fallback_tool_calls(&cx)
+        .map_err(|source| tool_fallback_error(&staged, partial.event_count, source))?
+        .ok_or_else(|| {
+            tool_fallback_error(
+                &staged,
+                partial.event_count,
+                ToolCallFallbackError::NoToolCall,
+            )
+        })?;
+    let recovered =
+        validate_recovered_text_tool_calls(recovered, &constraints.requirement, tool_definitions)
+            .map_err(|source| tool_fallback_error(&staged, partial.event_count, source))?;
+
+    let committed_turn = Arc::new(AssistantTurnView::from_items(
+        recovered.assistant_turn.items(),
+    )) as CommittedTurn;
+    let turn = UncommittedAssistantTurn::new(recovered.assistant_turn, committed_turn);
+
+    Ok(StagedTextTurnResultWithTools {
+        request_id: staged.request_id,
+        model: staged.model,
+        turn,
+        tool_calls: recovered.tool_calls,
+        recoverable_tool_call_issues: staged.recoverable_tool_call_issues,
+        continue_suggestion: staged.continue_suggestion,
+        finish_reason: staged.finish_reason,
+        usage: staged.usage,
+        cumulative_usage: staged.cumulative_usage,
+    })
+}
+
+fn validate_recovered_text_tool_calls<T>(
+    recovered: RecoveredTextToolCalls<T>,
+    requirement: &ToolRequirement<T::Selector>,
+    tool_definitions: &[AdapterToolDefinition],
+) -> Result<RecoveredTextToolCalls<T>, ToolCallFallbackError>
+where
+    T: Toolset,
+{
+    let assistant_tool_calls = recovered
+        .assistant_turn
+        .items()
+        .iter()
+        .filter_map(assistant_item_tool_metadata)
+        .collect::<Vec<_>>();
+
+    if assistant_tool_calls.is_empty() {
+        return Err(ToolCallFallbackError::NoToolCall);
+    }
+    if assistant_tool_calls.len() != recovered.tool_calls.len() {
+        return Err(ToolCallFallbackError::ToolCallCountMismatch {
+            assistant_tool_calls: assistant_tool_calls.len(),
+            tool_calls: recovered.tool_calls.len(),
+        });
+    }
+
+    for (index, (metadata, tool_call)) in assistant_tool_calls
+        .iter()
+        .zip(recovered.tool_calls.iter())
+        .enumerate()
+    {
+        if !tool_definitions
+            .iter()
+            .any(|definition| definition.name == metadata.name.as_str())
+        {
+            return Err(ToolCallFallbackError::UnavailableTool {
+                name: metadata.name.as_str().to_string(),
+            });
+        }
+
+        if let ToolRequirement::Specific(selector) = requirement {
+            let expected = selector.name();
+            if metadata.name.as_str() != expected {
+                return Err(ToolCallFallbackError::WrongRequiredTool {
+                    expected: expected.to_string(),
+                    actual: metadata.name.as_str().to_string(),
+                });
+            }
+        }
+
+        let typed_metadata = tool_call.metadata();
+        if typed_metadata.id != metadata.id
+            || typed_metadata.name != metadata.name
+            || typed_metadata.arguments != metadata.arguments
+        {
+            return Err(ToolCallFallbackError::MismatchedTypedCall { index });
+        }
+    }
+
+    Ok(recovered)
+}
+
+fn assistant_item_tool_metadata(item: &AssistantTurnItem) -> Option<ToolMetadata> {
+    let AssistantTurnItem::ToolCall {
+        id,
+        name,
+        arguments,
+    } = item
+    else {
+        return None;
+    };
+    Some(ToolMetadata::new(
+        id.clone(),
+        name.clone(),
+        arguments.clone(),
+    ))
+}
+
+fn unmet_tool_requirement_error<T>(
+    model: String,
+    request_id: Option<String>,
+    requirement: &ToolRequirement<T::Selector>,
+    event_count: u32,
+) -> TextTurnReductionError
+where
+    T: Toolset,
+{
+    TextTurnReductionError::UnmetToolRequirement {
+        model,
+        request_id,
+        requirement: tool_requirement_label::<T>(requirement),
+        event_count,
+    }
+}
+
+fn tool_fallback_error<T>(
+    staged: &StagedTextTurnResultWithTools<T>,
+    event_count: u32,
+    source: ToolCallFallbackError,
+) -> TextTurnReductionError
+where
+    T: Toolset,
+{
+    TextTurnReductionError::ToolCallFallback {
+        model: staged.model.clone(),
+        request_id: staged.request_id.clone(),
+        event_count,
+        source,
+    }
+}
+
+fn tool_requirement_label<T>(requirement: &ToolRequirement<T::Selector>) -> String
+where
+    T: Toolset,
+{
+    match requirement {
+        ToolRequirement::Optional => "optional".to_string(),
+        ToolRequirement::AtLeastOne => "at_least_one".to_string(),
+        ToolRequirement::Specific(selector) => format!("specific:{}", selector.name()),
     }
 }
 

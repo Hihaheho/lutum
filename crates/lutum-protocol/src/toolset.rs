@@ -5,8 +5,13 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use crate::{
-    conversation::{REJECTED_TOOL_RESULT_PREFIX, ToolMetadata, ToolResult},
+    budget::Usage,
+    conversation::{
+        AssistantTurn, AssistantTurnItem, REJECTED_TOOL_RESULT_PREFIX, ToolMetadata, ToolResult,
+    },
+    extensions::RequestExtensions,
     hooks::{HookFuture, HookObject, boxed_hook_future},
+    llm::{AdapterToolDefinition, FinishReason},
 };
 
 #[derive(Clone, Copy)]
@@ -432,6 +437,136 @@ pub trait ToolCallWrapper {
 impl ToolCallWrapper for std::convert::Infallible {
     fn metadata(&self) -> &ToolMetadata {
         match *self {}
+    }
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum ToolCallFallbackError {
+    #[error("fallback parser did not recover any tool calls")]
+    NoToolCall,
+    #[error("fallback parser returned an empty assistant turn")]
+    EmptyAssistantTurn,
+    #[error("fallback parser recovered unavailable tool `{name}`")]
+    UnavailableTool { name: String },
+    #[error("fallback parser recovered `{actual}` but required `{expected}`")]
+    WrongRequiredTool { expected: String, actual: String },
+    #[error(
+        "fallback parser returned {tool_calls} typed calls but assistant turn contains {assistant_tool_calls} tool-call items"
+    )]
+    ToolCallCountMismatch {
+        assistant_tool_calls: usize,
+        tool_calls: usize,
+    },
+    #[error("fallback parser recovered inconsistent typed call metadata at index {index}")]
+    MismatchedTypedCall { index: usize },
+    #[error("fallback parser could not parse recovered tool call `{name}`: {message}")]
+    ToolCallParse { name: String, message: String },
+    #[error("fallback parser failed: {message}")]
+    Parser { message: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct RecoveredTextToolCalls<T: Toolset> {
+    pub assistant_turn: AssistantTurn,
+    pub tool_calls: Vec<T::ToolCall>,
+}
+
+impl<T> RecoveredTextToolCalls<T>
+where
+    T: Toolset,
+{
+    pub fn new(assistant_turn: AssistantTurn, tool_calls: Vec<T::ToolCall>) -> Self {
+        Self {
+            assistant_turn,
+            tool_calls,
+        }
+    }
+
+    pub fn from_parts(
+        items: Vec<AssistantTurnItem>,
+        tool_calls: Vec<T::ToolCall>,
+    ) -> Result<Self, ToolCallFallbackError> {
+        let assistant_turn = AssistantTurn::from_items(items)
+            .map_err(|_| ToolCallFallbackError::EmptyAssistantTurn)?;
+        Ok(Self::new(assistant_turn, tool_calls))
+    }
+
+    pub fn from_items(items: Vec<AssistantTurnItem>) -> Result<Self, ToolCallFallbackError> {
+        let assistant_turn = AssistantTurn::from_items(items)
+            .map_err(|_| ToolCallFallbackError::EmptyAssistantTurn)?;
+        Self::from_assistant_turn(assistant_turn)
+    }
+
+    pub fn from_assistant_turn(
+        assistant_turn: AssistantTurn,
+    ) -> Result<Self, ToolCallFallbackError> {
+        let mut tool_calls = Vec::new();
+        for item in assistant_turn.items() {
+            let AssistantTurnItem::ToolCall {
+                id,
+                name,
+                arguments,
+            } = item
+            else {
+                continue;
+            };
+            let metadata = ToolMetadata::new(id.clone(), name.clone(), arguments.clone());
+            let tool_name = name.as_str().to_string();
+            let tool_call = T::parse_tool_call(metadata).map_err(|source| {
+                ToolCallFallbackError::ToolCallParse {
+                    name: tool_name,
+                    message: source.to_string(),
+                }
+            })?;
+            tool_calls.push(tool_call);
+        }
+
+        Ok(Self::new(assistant_turn, tool_calls))
+    }
+}
+
+pub struct TextToolCallFallbackContext<'a, T: Toolset> {
+    pub assistant_turn: &'a AssistantTurn,
+    pub constraints: &'a ToolConstraints<T>,
+    pub tool_definitions: &'a [AdapterToolDefinition],
+    pub requirement: &'a ToolRequirement<T::Selector>,
+    pub request_id: Option<&'a str>,
+    pub model: &'a str,
+    pub finish_reason: FinishReason,
+    pub usage: Usage,
+    pub event_count: u32,
+    pub extensions: &'a RequestExtensions,
+}
+
+impl<'a, T> TextToolCallFallbackContext<'a, T>
+where
+    T: Toolset,
+{
+    pub fn assistant_text(&self) -> String {
+        self.assistant_turn.assistant_text()
+    }
+}
+
+pub trait TextToolCallFallbackParser<T: Toolset>: HookObject {
+    fn parse_fallback_tool_calls(
+        &self,
+        cx: &TextToolCallFallbackContext<'_, T>,
+    ) -> Result<Option<RecoveredTextToolCalls<T>>, ToolCallFallbackError>;
+}
+
+impl<T, F> TextToolCallFallbackParser<T> for F
+where
+    T: Toolset,
+    F: Fn(
+            &TextToolCallFallbackContext<'_, T>,
+        ) -> Result<Option<RecoveredTextToolCalls<T>>, ToolCallFallbackError>
+        + HookObject,
+{
+    fn parse_fallback_tool_calls(
+        &self,
+        cx: &TextToolCallFallbackContext<'_, T>,
+    ) -> Result<Option<RecoveredTextToolCalls<T>>, ToolCallFallbackError> {
+        self(cx)
     }
 }
 

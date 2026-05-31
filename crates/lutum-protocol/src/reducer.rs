@@ -13,7 +13,10 @@ use crate::{
         StructuredTurnEventWithTools, TextTurnEvent, TextTurnEventWithTools,
     },
     structured::StructuredOutput,
-    toolset::{ContinueSuggestionReason, RecoverableToolCallIssue, ToolCallWrapper, Toolset},
+    toolset::{
+        ContinueSuggestionReason, RecoverableToolCallIssue, ToolCallFallbackError, ToolCallWrapper,
+        Toolset,
+    },
     transcript::CommittedTurn,
 };
 
@@ -1133,6 +1136,24 @@ pub enum TextTurnReductionError {
     },
     #[error("turn has not completed yet")]
     Incomplete,
+    #[error(
+        "required tool call was not produced (model={model}, request_id={request_id:?}, requirement={requirement}, event_count={event_count})"
+    )]
+    UnmetToolRequirement {
+        model: String,
+        request_id: Option<String>,
+        requirement: String,
+        event_count: u32,
+    },
+    #[error(
+        "fallback tool-call parsing failed (model={model}, request_id={request_id:?}, event_count={event_count}): {source}"
+    )]
+    ToolCallFallback {
+        model: String,
+        request_id: Option<String>,
+        event_count: u32,
+        source: ToolCallFallbackError,
+    },
 }
 
 #[derive(Debug, Error, Clone, Eq, PartialEq)]

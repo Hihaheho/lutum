@@ -1,8 +1,8 @@
 use lutum::{
-    AssistantTurnView, CommitTurn, EphemeralTurnView, FinishReason, MockLlmAdapter,
-    MockStructuredScenario, MockTextScenario, Session, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, StructuredStepOutcomeWithTools, TextStepOutcomeWithTools, TurnView,
-    Usage,
+    AssistantTurnItem, AssistantTurnView, CommitTurn, EphemeralTurnView, FinishReason,
+    MockLlmAdapter, MockStructuredScenario, MockTextScenario, RawJson, RecoveredTextToolCalls,
+    Session, SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcomeWithTools,
+    TextStepOutcomeWithTools, ToolCallFallbackError, TurnView, Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -289,6 +289,292 @@ fn tools_text_no_output_completion_does_not_commit_turn() {
         TextStepOutcomeWithTools::NeedsTools(_) => panic!("expected no-output completion"),
     }
 
+    assert_eq!(session.input().items().len(), before_len);
+    assert_eq!(session.list_turns().count(), before_turns);
+}
+
+#[test]
+fn required_tool_text_only_completion_errors_without_commit() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-required-text".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: r#"{"tool":"weather","arguments":{"city":"Tokyo"}}"#.into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-required-text".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 5,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Call a tool.");
+    let before_len = session.input().items().len();
+    let before_turns = session.list_turns().count();
+
+    let err = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<Tools>()
+            .require_any_tool()
+            .collect()
+            .await
+    })
+    .unwrap_err();
+
+    match err {
+        lutum::CollectError::Reduction {
+            source:
+                lutum::TextTurnReductionError::UnmetToolRequirement {
+                    requirement,
+                    request_id,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!(request_id.as_deref(), Some("req-required-text"));
+            assert_eq!(requirement, "at_least_one");
+        }
+        other => panic!("expected unmet required-tool reduction error, got {other:?}"),
+    }
+    assert_eq!(session.input().items().len(), before_len);
+    assert_eq!(session.list_turns().count(), before_turns);
+}
+
+#[test]
+fn optional_tool_text_only_completion_still_auto_commits() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-optional-text".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "plain answer".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-optional-text".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 5,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Tool optional.");
+    let before_len = session.input().items().len();
+
+    let outcome = futures::executor::block_on(async {
+        session.text_turn(&ctx).tools::<Tools>().collect().await
+    })
+    .unwrap();
+
+    match outcome {
+        TextStepOutcomeWithTools::Finished(result) => {
+            assert_eq!(result.assistant_text(), "plain answer");
+        }
+        TextStepOutcomeWithTools::NeedsTools(_) => panic!("expected finished text"),
+        TextStepOutcomeWithTools::FinishedNoOutput(_) => panic!("expected finished text"),
+    }
+    assert_eq!(session.input().items().len(), before_len + 1);
+    assert_eq!(session.list_turns().count(), 1);
+}
+
+#[test]
+fn tool_text_collect_staged_does_not_auto_commit_finished_turn() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-tools-staged-text".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "stage me".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-tools-staged-text".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 5,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Tool optional.");
+    let before_len = session.input().items().len();
+
+    let staged = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<Tools>()
+            .collect_staged()
+            .await
+    })
+    .unwrap();
+
+    match staged {
+        lutum::StagedTextStepOutcomeWithTools::Finished(result) => {
+            assert_eq!(result.assistant_text(), "stage me");
+            assert_eq!(session.input().items().len(), before_len);
+            result.turn.commit(&mut session);
+        }
+        lutum::StagedTextStepOutcomeWithTools::NeedsTools(_) => {
+            panic!("expected staged finished turn")
+        }
+        lutum::StagedTextStepOutcomeWithTools::FinishedNoOutput(_) => {
+            panic!("expected staged finished turn")
+        }
+    }
+
+    assert_eq!(session.input().items().len(), before_len + 1);
+    assert_eq!(session.list_turns().count(), 1);
+}
+
+#[test]
+fn required_specific_tool_text_fallback_recovers_needs_tools_round() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-recover-tool".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "I will check.\n```json\n{\"tool\":\"weather\"}\n```".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-recover-tool".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 8,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Check weather.");
+    let before_len = session.input().items().len();
+
+    let outcome = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<Tools>()
+            .available_tools(vec![ToolsSelector::Weather])
+            .require_tool(ToolsSelector::Weather)
+            .recover_tool_calls_with(|_cx: &lutum::TextToolCallFallbackContext<'_, Tools>| {
+                RecoveredTextToolCalls::<Tools>::from_items(vec![
+                    AssistantTurnItem::Text("I will check.\n".into()),
+                    AssistantTurnItem::ToolCall {
+                        id: "fallback-call-1".into(),
+                        name: "weather".into(),
+                        arguments: RawJson::parse(r#"{"city":"Tokyo"}"#).unwrap(),
+                    },
+                ])
+                .map(Some)
+            })
+            .collect()
+            .await
+    })
+    .unwrap();
+
+    assert_eq!(session.input().items().len(), before_len);
+    let TextStepOutcomeWithTools::NeedsTools(round) = outcome else {
+        panic!("expected recovered tool round");
+    };
+    assert_eq!(round.tool_count(), 1);
+    let ToolsCall::Weather(call) = round.expect_one().unwrap();
+    assert_eq!(call.input.city, "Tokyo");
+    let result = call
+        .clone()
+        .complete(WeatherResult {
+            forecast: "sunny".into(),
+        })
+        .unwrap();
+    round.commit(&mut session, vec![result]).unwrap();
+
+    assert_eq!(session.input().items().len(), before_len + 2);
+    assert_eq!(session.list_turns().count(), 1);
+    let turn = session.list_turns().next().unwrap();
+    assert_eq!(turn.item_count(), 2);
+    assert_eq!(turn.item_at(0).unwrap().as_text(), Some("I will check.\n"));
+    let tool_call = turn.item_at(1).unwrap().as_tool_call().unwrap();
+    assert_eq!(tool_call.id.as_str(), "fallback-call-1");
+    assert_eq!(tool_call.name.as_str(), "weather");
+    assert_eq!(tool_call.arguments.get(), r#"{"city":"Tokyo"}"#);
+}
+
+#[test]
+fn required_tool_text_fallback_none_errors_without_commit() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-recover-none".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "not a call".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-recover-none".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 4,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Call a tool.");
+    let before_len = session.input().items().len();
+    let before_turns = session.list_turns().count();
+
+    let err = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<Tools>()
+            .require_any_tool()
+            .recover_tool_calls_with(|_cx: &lutum::TextToolCallFallbackContext<'_, Tools>| {
+                Ok::<_, ToolCallFallbackError>(None)
+            })
+            .collect()
+            .await
+    })
+    .unwrap_err();
+
+    match err {
+        lutum::CollectError::Reduction {
+            source:
+                lutum::TextTurnReductionError::ToolCallFallback {
+                    source: ToolCallFallbackError::NoToolCall,
+                    request_id,
+                    ..
+                },
+            ..
+        } => assert_eq!(request_id.as_deref(), Some("req-recover-none")),
+        other => panic!("expected fallback no-call reduction error, got {other:?}"),
+    }
     assert_eq!(session.input().items().len(), before_len);
     assert_eq!(session.list_turns().count(), before_turns);
 }

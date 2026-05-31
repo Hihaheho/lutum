@@ -1,4 +1,4 @@
-use std::convert::Infallible;
+use std::{convert::Infallible, sync::Arc};
 
 use lutum_protocol::{
     AssistantTurn, CollectErrorKind, NoTools, OperationKind, RequestBudget, RequestExtensions,
@@ -22,14 +22,16 @@ use lutum_protocol::{
     },
     structured::StructuredOutput,
     toolset::{
-        DynamicTool, HasDynamicSlot, ToolAvailability, ToolConstraints, ToolRequirement, Toolset,
+        DynamicTool, HasDynamicSlot, TextToolCallFallbackParser, ToolAvailability, ToolConstraints,
+        ToolRequirement, Toolset,
     },
 };
 
 use crate::{
     CollectError, EventHandler, Lutum, LutumError, PendingCompletion, PendingStructuredCompletion,
     PendingStructuredTurn, PendingStructuredTurnWithTools, PendingTextTurn,
-    PendingTextTurnWithTools, Session, StructuredStepOutcomeWithTools, TextStepOutcomeWithTools,
+    PendingTextTurnWithTools, Session, StagedTextStepOutcomeWithTools,
+    StructuredStepOutcomeWithTools, TextStepOutcomeWithTools,
     context::{StructuredTurnPartial, StructuredTurnPartialWithTools},
 };
 
@@ -226,6 +228,7 @@ impl<'a> TextTurn<'a> {
             target,
             extensions,
             turn,
+            fallback_parser: None,
         }
     }
 
@@ -390,6 +393,7 @@ where
     target: TurnTarget<'a>,
     extensions: RequestExtensions,
     turn: ProtocolTextTurn<T>,
+    fallback_parser: Option<Arc<dyn TextToolCallFallbackParser<T>>>,
 }
 
 impl<'a, T> TextTurnWithTools<'a, T>
@@ -467,6 +471,16 @@ where
         self
     }
 
+    /// Register an opt-in parser for backends that emit required tool calls as
+    /// assistant text instead of native tool-call events.
+    pub fn recover_tool_calls_with<P>(mut self, parser: P) -> Self
+    where
+        P: TextToolCallFallbackParser<T> + 'static,
+    {
+        self.fallback_parser = Some(Arc::new(parser));
+        self
+    }
+
     /// Override the description for a single tool at this turn site. Useful for
     /// injecting live state into tool descriptions (e.g. "calls remaining: 2").
     pub fn describe_tool(mut self, selector: T::Selector, description: impl Into<String>) -> Self {
@@ -497,12 +511,13 @@ where
             mut target,
             mut extensions,
             mut turn,
+            fallback_parser,
         } = self;
         target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         lutum
-            .run_text_turn_with_tools(extensions, input, turn)
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
             .await
     }
 
@@ -542,13 +557,14 @@ where
             mut target,
             mut extensions,
             mut turn,
+            fallback_parser,
         } = self;
         target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum
-            .run_text_turn_with_tools(extensions, input, turn)
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
             .await
         {
             Ok(pending) => match pending.collect_with(handler).await {
@@ -576,6 +592,93 @@ where
         Ok(outcome)
     }
 
+    /// Collect without auto-committing. This returns the same staged tool outcome
+    /// shape used internally by `collect()`, so callers can inspect, discard, or
+    /// explicitly commit a finished tool-enabled turn.
+    pub async fn collect_staged_with<H>(
+        self,
+        handler: H,
+    ) -> Result<
+        StagedTextStepOutcomeWithTools<T>,
+        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    >
+    where
+        H: EventHandler<lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
+    {
+        let TextTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+            fallback_parser,
+        } = self;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let lutum = target.lutum_owned();
+        let input = target.input(&mut extensions);
+        drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        match lutum
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
+            .await
+        {
+            Ok(pending) => pending
+                .collect_with(handler)
+                .await
+                .map(StagedTextStepOutcomeWithTools::from_staged),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnStateWithTools::default(),
+                })
+            }
+        }
+    }
+
+    /// Collect without auto-committing. Returns a staged outcome with either an
+    /// uncommitted finished turn, an uncommitted tool round, or no-output metadata.
+    pub async fn collect_staged(
+        self,
+    ) -> Result<
+        StagedTextStepOutcomeWithTools<T>,
+        CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    > {
+        let TextTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+            fallback_parser,
+        } = self;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let lutum = target.lutum_owned();
+        let input = target.input(&mut extensions);
+        drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        match lutum
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
+            .await
+        {
+            Ok(pending) => pending
+                .collect()
+                .await
+                .map(StagedTextStepOutcomeWithTools::from_staged),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnStateWithTools::default(),
+                })
+            }
+        }
+    }
+
     pub async fn collect(
         self,
     ) -> Result<
@@ -586,13 +689,14 @@ where
             mut target,
             mut extensions,
             mut turn,
+            fallback_parser,
         } = self;
         target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum
-            .run_text_turn_with_tools(extensions, input, turn)
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
             .await
         {
             Ok(pending) => match pending.collect().await {
