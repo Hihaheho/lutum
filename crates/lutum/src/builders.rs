@@ -78,20 +78,26 @@ impl<'a> TurnTarget<'a> {
         }
     }
 
-    fn apply_defaults<T>(&self, turn: &mut TurnConfig<T>)
+    fn apply_defaults<T>(&self, extensions: &RequestExtensions, turn: &mut TurnConfig<T>)
     where
         T: Toolset,
     {
+        Lutum::apply_max_output_tokens_extension(extensions, &mut turn.generation);
         if let Self::Session { session, .. } = self {
             session.apply_defaults(turn);
         }
     }
 
-    fn generation_with_defaults<T>(&self, config: &TurnConfig<T>) -> GenerationParams
+    fn generation_with_defaults<T>(
+        &self,
+        extensions: &RequestExtensions,
+        config: &TurnConfig<T>,
+    ) -> GenerationParams
     where
         T: Toolset,
     {
         let mut generation = config.generation.clone();
+        Lutum::apply_max_output_tokens_extension(extensions, &mut generation);
         if let Self::Session { session, .. } = self {
             let defaults = session.defaults();
             if generation.temperature.is_none() {
@@ -229,7 +235,7 @@ impl<'a> TextTurn<'a> {
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         lutum.run_text_turn(extensions, input, turn).await
@@ -247,7 +253,9 @@ impl<'a> TextTurn<'a> {
     /// but does not commit, strip ephemeral items, or otherwise mutate the session.
     pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
         let mut extensions = self.extensions.clone();
-        let generation = self.target.generation_with_defaults(&self.turn.config);
+        let generation = self
+            .target
+            .generation_with_defaults(&extensions, &self.turn.config);
         let lutum = self.target.lutum_owned();
         let input = self.target.preview_input(&mut extensions);
         lutum
@@ -273,7 +281,7 @@ impl<'a> TextTurn<'a> {
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -307,7 +315,7 @@ impl<'a> TextTurn<'a> {
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -341,7 +349,7 @@ impl<'a> TextTurn<'a> {
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -490,7 +498,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         lutum
@@ -510,7 +518,9 @@ where
     /// the configured adapter surface does not support exact token counting.
     pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
         let mut extensions = self.extensions.clone();
-        let generation = self.target.generation_with_defaults(&self.turn.config);
+        let generation = self
+            .target
+            .generation_with_defaults(&extensions, &self.turn.config);
         let lutum = self.target.lutum_owned();
         let input = self.target.preview_input(&mut extensions);
         lutum
@@ -533,7 +543,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -577,7 +587,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -745,7 +755,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         lutum.run_structured_turn(extensions, input, turn).await
@@ -763,7 +773,9 @@ where
     /// but does not commit, strip ephemeral items, or otherwise mutate the session.
     pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
         let mut extensions = self.extensions.clone();
-        let generation = self.target.generation_with_defaults(&self.turn.config);
+        let generation = self
+            .target
+            .generation_with_defaults(&extensions, &self.turn.config);
         let lutum = self.target.lutum_owned();
         let input = self.target.preview_input(&mut extensions);
         lutum
@@ -789,7 +801,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -825,7 +837,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -861,7 +873,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1028,7 +1040,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         lutum
@@ -1048,7 +1060,9 @@ where
     /// the configured adapter surface does not support exact token counting.
     pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
         let mut extensions = self.extensions.clone();
-        let generation = self.target.generation_with_defaults(&self.turn.config);
+        let generation = self
+            .target
+            .generation_with_defaults(&extensions, &self.turn.config);
         let lutum = self.target.lutum_owned();
         let input = self.target.preview_input(&mut extensions);
         lutum
@@ -1074,7 +1088,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1172,7 +1186,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&mut turn.config);
+        target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);

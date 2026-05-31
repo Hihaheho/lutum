@@ -142,6 +142,27 @@ pub struct GenerationParams {
     pub seed: Option<u64>,
 }
 
+/// Request extension for defaulting max output tokens when a turn or request
+/// has not set them explicitly.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct MaxOutputTokens(u32);
+
+impl MaxOutputTokens {
+    pub fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for MaxOutputTokens {
+    fn from(value: u32) -> Self {
+        Self::new(value)
+    }
+}
+
 #[derive(Builder, Clone, Debug, PartialEq)]
 #[builder(builder_type(name = TurnConfigBuilder))]
 pub struct TurnConfig<T: Toolset = NoTools> {

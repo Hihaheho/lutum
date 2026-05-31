@@ -19,10 +19,10 @@ use lutum_protocol::{
     llm::{
         AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
         AdapterTextTurn, AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig,
-        CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionRequest,
-        ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
+        CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionOptions,
+        CompletionRequest, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-        ErasedTextTurnEventStream, GenerationParams, OperationKind, RetryPolicy,
+        ErasedTextTurnEventStream, GenerationParams, MaxOutputTokens, OperationKind, RetryPolicy,
         StructuredCompletionEvent, StructuredCompletionEventStream, StructuredCompletionRequest,
         StructuredTurn as ProtocolStructuredTurn, StructuredTurnEvent, StructuredTurnEventStream,
         StructuredTurnEventStreamWithTools, StructuredTurnEventWithTools,
@@ -348,6 +348,28 @@ impl Lutum {
     fn apply_default_extensions(&self, mut extensions: RequestExtensions) -> RequestExtensions {
         extensions.push_fallback(Arc::clone(&self.default_extensions));
         extensions
+    }
+
+    pub(crate) fn apply_max_output_tokens_extension(
+        extensions: &RequestExtensions,
+        generation: &mut GenerationParams,
+    ) {
+        if generation.max_output_tokens.is_none() {
+            generation.max_output_tokens = extensions
+                .get::<MaxOutputTokens>()
+                .map(|max_output_tokens| max_output_tokens.get());
+        }
+    }
+
+    pub(crate) fn apply_completion_max_output_tokens_extension(
+        extensions: &RequestExtensions,
+        options: &mut CompletionOptions,
+    ) {
+        if options.max_output_tokens.is_none() {
+            options.max_output_tokens = extensions
+                .get::<MaxOutputTokens>()
+                .map(|max_output_tokens| max_output_tokens.get());
+        }
     }
 
     pub(crate) fn raw_collect_errors_enabled(&self, extensions: &RequestExtensions) -> bool {
@@ -699,6 +721,8 @@ impl Lutum {
     {
         input.validate()?;
         let extensions = Arc::new(self.apply_default_extensions(extensions));
+        let mut generation = generation;
+        Self::apply_max_output_tokens_extension(extensions.as_ref(), &mut generation);
         let turn = erase_text_turn_ref(turn, generation, Arc::clone(&extensions))?;
         let Some(counter) = self.token_counter.as_ref() else {
             return Ok(None);
@@ -719,6 +743,8 @@ impl Lutum {
     {
         input.validate()?;
         let extensions = Arc::new(self.apply_default_extensions(extensions));
+        let mut generation = generation;
+        Self::apply_max_output_tokens_extension(extensions.as_ref(), &mut generation);
         let turn = erase_structured_turn_ref(turn, generation, Arc::clone(&extensions))?;
         let Some(counter) = self.token_counter.as_ref() else {
             return Ok(None);
@@ -729,9 +755,10 @@ impl Lutum {
     pub(crate) async fn count_completion_tokens(
         &self,
         extensions: RequestExtensions,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> Result<Option<TokenCount>, LutumError> {
         let extensions = self.apply_default_extensions(extensions);
+        Self::apply_completion_max_output_tokens_extension(&extensions, &mut request.options);
         let Some(counter) = self.token_counter.as_ref() else {
             return Ok(None);
         };
@@ -747,7 +774,8 @@ impl Lutum {
         O: StructuredOutput,
     {
         let extensions = self.apply_default_extensions(extensions);
-        let request = erase_structured_completion_request_ref(request)?;
+        let mut request = erase_structured_completion_request_ref(request)?;
+        Self::apply_max_output_tokens_extension(&extensions, &mut request.generation);
         let Some(counter) = self.token_counter.as_ref() else {
             return Ok(None);
         };
@@ -764,6 +792,8 @@ impl Lutum {
     ) -> Result<PendingTextTurn, LutumError> {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
+        let mut turn = turn;
+        Self::apply_max_output_tokens_extension(&extensions, &mut turn.config.generation);
         let request_budget = turn.config.budget;
         let max_output_tokens = turn.config.generation.max_output_tokens;
         let extensions = Arc::new(extensions);
@@ -808,6 +838,8 @@ impl Lutum {
     {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
+        let mut turn = turn;
+        Self::apply_max_output_tokens_extension(&extensions, &mut turn.config.generation);
         let request_budget = turn.config.budget;
         let max_output_tokens = turn.config.generation.max_output_tokens;
         // Extract availability before erase_text_turn consumes the turn config.
@@ -863,6 +895,8 @@ impl Lutum {
     {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
+        let mut turn = turn;
+        Self::apply_max_output_tokens_extension(&extensions, &mut turn.config.generation);
         let request_budget = turn.config.budget;
         let max_output_tokens = turn.config.generation.max_output_tokens;
         let extensions = Arc::new(extensions);
@@ -913,6 +947,8 @@ impl Lutum {
     {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
+        let mut turn = turn;
+        Self::apply_max_output_tokens_extension(&extensions, &mut turn.config.generation);
         let request_budget = turn.config.budget;
         let max_output_tokens = turn.config.generation.max_output_tokens;
         // Extract availability before erase_structured_turn consumes the turn config.
@@ -965,9 +1001,10 @@ impl Lutum {
     pub(crate) async fn run_completion(
         &self,
         extensions: RequestExtensions,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> Result<PendingCompletion, LutumError> {
         let extensions = self.apply_default_extensions(extensions);
+        Self::apply_completion_max_output_tokens_extension(&extensions, &mut request.options);
         let estimate = self
             .estimate_completion_usage(&extensions, &request)
             .await?;
@@ -997,12 +1034,13 @@ impl Lutum {
     pub(crate) async fn run_structured_completion<O>(
         &self,
         extensions: RequestExtensions,
-        request: StructuredCompletionRequest<O>,
+        mut request: StructuredCompletionRequest<O>,
     ) -> Result<PendingStructuredCompletion<O>, LutumError>
     where
         O: StructuredOutput,
     {
         let extensions = self.apply_default_extensions(extensions);
+        Self::apply_max_output_tokens_extension(&extensions, &mut request.generation);
         let request_budget = request.budget;
         let max_output_tokens = request.generation.max_output_tokens;
         let request = erase_structured_completion_request(request)?;
