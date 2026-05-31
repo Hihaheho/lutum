@@ -11,7 +11,7 @@ use lutum_protocol::{
         StructuredTurn as ProtocolStructuredTurn,
         StructuredTurnEventStream as ProtocolStructuredTurnEventStream, Temperature,
         TextTurn as ProtocolTextTurn, TextTurnEventStream as ProtocolTextTurnEventStream,
-        TurnConfig,
+        TokenCount, TurnConfig,
     },
     reducer::{
         CompletionReductionError, CompletionTurnResult, CompletionTurnState,
@@ -65,6 +65,19 @@ impl<'a> TurnTarget<'a> {
         }
     }
 
+    fn preview_input(&self, extensions: &mut RequestExtensions) -> ModelInput {
+        match self {
+            Self::Lutum { input, .. } => input.clone(),
+            Self::Session { session, .. } => {
+                let (input, ephemeral_indices) = session.preview_input_with_ephemeral_indices();
+                if !ephemeral_indices.is_empty() {
+                    extensions.insert(ephemeral_indices);
+                }
+                input
+            }
+        }
+    }
+
     fn apply_defaults<T>(&self, turn: &mut TurnConfig<T>)
     where
         T: Toolset,
@@ -72,6 +85,26 @@ impl<'a> TurnTarget<'a> {
         if let Self::Session { session, .. } = self {
             session.apply_defaults(turn);
         }
+    }
+
+    fn generation_with_defaults<T>(&self, config: &TurnConfig<T>) -> GenerationParams
+    where
+        T: Toolset,
+    {
+        let mut generation = config.generation.clone();
+        if let Self::Session { session, .. } = self {
+            let defaults = session.defaults();
+            if generation.temperature.is_none() {
+                generation.temperature = defaults.generation.temperature;
+            }
+            if generation.max_output_tokens.is_none() {
+                generation.max_output_tokens = defaults.generation.max_output_tokens;
+            }
+            if generation.seed.is_none() {
+                generation.seed = defaults.generation.seed;
+            }
+        }
+        generation
     }
 
     /// Commit to the session if this is a session target; otherwise discard.
@@ -204,6 +237,22 @@ impl<'a> TextTurn<'a> {
 
     pub async fn stream(self) -> Result<ProtocolTextTurnEventStream, LutumError> {
         Ok(self.start().await?.into_stream())
+    }
+
+    /// Count input tokens for this turn without sending a generation request.
+    ///
+    /// Returns `Ok(None)` when no token counter is attached to `Lutum`, or when
+    /// the configured adapter surface does not support exact token counting.
+    /// Counting a session-originated turn snapshots the current session input
+    /// but does not commit, strip ephemeral items, or otherwise mutate the session.
+    pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
+        let mut extensions = self.extensions.clone();
+        let generation = self.target.generation_with_defaults(&self.turn.config);
+        let lutum = self.target.lutum_owned();
+        let input = self.target.preview_input(&mut extensions);
+        lutum
+            .count_text_turn_tokens(extensions, input, &self.turn, generation)
+            .await
     }
 
     /// Collect the turn with a custom event handler. Always returns a staged result
@@ -455,6 +504,20 @@ where
         Ok(self.start().await?.into_stream())
     }
 
+    /// Count input tokens for this tool-capable turn without sending a generation request.
+    ///
+    /// Returns `Ok(None)` when no token counter is attached to `Lutum`, or when
+    /// the configured adapter surface does not support exact token counting.
+    pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
+        let mut extensions = self.extensions.clone();
+        let generation = self.target.generation_with_defaults(&self.turn.config);
+        let lutum = self.target.lutum_owned();
+        let input = self.target.preview_input(&mut extensions);
+        lutum
+            .count_text_turn_tokens(extensions, input, &self.turn, generation)
+            .await
+    }
+
     pub async fn collect_with<H>(
         self,
         handler: H,
@@ -690,6 +753,22 @@ where
 
     pub async fn stream(self) -> Result<ProtocolStructuredTurnEventStream<O>, LutumError> {
         Ok(self.start().await?.into_stream())
+    }
+
+    /// Count input tokens for this structured turn without sending a generation request.
+    ///
+    /// Returns `Ok(None)` when no token counter is attached to `Lutum`, or when
+    /// the configured adapter surface does not support exact token counting.
+    /// Counting a session-originated turn snapshots the current session input
+    /// but does not commit, strip ephemeral items, or otherwise mutate the session.
+    pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
+        let mut extensions = self.extensions.clone();
+        let generation = self.target.generation_with_defaults(&self.turn.config);
+        let lutum = self.target.lutum_owned();
+        let input = self.target.preview_input(&mut extensions);
+        lutum
+            .count_structured_turn_tokens(extensions, input, &self.turn, generation)
+            .await
     }
 
     /// Collect the turn with a custom event handler. Always returns a staged result
@@ -961,6 +1040,20 @@ where
         self,
     ) -> Result<lutum_protocol::StructuredTurnEventStreamWithTools<T, O>, LutumError> {
         Ok(self.start().await?.into_stream())
+    }
+
+    /// Count input tokens for this tool-capable structured turn without sending a generation request.
+    ///
+    /// Returns `Ok(None)` when no token counter is attached to `Lutum`, or when
+    /// the configured adapter surface does not support exact token counting.
+    pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
+        let mut extensions = self.extensions.clone();
+        let generation = self.target.generation_with_defaults(&self.turn.config);
+        let lutum = self.target.lutum_owned();
+        let input = self.target.preview_input(&mut extensions);
+        lutum
+            .count_structured_turn_tokens(extensions, input, &self.turn, generation)
+            .await
     }
 
     pub async fn collect_with<H>(
@@ -1243,6 +1336,16 @@ impl<'a> Completion<'a> {
         Ok(self.start().await?.into_stream())
     }
 
+    /// Count input tokens for this completion without sending a generation request.
+    ///
+    /// Returns `Ok(None)` when no token counter is attached to `Lutum`, or when
+    /// the configured adapter surface does not support exact token counting.
+    pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
+        self.lutum
+            .count_completion_tokens(self.extensions.clone(), self.request.clone())
+            .await
+    }
+
     pub async fn collect_with<H>(
         self,
         handler: H,
@@ -1384,6 +1487,16 @@ where
 
     pub async fn stream(self) -> Result<StructuredCompletionEventStream<O>, LutumError> {
         Ok(self.start().await?.into_stream())
+    }
+
+    /// Count input tokens for this structured completion without sending a generation request.
+    ///
+    /// Returns `Ok(None)` when no token counter is attached to `Lutum`, or when
+    /// the configured adapter surface does not support exact token counting.
+    pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
+        self.lutum
+            .count_structured_completion_tokens(self.extensions.clone(), &self.request)
+            .await
     }
 
     pub async fn collect_with<H>(

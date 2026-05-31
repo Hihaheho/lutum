@@ -1,0 +1,143 @@
+$frontmatter {
+  title: Token Counting
+  description: Count provider-side input tokens before generation and use counts for budget reservation.
+  tags = ["tokens", "budget", "adapters"]
+}
+
+"#": Token Counting
+
+"intro" = ```markdown
+Token counting is a provider request that asks the configured adapter how many input tokens a
+turn would use. It does not send a generation request, does not commit to a `Session`, and does
+not reserve budget by itself.
+```
+
+"toc".$toc = true
+
+@ "setup" {
+  "##": Setup
+
+  "body" = ```markdown
+Attach a token counter to `Lutum` with `with_token_counter`. The same adapter can usually be used
+as both the generation adapter and the counter:
+```
+
+  "rust-example" = ```rust
+use std::sync::Arc;
+use lutum::{Lutum, ModelName, SharedPoolBudgetManager, SharedPoolBudgetOptions};
+use lutum_openai::OpenAiAdapter;
+
+let adapter = Arc::new(
+    OpenAiAdapter::new(std::env::var("OPENAI_API_KEY")?)
+        .with_default_model(ModelName::new("gpt-5.4-nano")?)
+);
+
+let llm = Lutum::new(
+    adapter.clone(),
+    SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+)
+.with_token_counter(adapter);
+```
+
+  "body-2" = ```markdown
+`ClaudeAdapter` implements counting with Anthropic's Messages count-tokens endpoint.
+`OpenAiAdapter` implements counting for OpenAI Responses API requests that expose
+`/responses/input_tokens`.
+```
+
+}
+
+@ "same-builder" {
+  "##": Count Then Collect With The Same Builder
+
+  "body" = ```markdown
+`count_tokens()` borrows the builder. You can count, inspect the result, and then use the exact
+same builder for generation:
+```
+
+  "rust-example" = ```rust
+use lutum::Session;
+
+let mut session = Session::new();
+session.push_system("Answer concisely.");
+session.push_user("Explain provider-side token counting.");
+
+let turn = session.text_turn(&llm).max_output_tokens(64);
+
+let count = turn.count_tokens().await?;
+if let Some(count) = count {
+    println!("input tokens: {}", count.input_tokens);
+}
+
+let result = turn.collect().await?;
+println!("{}", result.assistant_text());
+```
+
+  "body-2" = ```markdown
+Counting a `Session` turn previews the current `ModelInput`. It does not auto-commit, does not
+strip ephemeral session items, and does not mutate the transcript. The later `collect()` call is
+the operation that starts generation and commits the completed turn.
+```
+
+}
+
+@ "model-input" {
+  "##": Count A ModelInput
+
+  "body" = ```markdown
+For code that manages `ModelInput` directly, use the same turn builder from `Lutum`:
+```
+
+  "rust-example" = ```rust
+use lutum::{InputMessageRole, ModelInput, ModelInputItem};
+
+let input = ModelInput::from_items(vec![
+    ModelInputItem::text(InputMessageRole::User, "Summarize this input."),
+]);
+
+let turn = llm.text_turn(input).max_output_tokens(32);
+
+let count = turn.count_tokens().await?;
+let result = turn.collect().await?;
+```
+
+}
+
+@ "unsupported" {
+  "##": Unsupported Surfaces
+
+  "body" = ```markdown
+`count_tokens()` returns `Result<Option<TokenCount>, AgentError>`.
+
+| Return | Meaning |
+|---|---|
+| `Ok(Some(count))` | The provider returned an exact input token count |
+| `Ok(None)` | No counter is attached, or this adapter surface does not support exact counting |
+| `Err(err)` | The count request failed before generation |
+
+OpenAI Chat Completions and legacy Completions currently return `Ok(None)`.
+OpenRouter and Ollama-compatible endpoints are not enabled in the smoke config for exact
+counting unless they expose the same count endpoints.
+```
+
+}
+
+@ "budget" {
+  "##": Budget Reservation
+
+  "body" = ```markdown
+When a token counter is attached, normal `.start()`, `.stream()`, and `.collect()` paths count
+before reserving budget. A successful count replaces only the input-token part of the reservation:
+
+| Field | Reservation value |
+|---|---|
+| `input_tokens` | Exact provider count |
+| `output_tokens` | Existing output/non-input estimate, at least the configured `max_output_tokens` when set |
+| `total_tokens` | Exact input count plus the preserved output/non-input estimate |
+| `cost_micros_usd` | Existing estimate |
+
+Counting itself is not generation usage. Cost accounting for completed generations still comes
+from provider usage events or usage recovery, not from the count request.
+```
+
+}

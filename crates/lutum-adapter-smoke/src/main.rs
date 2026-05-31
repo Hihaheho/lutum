@@ -13,10 +13,11 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use lutum::{
-    AssistantTurnItem, CompletionOptions, CompletionReductionError, Lutum, ModelName,
-    OutputLimitExceeded, RawTelemetryConfig, RequestExtensions, Session, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, StructuredStepOutcomeWithTools, StructuredTurnOutcome,
-    TextStepOutcomeWithTools, TextTurnReductionError, Usage, UsageEstimate, UsageRecoveryAdapter,
+    AgentError, AssistantTurnItem, CompletionOptions, CompletionReductionError, Lutum, ModelName,
+    OutputLimitExceeded, RawTelemetryConfig, RequestBudget, RequestExtensions, Session,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcomeWithTools,
+    StructuredTurnOutcome, TextStepOutcomeWithTools, TextTurnReductionError, Usage, UsageEstimate,
+    UsageRecoveryAdapter,
 };
 use lutum_claude::{ClaudeAdapter, MessagesRequest};
 use lutum_openai::{CompletionRequest, OpenAiAdapter, OpenAiReasoningEffort};
@@ -124,6 +125,7 @@ enum SmokeCase {
     ReasoningRequest,
     ReasoningCapture,
     ThinkingRoundtrip,
+    TokenCount,
 }
 
 impl SmokeCase {
@@ -142,6 +144,7 @@ impl SmokeCase {
             "reasoning_request" => Ok(Self::ReasoningRequest),
             "reasoning_capture" => Ok(Self::ReasoningCapture),
             "thinking_roundtrip" => Ok(Self::ThinkingRoundtrip),
+            "token_count" => Ok(Self::TokenCount),
             _ => bail!("unknown smoke case {value:?}"),
         }
     }
@@ -161,6 +164,7 @@ impl SmokeCase {
             Self::ReasoningRequest => "reasoning_request",
             Self::ReasoningCapture => "reasoning_capture",
             Self::ThinkingRoundtrip => "thinking_roundtrip",
+            Self::TokenCount => "token_count",
         }
     }
 }
@@ -370,6 +374,12 @@ fn expand_cases(config: &SmokeConfig) -> Result<Vec<CaseSpec>> {
 
 fn validate_case(endpoint_id: &str, kind: AdapterKind, case: SmokeCase) -> Result<()> {
     match (kind, case) {
+        (AdapterKind::ClaudeMessages | AdapterKind::OpenAiResponses, SmokeCase::TokenCount) => {
+            Ok(())
+        }
+        (_, SmokeCase::TokenCount) => {
+            bail!("endpoint {endpoint_id} token_count requires claude-messages or openai-responses")
+        }
         (AdapterKind::OpenAiChatCompletions, SmokeCase::ReasoningCapture) => Ok(()),
         (_, SmokeCase::ReasoningCapture) => {
             bail!("endpoint {endpoint_id} reasoning_capture requires openai-chat-completions")
@@ -441,6 +451,7 @@ fn worst_case_tokens(case: &CaseSpec, defaults: &DefaultsConfig) -> (u64, u64) {
         SmokeCase::Completion | SmokeCase::Text | SmokeCase::ReasoningRequest => {
             (96, text_max_output_tokens(&case.endpoint, defaults) as u64)
         }
+        SmokeCase::TokenCount => (192, 0),
         SmokeCase::OutputLimit => (192, OUTPUT_LIMIT_MAX_OUTPUT_TOKENS as u64),
         SmokeCase::ReasoningCapture => {
             (128, text_max_output_tokens(&case.endpoint, defaults) as u64)
@@ -506,6 +517,7 @@ async fn run_case(case: CaseSpec, defaults: &DefaultsConfig, strict: bool) -> Ca
             SmokeCase::ReasoningRequest => run_reasoning_request(&llm, &case, defaults).await?,
             SmokeCase::ReasoningCapture => run_reasoning_capture(&llm, &case, defaults).await?,
             SmokeCase::ThinkingRoundtrip => run_thinking_roundtrip(&llm, &case, defaults).await?,
+            SmokeCase::TokenCount => run_token_count(&llm).await?,
         };
         Ok::<Usage, anyhow::Error>(case_usage)
     };
@@ -618,10 +630,15 @@ fn build_lutum(case: &CaseSpec, defaults: &DefaultsConfig, api_key: String) -> R
             }
             let adapter = Arc::new(adapter);
             let recovery = recovery_adapter(&case.endpoint, api_key, adapter.clone());
-            Ok(Lutum::new(adapter.clone(), budget)
+            let llm = Lutum::new(adapter.clone(), budget)
                 .with_recovery(recovery)
                 .with_extension(RawTelemetryConfig::all())
-                .with_extension(usage_estimate))
+                .with_extension(usage_estimate);
+            Ok(if case.case == SmokeCase::TokenCount {
+                llm.with_token_counter(adapter.clone())
+            } else {
+                llm
+            })
         }
         AdapterKind::OpenAiChatCompletions
         | AdapterKind::OpenAiCompletions
@@ -640,7 +657,7 @@ fn build_lutum(case: &CaseSpec, defaults: &DefaultsConfig, api_key: String) -> R
             }
             let adapter = Arc::new(adapter);
             let recovery = recovery_adapter(&case.endpoint, api_key, adapter.clone());
-            Ok(Lutum::from_parts(adapter.clone(), adapter.clone(), budget)
+            let llm = Lutum::from_parts(adapter.clone(), adapter.clone(), budget)
                 .with_recovery(recovery)
                 .with_extension(RawTelemetryConfig::all())
                 .with_extension(SmokeReasoningConfig(parse_reasoning_effort(
@@ -649,7 +666,12 @@ fn build_lutum(case: &CaseSpec, defaults: &DefaultsConfig, api_key: String) -> R
                         .as_deref()
                         .unwrap_or(&defaults.openai_reasoning_effort),
                 )?))
-                .with_extension(usage_estimate))
+                .with_extension(usage_estimate);
+            Ok(if case.case == SmokeCase::TokenCount {
+                llm.with_token_counter(adapter.clone())
+            } else {
+                llm
+            })
         }
     }
 }
@@ -903,6 +925,30 @@ async fn run_output_limit(llm: &Lutum, case: &CaseSpec) -> Result<Usage> {
         .collect()
         .await;
     expect_output_limit(result, "text output_limit")
+}
+
+async fn run_token_count(llm: &Lutum) -> Result<Usage> {
+    let mut session = Session::new();
+    session.push_user(
+        "Count this request before generation. This prompt must exceed a one-token budget.",
+    );
+    match session
+        .text_turn(llm)
+        .budget(RequestBudget::from_tokens(1))
+        .start()
+        .await
+    {
+        Ok(pending) => {
+            drop(pending);
+            bail!("token_count unexpectedly fit within a one-token request budget")
+        }
+        Err(err) if is_budget_error(&err) => Ok(Usage::zero()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn is_budget_error(error: &AgentError) -> bool {
+    matches!(error, AgentError::Budget(_))
 }
 
 fn expect_output_limit<T, E>(result: Result<T, E>, label: &str) -> Result<Usage>
@@ -1238,6 +1284,23 @@ async fn run_thinking_roundtrip(
 }
 
 fn verify_raw_expectations(case: &CaseSpec, raw: &[RawTraceEntry]) -> Result<()> {
+    if case.case == SmokeCase::TokenCount {
+        let expected_api = match case.kind {
+            AdapterKind::ClaudeMessages => "messages_count_tokens",
+            AdapterKind::OpenAiResponses => "responses_input_tokens",
+            AdapterKind::OpenAiChatCompletions | AdapterKind::OpenAiCompletions => {
+                bail!("token_count raw verification received unsupported adapter")
+            }
+        };
+        if !raw_request_api_contains(raw, expected_api) {
+            bail!("token_count did not emit a {expected_api} raw request");
+        }
+        if raw_generation_request_exists(raw) {
+            bail!("token_count emitted a generation request after count-based budget rejection");
+        }
+        return Ok(());
+    }
+
     if matches!(
         case.case,
         SmokeCase::ReasoningRequest | SmokeCase::ReasoningCapture | SmokeCase::ThinkingRoundtrip
@@ -1323,6 +1386,28 @@ fn raw_request_contains(raw: &[RawTraceEntry], needles: &[&str]) -> bool {
         } else {
             false
         }
+    })
+}
+
+fn raw_request_api_contains(raw: &[RawTraceEntry], expected_api: &str) -> bool {
+    raw.iter().any(|entry| {
+        matches!(
+            entry,
+            RawTraceEntry::Request { api, .. } if api == expected_api
+        )
+    })
+}
+
+fn raw_generation_request_exists(raw: &[RawTraceEntry]) -> bool {
+    raw.iter().any(|entry| {
+        matches!(
+            entry,
+            RawTraceEntry::Request { api, .. }
+                if matches!(
+                    api.as_str(),
+                    "messages" | "responses" | "chat_completions" | "completions"
+                )
+        )
     })
 }
 
@@ -1950,6 +2035,16 @@ output_price_per_million = 0.35
                 .iter()
                 .any(|case| case.case_id == "openai_responses_gpt54:tool_no_output")
         );
+        assert!(
+            cases
+                .iter()
+                .any(|case| case.case_id == "anthropic_messages_haiku45:token_count")
+        );
+        assert!(
+            cases
+                .iter()
+                .any(|case| case.case_id == "openai_responses_gpt54_nano:token_count")
+        );
     }
 
     #[test]
@@ -2119,12 +2214,70 @@ output_price_per_million = 0.35
     }
 
     #[test]
+    fn token_count_raw_expectation_requires_count_without_generation() {
+        let case = CaseSpec {
+            endpoint_id: "openai_responses_gpt54_nano".into(),
+            case_id: "openai_responses_gpt54_nano:token_count".into(),
+            kind: AdapterKind::OpenAiResponses,
+            case: SmokeCase::TokenCount,
+            endpoint: EndpointConfig {
+                adapter: "openai-responses".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: "OPENAI_API_KEY".into(),
+                fallback_api_key: None,
+                model: "gpt-5.4-nano".into(),
+                fallback_models: Vec::new(),
+                cases: vec!["token_count".into()],
+                expects_visible_thinking: false,
+                openrouter_usage_recovery: false,
+                recovery_base_url: None,
+                input_price_per_million: 0.0,
+                output_price_per_million: 0.0,
+                text_max_output_tokens: None,
+                structured_max_output_tokens: None,
+                openai_reasoning_effort: None,
+            },
+        };
+        let count = RawTraceEntry::Request {
+            provider: "openai".into(),
+            api: "responses_input_tokens".into(),
+            operation: "text_turn".into(),
+            request_id: None,
+            body: "{}".into(),
+        };
+
+        verify_raw_expectations(&case, std::slice::from_ref(&count)).unwrap();
+
+        let generation = RawTraceEntry::Request {
+            provider: "openai".into(),
+            api: "responses".into(),
+            operation: "text_turn".into(),
+            request_id: None,
+            body: "{}".into(),
+        };
+        assert!(verify_raw_expectations(&case, &[count, generation]).is_err());
+    }
+
+    #[test]
     fn validates_completions_case_shape() {
         assert!(validate_case("bad", AdapterKind::OpenAiCompletions, SmokeCase::Text).is_err());
         assert!(validate_case("ok", AdapterKind::OpenAiCompletions, SmokeCase::Completion).is_ok());
         assert!(
             validate_case("ok", AdapterKind::OpenAiCompletions, SmokeCase::OutputLimit).is_ok()
         );
+        assert!(
+            validate_case("bad", AdapterKind::OpenAiCompletions, SmokeCase::TokenCount).is_err()
+        );
+        assert!(
+            validate_case(
+                "bad",
+                AdapterKind::OpenAiChatCompletions,
+                SmokeCase::TokenCount
+            )
+            .is_err()
+        );
+        assert!(validate_case("ok", AdapterKind::OpenAiResponses, SmokeCase::TokenCount).is_ok());
+        assert!(validate_case("ok", AdapterKind::ClaudeMessages, SmokeCase::TokenCount).is_ok());
         assert!(validate_case("ok", AdapterKind::OpenAiResponses, SmokeCase::ToolNoOutput).is_ok());
         assert!(
             validate_case(

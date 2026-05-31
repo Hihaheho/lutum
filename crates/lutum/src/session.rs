@@ -220,6 +220,12 @@ impl Session {
         (snapshot, indices)
     }
 
+    pub(crate) fn preview_input_with_ephemeral_indices(
+        &self,
+    ) -> (ModelInput, EphemeralInputIndices) {
+        (self.input.clone(), self.ephemeral_input_indices())
+    }
+
     fn ephemeral_input_indices(&self) -> EphemeralInputIndices {
         let mut indices = self.ephemeral_indices.clone();
         indices.extend(self.input.items().iter().enumerate().filter_map(

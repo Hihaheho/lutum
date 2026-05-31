@@ -48,8 +48,8 @@ pub use llm::{
     StructuredCompletionRequest, StructuredOutputSpec, StructuredTurn, StructuredTurnEvent,
     StructuredTurnEventStream, StructuredTurnEventStreamWithTools, StructuredTurnEventWithTools,
     Temperature, TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream,
-    TextTurnEventStreamWithTools, TextTurnEventWithTools, TurnAdapter, TurnConfig,
-    UsageRecoveryAdapter,
+    TextTurnEventStreamWithTools, TextTurnEventWithTools, TokenCount, TokenCounter, TurnAdapter,
+    TurnConfig, UsageRecoveryAdapter,
 };
 pub use reducer::{
     CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,

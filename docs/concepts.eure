@@ -37,11 +37,12 @@ Nothing is hidden. `Session` is a convenience wrapper that adds user/assistant/t
 `Lutum` is the only execution boundary in the library. When you call `.collect()` or `.stream()` on a turn builder, `Lutum`:
 
 1. Validates `ModelInput` (role ordering, required fields)
-2. Reserves a budget lease via `RequestBudget`
-3. Emits a tracing `llm_turn` span with request metadata
-4. Passes the request to the `TurnAdapter`
-5. Reduces the returned event stream into typed results
-6. Finalises the lease with actual usage on completion
+2. Counts input tokens first when a `TokenCounter` is attached and supported
+3. Reserves a budget lease via `RequestBudget`
+4. Emits a tracing `llm_turn` span with request metadata
+5. Passes the request to the `TurnAdapter`
+6. Reduces the returned event stream into typed results
+7. Finalises the lease with actual usage on completion
 
 Adapters are public because providers need an SPI boundary, but calling an adapter directly bypasses
 the execution contract. Prefer `Lutum::new(adapter, budget)` over direct adapter use.

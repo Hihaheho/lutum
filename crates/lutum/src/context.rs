@@ -22,13 +22,13 @@ use lutum_protocol::{
         CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionRequest,
         ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-        ErasedTextTurnEventStream, OperationKind, RetryPolicy, StructuredCompletionEvent,
-        StructuredCompletionEventStream, StructuredCompletionRequest,
+        ErasedTextTurnEventStream, GenerationParams, OperationKind, RetryPolicy,
+        StructuredCompletionEvent, StructuredCompletionEventStream, StructuredCompletionRequest,
         StructuredTurn as ProtocolStructuredTurn, StructuredTurnEvent, StructuredTurnEventStream,
         StructuredTurnEventStreamWithTools, StructuredTurnEventWithTools,
         TextTurn as ProtocolTextTurn, TextTurnEvent, TextTurnEventStream,
-        TextTurnEventStreamWithTools, TextTurnEventWithTools, TurnAdapter, TurnConfig,
-        UsageRecoveryAdapter,
+        TextTurnEventStreamWithTools, TextTurnEventWithTools, TokenCount, TokenCounter,
+        TurnAdapter, TurnConfig, UsageRecoveryAdapter,
     },
     reducer::{
         CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
@@ -89,6 +89,7 @@ pub struct Lutum {
     turns: Arc<dyn TurnAdapter>,
     completion: Arc<dyn CompletionAdapter>,
     recovery: Option<Arc<dyn UsageRecoveryAdapter>>,
+    token_counter: Option<Arc<dyn TokenCounter>>,
     hooks: Arc<LutumHooksSet<'static>>,
     default_extensions: Arc<RequestExtensions>,
 }
@@ -114,6 +115,7 @@ impl Lutum {
             turns: adapter,
             completion: Arc::new(UnsupportedCompletionAdapter),
             recovery: None,
+            token_counter: None,
             hooks: Arc::new(hooks),
             default_extensions: Arc::new(RequestExtensions::new()),
         }
@@ -138,6 +140,7 @@ impl Lutum {
             turns,
             completion,
             recovery: None,
+            token_counter: None,
             hooks: Arc::new(hooks),
             default_extensions: Arc::new(RequestExtensions::new()),
         }
@@ -145,6 +148,14 @@ impl Lutum {
 
     pub fn with_recovery(mut self, recovery: Arc<dyn UsageRecoveryAdapter>) -> Self {
         self.recovery = Some(recovery);
+        self
+    }
+
+    pub fn with_token_counter<T>(mut self, token_counter: Arc<T>) -> Self
+    where
+        T: TokenCounter + 'static,
+    {
+        self.token_counter = Some(token_counter);
         self
     }
 
@@ -216,6 +227,122 @@ impl Lutum {
         kind: OperationKind,
     ) -> UsageEstimate {
         self.hooks.resolve_usage_estimate(extensions, kind).await
+    }
+
+    async fn estimate_text_turn_usage(
+        &self,
+        extensions: &RequestExtensions,
+        input: &ModelInput,
+        turn: &AdapterTextTurn,
+        max_output_tokens: Option<u32>,
+    ) -> Result<UsageEstimate, AgentError> {
+        let Some(counter) = self.token_counter.as_ref() else {
+            return Ok(self
+                .resolve_usage_estimate(extensions, OperationKind::TextTurn)
+                .await);
+        };
+        match counter.count_text_turn(input, turn).await? {
+            Some(count) => {
+                let fallback = self
+                    .resolve_usage_estimate(extensions, OperationKind::TextTurn)
+                    .await;
+                Ok(estimate_with_token_count(
+                    fallback,
+                    count.input_tokens,
+                    max_output_tokens,
+                ))
+            }
+            None => Ok(self
+                .resolve_usage_estimate(extensions, OperationKind::TextTurn)
+                .await),
+        }
+    }
+
+    async fn estimate_structured_turn_usage(
+        &self,
+        extensions: &RequestExtensions,
+        input: &ModelInput,
+        turn: &AdapterStructuredTurn,
+        max_output_tokens: Option<u32>,
+    ) -> Result<UsageEstimate, AgentError> {
+        let Some(counter) = self.token_counter.as_ref() else {
+            return Ok(self
+                .resolve_usage_estimate(extensions, OperationKind::StructuredTurn)
+                .await);
+        };
+        match counter.count_structured_turn(input, turn).await? {
+            Some(count) => {
+                let fallback = self
+                    .resolve_usage_estimate(extensions, OperationKind::StructuredTurn)
+                    .await;
+                Ok(estimate_with_token_count(
+                    fallback,
+                    count.input_tokens,
+                    max_output_tokens,
+                ))
+            }
+            None => Ok(self
+                .resolve_usage_estimate(extensions, OperationKind::StructuredTurn)
+                .await),
+        }
+    }
+
+    async fn estimate_completion_usage(
+        &self,
+        extensions: &RequestExtensions,
+        request: &CompletionRequest,
+    ) -> Result<UsageEstimate, AgentError> {
+        let Some(counter) = self.token_counter.as_ref() else {
+            return Ok(self
+                .resolve_usage_estimate(extensions, OperationKind::Completion)
+                .await);
+        };
+        match counter.count_completion(request, extensions).await? {
+            Some(count) => {
+                let fallback = self
+                    .resolve_usage_estimate(extensions, OperationKind::Completion)
+                    .await;
+                Ok(estimate_with_token_count(
+                    fallback,
+                    count.input_tokens,
+                    request.options.max_output_tokens,
+                ))
+            }
+            None => Ok(self
+                .resolve_usage_estimate(extensions, OperationKind::Completion)
+                .await),
+        }
+    }
+
+    async fn estimate_structured_completion_usage(
+        &self,
+        extensions: &RequestExtensions,
+        request: &AdapterStructuredCompletionRequest,
+        max_output_tokens: Option<u32>,
+    ) -> Result<UsageEstimate, AgentError> {
+        let Some(counter) = self.token_counter.as_ref() else {
+            return Ok(self
+                .resolve_usage_estimate(extensions, OperationKind::StructuredCompletion)
+                .await);
+        };
+        match counter
+            .count_structured_completion(request, extensions)
+            .await?
+        {
+            Some(count) => {
+                let fallback = self
+                    .resolve_usage_estimate(extensions, OperationKind::StructuredCompletion)
+                    .await;
+                Ok(estimate_with_token_count(
+                    fallback,
+                    count.input_tokens,
+                    max_output_tokens,
+                ))
+            }
+            None => Ok(self
+                .resolve_usage_estimate(extensions, OperationKind::StructuredCompletion)
+                .await),
+        }
     }
 
     fn apply_default_extensions(&self, mut extensions: RequestExtensions) -> RequestExtensions {
@@ -560,6 +687,75 @@ where
 }
 
 impl Lutum {
+    pub(crate) async fn count_text_turn_tokens<T>(
+        &self,
+        extensions: RequestExtensions,
+        input: ModelInput,
+        turn: &ProtocolTextTurn<T>,
+        generation: GenerationParams,
+    ) -> Result<Option<TokenCount>, LutumError>
+    where
+        T: Toolset,
+    {
+        input.validate()?;
+        let extensions = Arc::new(self.apply_default_extensions(extensions));
+        let turn = erase_text_turn_ref(turn, generation, Arc::clone(&extensions))?;
+        let Some(counter) = self.token_counter.as_ref() else {
+            return Ok(None);
+        };
+        counter.count_text_turn(&input, &turn).await
+    }
+
+    pub(crate) async fn count_structured_turn_tokens<T, O>(
+        &self,
+        extensions: RequestExtensions,
+        input: ModelInput,
+        turn: &ProtocolStructuredTurn<T, O>,
+        generation: GenerationParams,
+    ) -> Result<Option<TokenCount>, LutumError>
+    where
+        T: Toolset,
+        O: StructuredOutput,
+    {
+        input.validate()?;
+        let extensions = Arc::new(self.apply_default_extensions(extensions));
+        let turn = erase_structured_turn_ref(turn, generation, Arc::clone(&extensions))?;
+        let Some(counter) = self.token_counter.as_ref() else {
+            return Ok(None);
+        };
+        counter.count_structured_turn(&input, &turn).await
+    }
+
+    pub(crate) async fn count_completion_tokens(
+        &self,
+        extensions: RequestExtensions,
+        request: CompletionRequest,
+    ) -> Result<Option<TokenCount>, LutumError> {
+        let extensions = self.apply_default_extensions(extensions);
+        let Some(counter) = self.token_counter.as_ref() else {
+            return Ok(None);
+        };
+        counter.count_completion(&request, &extensions).await
+    }
+
+    pub(crate) async fn count_structured_completion_tokens<O>(
+        &self,
+        extensions: RequestExtensions,
+        request: &StructuredCompletionRequest<O>,
+    ) -> Result<Option<TokenCount>, LutumError>
+    where
+        O: StructuredOutput,
+    {
+        let extensions = self.apply_default_extensions(extensions);
+        let request = erase_structured_completion_request_ref(request)?;
+        let Some(counter) = self.token_counter.as_ref() else {
+            return Ok(None);
+        };
+        counter
+            .count_structured_completion(&request, &extensions)
+            .await
+    }
+
     pub(crate) async fn run_text_turn(
         &self,
         extensions: RequestExtensions,
@@ -568,19 +764,21 @@ impl Lutum {
     ) -> Result<PendingTextTurn, LutumError> {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
+        let request_budget = turn.config.budget;
+        let max_output_tokens = turn.config.generation.max_output_tokens;
+        let extensions = Arc::new(extensions);
+        let turn = erase_text_turn(turn, Arc::clone(&extensions))?;
         let estimate = self
-            .resolve_usage_estimate(&extensions, OperationKind::TextTurn)
-            .await;
+            .estimate_text_turn_usage(extensions.as_ref(), &input, &turn, max_output_tokens)
+            .await?;
         let lease = self
             .budget
-            .reserve(&extensions, &estimate, turn.config.budget)?;
-        let extensions = Arc::new(extensions);
+            .reserve(extensions.as_ref(), &estimate, request_budget)?;
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("text_turn", estimate);
         self.emit_model_input_hook(&span, extensions.as_ref(), OperationKind::TextTurn, &input)
             .await;
         log_input_transcript(&span, &input);
-        let turn = erase_text_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingTextTurn {
             extensions,
             owned_lease: OwnedLease {
@@ -610,12 +808,8 @@ impl Lutum {
     {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
-        let estimate = self
-            .resolve_usage_estimate(&extensions, OperationKind::TextTurn)
-            .await;
-        let lease = self
-            .budget
-            .reserve(&extensions, &estimate, turn.config.budget)?;
+        let request_budget = turn.config.budget;
+        let max_output_tokens = turn.config.generation.max_output_tokens;
         // Extract availability before erase_text_turn consumes the turn config.
         let availability = turn.config.tools.available.clone();
         let dynamic_names = turn
@@ -626,12 +820,18 @@ impl Lutum {
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
         let extensions = Arc::new(extensions);
+        let turn = erase_text_turn(turn, Arc::clone(&extensions))?;
+        let estimate = self
+            .estimate_text_turn_usage(extensions.as_ref(), &input, &turn, max_output_tokens)
+            .await?;
+        let lease = self
+            .budget
+            .reserve(extensions.as_ref(), &estimate, request_budget)?;
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("text_turn", estimate);
         self.emit_model_input_hook(&span, extensions.as_ref(), OperationKind::TextTurn, &input)
             .await;
         log_input_transcript(&span, &input);
-        let turn = erase_text_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingTextTurnWithTools {
             extensions,
             owned_lease: OwnedLease {
@@ -663,13 +863,16 @@ impl Lutum {
     {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
+        let request_budget = turn.config.budget;
+        let max_output_tokens = turn.config.generation.max_output_tokens;
+        let extensions = Arc::new(extensions);
+        let turn = erase_structured_turn(turn, Arc::clone(&extensions))?;
         let estimate = self
-            .resolve_usage_estimate(&extensions, OperationKind::StructuredTurn)
-            .await;
+            .estimate_structured_turn_usage(extensions.as_ref(), &input, &turn, max_output_tokens)
+            .await?;
         let lease = self
             .budget
-            .reserve(&extensions, &estimate, turn.config.budget)?;
-        let extensions = Arc::new(extensions);
+            .reserve(extensions.as_ref(), &estimate, request_budget)?;
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("structured_turn", estimate);
         self.emit_model_input_hook(
@@ -680,7 +883,6 @@ impl Lutum {
         )
         .await;
         log_input_transcript(&span, &input);
-        let turn = erase_structured_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingStructuredTurn {
             extensions,
             owned_lease: OwnedLease {
@@ -711,12 +913,8 @@ impl Lutum {
     {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
-        let estimate = self
-            .resolve_usage_estimate(&extensions, OperationKind::StructuredTurn)
-            .await;
-        let lease = self
-            .budget
-            .reserve(&extensions, &estimate, turn.config.budget)?;
+        let request_budget = turn.config.budget;
+        let max_output_tokens = turn.config.generation.max_output_tokens;
         // Extract availability before erase_structured_turn consumes the turn config.
         let availability = turn.config.tools.available.clone();
         let dynamic_names = turn
@@ -727,6 +925,13 @@ impl Lutum {
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
         let extensions = Arc::new(extensions);
+        let turn = erase_structured_turn(turn, Arc::clone(&extensions))?;
+        let estimate = self
+            .estimate_structured_turn_usage(extensions.as_ref(), &input, &turn, max_output_tokens)
+            .await?;
+        let lease = self
+            .budget
+            .reserve(extensions.as_ref(), &estimate, request_budget)?;
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let span = turn_span("structured_turn", estimate);
         self.emit_model_input_hook(
@@ -737,7 +942,6 @@ impl Lutum {
         )
         .await;
         log_input_transcript(&span, &input);
-        let turn = erase_structured_turn(turn, Arc::clone(&extensions))?;
         Ok(PendingStructuredTurnWithTools {
             extensions,
             owned_lease: OwnedLease {
@@ -765,8 +969,8 @@ impl Lutum {
     ) -> Result<PendingCompletion, LutumError> {
         let extensions = self.apply_default_extensions(extensions);
         let estimate = self
-            .resolve_usage_estimate(&extensions, OperationKind::Completion)
-            .await;
+            .estimate_completion_usage(&extensions, &request)
+            .await?;
         let lease = self
             .budget
             .reserve(&extensions, &estimate, request.budget)?;
@@ -799,12 +1003,15 @@ impl Lutum {
         O: StructuredOutput,
     {
         let extensions = self.apply_default_extensions(extensions);
+        let request_budget = request.budget;
+        let max_output_tokens = request.generation.max_output_tokens;
+        let request = erase_structured_completion_request(request)?;
         let estimate = self
-            .resolve_usage_estimate(&extensions, OperationKind::StructuredCompletion)
-            .await;
+            .estimate_structured_completion_usage(&extensions, &request, max_output_tokens)
+            .await?;
         let lease = self
             .budget
-            .reserve(&extensions, &estimate, request.budget)?;
+            .reserve(&extensions, &estimate, request_budget)?;
         let retry_policy = extensions.get::<RetryPolicy>().cloned().unwrap_or_default();
         let extensions = Arc::new(extensions);
         let span = turn_span("structured_completion", estimate);
@@ -817,7 +1024,7 @@ impl Lutum {
             recovery: self.recovery.clone(),
             completion: Arc::clone(&self.completion),
             hooks: Arc::clone(&self.hooks),
-            request: erase_structured_completion_request(request)?,
+            request,
             estimate,
             retry_policy,
             span,
@@ -4735,6 +4942,20 @@ where
     })
 }
 
+fn erase_text_turn_ref<T>(
+    turn: &ProtocolTextTurn<T>,
+    generation: GenerationParams,
+    extensions: Arc<RequestExtensions>,
+) -> Result<AdapterTextTurn, AgentError>
+where
+    T: Toolset,
+{
+    Ok(AdapterTextTurn {
+        config: erase_turn_config_ref(&turn.config, generation)?,
+        extensions,
+    })
+}
+
 fn erase_structured_turn<T, O>(
     turn: ProtocolStructuredTurn<T, O>,
     extensions: Arc<RequestExtensions>,
@@ -4751,6 +4972,23 @@ where
     })
 }
 
+fn erase_structured_turn_ref<T, O>(
+    turn: &ProtocolStructuredTurn<T, O>,
+    generation: GenerationParams,
+    extensions: Arc<RequestExtensions>,
+) -> Result<AdapterStructuredTurn, AgentError>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    let output = erase_structured_output_spec_ref(&turn.output)?;
+    Ok(AdapterStructuredTurn {
+        config: erase_turn_config_ref(&turn.config, generation)?,
+        extensions,
+        output,
+    })
+}
+
 fn erase_structured_completion_request<O>(
     request: StructuredCompletionRequest<O>,
 ) -> Result<AdapterStructuredCompletionRequest, AgentError>
@@ -4762,6 +5000,21 @@ where
         system: request.system,
         prompt: request.prompt,
         generation: request.generation,
+        output,
+    })
+}
+
+fn erase_structured_completion_request_ref<O>(
+    request: &StructuredCompletionRequest<O>,
+) -> Result<AdapterStructuredCompletionRequest, AgentError>
+where
+    O: StructuredOutput,
+{
+    let output = erase_structured_output_spec_ref(&request.output)?;
+    Ok(AdapterStructuredCompletionRequest {
+        system: request.system.clone(),
+        prompt: request.prompt.clone(),
+        generation: request.generation.clone(),
         output,
     })
 }
@@ -4783,7 +5036,35 @@ where
     })
 }
 
+fn erase_structured_output_spec_ref<O>(
+    output: &lutum_protocol::StructuredOutputSpec<O>,
+) -> Result<AdapterStructuredOutputSpec, AgentError>
+where
+    O: StructuredOutput,
+{
+    Ok(AdapterStructuredOutputSpec {
+        schema_name: output
+            .schema_name
+            .clone()
+            .unwrap_or_else(|| <O as StructuredOutput>::schema_name().into_owned()),
+        schema: match output.schema.as_ref() {
+            Some(schema) => schema.clone(),
+            None => serde_json::to_value(<O as StructuredOutput>::json_schema())?,
+        },
+    })
+}
+
 fn erase_turn_config<T>(config: TurnConfig<T>) -> Result<AdapterTurnConfig, AgentError>
+where
+    T: Toolset,
+{
+    erase_turn_config_ref(&config, config.generation.clone())
+}
+
+fn erase_turn_config_ref<T>(
+    config: &TurnConfig<T>,
+    generation: GenerationParams,
+) -> Result<AdapterTurnConfig, AgentError>
 where
     T: Toolset,
 {
@@ -4792,7 +5073,7 @@ where
         requirement,
         description_overrides,
         dynamic_tools,
-    } = config.tools;
+    } = &config.tools;
 
     if !dynamic_tools.is_empty() && !T::has_dynamic_slot() {
         return Err(AgentError::InvalidToolConstraints {
@@ -4804,7 +5085,7 @@ where
     }
 
     let mut dynamic_name_set = std::collections::HashSet::new();
-    for tool in &dynamic_tools {
+    for tool in dynamic_tools {
         if !dynamic_name_set.insert(tool.name.as_str()) {
             return Err(AgentError::InvalidToolConstraints {
                 tool: tool.name.clone(),
@@ -4818,8 +5099,8 @@ where
     }
 
     // Validate: require_tool(x) must be in the available set when availability is restricted.
-    if let ToolRequirement::Specific(ref selector) = requirement {
-        let in_available = match &available {
+    if let ToolRequirement::Specific(selector) = requirement {
+        let in_available = match available {
             ToolAvailability::All => true,
             ToolAvailability::Default => T::default_selectors().contains(selector),
             ToolAvailability::Only(only) => only.contains(selector),
@@ -4834,7 +5115,7 @@ where
         }
     }
 
-    let tool_defs = match &available {
+    let tool_defs = match available {
         ToolAvailability::All => T::definitions().iter().collect::<Vec<_>>(),
         ToolAvailability::Default => T::definitions_for(T::default_selectors()),
         ToolAvailability::Only(selectors) => T::definitions_for(selectors.iter().copied()),
@@ -4851,7 +5132,7 @@ where
 
     // Build a last-write-wins override map from selector name → description.
     let mut override_map: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for (sel, desc) in &description_overrides {
+    for (sel, desc) in description_overrides {
         override_map.insert(sel.name(), desc.as_str());
     }
 
@@ -4883,9 +5164,9 @@ where
 
     for tool in dynamic_tools {
         tools.push(AdapterToolDefinition {
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.input_schema,
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: tool.input_schema.clone(),
         });
     }
 
@@ -4898,7 +5179,7 @@ where
             });
         }
         return Ok(AdapterTurnConfig {
-            generation: config.generation,
+            generation,
             tools: vec![],
             tool_choice: AdapterToolChoice::None,
         });
@@ -4913,7 +5194,7 @@ where
     };
 
     Ok(AdapterTurnConfig {
-        generation: config.generation,
+        generation,
         tools,
         tool_choice,
     })
@@ -5450,6 +5731,23 @@ fn turn_span(kind: &'static str, estimate: UsageEstimate) -> Span {
         estimate_cost_micros_usd = estimate.cost_micros_usd,
         finish_reason = field::Empty
     )
+}
+
+fn estimate_with_token_count(
+    mut fallback: UsageEstimate,
+    input_tokens: u64,
+    max_output_tokens: Option<u32>,
+) -> UsageEstimate {
+    let estimated_non_input_tokens = fallback
+        .total_tokens
+        .saturating_sub(fallback.input_tokens)
+        .max(fallback.output_tokens);
+    let output_tokens =
+        estimated_non_input_tokens.max(max_output_tokens.map(u64::from).unwrap_or_default());
+    fallback.input_tokens = input_tokens;
+    fallback.output_tokens = output_tokens;
+    fallback.total_tokens = input_tokens.saturating_add(output_tokens);
+    fallback
 }
 
 fn emit_raw_collect_error(

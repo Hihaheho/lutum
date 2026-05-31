@@ -16,10 +16,10 @@ use std::{
 ///
 /// Reads walk the newest layer first, then any older fallback layers. Mutations
 /// apply only to the newest local layer.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RequestExtensions {
     fallbacks: Vec<Arc<RequestExtensions>>,
-    extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    extensions: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
 impl RequestExtensions {
@@ -29,14 +29,15 @@ impl RequestExtensions {
 
     pub fn insert<T: Any + Send + Sync + 'static>(&mut self, val: T) -> Option<T> {
         self.extensions
-            .insert(TypeId::of::<T>(), Box::new(val))
-            .and_then(|old| old.downcast::<T>().ok().map(|b| *b))
+            .insert(TypeId::of::<T>(), Arc::new(val))
+            .and_then(|old| Arc::downcast::<T>(old).ok())
+            .and_then(|old| Arc::try_unwrap(old).ok())
     }
 
     pub fn get<T: Any + Send + Sync + 'static>(&self) -> Option<&T> {
         self.extensions
             .get(&TypeId::of::<T>())
-            .and_then(|b| b.downcast_ref::<T>())
+            .and_then(|b| b.as_ref().downcast_ref::<T>())
             .or_else(|| {
                 self.fallbacks
                     .iter()
@@ -44,16 +45,22 @@ impl RequestExtensions {
             })
     }
 
+    /// Returns a mutable reference to a local extension value when it is uniquely owned.
+    ///
+    /// Cloning `RequestExtensions` is a shallow read-sharing operation. While a value is shared
+    /// by a clone, this returns `None` instead of exposing mutable aliases.
     pub fn get_mut<T: Any + Send + Sync + 'static>(&mut self) -> Option<&mut T> {
         self.extensions
             .get_mut(&TypeId::of::<T>())
+            .and_then(Arc::get_mut)
             .and_then(|b| b.downcast_mut::<T>())
     }
 
     pub fn remove<T: Any + Send + Sync + 'static>(&mut self) -> Option<T> {
         self.extensions
             .remove(&TypeId::of::<T>())
-            .and_then(|b| b.downcast::<T>().ok().map(|b| *b))
+            .and_then(|b| Arc::downcast::<T>(b).ok())
+            .and_then(|b| Arc::try_unwrap(b).ok())
     }
 
     pub fn contains<T: Any + Send + Sync + 'static>(&self) -> bool {
@@ -138,5 +145,31 @@ mod tests {
             extensions.get_mut::<Marker>().map(|marker| marker.0),
             Some(1)
         );
+    }
+
+    #[test]
+    fn get_mut_updates_uniquely_owned_extension() {
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(Marker(1));
+
+        extensions.get_mut::<Marker>().unwrap().0 = 2;
+
+        assert_eq!(extensions.get::<Marker>(), Some(&Marker(2)));
+    }
+
+    #[test]
+    fn cloned_extensions_share_reads_without_mutable_aliasing() {
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(Marker(1));
+
+        let clone = extensions.clone();
+
+        assert_eq!(extensions.get::<Marker>(), Some(&Marker(1)));
+        assert_eq!(clone.get::<Marker>(), Some(&Marker(1)));
+        assert!(extensions.get_mut::<Marker>().is_none());
+
+        drop(clone);
+        extensions.get_mut::<Marker>().unwrap().0 = 2;
+        assert_eq!(extensions.get::<Marker>(), Some(&Marker(2)));
     }
 }

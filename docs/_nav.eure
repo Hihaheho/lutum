@@ -12,6 +12,7 @@ groups[] {
   description: The execution model, transcript, and session API.
   pages[] { path = "/docs/concepts" label = "Execution Model" }
   pages[] { path = "/docs/session" label = "Session" }
+  pages[] { path = "/docs/token-counting" label = "Token Counting" }
   pages[] { path = "/docs/structured-output" label = "Structured Output" }
 }
 

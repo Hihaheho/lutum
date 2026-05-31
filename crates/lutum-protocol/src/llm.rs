@@ -8,6 +8,7 @@ use crate::{
     budget::{RequestBudget, Usage},
     conversation::{ModelInput, RawJson, ToolMetadata},
     error::RequestFailureKind,
+    extensions::RequestExtensions,
     structured::StructuredOutput,
     toolset::{NoTools, RecoverableToolCallIssue, ToolConstraints, Toolset},
     transcript::CommittedTurn,
@@ -1314,6 +1315,53 @@ pub enum OperationKind {
     StructuredTurn,
     StructuredCompletion,
     Completion,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TokenCount {
+    pub input_tokens: u64,
+}
+
+impl TokenCount {
+    pub const fn new(input_tokens: u64) -> Self {
+        Self { input_tokens }
+    }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+pub trait TokenCounter: crate::hooks::MaybeSend + crate::hooks::MaybeSync + 'static {
+    async fn count_text_turn(
+        &self,
+        _input: &ModelInput,
+        _turn: &AdapterTextTurn,
+    ) -> Result<Option<TokenCount>, AgentError> {
+        Ok(None)
+    }
+
+    async fn count_structured_turn(
+        &self,
+        _input: &ModelInput,
+        _turn: &AdapterStructuredTurn,
+    ) -> Result<Option<TokenCount>, AgentError> {
+        Ok(None)
+    }
+
+    async fn count_completion(
+        &self,
+        _request: &CompletionRequest,
+        _extensions: &RequestExtensions,
+    ) -> Result<Option<TokenCount>, AgentError> {
+        Ok(None)
+    }
+
+    async fn count_structured_completion(
+        &self,
+        _request: &AdapterStructuredCompletionRequest,
+        _extensions: &RequestExtensions,
+    ) -> Result<Option<TokenCount>, AgentError> {
+        Ok(None)
+    }
 }
 
 #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]

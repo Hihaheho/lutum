@@ -24,8 +24,8 @@ use lutum_protocol::{
     llm::{
         AdapterStructuredTurn, AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig,
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-        ErasedTextTurnEventStream, FinishReason, ModelName, OperationKind, TurnAdapter,
-        UsageRecoveryAdapter,
+        ErasedTextTurnEventStream, FinishReason, ModelName, OperationKind, TokenCount,
+        TokenCounter, TurnAdapter, UsageRecoveryAdapter,
     },
     telemetry::{ParseErrorStage, RawTelemetryEmitter, RequestErrorDebugInfo, RequestErrorKind},
     transcript::{ToolResultItemView, TurnRole, TurnView},
@@ -434,6 +434,47 @@ impl ClaudeAdapter {
         let response = error_for_status_with_body(raw, response).await?;
         Ok(response.body)
     }
+
+    async fn post_json<T>(
+        &self,
+        path: &str,
+        body: &T,
+        extensions: &RequestExtensions,
+        raw: Option<&RawTelemetryEmitter>,
+    ) -> Result<Value, ClaudeError>
+    where
+        T: Serialize + ?Sized,
+    {
+        let response = match self
+            .client
+            .send(HttpRequest {
+                method: Method::POST,
+                url: format!("{}{}", self.base_url, path),
+                headers: self.request_headers(extensions)?,
+                body: Some(serde_json::to_vec(body).map_err(ClaudeError::Json)?),
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(source) => {
+                let debug_info = source.debug_info().clone();
+                let error = ClaudeError::Request(source);
+                emit_claude_request_error(
+                    raw,
+                    None,
+                    RequestErrorKind::Transport,
+                    None,
+                    None,
+                    &error.to_string(),
+                    &debug_info,
+                );
+                return Err(error);
+            }
+        };
+        let response = error_for_status_with_body(raw, response).await?;
+        let body = collect_response_body(response).await?;
+        serde_json::from_slice::<Value>(&body).map_err(ClaudeError::Json)
+    }
 }
 
 #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
@@ -561,6 +602,128 @@ impl UsageRecoveryAdapter for ClaudeAdapter {
             OperationKind::Completion => Ok(None),
         }
     }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+impl TokenCounter for ClaudeAdapter {
+    async fn count_text_turn(
+        &self,
+        input: &ModelInput,
+        turn: &AdapterTextTurn,
+    ) -> Result<Option<TokenCount>, AgentError> {
+        let raw = RawTelemetryEmitter::new(
+            turn.extensions.as_ref(),
+            "claude",
+            "messages_count_tokens",
+            "text_turn",
+        );
+        let model = self
+            .hooks
+            .select_claude_model(turn.extensions.as_ref(), self.default_model.clone())
+            .await;
+        let thinking_budget = self
+            .hooks
+            .resolve_budget_tokens(turn.extensions.as_ref(), self.default_thinking_budget)
+            .await
+            .map(|budget| budget.max(MIN_THINKING_BUDGET_TOKENS));
+        let request = self
+            .prepare_messages_request(
+                input,
+                &turn.config,
+                turn.extensions.as_ref(),
+                model.as_ref(),
+                thinking_budget,
+                None,
+                false,
+            )
+            .map_err(AgentError::from)?;
+        let body = messages_count_tokens_body(&request).map_err(AgentError::from)?;
+        if let Some(raw) = raw.as_ref() {
+            raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
+        }
+        let response = self
+            .post_json(
+                "/v1/messages/count_tokens",
+                &body,
+                turn.extensions.as_ref(),
+                raw.as_ref(),
+            )
+            .await
+            .map_err(AgentError::from)?;
+        Ok(Some(TokenCount::new(parse_input_token_count(&response)?)))
+    }
+
+    async fn count_structured_turn(
+        &self,
+        input: &ModelInput,
+        turn: &AdapterStructuredTurn,
+    ) -> Result<Option<TokenCount>, AgentError> {
+        let raw = RawTelemetryEmitter::new(
+            turn.extensions.as_ref(),
+            "claude",
+            "messages_count_tokens",
+            "structured_turn",
+        );
+        let model = self
+            .hooks
+            .select_claude_model(turn.extensions.as_ref(), self.default_model.clone())
+            .await;
+        let thinking_budget = self
+            .hooks
+            .resolve_budget_tokens(turn.extensions.as_ref(), self.default_thinking_budget)
+            .await
+            .map(|budget| budget.max(MIN_THINKING_BUDGET_TOKENS));
+        let mut schema = turn.output.schema.clone();
+        require_no_additional_properties(&mut schema);
+        let request = self
+            .prepare_messages_request(
+                input,
+                &turn.config,
+                turn.extensions.as_ref(),
+                model.as_ref(),
+                thinking_budget,
+                Some(OutputFormat::JsonSchema { schema }),
+                false,
+            )
+            .map_err(AgentError::from)?;
+        let body = messages_count_tokens_body(&request).map_err(AgentError::from)?;
+        if let Some(raw) = raw.as_ref() {
+            raw.emit_request(None, &serialize_raw_body(&body).map_err(AgentError::from)?);
+        }
+        let response = self
+            .post_json(
+                "/v1/messages/count_tokens",
+                &body,
+                turn.extensions.as_ref(),
+                raw.as_ref(),
+            )
+            .await
+            .map_err(AgentError::from)?;
+        Ok(Some(TokenCount::new(parse_input_token_count(&response)?)))
+    }
+}
+
+fn messages_count_tokens_body(request: &MessagesRequest) -> Result<Value, ClaudeError> {
+    let mut body = serde_json::to_value(request)?;
+    if let Value::Object(map) = &mut body {
+        map.remove("max_tokens");
+        map.remove("stream");
+        map.remove("temperature");
+        map.remove("stop_sequences");
+    }
+    Ok(body)
+}
+
+fn parse_input_token_count(value: &Value) -> Result<u64, AgentError> {
+    value
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            AgentError::from(ClaudeError::InvalidRequest {
+                message: "token count response did not include input_tokens".to_string(),
+            })
+        })
 }
 
 impl CompiledClaudeConversation {
@@ -2099,6 +2262,50 @@ mod tests {
         );
         let body = serde_json::from_slice::<Value>(request.body.as_deref().unwrap()).unwrap();
         assert_eq!(body, serde_json::json!({"stream": true}));
+    }
+
+    #[tokio::test]
+    async fn token_counter_sends_count_request_and_parses_input_tokens() {
+        let fake = FakeHttpClient::new(fake_response(
+            StatusCode::OK,
+            HeaderMap::new(),
+            vec![Ok(Bytes::from_static(br#"{"input_tokens":13}"#))],
+        ));
+        let adapter = ClaudeAdapter::new_with_http_client("test-key", fake.clone());
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let turn = AdapterTextTurn {
+            config: AdapterTurnConfig {
+                generation: GenerationParams {
+                    max_output_tokens: Some(8),
+                    ..GenerationParams::default()
+                },
+                tools: Vec::new(),
+                tool_choice: AdapterToolChoice::None,
+            },
+            extensions: Arc::new(RequestExtensions::new()),
+        };
+
+        let count = adapter
+            .count_text_turn(&input, &turn)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(count.input_tokens, 13);
+        let captured = fake.captured();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].method, Method::POST);
+        assert_eq!(
+            captured[0].url,
+            "https://api.anthropic.com/v1/messages/count_tokens"
+        );
+        let body = serde_json::from_slice::<Value>(captured[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["model"], "claude-opus-4-5");
+        assert!(body.get("messages").is_some());
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("stream").is_none());
+        assert!(body.get("temperature").is_none());
     }
 
     #[tokio::test]
