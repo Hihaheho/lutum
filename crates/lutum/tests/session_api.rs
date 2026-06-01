@@ -2,11 +2,12 @@ use lutum::{
     AssistantTurnItem, AssistantTurnView, CommitTurn, EphemeralTurnView, FinishReason,
     MockLlmAdapter, MockStructuredScenario, MockTextScenario, RawJson, RecoveredTextToolCalls,
     Session, SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcomeWithTools,
-    TextStepOutcomeWithTools, ToolCallFallbackError, TurnView, Usage,
+    TextStepOutcomeWithTools, TextToolCollectError, TextToolErrorDirective,
+    TextToolHandlerDirective, ToolCallFallbackError, TurnView, Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
 #[lutum::tool_input(name = "weather", output = WeatherResult)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -22,6 +23,34 @@ struct WeatherResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, lutum::Toolset)]
 enum Tools {
     Weather(WeatherArgs),
+}
+
+#[lutum::tool_input(name = "v_weather", output = ValidationWeatherResult)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct ValidationWeatherArgs {
+    city: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct ValidationWeatherResult {
+    forecast: String,
+}
+
+#[lutum::tool_input(name = "v_search", output = SearchResult)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct SearchArgs {
+    query: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct SearchResult {
+    snippets: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, lutum::Toolset)]
+enum ValidationTools {
+    ValidationWeather(ValidationWeatherArgs),
+    Search(SearchArgs),
 }
 
 #[test]
@@ -577,6 +606,392 @@ fn required_tool_text_fallback_none_errors_without_commit() {
     }
     assert_eq!(session.input().items().len(), before_len);
     assert_eq!(session.list_turns().count(), before_turns);
+}
+
+#[test]
+fn controlled_handler_can_return_tool_round_from_text_delta() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-controlled-early".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "I will check.\n```json\n{\"tool\":\"weather\"}\n```".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-controlled-early".into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 9,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Check weather.");
+    let before_len = session.input().items().len();
+
+    let outcome = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<Tools>()
+            .available_tools([ToolsSelector::Weather])
+            .require_any_tool()
+            .collect_controlled_with(
+                |event: &lutum::TextTurnEventWithTools<Tools>,
+                 cx: &lutum::TextToolHandlerContext<'_, Tools>|
+                 -> Result<_, Infallible> {
+                    if let lutum::TextTurnEventWithTools::TextDelta { delta } = event
+                        && delta.contains("```json")
+                    {
+                        let recovered = cx
+                            .recover_tool_calls_from_items(vec![
+                                AssistantTurnItem::Text("I will check.\n".into()),
+                                AssistantTurnItem::ToolCall {
+                                    id: "controlled-call-1".into(),
+                                    name: "weather".into(),
+                                    arguments: RawJson::parse(r#"{"city":"Tokyo"}"#).unwrap(),
+                                },
+                            ])
+                            .unwrap();
+                        return Ok(TextToolHandlerDirective::Return(
+                            lutum::SyntheticTextToolTurn::needs_tools(recovered),
+                        ));
+                    }
+                    Ok(TextToolHandlerDirective::Continue)
+                },
+            )
+            .await
+    })
+    .unwrap();
+
+    assert_eq!(session.input().items().len(), before_len);
+    let TextStepOutcomeWithTools::NeedsTools(round) = outcome else {
+        panic!("expected controlled tool round");
+    };
+    assert_eq!(round.usage, Usage::zero());
+    let ToolsCall::Weather(call) = round.expect_one().unwrap();
+    assert_eq!(call.input.city, "Tokyo");
+}
+
+#[test]
+fn controlled_synthetic_finished_respects_required_tool_constraint() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-controlled-required-bypass".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "done".into(),
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Check weather.");
+    let before_len = session.input().items().len();
+
+    let err = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<Tools>()
+            .require_any_tool()
+            .collect_controlled_with(
+                |event: &lutum::TextTurnEventWithTools<Tools>,
+                 _cx: &lutum::TextToolHandlerContext<'_, Tools>|
+                 -> Result<_, Infallible> {
+                    if matches!(event, lutum::TextTurnEventWithTools::TextDelta { .. }) {
+                        let assistant_turn =
+                            lutum::AssistantTurn::from_items(vec![AssistantTurnItem::Text(
+                                "done".into(),
+                            )])
+                            .unwrap();
+                        return Ok(TextToolHandlerDirective::Return(
+                            lutum::SyntheticTextToolTurn::finished(assistant_turn),
+                        ));
+                    }
+                    Ok(TextToolHandlerDirective::Continue)
+                },
+            )
+            .await
+    })
+    .unwrap_err();
+
+    assert_eq!(session.input().items().len(), before_len);
+    assert!(matches!(
+        err,
+        lutum::CollectError::Reduction {
+            source: lutum::TextTurnReductionError::UnmetToolRequirement { .. },
+            ..
+        }
+    ));
+}
+
+struct LengthRecoveryHandler {
+    recovered: Option<RecoveredTextToolCalls<Tools>>,
+}
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+impl lutum::TextToolEventHandler<Tools> for LengthRecoveryHandler {
+    type Error = ToolCallFallbackError;
+
+    async fn on_event(
+        &mut self,
+        event: &lutum::TextTurnEventWithTools<Tools>,
+        cx: &lutum::TextToolHandlerContext<Tools>,
+    ) -> Result<TextToolHandlerDirective<Tools>, Self::Error> {
+        if let lutum::TextTurnEventWithTools::TextDelta { delta } = event
+            && delta.contains("```json")
+        {
+            self.recovered = Some(cx.recover_tool_calls_from_items(vec![
+                AssistantTurnItem::Text("I will check.\n".into()),
+                AssistantTurnItem::ToolCall {
+                    id: "controlled-length-call-1".into(),
+                    name: "weather".into(),
+                    arguments: RawJson::parse(r#"{"city":"Tokyo"}"#).unwrap(),
+                },
+            ])?);
+        }
+        Ok(TextToolHandlerDirective::Continue)
+    }
+
+    async fn on_error(
+        &mut self,
+        error: TextToolCollectError<'_>,
+        _cx: &lutum::TextToolHandlerContext<Tools>,
+    ) -> Result<TextToolErrorDirective<Tools>, Self::Error> {
+        if matches!(
+            error,
+            TextToolCollectError::Reduction(lutum::TextTurnReductionError::OutputLimitExceeded(_))
+        ) {
+            let recovered = self
+                .recovered
+                .take()
+                .ok_or(ToolCallFallbackError::NoToolCall)?;
+            return Ok(TextToolErrorDirective::Return(
+                lutum::SyntheticTextToolTurn::needs_tools(recovered),
+            ));
+        }
+        Ok(TextToolErrorDirective::Propagate)
+    }
+}
+
+#[test]
+fn controlled_handler_can_recover_output_limit_as_tool_round() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-controlled-length".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "I will check.\n```json\n{\"tool\":\"weather\"}\n```".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-controlled-length".into()),
+            finish_reason: FinishReason::Length,
+            usage: Usage {
+                total_tokens: 12,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Check weather.");
+
+    let outcome = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<Tools>()
+            .available_tools([ToolsSelector::Weather])
+            .require_any_tool()
+            .collect_controlled_with(LengthRecoveryHandler { recovered: None })
+            .await
+    })
+    .unwrap();
+
+    let TextStepOutcomeWithTools::NeedsTools(round) = outcome else {
+        panic!("expected recovered tool round");
+    };
+    assert_eq!(round.usage.total_tokens, 12);
+    let ToolsCall::Weather(call) = round.expect_one().unwrap();
+    assert_eq!(call.input.city, "Tokyo");
+}
+
+#[test]
+fn controlled_handler_propagates_output_limit_by_default() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-controlled-length-propagate".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "partial".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::Completed {
+            request_id: Some("req-controlled-length-propagate".into()),
+            finish_reason: FinishReason::Length,
+            usage: Usage {
+                total_tokens: 7,
+                ..Usage::zero()
+            },
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Check weather.");
+
+    let err = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<Tools>()
+            .collect_controlled_with(
+                |_event: &lutum::TextTurnEventWithTools<Tools>,
+                 _cx: &lutum::TextToolHandlerContext<'_, Tools>|
+                 -> Result<_, Infallible> {
+                    Ok(TextToolHandlerDirective::Continue)
+                },
+            )
+            .await
+    })
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        lutum::CollectError::Reduction {
+            source: lutum::TextTurnReductionError::OutputLimitExceeded(_),
+            ..
+        }
+    ));
+}
+
+fn recovered_validation_search_call<T>(
+    cx: &lutum::TextToolHandlerContext<'_, T>,
+) -> Result<TextToolHandlerDirective<T>, ToolCallFallbackError>
+where
+    T: lutum::Toolset,
+{
+    let recovered = cx.recover_tool_calls_from_items(vec![
+        AssistantTurnItem::Text("searching\n".into()),
+        AssistantTurnItem::ToolCall {
+            id: "validation-call-1".into(),
+            name: "v_search".into(),
+            arguments: RawJson::parse(r#"{"query":"rust"}"#).unwrap(),
+        },
+    ])?;
+    Ok(TextToolHandlerDirective::Return(
+        lutum::SyntheticTextToolTurn::needs_tools(recovered),
+    ))
+}
+
+#[test]
+fn controlled_context_rejects_unavailable_recovered_tool() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-controlled-unavailable".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "search".into(),
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Search.");
+
+    let err = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<ValidationTools>()
+            .available_tools([ValidationToolsSelector::ValidationWeather])
+            .collect_controlled_with(
+                |event: &lutum::TextTurnEventWithTools<ValidationTools>,
+                 cx: &lutum::TextToolHandlerContext<'_, ValidationTools>| {
+                    if matches!(event, lutum::TextTurnEventWithTools::TextDelta { .. }) {
+                        return recovered_validation_search_call(cx);
+                    }
+                    Ok(TextToolHandlerDirective::Continue)
+                },
+            )
+            .await
+    })
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        lutum::CollectError::Handler {
+            source: ToolCallFallbackError::UnavailableTool { ref name },
+            ..
+        } if name == "v_search"
+    ));
+}
+
+#[test]
+fn controlled_context_rejects_wrong_required_recovered_tool() {
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::RawTextTurnEvent::Started {
+            request_id: Some("req-controlled-wrong-required".into()),
+            model: "gpt-4.1-mini".into(),
+        }),
+        Ok(lutum::RawTextTurnEvent::TextDelta {
+            delta: "search".into(),
+        }),
+    ]));
+    let ctx = lutum::Lutum::new(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+    );
+    let mut session = Session::new();
+    session.push_user("Search.");
+
+    let err = futures::executor::block_on(async {
+        session
+            .text_turn(&ctx)
+            .tools::<ValidationTools>()
+            .available_tools([
+                ValidationToolsSelector::ValidationWeather,
+                ValidationToolsSelector::Search,
+            ])
+            .require_tool(ValidationToolsSelector::ValidationWeather)
+            .collect_controlled_with(
+                |event: &lutum::TextTurnEventWithTools<ValidationTools>,
+                 cx: &lutum::TextToolHandlerContext<'_, ValidationTools>| {
+                    if matches!(event, lutum::TextTurnEventWithTools::TextDelta { .. }) {
+                        return recovered_validation_search_call(cx);
+                    }
+                    Ok(TextToolHandlerDirective::Continue)
+                },
+            )
+            .await
+    })
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        lutum::CollectError::Handler {
+            source: ToolCallFallbackError::WrongRequiredTool {
+                ref expected,
+                ref actual
+            },
+            ..
+        } if expected == "v_weather" && actual == "v_search"
+    ));
 }
 
 #[test]

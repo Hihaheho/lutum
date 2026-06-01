@@ -255,6 +255,134 @@ Convenience methods:
 ```
 }
 
+@ "controlled-collection" {
+  "##": Controlled Text+Tool Collection
+
+  "body" = ```markdown
+Use controlled collection when user code needs more authority than `collect_with` provides during
+a text turn with tools. The common case is an assistant that streams a JSON code block in normal
+text, where your app wants to parse that JSON, validate it as a Lutum tool call, and immediately
+return a `NeedsTools` round without waiting for provider-native tool-call events.
+
+The existing `EventHandler` and `.collect_with(handler)` behavior is unchanged. The controlled
+path is separate and currently applies only to `TextTurnWithTools<T>`.
+```
+
+  "rust-example" = ```rust
+use lutum::{
+    AssistantTurnItem, RawJson, SyntheticTextToolTurn, TextToolCollectError,
+    TextToolErrorDirective, TextToolEventHandler, TextToolHandlerContext,
+    TextToolHandlerDirective, TextTurnEventWithTools, ToolCallFallbackError,
+};
+
+struct JsonBlockHandler {
+    buffer: String,
+    recovered: Option<lutum::RecoveredTextToolCalls<AppTools>>,
+}
+
+#[async_trait::async_trait]
+impl TextToolEventHandler<AppTools> for JsonBlockHandler {
+    type Error = ToolCallFallbackError;
+
+    async fn on_event(
+        &mut self,
+        event: &TextTurnEventWithTools<AppTools>,
+        cx: &TextToolHandlerContext<AppTools>,
+    ) -> Result<TextToolHandlerDirective<AppTools>, Self::Error> {
+        if let TextTurnEventWithTools::TextDelta { delta } = event {
+            self.buffer.push_str(delta);
+
+            // JSON extraction is application-owned. Once you have name and arguments,
+            // Lutum can validate and decode the call against this turn's constraints.
+            if let Some((name, arguments)) = extract_json_tool_candidate(&self.buffer) {
+                let recovered = cx.recover_tool_calls_from_items(vec![
+                    AssistantTurnItem::Text("Recovered a JSON tool request.".into()),
+                    AssistantTurnItem::ToolCall {
+                        id: "json-call-1".into(),
+                        name: name.into(),
+                        arguments,
+                    },
+                ])?;
+
+                return Ok(TextToolHandlerDirective::Return(
+                    SyntheticTextToolTurn::needs_tools(recovered),
+                ));
+            }
+        }
+
+        Ok(TextToolHandlerDirective::Continue)
+    }
+
+    async fn on_error(
+        &mut self,
+        error: TextToolCollectError<'_>,
+        _cx: &TextToolHandlerContext<AppTools>,
+    ) -> Result<TextToolErrorDirective<AppTools>, Self::Error> {
+        if matches!(
+            error,
+            TextToolCollectError::Reduction(lutum::TextTurnReductionError::OutputLimitExceeded(_))
+        ) && let Some(recovered) = self.recovered.take()
+        {
+            return Ok(TextToolErrorDirective::Return(
+                SyntheticTextToolTurn::needs_tools(recovered),
+            ));
+        }
+
+        Ok(TextToolErrorDirective::Propagate)
+    }
+}
+
+let outcome = session
+    .text_turn(&llm)
+    .tools::<AppTools>()
+    .require_any_tool()
+    .collect_controlled_with(JsonBlockHandler {
+        buffer: String::new(),
+        recovered: None,
+    })
+    .await?;
+```
+
+  "body-2" = ```markdown
+`TextToolEventHandler<T>::on_event` returns a `TextToolHandlerDirective<T>`:
+
+| Directive | Effect |
+|---|---|
+| `Continue` | Continue normal stream collection. |
+| `Stop` | Finalize accounting and return `CollectError::Stopped`, matching `collect_with`. |
+| `Return(SyntheticTextToolTurn<T>)` | Drop the stream and return a synthesized finished turn or tool round. |
+
+`TextToolEventHandler<T>::on_error` runs before controlled collection returns adapter execution
+errors, reducer errors, or unexpected EOF. Its default is `Propagate`. Returning
+`TextToolErrorDirective::Return(...)` treats the error as handled; this is useful for conditional
+recovery from `TextTurnReductionError::OutputLimitExceeded` after the handler has already captured
+a valid JSON tool-call candidate.
+```
+
+  "body-3" = ```markdown
+`TextToolHandlerContext<T>` exposes the current reduced state, request extensions, remaining
+budget, resolved `ToolConstraints<T>`, and adapter tool definitions. Its recovery helpers are the
+preferred way to turn JSON-derived candidates into typed tool calls:
+
+| Helper | Use |
+|---|---|
+| `recover_tool_calls_from_items(items)` | Build an assistant turn from items, decode tool calls, and validate them. |
+| `validate_recovered_tool_calls(recovered)` | Validate an already recovered set against current availability and requirement constraints. |
+| `parse_tool_call(id, name, arguments)` | Decode one JSON tool call using the active constraints. |
+
+Validation uses the same fallback error variants as normal text-tool fallback recovery:
+unavailable tools become `ToolCallFallbackError::UnavailableTool`, and a call that conflicts with
+`.require_tool(selector)` becomes `ToolCallFallbackError::WrongRequiredTool`.
+
+Synthetic returns do not bypass required-tool policy. A `SyntheticTextToolTurn::finished(...)`
+without tool calls still fails under `.require_any_tool()` or `.require_tool(...)` unless normal
+required-tool fallback recovery can recover the required call from the assistant turn.
+
+For a complete deterministic example, see
+[`crates/lutum/examples/controlled_text_tool_handler.rs`](../crates/lutum/examples/controlled_text_tool_handler.rs).
+```
+}
+
 @ "tool-hooks-overview" {
   "##": Tool Hooks Overview
 

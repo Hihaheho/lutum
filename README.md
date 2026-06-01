@@ -610,10 +610,11 @@ let score = scored.score;
 
 ## Examples
 
-All examples live under [crates/lutum/examples](crates/lutum/examples) and use
-`OpenAiAdapter` behind the `openai` feature.
+All examples live under [crates/lutum/examples](crates/lutum/examples). Live-provider examples use
+`OpenAiAdapter` behind the `openai` feature; deterministic examples use `MockLlmAdapter` and do not
+need provider credentials.
 
-Set the endpoint once, then swap `<name>`:
+For live-provider examples, set the endpoint once, then swap `<name>`:
 
 ```bash
 export TOKEN="$OPENAI_API_KEY"
@@ -631,6 +632,7 @@ cargo run -p lutum --example <name> --features openai
 |---|---|---|---|
 | [`streaming_turn_ui`](crates/lutum/examples/streaming_turn_ui.rs) | Stream `TextTurnEvent` deltas directly to a UI or terminal | `cargo run -p lutum --example streaming_turn_ui --features openai` | You want the smallest streaming example without tools or transcript branching |
 | [`react_loop`](crates/lutum/examples/react_loop.rs) | Explicit tool loop with `.tools::<T>()`, `NeedsTools`, and `round.commit(...)` | `cargo run -p lutum --example react_loop --features openai` | You want a ReAct-style loop but still keep tool execution in Rust |
+| [`controlled_text_tool_handler`](crates/lutum/examples/controlled_text_tool_handler.rs) | Convert assistant text JSON into a synthetic tool round and recover selected collection errors | `cargo run -p lutum --example controlled_text_tool_handler` | You want to detect JSON code blocks yourself, validate them as tool calls, or conditionally recover from output limits |
 | [`tool_hook`](crates/lutum/examples/tool_hook.rs) | Short-circuit selected tool calls with a cache, then fall back to normal tool execution | `cargo run -p lutum --example tool_hook` | You want to intercept tool calls without moving tool execution ownership out of app code |
 | [`verification_gates`](crates/lutum/examples/verification_gates.rs) | Structured output checked by deterministic Rust gates and retried | `cargo run -p lutum --example verification_gates --features openai` | You want model output to pass strict post-validation before acceptance |
 | [`deterministic_hooks`](crates/lutum/examples/deterministic_hooks.rs) | Prompt and output validation through typed hooks | `cargo run -p lutum --example deterministic_hooks --features openai` | You want reusable policy checks without baking them into every call site |

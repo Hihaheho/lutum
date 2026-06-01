@@ -11,8 +11,9 @@ use thiserror::Error;
 use tracing::{Instrument, Span, field};
 
 use lutum_protocol::{
-    AgentError, AssistantInputItem, AssistantTurnItem, AssistantTurnView, CommittedTurn, NoTools,
-    NoToolsContractViolation, UncommittedAssistantTurn,
+    AgentError, AssistantInputItem, AssistantTurn, AssistantTurnItem, AssistantTurnView,
+    CommittedTurn, NoTools, NoToolsContractViolation, RawJson, ToolCallId, ToolName,
+    UncommittedAssistantTurn,
     budget::{BudgetLease, BudgetManager, Remaining, Usage, UsageEstimate},
     conversation::{MessageContent, ModelInput, ModelInputItem, ToolMetadata},
     error::RequestFailure,
@@ -451,6 +452,243 @@ where
         event: &E,
         cx: &HandlerContext<S>,
     ) -> Result<HandlerDirective, Self::Error> {
+        (self)(event, cx)
+    }
+}
+
+/// Recoverable collection errors exposed to [`TextToolEventHandler::on_error`].
+///
+/// Handler errors and budget-finalization errors are intentionally not routed
+/// through this type; those errors are returned directly to avoid recursive
+/// recovery paths.
+#[derive(Debug)]
+pub enum TextToolCollectError<'a> {
+    /// The adapter or execution layer failed before a reducible event was available.
+    Execution(&'a AgentError),
+    /// The text+tools reducer rejected the current partial state.
+    Reduction(&'a TextTurnReductionError),
+    /// The stream ended without a `Completed` event.
+    UnexpectedEof,
+}
+
+/// A user-synthesized text+tools turn returned from controlled collection.
+///
+/// Use [`SyntheticTextToolTurn::finished`] for a completed assistant turn and
+/// [`SyntheticTextToolTurn::needs_tools`] when user code has recovered tool
+/// calls from assistant text. Synthetic returns are still validated against the
+/// active tool availability and requirement constraints.
+#[derive(Clone, Debug)]
+pub struct SyntheticTextToolTurn<T: Toolset> {
+    /// Assistant turn items to replay into the transcript.
+    pub assistant_turn: AssistantTurn,
+    /// Decoded tool calls, if the synthetic outcome should enter a tool round.
+    pub tool_calls: Vec<T::ToolCall>,
+    /// Recoverable tool-call issues to attach to the staged result.
+    pub recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
+    /// Optional suggestion that the caller should continue the model turn.
+    pub continue_suggestion: Option<lutum_protocol::ContinueSuggestionReason>,
+    /// Optional finish reason. Defaults to `ToolCall` when tool calls exist and
+    /// `Stop` otherwise.
+    pub finish_reason: Option<lutum_protocol::FinishReason>,
+    /// Optional usage override. When absent, controlled collection uses provider
+    /// usage already seen in the reducer, usage recovery, or the normal estimate.
+    pub usage: Option<Usage>,
+}
+
+impl<T> SyntheticTextToolTurn<T>
+where
+    T: Toolset,
+{
+    /// Build a synthetic finished assistant turn.
+    pub fn finished(assistant_turn: AssistantTurn) -> Self {
+        Self {
+            assistant_turn,
+            tool_calls: Vec::new(),
+            recoverable_tool_call_issues: Vec::new(),
+            continue_suggestion: None,
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    /// Build a synthetic tool round from recovered text tool calls.
+    pub fn needs_tools(recovered: RecoveredTextToolCalls<T>) -> Self {
+        Self {
+            assistant_turn: recovered.assistant_turn,
+            tool_calls: recovered.tool_calls,
+            recoverable_tool_call_issues: Vec::new(),
+            continue_suggestion: None,
+            finish_reason: None,
+            usage: None,
+        }
+    }
+}
+
+/// Directive returned by [`TextToolEventHandler::on_event`].
+#[derive(Debug)]
+pub enum TextToolHandlerDirective<T: Toolset> {
+    /// Continue normal stream collection.
+    Continue,
+    /// Stop collection and return `CollectError::Stopped`.
+    Stop,
+    /// Finish collection immediately with a synthetic text+tools outcome.
+    Return(SyntheticTextToolTurn<T>),
+}
+
+/// Directive returned by [`TextToolEventHandler::on_error`].
+#[derive(Debug)]
+pub enum TextToolErrorDirective<T: Toolset> {
+    /// Return the original collection error.
+    Propagate,
+    /// Treat the error as handled and return a synthetic text+tools outcome.
+    Return(SyntheticTextToolTurn<T>),
+}
+
+/// Context passed to [`TextToolEventHandler`] callbacks.
+///
+/// The reducer is updated before handlers are called, so `state()` reflects the
+/// event being observed. The validation helpers use the resolved tool
+/// availability and requirement constraints for the current request.
+pub struct TextToolHandlerContext<'a, T: Toolset> {
+    extensions: &'a RequestExtensions,
+    state: &'a TextTurnStateWithTools<T>,
+    remaining_budget: Remaining,
+    constraints: &'a ToolConstraints<T>,
+    tool_definitions: &'a [AdapterToolDefinition],
+}
+
+impl<'a, T> TextToolHandlerContext<'a, T>
+where
+    T: Toolset,
+{
+    /// Request extensions active for this turn.
+    pub fn extensions(&self) -> &RequestExtensions {
+        self.extensions
+    }
+
+    /// Current reduced text+tools state.
+    pub fn state(&self) -> &TextTurnStateWithTools<T> {
+        self.state
+    }
+
+    /// Remaining request budget after current reservations.
+    pub fn remaining_budget(&self) -> Remaining {
+        self.remaining_budget
+    }
+
+    /// Resolved tool availability and requirement constraints.
+    pub fn constraints(&self) -> &ToolConstraints<T> {
+        self.constraints
+    }
+
+    /// Adapter-level tool definitions sent with this request.
+    pub fn tool_definitions(&self) -> &[AdapterToolDefinition] {
+        self.tool_definitions
+    }
+
+    /// Convert assistant items into decoded tool calls and validate them against
+    /// the current tool constraints.
+    pub fn recover_tool_calls_from_items(
+        &self,
+        items: Vec<AssistantTurnItem>,
+    ) -> Result<RecoveredTextToolCalls<T>, ToolCallFallbackError> {
+        let recovered = RecoveredTextToolCalls::<T>::from_items(items)?;
+        self.validate_recovered_tool_calls(recovered)
+    }
+
+    /// Validate recovered calls against the current availability and required
+    /// tool policy.
+    pub fn validate_recovered_tool_calls(
+        &self,
+        recovered: RecoveredTextToolCalls<T>,
+    ) -> Result<RecoveredTextToolCalls<T>, ToolCallFallbackError> {
+        validate_recovered_text_tool_calls(
+            recovered,
+            &self.constraints.requirement,
+            self.tool_definitions,
+        )
+    }
+
+    /// Parse one JSON-derived tool call using the active availability and
+    /// required-tool policy.
+    pub fn parse_tool_call(
+        &self,
+        id: impl Into<ToolCallId>,
+        name: impl Into<ToolName>,
+        arguments: RawJson,
+    ) -> Result<T::ToolCall, ToolCallFallbackError> {
+        let metadata = ToolMetadata::new(id, name, arguments);
+        let recovered = RecoveredTextToolCalls::from_parts(
+            vec![AssistantTurnItem::ToolCall {
+                id: metadata.id.clone(),
+                name: metadata.name.clone(),
+                arguments: metadata.arguments.clone(),
+            }],
+            vec![parse_validated_tool_call::<T>(
+                metadata,
+                &self.constraints.requirement,
+                self.tool_definitions,
+            )?],
+        )?;
+        let mut recovered = self.validate_recovered_tool_calls(recovered)?;
+        recovered
+            .tool_calls
+            .pop()
+            .ok_or(ToolCallFallbackError::NoToolCall)
+    }
+}
+
+/// Advanced event handler for text turns with tools.
+///
+/// This is separate from [`EventHandler`] so existing `collect_with` behavior
+/// remains unchanged. Use it with `collect_controlled_with` when the handler may
+/// synthesize a turn/tool round or recover from collection errors.
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+pub trait TextToolEventHandler<T: Toolset>: MaybeSend {
+    /// User error returned from handler callbacks.
+    type Error;
+
+    /// Observe a reduced stream event and decide whether collection should
+    /// continue, stop, or return a synthetic outcome.
+    async fn on_event(
+        &mut self,
+        event: &TextTurnEventWithTools<T>,
+        cx: &TextToolHandlerContext<T>,
+    ) -> Result<TextToolHandlerDirective<T>, Self::Error>;
+
+    /// Optionally recover from controlled collection errors.
+    ///
+    /// The default propagates the original error. This method is called for
+    /// adapter execution failures, reducer errors such as
+    /// `OutputLimitExceeded`, and unexpected EOF.
+    async fn on_error(
+        &mut self,
+        _error: TextToolCollectError<'_>,
+        _cx: &TextToolHandlerContext<T>,
+    ) -> Result<TextToolErrorDirective<T>, Self::Error> {
+        Ok(TextToolErrorDirective::Propagate)
+    }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+impl<T, F, Err> TextToolEventHandler<T> for F
+where
+    T: Toolset,
+    F: MaybeSend
+        + for<'a> FnMut(
+            &'a TextTurnEventWithTools<T>,
+            &'a TextToolHandlerContext<'a, T>,
+        ) -> Result<TextToolHandlerDirective<T>, Err>,
+{
+    type Error = Err;
+
+    async fn on_event(
+        &mut self,
+        event: &TextTurnEventWithTools<T>,
+        cx: &TextToolHandlerContext<T>,
+    ) -> Result<TextToolHandlerDirective<T>, Self::Error> {
         (self)(event, cx)
     }
 }
@@ -2378,6 +2616,578 @@ where
         self.collect_with(NoopHandler).await
     }
 
+    /// Collect this pending text+tools stream with a handler that can return a
+    /// synthetic turn/tool outcome or recover from controlled collection errors.
+    ///
+    /// The reducer is applied before the handler observes each event, matching
+    /// the existing `collect_with` event ordering.
+    pub async fn collect_controlled_with<H>(
+        mut self,
+        mut handler: H,
+    ) -> Result<
+        StagedTextTurnOutcomeWithTools<T>,
+        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    >
+    where
+        H: TextToolEventHandler<T>,
+    {
+        let mut attempt = 1_u32;
+        let mut cumulative_usage = Usage::zero();
+
+        'attempts: loop {
+            let mut stream = match self.start_attempt().await {
+                Ok(stream) => stream,
+                Err(source) => {
+                    let partial = self.reducer.state().clone();
+                    let accounted_usage = recover_or_estimate_usage(
+                        self.recovery.as_deref(),
+                        OperationKind::TextTurn,
+                        self.reducer.state().request_id.as_deref(),
+                        self.estimate,
+                    )
+                    .await;
+                    let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+
+                    if let Some((next_attempt, after, status, kind)) =
+                        maybe_retry_plan(&self.retry_policy, attempt, &source)
+                    {
+                        let retry_event = TextTurnEventWithTools::WillRetry {
+                            attempt: next_attempt,
+                            after,
+                            kind,
+                            status,
+                            request_id: self.reducer.state().request_id.clone(),
+                            accounted_usage,
+                            cumulative_usage: next_cumulative_usage,
+                        };
+                        match self
+                            .call_controlled_handler(&mut handler, &retry_event)
+                            .await
+                        {
+                            Ok(TextToolHandlerDirective::Continue) => {
+                                cumulative_usage = next_cumulative_usage;
+                                self.reducer.reset_for_retry();
+                                tokio::time::sleep(after).await;
+                                attempt = next_attempt;
+                                continue 'attempts;
+                            }
+                            Ok(TextToolHandlerDirective::Stop) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state_with_tools(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    partial.request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_text_state_with_tools(&partial),
+                                    source.to_string(),
+                                );
+                                return Err(CollectError::Execution { source, partial });
+                            }
+                            Ok(TextToolHandlerDirective::Return(synthetic)) => {
+                                return self
+                                    .finish_controlled_synthetic(synthetic, cumulative_usage)
+                                    .await;
+                            }
+                            Err(handler_source) => {
+                                if let Err(finalize_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    partial.request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state_with_tools(&partial),
+                                        finalize_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: finalize_source,
+                                        partial,
+                                    });
+                                }
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    partial.request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_text_state_with_tools(&partial),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&handler_source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source: handler_source,
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                        }
+                    }
+
+                    if let Some(outcome) = self
+                        .try_controlled_execution_error(
+                            &mut handler,
+                            &source,
+                            cumulative_usage,
+                            next_cumulative_usage,
+                            &partial,
+                        )
+                        .await?
+                    {
+                        return Ok(outcome);
+                    }
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::TextTurn,
+                        partial.request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_text_state_with_tools(&partial),
+                        source.to_string(),
+                    );
+                    return Err(CollectError::Execution {
+                        source,
+                        partial: self.reducer.into_state(),
+                    });
+                }
+            };
+
+            while let Some(item) = stream.next().instrument(self.span.clone()).await {
+                match item {
+                    Ok(event) => {
+                        if let Err(source) = self.reducer.apply(&event) {
+                            let partial = self.reducer.state().clone();
+                            let accounted_usage = recover_or_estimate_usage(
+                                self.recovery.as_deref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                self.estimate,
+                            )
+                            .await;
+                            let next_cumulative_usage =
+                                cumulative_usage.saturating_add(accounted_usage);
+                            if let Some(outcome) = self
+                                .try_controlled_reduction_error(
+                                    &mut handler,
+                                    &source,
+                                    cumulative_usage,
+                                    next_cumulative_usage,
+                                    &partial,
+                                )
+                                .await?
+                            {
+                                return Ok(outcome);
+                            }
+                            emit_raw_collect_error(
+                                self.extensions.as_ref(),
+                                OperationKind::TextTurn,
+                                self.reducer.state().request_id.as_deref(),
+                                CollectErrorKind::Reduction,
+                                summarize_text_state_with_tools(self.reducer.state()),
+                                source.to_string(),
+                            );
+                            return Err(CollectError::Reduction { source, partial });
+                        }
+                        record_request_id(&self.span, self.reducer.state().request_id.as_deref());
+                        if let TextTurnEventWithTools::Completed { committed_turn, .. } = &event {
+                            log_output_turn(&self.span, committed_turn);
+                        }
+                        if let Some(usage) = completed_usage_from_text_with_tools(&event) {
+                            let next_cumulative_usage = cumulative_usage.saturating_add(usage);
+                            if let Err(source) = finalize_budget_cumulative(
+                                &mut self.owned_lease,
+                                &self.span,
+                                self.reducer.state().request_id.as_deref(),
+                                next_cumulative_usage,
+                            ) {
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Execution,
+                                    summarize_text_state_with_tools(self.reducer.state()),
+                                    source.to_string(),
+                                );
+                                return Err(CollectError::Execution {
+                                    source,
+                                    partial: self.reducer.state().clone(),
+                                });
+                            }
+                            let partial = self.reducer.state().clone();
+                            match self.call_controlled_handler(&mut handler, &event).await {
+                                Ok(TextToolHandlerDirective::Continue) => {}
+                                Ok(TextToolHandlerDirective::Stop) => {
+                                    return Err(CollectError::Stopped { partial });
+                                }
+                                Ok(TextToolHandlerDirective::Return(synthetic)) => {
+                                    return self
+                                        .finish_controlled_synthetic(synthetic, cumulative_usage)
+                                        .await;
+                                }
+                                Err(source) => {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Handler,
+                                        summarize_text_state_with_tools(self.reducer.state()),
+                                        format!(
+                                            "handler error type={}",
+                                            std::any::type_name_of_val(&source)
+                                        ),
+                                    );
+                                    return Err(CollectError::Handler { source, partial });
+                                }
+                            }
+                            return match partial.clone().finish() {
+                                Ok(mut outcome) => {
+                                    match &mut outcome {
+                                        StagedTextTurnOutcomeWithTools::Turn(result) => {
+                                            result.cumulative_usage = next_cumulative_usage;
+                                        }
+                                        StagedTextTurnOutcomeWithTools::FinishedNoOutput(
+                                            result,
+                                        ) => {
+                                            result.cumulative_usage = next_cumulative_usage;
+                                        }
+                                    }
+                                    match recover_required_text_tool_outcome(
+                                        outcome,
+                                        &partial,
+                                        self.fallback_parser.as_deref(),
+                                        &self.tool_constraints,
+                                        &self.tool_definitions,
+                                        self.extensions.as_ref(),
+                                    ) {
+                                        Ok(outcome) => Ok(outcome),
+                                        Err(source) => {
+                                            if let Some(outcome) = self
+                                                .try_controlled_reduction_error(
+                                                    &mut handler,
+                                                    &source,
+                                                    cumulative_usage,
+                                                    next_cumulative_usage,
+                                                    &partial,
+                                                )
+                                                .await?
+                                            {
+                                                return Ok(outcome);
+                                            }
+                                            emit_raw_collect_error(
+                                                self.extensions.as_ref(),
+                                                OperationKind::TextTurn,
+                                                partial.request_id.as_deref(),
+                                                CollectErrorKind::Reduction,
+                                                summarize_text_state_with_tools(&partial),
+                                                source.to_string(),
+                                            );
+                                            Err(CollectError::Reduction { source, partial })
+                                        }
+                                    }
+                                }
+                                Err(source) => {
+                                    if let Some(outcome) = self
+                                        .try_controlled_reduction_error(
+                                            &mut handler,
+                                            &source,
+                                            cumulative_usage,
+                                            next_cumulative_usage,
+                                            &partial,
+                                        )
+                                        .await?
+                                    {
+                                        return Ok(outcome);
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Reduction,
+                                        summarize_text_state_with_tools(&partial),
+                                        source.to_string(),
+                                    );
+                                    Err(CollectError::Reduction { source, partial })
+                                }
+                            };
+                        }
+
+                        match self.call_controlled_handler(&mut handler, &event).await {
+                            Ok(TextToolHandlerDirective::Continue) => {}
+                            Ok(TextToolHandlerDirective::Stop) => {
+                                let partial = self.reducer.state().clone();
+                                let accounted_usage = recover_or_estimate_usage(
+                                    self.recovery.as_deref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state_with_tools(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                return Err(CollectError::Stopped {
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                            Ok(TextToolHandlerDirective::Return(synthetic)) => {
+                                return self
+                                    .finish_controlled_synthetic(synthetic, cumulative_usage)
+                                    .await;
+                            }
+                            Err(source) => {
+                                let partial = self.reducer.state().clone();
+                                let accounted_usage = recover_or_estimate_usage(
+                                    self.recovery.as_deref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    self.estimate,
+                                )
+                                .await;
+                                let next_cumulative_usage =
+                                    cumulative_usage.saturating_add(accounted_usage);
+                                if let Err(execution_source) = finalize_budget_cumulative(
+                                    &mut self.owned_lease,
+                                    &self.span,
+                                    self.reducer.state().request_id.as_deref(),
+                                    next_cumulative_usage,
+                                ) {
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        self.reducer.state().request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state_with_tools(&partial),
+                                        execution_source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution {
+                                        source: execution_source,
+                                        partial,
+                                    });
+                                }
+                                emit_raw_collect_error(
+                                    self.extensions.as_ref(),
+                                    OperationKind::TextTurn,
+                                    self.reducer.state().request_id.as_deref(),
+                                    CollectErrorKind::Handler,
+                                    summarize_text_state_with_tools(self.reducer.state()),
+                                    format!(
+                                        "handler error type={}",
+                                        std::any::type_name_of_val(&source)
+                                    ),
+                                );
+                                return Err(CollectError::Handler {
+                                    source,
+                                    partial: self.reducer.into_state(),
+                                });
+                            }
+                        }
+                    }
+                    Err(source) => {
+                        let partial = self.reducer.state().clone();
+                        let accounted_usage = recover_or_estimate_usage(
+                            self.recovery.as_deref(),
+                            OperationKind::TextTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            self.estimate,
+                        )
+                        .await;
+                        let next_cumulative_usage =
+                            cumulative_usage.saturating_add(accounted_usage);
+
+                        if let Some((next_attempt, after, status, kind)) =
+                            maybe_retry_plan(&self.retry_policy, attempt, &source)
+                        {
+                            let retry_event = TextTurnEventWithTools::WillRetry {
+                                attempt: next_attempt,
+                                after,
+                                kind,
+                                status,
+                                request_id: self.reducer.state().request_id.clone(),
+                                accounted_usage,
+                                cumulative_usage: next_cumulative_usage,
+                            };
+                            match self
+                                .call_controlled_handler(&mut handler, &retry_event)
+                                .await
+                            {
+                                Ok(TextToolHandlerDirective::Continue) => {
+                                    cumulative_usage = next_cumulative_usage;
+                                    self.reducer.reset_for_retry();
+                                    tokio::time::sleep(after).await;
+                                    attempt = next_attempt;
+                                    continue 'attempts;
+                                }
+                                Ok(TextToolHandlerDirective::Stop) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            self.extensions.as_ref(),
+                                            OperationKind::TextTurn,
+                                            partial.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_text_state_with_tools(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Execution,
+                                        summarize_text_state_with_tools(&partial),
+                                        source.to_string(),
+                                    );
+                                    return Err(CollectError::Execution { source, partial });
+                                }
+                                Ok(TextToolHandlerDirective::Return(synthetic)) => {
+                                    return self
+                                        .finish_controlled_synthetic(synthetic, cumulative_usage)
+                                        .await;
+                                }
+                                Err(handler_source) => {
+                                    if let Err(finalize_source) = finalize_budget_cumulative(
+                                        &mut self.owned_lease,
+                                        &self.span,
+                                        partial.request_id.as_deref(),
+                                        next_cumulative_usage,
+                                    ) {
+                                        emit_raw_collect_error(
+                                            self.extensions.as_ref(),
+                                            OperationKind::TextTurn,
+                                            partial.request_id.as_deref(),
+                                            CollectErrorKind::Execution,
+                                            summarize_text_state_with_tools(&partial),
+                                            finalize_source.to_string(),
+                                        );
+                                        return Err(CollectError::Execution {
+                                            source: finalize_source,
+                                            partial,
+                                        });
+                                    }
+                                    emit_raw_collect_error(
+                                        self.extensions.as_ref(),
+                                        OperationKind::TextTurn,
+                                        partial.request_id.as_deref(),
+                                        CollectErrorKind::Handler,
+                                        summarize_text_state_with_tools(&partial),
+                                        format!(
+                                            "handler error type={}",
+                                            std::any::type_name_of_val(&handler_source)
+                                        ),
+                                    );
+                                    return Err(CollectError::Handler {
+                                        source: handler_source,
+                                        partial: self.reducer.into_state(),
+                                    });
+                                }
+                            }
+                        }
+
+                        if let Some(outcome) = self
+                            .try_controlled_execution_error(
+                                &mut handler,
+                                &source,
+                                cumulative_usage,
+                                next_cumulative_usage,
+                                &partial,
+                            )
+                            .await?
+                        {
+                            return Ok(outcome);
+                        }
+                        emit_raw_collect_error(
+                            self.extensions.as_ref(),
+                            OperationKind::TextTurn,
+                            self.reducer.state().request_id.as_deref(),
+                            CollectErrorKind::Execution,
+                            summarize_text_state_with_tools(&partial),
+                            source.to_string(),
+                        );
+                        return Err(CollectError::Execution {
+                            source,
+                            partial: self.reducer.into_state(),
+                        });
+                    }
+                }
+            }
+
+            let partial = self.reducer.state().clone();
+            let accounted_usage = recover_or_estimate_usage(
+                self.recovery.as_deref(),
+                OperationKind::TextTurn,
+                self.reducer.state().request_id.as_deref(),
+                self.estimate,
+            )
+            .await;
+            let next_cumulative_usage = cumulative_usage.saturating_add(accounted_usage);
+            if let Some(outcome) = self
+                .try_controlled_unexpected_eof(
+                    &mut handler,
+                    cumulative_usage,
+                    next_cumulative_usage,
+                    &partial,
+                )
+                .await?
+            {
+                return Ok(outcome);
+            }
+            emit_raw_collect_error(
+                self.extensions.as_ref(),
+                OperationKind::TextTurn,
+                self.reducer.state().request_id.as_deref(),
+                CollectErrorKind::UnexpectedEof,
+                summarize_text_state_with_tools(self.reducer.state()),
+                "stream ended before completion".to_string(),
+            );
+            return Err(CollectError::UnexpectedEof {
+                partial: self.reducer.into_state(),
+            });
+        }
+    }
+
     async fn call_handler<H>(
         &self,
         handler: &mut H,
@@ -2392,6 +3202,454 @@ where
             remaining_budget: self.owned_lease.budget.remaining(self.extensions.as_ref()),
         };
         handler.on_event(event, &cx).await
+    }
+
+    async fn call_controlled_handler<H>(
+        &self,
+        handler: &mut H,
+        event: &TextTurnEventWithTools<T>,
+    ) -> Result<TextToolHandlerDirective<T>, H::Error>
+    where
+        H: TextToolEventHandler<T>,
+    {
+        let cx = self.controlled_handler_context();
+        handler.on_event(event, &cx).await
+    }
+
+    async fn call_controlled_error_handler<H>(
+        &self,
+        handler: &mut H,
+        error: TextToolCollectError<'_>,
+    ) -> Result<TextToolErrorDirective<T>, H::Error>
+    where
+        H: TextToolEventHandler<T>,
+    {
+        let cx = self.controlled_handler_context();
+        handler.on_error(error, &cx).await
+    }
+
+    fn controlled_handler_context(&self) -> TextToolHandlerContext<'_, T> {
+        TextToolHandlerContext {
+            extensions: self.extensions.as_ref(),
+            state: self.reducer.state(),
+            remaining_budget: self.owned_lease.budget.remaining(self.extensions.as_ref()),
+            constraints: &self.tool_constraints,
+            tool_definitions: &self.tool_definitions,
+        }
+    }
+
+    async fn finish_controlled_synthetic<HandlerError>(
+        &mut self,
+        synthetic: SyntheticTextToolTurn<T>,
+        cumulative_usage: Usage,
+    ) -> Result<
+        StagedTextTurnOutcomeWithTools<T>,
+        CollectError<HandlerError, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    > {
+        let partial = self.reducer.state().clone();
+        let (outcome, next_cumulative_usage) = match self
+            .synthesize_text_tool_outcome(synthetic, cumulative_usage)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(source) => {
+                emit_raw_collect_error(
+                    self.extensions.as_ref(),
+                    OperationKind::TextTurn,
+                    partial.request_id.as_deref(),
+                    CollectErrorKind::Reduction,
+                    summarize_text_state_with_tools(&partial),
+                    source.to_string(),
+                );
+                return Err(CollectError::Reduction { source, partial });
+            }
+        };
+        let outcome = match recover_required_text_tool_outcome(
+            outcome,
+            &partial,
+            self.fallback_parser.as_deref(),
+            &self.tool_constraints,
+            &self.tool_definitions,
+            self.extensions.as_ref(),
+        ) {
+            Ok(outcome) => outcome,
+            Err(source) => {
+                if let Err(finalize_source) = finalize_budget_cumulative(
+                    &mut self.owned_lease,
+                    &self.span,
+                    partial.request_id.as_deref(),
+                    next_cumulative_usage,
+                ) {
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::TextTurn,
+                        partial.request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_text_state_with_tools(&partial),
+                        finalize_source.to_string(),
+                    );
+                    return Err(CollectError::Execution {
+                        source: finalize_source,
+                        partial,
+                    });
+                }
+                emit_raw_collect_error(
+                    self.extensions.as_ref(),
+                    OperationKind::TextTurn,
+                    partial.request_id.as_deref(),
+                    CollectErrorKind::Reduction,
+                    summarize_text_state_with_tools(&partial),
+                    source.to_string(),
+                );
+                return Err(CollectError::Reduction { source, partial });
+            }
+        };
+        if let Err(source) = finalize_budget_cumulative(
+            &mut self.owned_lease,
+            &self.span,
+            self.reducer.state().request_id.as_deref(),
+            next_cumulative_usage,
+        ) {
+            emit_raw_collect_error(
+                self.extensions.as_ref(),
+                OperationKind::TextTurn,
+                self.reducer.state().request_id.as_deref(),
+                CollectErrorKind::Execution,
+                summarize_text_state_with_tools(&partial),
+                source.to_string(),
+            );
+            return Err(CollectError::Execution { source, partial });
+        }
+        Ok(outcome)
+    }
+
+    async fn synthesize_text_tool_outcome(
+        &self,
+        mut synthetic: SyntheticTextToolTurn<T>,
+        cumulative_usage: Usage,
+    ) -> Result<(StagedTextTurnOutcomeWithTools<T>, Usage), TextTurnReductionError> {
+        let state = self.reducer.state();
+        let assistant_tool_calls = synthetic
+            .assistant_turn
+            .items()
+            .iter()
+            .filter(|item| matches!(item, AssistantTurnItem::ToolCall { .. }))
+            .count();
+        if !synthetic.tool_calls.is_empty() {
+            let recovered = RecoveredTextToolCalls::<T>::new(
+                synthetic.assistant_turn.clone(),
+                synthetic.tool_calls.clone(),
+            );
+            let recovered = validate_recovered_text_tool_calls(
+                recovered,
+                &self.tool_constraints.requirement,
+                &self.tool_definitions,
+            )
+            .map_err(|source| tool_fallback_error_from_state::<T>(state, source))?;
+            synthetic.assistant_turn = recovered.assistant_turn;
+            synthetic.tool_calls = recovered.tool_calls;
+        } else if assistant_tool_calls != 0 && synthetic.recoverable_tool_call_issues.is_empty() {
+            return Err(tool_fallback_error_from_state::<T>(
+                state,
+                ToolCallFallbackError::ToolCallCountMismatch {
+                    assistant_tool_calls,
+                    tool_calls: 0,
+                },
+            ));
+        }
+
+        let usage = if let Some(usage) = synthetic.usage {
+            usage
+        } else if let Some(usage) = state.usage {
+            usage
+        } else {
+            recover_or_estimate_usage(
+                self.recovery.as_deref(),
+                OperationKind::TextTurn,
+                state.request_id.as_deref(),
+                self.estimate,
+            )
+            .await
+        };
+        let cumulative_usage = cumulative_usage.saturating_add(usage);
+        let finish_reason = synthetic
+            .finish_reason
+            .or_else(|| state.finish_reason.clone())
+            .unwrap_or_else(|| {
+                if !synthetic.tool_calls.is_empty()
+                    || !synthetic.recoverable_tool_call_issues.is_empty()
+                {
+                    lutum_protocol::FinishReason::ToolCall
+                } else {
+                    lutum_protocol::FinishReason::Stop
+                }
+            });
+        let committed_turn = Arc::new(AssistantTurnView::from_items(
+            synthetic.assistant_turn.items(),
+        )) as CommittedTurn;
+        let turn = UncommittedAssistantTurn::new(synthetic.assistant_turn, committed_turn);
+        Ok((
+            StagedTextTurnOutcomeWithTools::Turn(StagedTextTurnResultWithTools {
+                request_id: state.request_id.clone(),
+                model: state.model.clone(),
+                turn,
+                tool_calls: synthetic.tool_calls,
+                recoverable_tool_call_issues: synthetic.recoverable_tool_call_issues,
+                continue_suggestion: synthetic.continue_suggestion,
+                finish_reason,
+                usage,
+                cumulative_usage,
+            }),
+            cumulative_usage,
+        ))
+    }
+
+    async fn try_controlled_execution_error<H>(
+        &mut self,
+        handler: &mut H,
+        source: &AgentError,
+        cumulative_usage: Usage,
+        next_cumulative_usage: Usage,
+        partial: &TextTurnStateWithTools<T>,
+    ) -> Result<
+        Option<StagedTextTurnOutcomeWithTools<T>>,
+        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    >
+    where
+        H: TextToolEventHandler<T>,
+    {
+        match self
+            .call_controlled_error_handler(handler, TextToolCollectError::Execution(source))
+            .await
+        {
+            Ok(TextToolErrorDirective::Propagate) => {
+                if let Err(finalize_source) = finalize_budget_cumulative(
+                    &mut self.owned_lease,
+                    &self.span,
+                    partial.request_id.as_deref(),
+                    next_cumulative_usage,
+                ) {
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::TextTurn,
+                        partial.request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_text_state_with_tools(partial),
+                        finalize_source.to_string(),
+                    );
+                    return Err(CollectError::Execution {
+                        source: finalize_source,
+                        partial: partial.clone(),
+                    });
+                }
+                Ok(None)
+            }
+            Ok(TextToolErrorDirective::Return(synthetic)) => self
+                .finish_controlled_synthetic(synthetic, cumulative_usage)
+                .await
+                .map(Some),
+            Err(handler_source) => {
+                if let Err(finalize_source) = finalize_budget_cumulative(
+                    &mut self.owned_lease,
+                    &self.span,
+                    partial.request_id.as_deref(),
+                    next_cumulative_usage,
+                ) {
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::TextTurn,
+                        partial.request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_text_state_with_tools(partial),
+                        finalize_source.to_string(),
+                    );
+                    return Err(CollectError::Execution {
+                        source: finalize_source,
+                        partial: partial.clone(),
+                    });
+                }
+                emit_raw_collect_error(
+                    self.extensions.as_ref(),
+                    OperationKind::TextTurn,
+                    partial.request_id.as_deref(),
+                    CollectErrorKind::Handler,
+                    summarize_text_state_with_tools(partial),
+                    format!(
+                        "handler error type={}",
+                        std::any::type_name_of_val(&handler_source)
+                    ),
+                );
+                Err(CollectError::Handler {
+                    source: handler_source,
+                    partial: self.reducer.state().clone(),
+                })
+            }
+        }
+    }
+
+    async fn try_controlled_reduction_error<H>(
+        &mut self,
+        handler: &mut H,
+        source: &TextTurnReductionError,
+        cumulative_usage: Usage,
+        next_cumulative_usage: Usage,
+        partial: &TextTurnStateWithTools<T>,
+    ) -> Result<
+        Option<StagedTextTurnOutcomeWithTools<T>>,
+        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    >
+    where
+        H: TextToolEventHandler<T>,
+    {
+        match self
+            .call_controlled_error_handler(handler, TextToolCollectError::Reduction(source))
+            .await
+        {
+            Ok(TextToolErrorDirective::Propagate) => {
+                if let Err(finalize_source) = finalize_budget_cumulative(
+                    &mut self.owned_lease,
+                    &self.span,
+                    partial.request_id.as_deref(),
+                    next_cumulative_usage,
+                ) {
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::TextTurn,
+                        partial.request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_text_state_with_tools(partial),
+                        finalize_source.to_string(),
+                    );
+                    return Err(CollectError::Execution {
+                        source: finalize_source,
+                        partial: partial.clone(),
+                    });
+                }
+                Ok(None)
+            }
+            Ok(TextToolErrorDirective::Return(synthetic)) => self
+                .finish_controlled_synthetic(synthetic, cumulative_usage)
+                .await
+                .map(Some),
+            Err(handler_source) => {
+                if let Err(finalize_source) = finalize_budget_cumulative(
+                    &mut self.owned_lease,
+                    &self.span,
+                    partial.request_id.as_deref(),
+                    next_cumulative_usage,
+                ) {
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::TextTurn,
+                        partial.request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_text_state_with_tools(partial),
+                        finalize_source.to_string(),
+                    );
+                    return Err(CollectError::Execution {
+                        source: finalize_source,
+                        partial: partial.clone(),
+                    });
+                }
+                emit_raw_collect_error(
+                    self.extensions.as_ref(),
+                    OperationKind::TextTurn,
+                    partial.request_id.as_deref(),
+                    CollectErrorKind::Handler,
+                    summarize_text_state_with_tools(partial),
+                    format!(
+                        "handler error type={}",
+                        std::any::type_name_of_val(&handler_source)
+                    ),
+                );
+                Err(CollectError::Handler {
+                    source: handler_source,
+                    partial: self.reducer.state().clone(),
+                })
+            }
+        }
+    }
+
+    async fn try_controlled_unexpected_eof<H>(
+        &mut self,
+        handler: &mut H,
+        cumulative_usage: Usage,
+        next_cumulative_usage: Usage,
+        partial: &TextTurnStateWithTools<T>,
+    ) -> Result<
+        Option<StagedTextTurnOutcomeWithTools<T>>,
+        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    >
+    where
+        H: TextToolEventHandler<T>,
+    {
+        match self
+            .call_controlled_error_handler(handler, TextToolCollectError::UnexpectedEof)
+            .await
+        {
+            Ok(TextToolErrorDirective::Propagate) => {
+                if let Err(finalize_source) = finalize_budget_cumulative(
+                    &mut self.owned_lease,
+                    &self.span,
+                    partial.request_id.as_deref(),
+                    next_cumulative_usage,
+                ) {
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::TextTurn,
+                        partial.request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_text_state_with_tools(partial),
+                        finalize_source.to_string(),
+                    );
+                    return Err(CollectError::Execution {
+                        source: finalize_source,
+                        partial: partial.clone(),
+                    });
+                }
+                Ok(None)
+            }
+            Ok(TextToolErrorDirective::Return(synthetic)) => self
+                .finish_controlled_synthetic(synthetic, cumulative_usage)
+                .await
+                .map(Some),
+            Err(handler_source) => {
+                if let Err(finalize_source) = finalize_budget_cumulative(
+                    &mut self.owned_lease,
+                    &self.span,
+                    partial.request_id.as_deref(),
+                    next_cumulative_usage,
+                ) {
+                    emit_raw_collect_error(
+                        self.extensions.as_ref(),
+                        OperationKind::TextTurn,
+                        partial.request_id.as_deref(),
+                        CollectErrorKind::Execution,
+                        summarize_text_state_with_tools(partial),
+                        finalize_source.to_string(),
+                    );
+                    return Err(CollectError::Execution {
+                        source: finalize_source,
+                        partial: partial.clone(),
+                    });
+                }
+                emit_raw_collect_error(
+                    self.extensions.as_ref(),
+                    OperationKind::TextTurn,
+                    partial.request_id.as_deref(),
+                    CollectErrorKind::Handler,
+                    summarize_text_state_with_tools(partial),
+                    format!(
+                        "handler error type={}",
+                        std::any::type_name_of_val(&handler_source)
+                    ),
+                );
+                Err(CollectError::Handler {
+                    source: handler_source,
+                    partial: self.reducer.state().clone(),
+                })
+            }
+        }
     }
 }
 
@@ -2561,6 +3819,38 @@ where
     Ok(recovered)
 }
 
+fn parse_validated_tool_call<T>(
+    metadata: ToolMetadata,
+    requirement: &ToolRequirement<T::Selector>,
+    tool_definitions: &[AdapterToolDefinition],
+) -> Result<T::ToolCall, ToolCallFallbackError>
+where
+    T: Toolset,
+{
+    let name = metadata.name.as_str().to_string();
+    if !tool_definitions
+        .iter()
+        .any(|definition| definition.name == metadata.name.as_str())
+    {
+        return Err(ToolCallFallbackError::UnavailableTool { name });
+    }
+
+    if let ToolRequirement::Specific(selector) = requirement {
+        let expected = selector.name();
+        if metadata.name.as_str() != expected {
+            return Err(ToolCallFallbackError::WrongRequiredTool {
+                expected: expected.to_string(),
+                actual: metadata.name.as_str().to_string(),
+            });
+        }
+    }
+
+    T::parse_tool_call(metadata).map_err(|source| ToolCallFallbackError::ToolCallParse {
+        name,
+        message: source.to_string(),
+    })
+}
+
 fn assistant_item_tool_metadata(item: &AssistantTurnItem) -> Option<ToolMetadata> {
     let AssistantTurnItem::ToolCall {
         id,
@@ -2606,6 +3896,21 @@ where
         model: staged.model.clone(),
         request_id: staged.request_id.clone(),
         event_count,
+        source,
+    }
+}
+
+fn tool_fallback_error_from_state<T>(
+    state: &TextTurnStateWithTools<T>,
+    source: ToolCallFallbackError,
+) -> TextTurnReductionError
+where
+    T: Toolset,
+{
+    TextTurnReductionError::ToolCallFallback {
+        model: state.model.clone(),
+        request_id: state.request_id.clone(),
+        event_count: state.event_count,
         source,
     }
 }

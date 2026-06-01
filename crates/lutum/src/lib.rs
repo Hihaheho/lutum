@@ -57,7 +57,9 @@ pub use context::{
     CollectError, EventHandler, HandlerContext, HandlerDirective, Lutum, LutumError,
     PendingCompletion, PendingStructuredCompletion, PendingStructuredTurn,
     PendingStructuredTurnWithTools, PendingTextTurn, PendingTextTurnWithTools,
-    StructuredTurnPartial, StructuredTurnPartialWithTools,
+    StructuredTurnPartial, StructuredTurnPartialWithTools, SyntheticTextToolTurn,
+    TextToolCollectError, TextToolErrorDirective, TextToolEventHandler, TextToolHandlerContext,
+    TextToolHandlerDirective,
 };
 pub use hooks::{
     Aggregate, AggregateInto, Chain, ContinueChain, DynAggregate, DynAggregateInto, DynChain,
