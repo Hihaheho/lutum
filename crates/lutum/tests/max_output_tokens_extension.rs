@@ -29,12 +29,20 @@ fn budget() -> SharedPoolBudgetManager {
 #[derive(Default)]
 struct RecordingTurnAdapter {
     text_max_output_tokens: Mutex<Vec<Option<u32>>>,
+    text_extension_max_output_tokens: Mutex<Vec<Option<u32>>>,
     structured_max_output_tokens: Mutex<Vec<Option<u32>>>,
 }
 
 impl RecordingTurnAdapter {
     fn text_max_output_tokens(&self) -> Vec<Option<u32>> {
         self.text_max_output_tokens.lock().unwrap().clone()
+    }
+
+    fn text_extension_max_output_tokens(&self) -> Vec<Option<u32>> {
+        self.text_extension_max_output_tokens
+            .lock()
+            .unwrap()
+            .clone()
     }
 
     fn structured_max_output_tokens(&self) -> Vec<Option<u32>> {
@@ -54,6 +62,11 @@ impl TurnAdapter for RecordingTurnAdapter {
             .lock()
             .unwrap()
             .push(turn.config.generation.max_output_tokens);
+        self.text_extension_max_output_tokens.lock().unwrap().push(
+            turn.extensions
+                .get::<MaxOutputTokens>()
+                .map(|value| value.get()),
+        );
         let assistant_turn = AssistantTurn::text("ok");
         Ok(Box::pin(stream::iter([
             Ok(ErasedTextTurnEvent::Started {
@@ -242,6 +255,50 @@ async fn count_tokens_uses_lutum_default_max_output_tokens_extension() {
 
     assert_eq!(count, Some(TokenCount::new(7)));
     assert_eq!(counter.text_max_output_tokens(), vec![Some(17)]);
+}
+
+#[tokio::test]
+async fn session_max_output_tokens_extension_applies_to_counting_and_turns() {
+    let counter = Arc::new(RecordingTokenCounter::default());
+    let adapter = Arc::new(RecordingTurnAdapter::default());
+    let ctx = Lutum::new(Arc::clone(&adapter), budget())
+        .with_token_counter(Arc::clone(&counter))
+        .with_extension(MaxOutputTokens::new(6));
+    let defaults = SessionDefaults {
+        generation: GenerationParams {
+            max_output_tokens: Some(8),
+            ..GenerationParams::default()
+        },
+        ..SessionDefaults::default()
+    };
+    let mut session = Session::new()
+        .with_defaults(defaults)
+        .with_extension(MaxOutputTokens::new(17));
+    session.push_user("hello");
+
+    let count = session.text_turn().count_tokens(&ctx).await.unwrap();
+    let result = session.text_turn().collect(&ctx).await.unwrap();
+
+    let mut builder_override = Session::new().with_extension(MaxOutputTokens::new(17));
+    builder_override.push_user("hello");
+    builder_override
+        .text_turn()
+        .max_output_tokens(3)
+        .collect(&ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(count, Some(TokenCount::new(7)));
+    assert_eq!(result.assistant_text(), "ok");
+    assert_eq!(
+        counter.text_max_output_tokens(),
+        vec![Some(17), Some(17), Some(3)]
+    );
+    assert_eq!(adapter.text_max_output_tokens(), vec![Some(17), Some(3)]);
+    assert_eq!(
+        adapter.text_extension_max_output_tokens(),
+        vec![Some(17), Some(17)]
+    );
 }
 
 #[tokio::test]

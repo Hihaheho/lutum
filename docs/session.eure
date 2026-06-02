@@ -224,6 +224,42 @@ session.push_system("You are a code review assistant.");
 
 }
 
+@ "request-extensions" {
+  "##": Request Extensions
+
+  "body" = ```markdown
+`Session` can carry request-scoped metadata defaults for every turn launched from it:
+```
+
+  "rust-example" = ```rust
+use lutum::{RequestExtensions, Session};
+
+#[derive(Clone)]
+struct Tenant(&'static str);
+
+let mut session = Session::new().with_extension(Tenant("tenant-123"));
+
+let mut extensions = RequestExtensions::new();
+extensions.insert(Tenant("tenant-456"));
+session = session.with_extensions(extensions);
+
+// Per-turn extensions still win over session defaults.
+session
+    .text_turn()
+    .ext(Tenant("one-off"))
+    .collect(&lutum)
+    .await?;
+```
+
+  "note".$mark.alert = "NOTE"
+  "note" = ```markdown
+Session request extensions are runtime execution metadata, not transcript state. They are cloned
+with `Session::clone()`, but they are not stored in `ModelInput` or committed turns. Lookup
+precedence is per-turn extensions, then session extensions, then `Lutum` default extensions.
+```
+
+}
+
 @ "agent-loop" {
   "##": Agent Loop
 

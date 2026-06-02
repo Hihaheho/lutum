@@ -53,6 +53,35 @@ enum ValidationTools {
     Search(SearchArgs),
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct SessionMarker(u8);
+
+#[test]
+fn session_extensions_are_runtime_defaults_cloned_with_session() {
+    let mut override_extensions = lutum::RequestExtensions::new();
+    override_extensions.insert(SessionMarker(2));
+    let mut session = Session::new()
+        .with_extension(SessionMarker(1))
+        .with_extensions(override_extensions);
+
+    assert_eq!(
+        session.extensions().get::<SessionMarker>(),
+        Some(&SessionMarker(2))
+    );
+
+    session.extensions_mut().insert(SessionMarker(3));
+    let branch = session.clone();
+
+    assert_eq!(
+        session.extensions().get::<SessionMarker>(),
+        Some(&SessionMarker(3))
+    );
+    assert_eq!(
+        branch.extensions().get::<SessionMarker>(),
+        Some(&SessionMarker(3))
+    );
+}
+
 #[test]
 fn collect_auto_commits_collect_staged_does_not() {
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![

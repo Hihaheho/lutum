@@ -4,8 +4,9 @@ use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn,
     ContinueSuggestionReason, EphemeralTurnView, FinishReason, GenerationParams, HookableToolset,
     InputMessageRole, IntoToolResult, ModelInput, ModelInputItem, REJECTED_TOOL_RESULT_PREFIX,
-    RawJson, RecoverableToolCallIssue, RejectedToolCall, RequestBudget, ToolHookOutcome, ToolHooks,
-    ToolResult, ToolResultError, Toolset, TurnConfig, TurnView, UncommittedAssistantTurn,
+    RawJson, RecoverableToolCallIssue, RejectedToolCall, RequestBudget, RequestExtensions,
+    ToolHookOutcome, ToolHooks, ToolResult, ToolResultError, Toolset, TurnConfig, TurnView,
+    UncommittedAssistantTurn,
     budget::Usage,
     conversation::EphemeralInputIndices,
     reducer::{
@@ -62,6 +63,7 @@ pub struct Session {
     /// by [`ModelInput::remove_ephemeral_turns`].
     ephemeral_indices: Vec<usize>,
     defaults: SessionDefaults,
+    extensions: RequestExtensions,
 }
 
 impl Session {
@@ -70,6 +72,7 @@ impl Session {
             input: ModelInput::new(),
             ephemeral_indices: Vec::new(),
             defaults: SessionDefaults::default(),
+            extensions: RequestExtensions::new(),
         }
     }
 
@@ -78,6 +81,7 @@ impl Session {
             input,
             ephemeral_indices: Vec::new(),
             defaults: SessionDefaults::default(),
+            extensions: RequestExtensions::new(),
         }
     }
 
@@ -88,6 +92,28 @@ impl Session {
 
     pub fn defaults(&self) -> &SessionDefaults {
         &self.defaults
+    }
+
+    pub fn with_extension<T>(self, extension: T) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(extension);
+        self.with_extensions(extensions)
+    }
+
+    pub fn with_extensions(mut self, extensions: RequestExtensions) -> Self {
+        self.extensions.extend(extensions);
+        self
+    }
+
+    pub fn extensions(&self) -> &RequestExtensions {
+        &self.extensions
+    }
+
+    pub fn extensions_mut(&mut self) -> &mut RequestExtensions {
+        &mut self.extensions
     }
 
     pub fn input(&self) -> &ModelInput {

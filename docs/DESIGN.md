@@ -228,7 +228,8 @@ Public builders in `lutum`:
   turn builders
 - `.tools::<T>()` upgrades those into `TextTurnWithTools<T>` /
   `StructuredTurnWithTools<T, O>`
-- request metadata is attached inline with `.ext(...)` / `.extensions(...)`
+- request metadata is attached inline with `.ext(...)` / `.extensions(...)`, or as session
+  defaults with `Session::with_extension(s)`
 - low-level generation overrides stay available via `.generation_config(...)`
 
 `ReasoningParams` no longer exists in core. Reasoning is provider-owned: `OpenAiAdapter`
@@ -367,7 +368,9 @@ canonical request faithfully, that remains an adapter limitation.
 
 `RequestExtensions` is a per-request type-map for execution metadata.
 
-The public API attaches entries inline on builders with `.ext(...)` or `.extensions(...)`.
+The public API attaches entries inline on builders with `.ext(...)` or `.extensions(...)`, or as
+session-scoped defaults with `Session::with_extension(s)`. Lookup precedence is turn, then
+session, then `Lutum` defaults.
 Core treats entries as opaque and passes `Arc<RequestExtensions>` to:
 
 - `BudgetManager` methods so implementors can extract identity, routing keys, or cost centers

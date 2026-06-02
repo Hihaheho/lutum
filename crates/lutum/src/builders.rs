@@ -48,6 +48,12 @@ impl<'a> TurnTarget<'a> {
         }
     }
 
+    fn apply_session_extensions(&self, extensions: &mut RequestExtensions) {
+        if let Self::Session { session, .. } = self {
+            extensions.push_fallback(Arc::new(session.extensions().clone()));
+        }
+    }
+
     fn input(&mut self, extensions: &mut RequestExtensions) -> ModelInput {
         match self {
             Self::Lutum { input, .. } => input.clone(),
@@ -74,10 +80,11 @@ impl<'a> TurnTarget<'a> {
         }
     }
 
-    fn apply_defaults<T>(&self, extensions: &RequestExtensions, turn: &mut TurnConfig<T>)
+    fn apply_defaults<T>(&self, extensions: &mut RequestExtensions, turn: &mut TurnConfig<T>)
     where
         T: Toolset,
     {
+        self.apply_session_extensions(extensions);
         Lutum::apply_max_output_tokens_extension(extensions, &mut turn.generation);
         if let Self::Session { session, .. } = self {
             session.apply_defaults(turn);
@@ -86,12 +93,13 @@ impl<'a> TurnTarget<'a> {
 
     fn generation_with_defaults<T>(
         &self,
-        extensions: &RequestExtensions,
+        extensions: &mut RequestExtensions,
         config: &TurnConfig<T>,
     ) -> GenerationParams
     where
         T: Toolset,
     {
+        self.apply_session_extensions(extensions);
         let mut generation = config.generation.clone();
         Lutum::apply_max_output_tokens_extension(extensions, &mut generation);
         if let Self::Session { session, .. } = self {
@@ -231,7 +239,7 @@ impl<'a> TextTurn<'a> {
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         lutum.run_text_turn(extensions, input, turn).await
@@ -249,7 +257,7 @@ impl<'a> TextTurn<'a> {
         let mut extensions = self.extensions.clone();
         let generation = self
             .target
-            .generation_with_defaults(&extensions, &self.turn.config);
+            .generation_with_defaults(&mut extensions, &self.turn.config);
         let lutum = self.target.lutum_owned();
         let input = self.target.preview_input(&mut extensions);
         lutum
@@ -275,7 +283,7 @@ impl<'a> TextTurn<'a> {
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -309,7 +317,7 @@ impl<'a> TextTurn<'a> {
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -343,7 +351,7 @@ impl<'a> TextTurn<'a> {
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -465,7 +473,7 @@ impl<'a> SessionTextTurn<'a> {
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         lutum.run_text_turn(extensions, input, turn).await
     }
@@ -483,7 +491,7 @@ impl<'a> SessionTextTurn<'a> {
         let generation = self
             .inner
             .target
-            .generation_with_defaults(&extensions, &self.inner.turn.config);
+            .generation_with_defaults(&mut extensions, &self.inner.turn.config);
         let input = self.inner.target.preview_input(&mut extensions);
         lutum
             .count_text_turn_tokens(extensions, input, &self.inner.turn, generation)
@@ -509,7 +517,7 @@ impl<'a> SessionTextTurn<'a> {
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -543,7 +551,7 @@ impl<'a> SessionTextTurn<'a> {
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -577,7 +585,7 @@ impl<'a> SessionTextTurn<'a> {
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum.run_text_turn(extensions, input, turn).await {
@@ -737,7 +745,7 @@ where
             mut turn,
             fallback_parser,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         lutum
@@ -759,7 +767,7 @@ where
         let mut extensions = self.extensions.clone();
         let generation = self
             .target
-            .generation_with_defaults(&extensions, &self.turn.config);
+            .generation_with_defaults(&mut extensions, &self.turn.config);
         let lutum = self.target.lutum_owned();
         let input = self.target.preview_input(&mut extensions);
         lutum
@@ -783,7 +791,7 @@ where
             mut turn,
             fallback_parser,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -838,7 +846,7 @@ where
             mut turn,
             fallback_parser,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -890,7 +898,7 @@ where
             mut turn,
             fallback_parser,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -938,7 +946,7 @@ where
             mut turn,
             fallback_parser,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -979,7 +987,7 @@ where
             mut turn,
             fallback_parser,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -1018,7 +1026,7 @@ where
             mut turn,
             fallback_parser,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1172,7 +1180,7 @@ where
             mut turn,
             fallback_parser,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         lutum
             .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
@@ -1192,7 +1200,7 @@ where
         let generation = self
             .inner
             .target
-            .generation_with_defaults(&extensions, &self.inner.turn.config);
+            .generation_with_defaults(&mut extensions, &self.inner.turn.config);
         let input = self.inner.target.preview_input(&mut extensions);
         lutum
             .count_text_turn_tokens(extensions, input, &self.inner.turn, generation)
@@ -1216,7 +1224,7 @@ where
             mut turn,
             fallback_parser,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum
@@ -1264,7 +1272,7 @@ where
             mut turn,
             fallback_parser,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum
@@ -1312,7 +1320,7 @@ where
             mut turn,
             fallback_parser,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1355,7 +1363,7 @@ where
             mut turn,
             fallback_parser,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1394,7 +1402,7 @@ where
             mut turn,
             fallback_parser,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1433,7 +1441,7 @@ where
             mut turn,
             fallback_parser,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum
@@ -1609,7 +1617,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         lutum.run_structured_turn(extensions, input, turn).await
@@ -1627,7 +1635,7 @@ where
         let mut extensions = self.extensions.clone();
         let generation = self
             .target
-            .generation_with_defaults(&extensions, &self.turn.config);
+            .generation_with_defaults(&mut extensions, &self.turn.config);
         let lutum = self.target.lutum_owned();
         let input = self.target.preview_input(&mut extensions);
         lutum
@@ -1653,7 +1661,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -1689,7 +1697,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
@@ -1725,7 +1733,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1866,7 +1874,7 @@ where
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         lutum.run_structured_turn(extensions, input, turn).await
     }
@@ -1884,7 +1892,7 @@ where
         let generation = self
             .inner
             .target
-            .generation_with_defaults(&extensions, &self.inner.turn.config);
+            .generation_with_defaults(&mut extensions, &self.inner.turn.config);
         let input = self.inner.target.preview_input(&mut extensions);
         lutum
             .count_structured_turn_tokens(extensions, input, &self.inner.turn, generation)
@@ -1907,7 +1915,7 @@ where
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1941,7 +1949,7 @@ where
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1975,7 +1983,7 @@ where
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum.run_structured_turn(extensions, input, turn).await {
@@ -2141,7 +2149,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         lutum
@@ -2163,7 +2171,7 @@ where
         let mut extensions = self.extensions.clone();
         let generation = self
             .target
-            .generation_with_defaults(&extensions, &self.turn.config);
+            .generation_with_defaults(&mut extensions, &self.turn.config);
         let lutum = self.target.lutum_owned();
         let input = self.target.preview_input(&mut extensions);
         lutum
@@ -2189,7 +2197,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -2285,7 +2293,7 @@ where
             mut extensions,
             mut turn,
         } = self;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -2492,7 +2500,7 @@ where
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         lutum
             .run_structured_turn_with_tools(extensions, input, turn)
@@ -2511,7 +2519,7 @@ where
         let generation = self
             .inner
             .target
-            .generation_with_defaults(&extensions, &self.inner.turn.config);
+            .generation_with_defaults(&mut extensions, &self.inner.turn.config);
         let input = self.inner.target.preview_input(&mut extensions);
         lutum
             .count_structured_turn_tokens(extensions, input, &self.inner.turn, generation)
@@ -2537,7 +2545,7 @@ where
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let pending = match lutum
@@ -2632,7 +2640,7 @@ where
             mut extensions,
             mut turn,
         } = self.inner;
-        target.apply_defaults(&extensions, &mut turn.config);
+        target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let pending = match lutum

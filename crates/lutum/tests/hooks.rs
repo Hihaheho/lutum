@@ -4,14 +4,14 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 use lutum::{
     AdapterStructuredCompletionRequest, AdapterStructuredTurn, AdapterTextTurn, AgentError,
-    CompletionAdapter, CompletionEventStream, CompletionRequest,
+    BudgetLease, BudgetManager, CompletionAdapter, CompletionEventStream, CompletionRequest,
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
     ErasedTextTurnEventStream, FinishReason, HookReentrancyError, InputMessageRole, Lutum,
     LutumHooksSet, LutumStreamEvent, MockLlmAdapter, MockTextScenario, ModelInput,
     ModelInputHookContext, ModelInputItem, OnModelInput, OnStreamEvent, OperationKind,
-    RawTextTurnEvent, RequestExtensions, ResolveUsageEstimate, SharedPoolBudgetManager,
-    SharedPoolBudgetOptions, Stateful, StreamEventHookContext, TurnAdapter, Usage,
-    budget::UsageEstimate,
+    RawTextTurnEvent, Remaining, RequestBudget, RequestExtensions, ResolveUsageEstimate, Session,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, Stateful, StreamEventHookContext,
+    TurnAdapter, Usage, budget::UsageEstimate,
 };
 use lutum_trace::FieldValue;
 use schemars::JsonSchema;
@@ -385,6 +385,22 @@ struct Summary {
     answer: String,
 }
 
+#[lutum::tool_input(name = "session_probe", output = SessionProbeResult)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct SessionProbeArgs {
+    value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct SessionProbeResult {
+    ok: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, lutum::Toolset)]
+enum AgentTools {
+    SessionProbe(SessionProbeArgs),
+}
+
 struct NullAdapter;
 
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
@@ -492,6 +508,34 @@ impl ResolveUsageEstimate for RecordExtensionEstimate {
             .unwrap_or(0);
         self.seen.lock().unwrap().push(total_tokens);
         UsageEstimate::zero()
+    }
+}
+
+struct RecordBudgetExtensions {
+    seen: Arc<Mutex<Vec<u64>>>,
+}
+
+impl BudgetManager for RecordBudgetExtensions {
+    fn remaining(&self, _extensions: &RequestExtensions) -> Remaining {
+        Remaining::default()
+    }
+
+    fn reserve(
+        &self,
+        extensions: &RequestExtensions,
+        estimate: &UsageEstimate,
+        request_budget: RequestBudget,
+    ) -> Result<BudgetLease, AgentError> {
+        let total_tokens = extensions
+            .get::<UsageEstimate>()
+            .map(|estimate| estimate.total_tokens)
+            .unwrap_or(0);
+        self.seen.lock().unwrap().push(total_tokens);
+        Ok(BudgetLease::new(1, *estimate, request_budget))
+    }
+
+    fn record_used(&self, _lease: BudgetLease, _usage: Usage) -> Result<(), AgentError> {
+        Ok(())
     }
 }
 
@@ -783,6 +827,137 @@ async fn request_extensions_override_lutum_default_extensions_in_resolve_usage_e
         .unwrap();
 
     assert_eq!(*seen.lock().unwrap(), vec![7]);
+}
+
+#[tokio::test]
+async fn session_extensions_sit_between_request_and_lutum_defaults_in_resolve_usage_estimate() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = full_context(LutumHooksSet::new().with_resolve_usage_estimate(
+        RecordExtensionEstimate {
+            seen: Arc::clone(&seen),
+        },
+    ))
+    .with_extension(UsageEstimate {
+        total_tokens: 42,
+        ..UsageEstimate::zero()
+    });
+
+    let mut session = Session::new().with_extension(UsageEstimate {
+        total_tokens: 11,
+        ..UsageEstimate::zero()
+    });
+    session.push_user("hello");
+    let _pending = session.text_turn().start(&ctx).await.unwrap();
+
+    let mut request_override_session = Session::new().with_extension(UsageEstimate {
+        total_tokens: 11,
+        ..UsageEstimate::zero()
+    });
+    request_override_session.push_user("hello");
+    let _pending = request_override_session
+        .text_turn()
+        .ext(UsageEstimate {
+            total_tokens: 7,
+            ..UsageEstimate::zero()
+        })
+        .start(&ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![11, 7]);
+}
+
+#[tokio::test]
+async fn session_text_turn_passes_extensions_to_budget_manager() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = Lutum::with_hooks(
+        Arc::new(NullAdapter),
+        RecordBudgetExtensions {
+            seen: Arc::clone(&seen),
+        },
+        LutumHooksSet::new(),
+    )
+    .with_extension(UsageEstimate {
+        total_tokens: 42,
+        ..UsageEstimate::zero()
+    });
+    let mut session = Session::new().with_extension(UsageEstimate {
+        total_tokens: 9,
+        ..UsageEstimate::zero()
+    });
+    session.push_user("hello");
+
+    let _pending = session.text_turn().start(&ctx).await.unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![9]);
+}
+
+#[tokio::test]
+async fn agent_loop_reads_session_extensions_on_each_round() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let adapter = MockLlmAdapter::new()
+        .with_text_scenario(MockTextScenario::events(vec![
+            Ok(RawTextTurnEvent::Started {
+                request_id: Some("req-agent-1".into()),
+                model: "mock".into(),
+            }),
+            Ok(RawTextTurnEvent::ToolCallChunk {
+                id: "call-1".into(),
+                name: "session_probe".into(),
+                arguments_json_delta: r#"{"value":"x"}"#.into(),
+            }),
+            Ok(RawTextTurnEvent::Completed {
+                request_id: Some("req-agent-1".into()),
+                finish_reason: FinishReason::ToolCall,
+                usage: Usage::zero(),
+            }),
+        ]))
+        .with_text_scenario(MockTextScenario::events(vec![
+            Ok(RawTextTurnEvent::Started {
+                request_id: Some("req-agent-2".into()),
+                model: "mock".into(),
+            }),
+            Ok(RawTextTurnEvent::TextDelta {
+                delta: "done".into(),
+            }),
+            Ok(RawTextTurnEvent::Completed {
+                request_id: Some("req-agent-2".into()),
+                finish_reason: FinishReason::Stop,
+                usage: Usage::zero(),
+            }),
+        ]));
+    let ctx = Lutum::with_hooks(
+        Arc::new(adapter),
+        SharedPoolBudgetManager::new(SharedPoolBudgetOptions::default()),
+        LutumHooksSet::new().with_resolve_usage_estimate(RecordExtensionEstimate {
+            seen: Arc::clone(&seen),
+        }),
+    )
+    .with_extension(UsageEstimate {
+        total_tokens: 42,
+        ..UsageEstimate::zero()
+    });
+    let mut session = Session::new().with_extension(UsageEstimate {
+        total_tokens: 13,
+        ..UsageEstimate::zero()
+    });
+    session.push_user("hello");
+
+    let output = session
+        .agent_loop::<AgentTools>()
+        .max_rounds(2)
+        .run(&ctx, |call| async move {
+            match call {
+                AgentToolsCall::SessionProbe(call) => {
+                    call.complete(SessionProbeResult { ok: true })
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(output.rounds, 2);
+    assert_eq!(*seen.lock().unwrap(), vec![13, 13]);
 }
 
 #[test]
