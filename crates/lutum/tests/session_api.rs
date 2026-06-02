@@ -335,6 +335,12 @@ fn tools_text_no_output_completion_does_not_commit_turn() {
             .unwrap()
     });
 
+    assert_eq!(outcome.request_id(), Some("req-no-output"));
+    assert_eq!(outcome.model(), "gpt-4.1-mini");
+    assert_eq!(outcome.finish_reason(), &FinishReason::Stop);
+    assert_eq!(outcome.usage().total_tokens, 3);
+    assert_eq!(outcome.cumulative_usage().total_tokens, 3);
+
     match outcome {
         TextStepOutcomeWithTools::FinishedNoOutput(result) => {
             assert_eq!(result.request_id.as_deref(), Some("req-no-output"));
@@ -440,6 +446,12 @@ fn optional_tool_text_only_completion_still_auto_commits() {
     })
     .unwrap();
 
+    assert_eq!(outcome.request_id(), Some("req-optional-text"));
+    assert_eq!(outcome.model(), "gpt-4.1-mini");
+    assert_eq!(outcome.finish_reason(), &FinishReason::Stop);
+    assert_eq!(outcome.usage().total_tokens, 5);
+    assert_eq!(outcome.cumulative_usage().total_tokens, 5);
+
     match outcome {
         TextStepOutcomeWithTools::Finished(result) => {
             assert_eq!(result.assistant_text(), "plain answer");
@@ -486,6 +498,12 @@ fn tool_text_collect_staged_does_not_auto_commit_finished_turn() {
             .await
     })
     .unwrap();
+
+    assert_eq!(staged.request_id(), Some("req-tools-staged-text"));
+    assert_eq!(staged.model(), "gpt-4.1-mini");
+    assert_eq!(staged.finish_reason(), &FinishReason::Stop);
+    assert_eq!(staged.usage().total_tokens, 5);
+    assert_eq!(staged.cumulative_usage().total_tokens, 5);
 
     match staged {
         lutum::StagedTextStepOutcomeWithTools::Finished(result) => {
@@ -1134,6 +1152,11 @@ fn structured_tool_round_stays_explicit_until_commit() {
 
     assert_eq!(session.input().items().len(), before_len);
     assert_eq!(session.list_turns().count(), before_turns);
+    assert_eq!(outcome.request_id(), Some("req-session-3"));
+    assert_eq!(outcome.model(), "gpt-4.1-mini");
+    assert_eq!(outcome.finish_reason(), &FinishReason::ToolCall);
+    assert_eq!(outcome.usage().total_tokens, 6);
+    assert_eq!(outcome.cumulative_usage().total_tokens, 6);
 
     match outcome {
         StructuredStepOutcomeWithTools::NeedsTools(round) => {

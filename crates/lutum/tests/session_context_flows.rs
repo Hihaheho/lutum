@@ -159,6 +159,11 @@ fn session_commits_parallel_tool_results_in_order() {
 
     assert_eq!(session.input().items().len(), before_len);
     assert_eq!(session.list_turns().count(), before_turns);
+    assert_eq!(outcome.request_id(), Some("req-parallel"));
+    assert_eq!(outcome.model(), "gpt-4.1-mini");
+    assert_eq!(outcome.finish_reason(), &FinishReason::ToolCall);
+    assert_eq!(outcome.usage().total_tokens, 12);
+    assert_eq!(outcome.cumulative_usage().total_tokens, 12);
 
     match outcome {
         TextStepOutcomeWithTools::NeedsTools(round) => {

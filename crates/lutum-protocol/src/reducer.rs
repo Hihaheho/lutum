@@ -470,6 +470,46 @@ pub enum StagedTextTurnOutcomeWithTools<T: Toolset> {
     FinishedNoOutput(NoOutputTextTurnResult),
 }
 
+impl<T> StagedTextTurnOutcomeWithTools<T>
+where
+    T: Toolset,
+{
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Turn(result) => result.request_id.as_deref(),
+            Self::FinishedNoOutput(result) => result.request_id.as_deref(),
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Turn(result) => &result.model,
+            Self::FinishedNoOutput(result) => &result.model,
+        }
+    }
+
+    pub fn finish_reason(&self) -> &FinishReason {
+        match self {
+            Self::Turn(result) => &result.finish_reason,
+            Self::FinishedNoOutput(result) => &result.finish_reason,
+        }
+    }
+
+    pub fn usage(&self) -> Usage {
+        match self {
+            Self::Turn(result) => result.usage,
+            Self::FinishedNoOutput(result) => result.usage,
+        }
+    }
+
+    pub fn cumulative_usage(&self) -> Usage {
+        match self {
+            Self::Turn(result) => result.cumulative_usage,
+            Self::FinishedNoOutput(result) => result.cumulative_usage,
+        }
+    }
+}
+
 impl<T> StagedTextTurnResultWithTools<T>
 where
     T: Toolset,
@@ -1751,7 +1791,14 @@ mod tests {
             })
             .unwrap();
 
-        let result = match reducer.into_result().unwrap() {
+        let outcome = reducer.into_result().unwrap();
+        assert_eq!(outcome.request_id(), Some("req-1"));
+        assert_eq!(outcome.model(), "gpt-4.1");
+        assert_eq!(outcome.finish_reason(), &FinishReason::ToolCall);
+        assert_eq!(outcome.usage().total_tokens, 12);
+        assert_eq!(outcome.cumulative_usage().total_tokens, 12);
+
+        let result = match outcome {
             StagedTextTurnOutcomeWithTools::Turn(result) => result,
             StagedTextTurnOutcomeWithTools::FinishedNoOutput(_) => {
                 panic!("expected assistant turn")
@@ -1782,7 +1829,14 @@ mod tests {
             })
             .unwrap();
 
-        let result = match reducer.into_result().unwrap() {
+        let outcome = reducer.into_result().unwrap();
+        assert_eq!(outcome.request_id(), Some("req-empty"));
+        assert_eq!(outcome.model(), "gpt-4.1");
+        assert_eq!(outcome.finish_reason(), &FinishReason::Stop);
+        assert_eq!(outcome.usage().total_tokens, 3);
+        assert_eq!(outcome.cumulative_usage().total_tokens, 3);
+
+        let result = match outcome {
             StagedTextTurnOutcomeWithTools::FinishedNoOutput(result) => result,
             StagedTextTurnOutcomeWithTools::Turn(_) => panic!("expected no-output completion"),
         };

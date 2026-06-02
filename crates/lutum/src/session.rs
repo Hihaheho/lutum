@@ -698,10 +698,95 @@ pub enum StagedTextStepOutcomeWithTools<T: Toolset> {
     NeedsTools(UncommittedToolRound<T>),
 }
 
+impl<T> TextStepOutcomeWithTools<T>
+where
+    T: Toolset,
+{
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Finished(result) => result.request_id.as_deref(),
+            Self::FinishedNoOutput(result) => result.request_id.as_deref(),
+            Self::NeedsTools(round) => round.request_id.as_deref(),
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Finished(result) => &result.model,
+            Self::FinishedNoOutput(result) => &result.model,
+            Self::NeedsTools(round) => &round.model,
+        }
+    }
+
+    pub fn finish_reason(&self) -> &FinishReason {
+        match self {
+            Self::Finished(result) => &result.finish_reason,
+            Self::FinishedNoOutput(result) => &result.finish_reason,
+            Self::NeedsTools(round) => &round.finish_reason,
+        }
+    }
+
+    pub fn usage(&self) -> Usage {
+        match self {
+            Self::Finished(result) => result.usage,
+            Self::FinishedNoOutput(result) => result.usage,
+            Self::NeedsTools(round) => round.usage,
+        }
+    }
+
+    pub fn cumulative_usage(&self) -> Usage {
+        match self {
+            Self::Finished(result) => result.cumulative_usage,
+            Self::FinishedNoOutput(result) => result.cumulative_usage,
+            Self::NeedsTools(round) => round.cumulative_usage,
+        }
+    }
+}
+
 impl<T> StagedTextStepOutcomeWithTools<T>
 where
     T: Toolset,
 {
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Finished(result) => result.request_id.as_deref(),
+            Self::FinishedNoOutput(result) => result.request_id.as_deref(),
+            Self::NeedsTools(round) => round.request_id.as_deref(),
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Finished(result) => &result.model,
+            Self::FinishedNoOutput(result) => &result.model,
+            Self::NeedsTools(round) => &round.model,
+        }
+    }
+
+    pub fn finish_reason(&self) -> &FinishReason {
+        match self {
+            Self::Finished(result) => &result.finish_reason,
+            Self::FinishedNoOutput(result) => &result.finish_reason,
+            Self::NeedsTools(round) => &round.finish_reason,
+        }
+    }
+
+    pub fn usage(&self) -> Usage {
+        match self {
+            Self::Finished(result) => result.usage,
+            Self::FinishedNoOutput(result) => result.usage,
+            Self::NeedsTools(round) => round.usage,
+        }
+    }
+
+    pub fn cumulative_usage(&self) -> Usage {
+        match self {
+            Self::Finished(result) => result.cumulative_usage,
+            Self::FinishedNoOutput(result) => result.cumulative_usage,
+            Self::NeedsTools(round) => round.cumulative_usage,
+        }
+    }
+
     pub(crate) fn from_staged(staged: StagedTextTurnOutcomeWithTools<T>) -> Self {
         let staged = match staged {
             StagedTextTurnOutcomeWithTools::Turn(staged) => staged,
@@ -824,6 +909,41 @@ where
     T: Toolset,
     O: StructuredOutput,
 {
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Finished(result) => result.request_id.as_deref(),
+            Self::NeedsTools(round) => round.request_id.as_deref(),
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Finished(result) => &result.model,
+            Self::NeedsTools(round) => &round.model,
+        }
+    }
+
+    pub fn finish_reason(&self) -> &FinishReason {
+        match self {
+            Self::Finished(result) => &result.finish_reason,
+            Self::NeedsTools(round) => &round.finish_reason,
+        }
+    }
+
+    pub fn usage(&self) -> Usage {
+        match self {
+            Self::Finished(result) => result.usage,
+            Self::NeedsTools(round) => round.usage,
+        }
+    }
+
+    pub fn cumulative_usage(&self) -> Usage {
+        match self {
+            Self::Finished(result) => result.cumulative_usage,
+            Self::NeedsTools(round) => round.cumulative_usage,
+        }
+    }
+
     pub(crate) fn from_staged(
         staged: StagedStructuredTurnResultWithTools<T, O>,
         session: Option<&mut ModelInput>,
