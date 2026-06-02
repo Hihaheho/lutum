@@ -249,10 +249,10 @@ fn tool_round_commit_accepts_typed_handled_values() {
 
     let outcome = block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect()
+            .collect(&ctx)
             .await
             .unwrap()
     });
@@ -328,10 +328,10 @@ fn tool_round_plan_commit_preserves_original_arguments_after_rewrite() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
     let round = match outcome {
@@ -411,10 +411,10 @@ fn apply_hooks_splits_handled_and_pending() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -455,10 +455,10 @@ fn apply_hooks_multi_pass_chaining_narrows_pending() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -500,10 +500,10 @@ fn tool_round_plan_commit_merges_handled_and_pending_results() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -579,10 +579,10 @@ fn tool_round_plan_commit_auto_commits_rejected_calls() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -648,10 +648,10 @@ fn apply_hooks_accepts_closure_via_blanket_impl() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -798,10 +798,10 @@ fn invalid_tool_call_is_rejected_and_reported() {
     // Weather のみ available に制限（Search の定義は LLM に送られない）
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -851,10 +851,10 @@ fn invalid_tool_call_commit_auto_synthesizes_rejection_result() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -899,10 +899,10 @@ fn recoverable_tool_call_issue_result_overrides_auto_rejection() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -945,10 +945,10 @@ fn parse_failure_issue_result_overrides_auto_rejection() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -997,10 +997,10 @@ fn tool_call_parse_failure_is_recovered_and_suggests_continue() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -1040,10 +1040,10 @@ fn mixed_valid_and_parse_failed_tool_calls_still_expose_valid_calls() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -1114,10 +1114,10 @@ fn tool_call_parse_failure_commit_auto_synthesizes_rejection_result() {
 
     let outcome = block_on(
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect(),
+            .collect(&ctx),
     )
     .unwrap();
 
@@ -1160,7 +1160,7 @@ fn unknown_tool_parse_failure_is_recovered() {
 
     // `NoTools` exposes no selectors, so the outer availability gate rejects the model-authored
     // tool call before toolset parsing.
-    let outcome = block_on(session.text_turn(&ctx).tools::<lutum::NoTools>().collect()).unwrap();
+    let outcome = block_on(session.text_turn().tools::<lutum::NoTools>().collect(&ctx)).unwrap();
 
     match outcome {
         TextStepOutcomeWithTools::NeedsTools(round) => {

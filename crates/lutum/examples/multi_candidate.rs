@@ -17,12 +17,12 @@ async fn ask(
     let result = match temperature {
         Some(temperature) => {
             session
-                .text_turn(llm)
+                .text_turn()
                 .temperature(temperature)
-                .collect()
+                .collect(llm)
                 .await?
         }
-        None => session.text_turn(llm).collect().await?,
+        None => session.text_turn().collect(llm).await?,
     };
     Ok(result.assistant_text())
 }

@@ -34,9 +34,9 @@ async fn main() -> anyhow::Result<()> {
     session.push_system("Answer concisely.");
     session.push_user("Explain what provider-side token counting is useful for.");
 
-    let turn = session.text_turn(&llm).max_output_tokens(64);
+    let turn = session.text_turn().max_output_tokens(64);
 
-    match turn.count_tokens().await? {
+    match turn.count_tokens(&llm).await? {
         Some(count) => println!(
             "{} input_tokens={}",
             style("count").bold().cyan(),
@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let result = turn
-        .collect()
+        .collect(&llm)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
 

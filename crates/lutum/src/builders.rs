@@ -36,21 +36,15 @@ use crate::{
 };
 
 enum TurnTarget<'a> {
-    Lutum {
-        lutum: &'a Lutum,
-        input: ModelInput,
-    },
-    Session {
-        lutum: Lutum,
-        session: &'a mut Session,
-    },
+    Lutum { lutum: &'a Lutum, input: ModelInput },
+    Session { session: &'a mut Session },
 }
 
 impl<'a> TurnTarget<'a> {
     fn lutum_owned(&self) -> Lutum {
         match self {
             Self::Lutum { lutum, .. } => (*lutum).clone(),
-            Self::Session { lutum, .. } => lutum.clone(),
+            Self::Session { .. } => unreachable!("session builders receive Lutum at execution"),
         }
     }
 
@@ -154,14 +148,13 @@ impl<'a> TextTurn<'a> {
         }
     }
 
-    pub(crate) fn from_session(session: &'a mut Session, lutum: &Lutum) -> Self {
-        Self {
-            target: TurnTarget::Session {
-                lutum: lutum.clone(),
-                session,
+    pub(crate) fn from_session(session: &'a mut Session) -> SessionTextTurn<'a> {
+        SessionTextTurn {
+            inner: Self {
+                target: TurnTarget::Session { session },
+                extensions: RequestExtensions::new(),
+                turn: ProtocolTextTurn::new(),
             },
-            extensions: RequestExtensions::new(),
-            turn: ProtocolTextTurn::new(),
         }
     }
 
@@ -252,8 +245,6 @@ impl<'a> TextTurn<'a> {
     ///
     /// Returns `Ok(None)` when no token counter is attached to `Lutum`, or when
     /// the configured adapter surface does not support exact token counting.
-    /// Counting a session-originated turn snapshots the current session input
-    /// but does not commit, strip ephemeral items, or otherwise mutate the session.
     pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
         let mut extensions = self.extensions.clone();
         let generation = self
@@ -339,8 +330,8 @@ impl<'a> TextTurn<'a> {
         }
     }
 
-    /// Collect and auto-commit to the session (if session-originated). Returns the
-    /// committed result directly; use [`collect_staged`] to opt out of auto-commit.
+    /// Collect and return the completed result directly; use [`collect_staged`]
+    /// to keep the uncommitted assistant turn.
     pub async fn collect(
         self,
     ) -> Result<
@@ -354,6 +345,239 @@ impl<'a> TextTurn<'a> {
         } = self;
         target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
+        let input = target.input(&mut extensions);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        let staged = match lutum.run_text_turn(extensions, input, turn).await {
+            Ok(pending) => match pending.collect().await {
+                Ok(s) => s,
+                Err(e) => return Err(e),
+            },
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                return Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnCollectedState::default(),
+                });
+            }
+        };
+        let assistant_turn = staged.turn.assistant_turn().clone();
+        target.commit_staged(staged.turn);
+        Ok(lutum_protocol::TextTurnResult {
+            request_id: staged.request_id,
+            model: staged.model,
+            assistant_turn,
+            finish_reason: staged.finish_reason,
+            usage: staged.usage,
+            cumulative_usage: staged.cumulative_usage,
+        })
+    }
+}
+
+pub struct SessionTextTurn<'a> {
+    inner: TextTurn<'a>,
+}
+
+impl<'a> SessionTextTurn<'a> {
+    pub fn ext<T>(self, extension: T) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        Self {
+            inner: self.inner.ext(extension),
+        }
+    }
+
+    pub fn extensions(self, extensions: RequestExtensions) -> Self {
+        Self {
+            inner: self.inner.extensions(extensions),
+        }
+    }
+
+    pub fn temperature(self, temperature: Temperature) -> Self {
+        Self {
+            inner: self.inner.temperature(temperature),
+        }
+    }
+
+    pub fn max_output_tokens(self, max_output_tokens: u32) -> Self {
+        Self {
+            inner: self.inner.max_output_tokens(max_output_tokens),
+        }
+    }
+
+    pub fn seed(self, seed: u64) -> Self {
+        Self {
+            inner: self.inner.seed(seed),
+        }
+    }
+
+    pub fn budget(self, budget: RequestBudget) -> Self {
+        Self {
+            inner: self.inner.budget(budget),
+        }
+    }
+
+    pub fn generation_config(self, generation: GenerationParams) -> Self {
+        Self {
+            inner: self.inner.generation_config(generation),
+        }
+    }
+
+    pub fn retry_policy(self, retry_policy: RetryPolicy) -> Self {
+        Self {
+            inner: self.inner.retry_policy(retry_policy),
+        }
+    }
+
+    pub fn tools<T>(self) -> SessionTextTurnWithTools<'a, T>
+    where
+        T: Toolset,
+    {
+        let TextTurn {
+            target,
+            extensions,
+            turn,
+        } = self.inner;
+        let turn = ProtocolTextTurn {
+            config: TurnConfig {
+                generation: turn.config.generation,
+                tools: ToolConstraints::default(),
+                budget: turn.config.budget,
+            },
+        };
+        SessionTextTurnWithTools {
+            inner: TextTurnWithTools {
+                target,
+                extensions,
+                turn,
+                fallback_parser: None,
+            },
+        }
+    }
+
+    pub async fn start(self, lutum: &Lutum) -> Result<PendingTextTurn, LutumError> {
+        let TextTurn {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        lutum.run_text_turn(extensions, input, turn).await
+    }
+
+    pub async fn stream(self, lutum: &Lutum) -> Result<ProtocolTextTurnEventStream, LutumError> {
+        Ok(self.start(lutum).await?.into_stream())
+    }
+
+    /// Count input tokens for this turn without sending a generation request.
+    ///
+    /// Counting snapshots the current session input but does not commit, strip
+    /// ephemeral items, or otherwise mutate the session.
+    pub async fn count_tokens(&self, lutum: &Lutum) -> Result<Option<TokenCount>, LutumError> {
+        let mut extensions = self.inner.extensions.clone();
+        let generation = self
+            .inner
+            .target
+            .generation_with_defaults(&extensions, &self.inner.turn.config);
+        let input = self.inner.target.preview_input(&mut extensions);
+        lutum
+            .count_text_turn_tokens(extensions, input, &self.inner.turn, generation)
+            .await
+    }
+
+    /// Collect the turn with a custom event handler. Always returns a staged result
+    /// (never auto-commits). Use [`collect`] for auto-commit or
+    /// [`collect_staged`] for staged without a handler.
+    pub async fn collect_with<H>(
+        self,
+        lutum: &Lutum,
+        handler: H,
+    ) -> Result<
+        StagedTextTurnResult,
+        CollectError<H::Error, TextTurnReductionError, TextTurnCollectedState>,
+    >
+    where
+        H: EventHandler<lutum_protocol::TextTurnEvent, TextTurnCollectedState>,
+    {
+        let TextTurn {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        match lutum.run_text_turn(extensions, input, turn).await {
+            Ok(pending) => pending.collect_with(handler).await,
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnCollectedState::default(),
+                })
+            }
+        }
+    }
+
+    /// Collect without auto-committing. Returns a staged result with an
+    /// [`UncommittedAssistantTurn`] that you can commit later.
+    pub async fn collect_staged(
+        self,
+        lutum: &Lutum,
+    ) -> Result<
+        StagedTextTurnResult,
+        CollectError<Infallible, TextTurnReductionError, TextTurnCollectedState>,
+    > {
+        let TextTurn {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        match lutum.run_text_turn(extensions, input, turn).await {
+            Ok(pending) => pending.collect().await,
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnCollectedState::default(),
+                })
+            }
+        }
+    }
+
+    /// Collect and auto-commit to the session. Returns the committed result directly;
+    /// use [`collect_staged`] to opt out of auto-commit.
+    pub async fn collect(
+        self,
+        lutum: &Lutum,
+    ) -> Result<
+        lutum_protocol::TextTurnResult,
+        CollectError<Infallible, TextTurnReductionError, TextTurnCollectedState>,
+    > {
+        let TextTurn {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum.run_text_turn(extensions, input, turn).await {
@@ -584,7 +808,7 @@ where
             }
         };
         let outcome = match target {
-            TurnTarget::Session { session, .. } => {
+            TurnTarget::Session { session } => {
                 TextStepOutcomeWithTools::from_staged(staged, Some(session.input_mut()))
             }
             TurnTarget::Lutum { .. } => TextStepOutcomeWithTools::from_staged(staged, None),
@@ -639,7 +863,7 @@ where
             }
         };
         let outcome = match target {
-            TurnTarget::Session { session, .. } => {
+            TurnTarget::Session { session } => {
                 TextStepOutcomeWithTools::from_staged(staged, Some(session.input_mut()))
             }
             TurnTarget::Lutum { .. } => TextStepOutcomeWithTools::from_staged(staged, None),
@@ -819,12 +1043,425 @@ where
             }
         };
         let outcome = match target {
-            TurnTarget::Session { session, .. } => {
+            TurnTarget::Session { session } => {
                 TextStepOutcomeWithTools::from_staged(staged, Some(session.input_mut()))
             }
             TurnTarget::Lutum { .. } => TextStepOutcomeWithTools::from_staged(staged, None),
         };
         Ok(outcome)
+    }
+}
+
+pub struct SessionTextTurnWithTools<'a, T>
+where
+    T: Toolset,
+{
+    inner: TextTurnWithTools<'a, T>,
+}
+
+impl<'a, T> SessionTextTurnWithTools<'a, T>
+where
+    T: Toolset,
+{
+    pub fn ext<E>(self, extension: E) -> Self
+    where
+        E: Send + Sync + 'static,
+    {
+        Self {
+            inner: self.inner.ext(extension),
+        }
+    }
+
+    pub fn extensions(self, extensions: RequestExtensions) -> Self {
+        Self {
+            inner: self.inner.extensions(extensions),
+        }
+    }
+
+    pub fn temperature(self, temperature: Temperature) -> Self {
+        Self {
+            inner: self.inner.temperature(temperature),
+        }
+    }
+
+    pub fn max_output_tokens(self, max_output_tokens: u32) -> Self {
+        Self {
+            inner: self.inner.max_output_tokens(max_output_tokens),
+        }
+    }
+
+    pub fn seed(self, seed: u64) -> Self {
+        Self {
+            inner: self.inner.seed(seed),
+        }
+    }
+
+    pub fn budget(self, budget: RequestBudget) -> Self {
+        Self {
+            inner: self.inner.budget(budget),
+        }
+    }
+
+    pub fn generation_config(self, generation: GenerationParams) -> Self {
+        Self {
+            inner: self.inner.generation_config(generation),
+        }
+    }
+
+    pub fn retry_policy(self, retry_policy: RetryPolicy) -> Self {
+        Self {
+            inner: self.inner.retry_policy(retry_policy),
+        }
+    }
+
+    pub fn available_tools(self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
+        Self {
+            inner: self.inner.available_tools(selectors),
+        }
+    }
+
+    pub fn available_tools_default_plus(
+        self,
+        selectors: impl IntoIterator<Item = T::Selector>,
+    ) -> Self {
+        Self {
+            inner: self.inner.available_tools_default_plus(selectors),
+        }
+    }
+
+    pub fn require_any_tool(self) -> Self {
+        Self {
+            inner: self.inner.require_any_tool(),
+        }
+    }
+
+    pub fn require_tool(self, selector: T::Selector) -> Self {
+        Self {
+            inner: self.inner.require_tool(selector),
+        }
+    }
+
+    pub fn recover_tool_calls_with<P>(self, parser: P) -> Self
+    where
+        P: TextToolCallFallbackParser<T> + 'static,
+    {
+        Self {
+            inner: self.inner.recover_tool_calls_with(parser),
+        }
+    }
+
+    pub fn describe_tool(self, selector: T::Selector, description: impl Into<String>) -> Self {
+        Self {
+            inner: self.inner.describe_tool(selector, description),
+        }
+    }
+
+    pub fn describe_many_tools(
+        self,
+        overrides: impl IntoIterator<Item = (T::Selector, String)>,
+    ) -> Self {
+        Self {
+            inner: self.inner.describe_many_tools(overrides),
+        }
+    }
+
+    pub async fn start(self, lutum: &Lutum) -> Result<PendingTextTurnWithTools<T>, LutumError> {
+        let TextTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+            fallback_parser,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        lutum
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
+            .await
+    }
+
+    pub async fn stream(
+        self,
+        lutum: &Lutum,
+    ) -> Result<lutum_protocol::TextTurnEventStreamWithTools<T>, LutumError> {
+        Ok(self.start(lutum).await?.into_stream())
+    }
+
+    /// Count input tokens for this tool-capable turn without sending a generation request.
+    pub async fn count_tokens(&self, lutum: &Lutum) -> Result<Option<TokenCount>, LutumError> {
+        let mut extensions = self.inner.extensions.clone();
+        let generation = self
+            .inner
+            .target
+            .generation_with_defaults(&extensions, &self.inner.turn.config);
+        let input = self.inner.target.preview_input(&mut extensions);
+        lutum
+            .count_text_turn_tokens(extensions, input, &self.inner.turn, generation)
+            .await
+    }
+
+    pub async fn collect_with<H>(
+        self,
+        lutum: &Lutum,
+        handler: H,
+    ) -> Result<
+        TextStepOutcomeWithTools<T>,
+        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    >
+    where
+        H: EventHandler<lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
+    {
+        let TextTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+            fallback_parser,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        let staged = match lutum
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
+            .await
+        {
+            Ok(pending) => match pending.collect_with(handler).await {
+                Ok(s) => s,
+                Err(e) => return Err(e),
+            },
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                return Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnStateWithTools::default(),
+                });
+            }
+        };
+        Ok(match target {
+            TurnTarget::Session { session } => {
+                TextStepOutcomeWithTools::from_staged(staged, Some(session.input_mut()))
+            }
+            TurnTarget::Lutum { .. } => TextStepOutcomeWithTools::from_staged(staged, None),
+        })
+    }
+
+    pub async fn collect_controlled_with<H>(
+        self,
+        lutum: &Lutum,
+        handler: H,
+    ) -> Result<
+        TextStepOutcomeWithTools<T>,
+        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    >
+    where
+        H: TextToolEventHandler<T>,
+    {
+        let TextTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+            fallback_parser,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        let staged = match lutum
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
+            .await
+        {
+            Ok(pending) => match pending.collect_controlled_with(handler).await {
+                Ok(s) => s,
+                Err(e) => return Err(e),
+            },
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                return Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnStateWithTools::default(),
+                });
+            }
+        };
+        Ok(match target {
+            TurnTarget::Session { session } => {
+                TextStepOutcomeWithTools::from_staged(staged, Some(session.input_mut()))
+            }
+            TurnTarget::Lutum { .. } => TextStepOutcomeWithTools::from_staged(staged, None),
+        })
+    }
+
+    pub async fn collect_staged_with<H>(
+        self,
+        lutum: &Lutum,
+        handler: H,
+    ) -> Result<
+        StagedTextStepOutcomeWithTools<T>,
+        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    >
+    where
+        H: EventHandler<lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
+    {
+        let TextTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+            fallback_parser,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        match lutum
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
+            .await
+        {
+            Ok(pending) => pending
+                .collect_with(handler)
+                .await
+                .map(StagedTextStepOutcomeWithTools::from_staged),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnStateWithTools::default(),
+                })
+            }
+        }
+    }
+
+    pub async fn collect_staged_controlled_with<H>(
+        self,
+        lutum: &Lutum,
+        handler: H,
+    ) -> Result<
+        StagedTextStepOutcomeWithTools<T>,
+        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    >
+    where
+        H: TextToolEventHandler<T>,
+    {
+        let TextTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+            fallback_parser,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        match lutum
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
+            .await
+        {
+            Ok(pending) => pending
+                .collect_controlled_with(handler)
+                .await
+                .map(StagedTextStepOutcomeWithTools::from_staged),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnStateWithTools::default(),
+                })
+            }
+        }
+    }
+
+    pub async fn collect_staged(
+        self,
+        lutum: &Lutum,
+    ) -> Result<
+        StagedTextStepOutcomeWithTools<T>,
+        CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    > {
+        let TextTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+            fallback_parser,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        match lutum
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
+            .await
+        {
+            Ok(pending) => pending
+                .collect()
+                .await
+                .map(StagedTextStepOutcomeWithTools::from_staged),
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnStateWithTools::default(),
+                })
+            }
+        }
+    }
+
+    pub async fn collect(
+        self,
+        lutum: &Lutum,
+    ) -> Result<
+        TextStepOutcomeWithTools<T>,
+        CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
+    > {
+        let TextTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+            fallback_parser,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        let staged = match lutum
+            .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
+            .await
+        {
+            Ok(pending) => match pending.collect().await {
+                Ok(s) => s,
+                Err(e) => return Err(e),
+            },
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::TextTurn,
+                    &source,
+                );
+                return Err(CollectError::Execution {
+                    source,
+                    partial: TextTurnStateWithTools::default(),
+                });
+            }
+        };
+        Ok(match target {
+            TurnTarget::Session { session } => {
+                TextStepOutcomeWithTools::from_staged(staged, Some(session.input_mut()))
+            }
+            TurnTarget::Lutum { .. } => TextStepOutcomeWithTools::from_staged(staged, None),
+        })
     }
 }
 
@@ -841,6 +1478,17 @@ where
     pub fn with_dynamic_tools(mut self, tools: impl IntoIterator<Item = DynamicTool>) -> Self {
         self.turn.config.tools.dynamic_tools.extend(tools);
         self
+    }
+}
+
+impl<'a, T> SessionTextTurnWithTools<'a, T>
+where
+    T: Toolset + HasDynamicSlot,
+{
+    pub fn with_dynamic_tools(self, tools: impl IntoIterator<Item = DynamicTool>) -> Self {
+        Self {
+            inner: self.inner.with_dynamic_tools(tools),
+        }
     }
 }
 
@@ -865,14 +1513,13 @@ where
         }
     }
 
-    pub(crate) fn from_session(session: &'a mut Session, lutum: &Lutum) -> Self {
-        Self {
-            target: TurnTarget::Session {
-                lutum: lutum.clone(),
-                session,
+    pub(crate) fn from_session(session: &'a mut Session) -> SessionStructuredTurn<'a, O> {
+        SessionStructuredTurn {
+            inner: Self {
+                target: TurnTarget::Session { session },
+                extensions: RequestExtensions::new(),
+                turn: ProtocolStructuredTurn::new(),
             },
-            extensions: RequestExtensions::new(),
-            turn: ProtocolStructuredTurn::new(),
         }
     }
 
@@ -976,8 +1623,6 @@ where
     ///
     /// Returns `Ok(None)` when no token counter is attached to `Lutum`, or when
     /// the configured adapter surface does not support exact token counting.
-    /// Counting a session-originated turn snapshots the current session input
-    /// but does not commit, strip ephemeral items, or otherwise mutate the session.
     pub async fn count_tokens(&self) -> Result<Option<TokenCount>, LutumError> {
         let mut extensions = self.extensions.clone();
         let generation = self
@@ -1067,8 +1712,8 @@ where
         }
     }
 
-    /// Collect and auto-commit to the session (if session-originated). Returns the
-    /// committed result directly; use [`collect_staged`] to opt out of auto-commit.
+    /// Collect and return the completed result directly; use [`collect_staged`]
+    /// to keep the uncommitted assistant turn.
     pub async fn collect(
         self,
     ) -> Result<
@@ -1082,6 +1727,255 @@ where
         } = self;
         target.apply_defaults(&extensions, &mut turn.config);
         let lutum = target.lutum_owned();
+        let input = target.input(&mut extensions);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        let staged = match lutum.run_structured_turn(extensions, input, turn).await {
+            Ok(pending) => match pending.collect().await {
+                Ok(s) => s,
+                Err(e) => return Err(e),
+            },
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredTurn,
+                    &source,
+                );
+                return Err(CollectError::Execution {
+                    source,
+                    partial: StructuredTurnPartial::from_state(
+                        StructuredTurnCollectedState::default(),
+                    ),
+                });
+            }
+        };
+        let assistant_turn = staged.turn.assistant_turn().clone();
+        target.commit_staged(staged.turn);
+        Ok(lutum_protocol::StructuredTurnResult {
+            request_id: staged.request_id,
+            model: staged.model,
+            assistant_turn,
+            semantic: staged.semantic,
+            finish_reason: staged.finish_reason,
+            usage: staged.usage,
+            cumulative_usage: staged.cumulative_usage,
+        })
+    }
+}
+
+pub struct SessionStructuredTurn<'a, O>
+where
+    O: StructuredOutput,
+{
+    inner: StructuredTurn<'a, O>,
+}
+
+impl<'a, O> SessionStructuredTurn<'a, O>
+where
+    O: StructuredOutput,
+{
+    pub fn ext<T>(self, extension: T) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        Self {
+            inner: self.inner.ext(extension),
+        }
+    }
+
+    pub fn extensions(self, extensions: RequestExtensions) -> Self {
+        Self {
+            inner: self.inner.extensions(extensions),
+        }
+    }
+
+    pub fn temperature(self, temperature: Temperature) -> Self {
+        Self {
+            inner: self.inner.temperature(temperature),
+        }
+    }
+
+    pub fn max_output_tokens(self, max_output_tokens: u32) -> Self {
+        Self {
+            inner: self.inner.max_output_tokens(max_output_tokens),
+        }
+    }
+
+    pub fn seed(self, seed: u64) -> Self {
+        Self {
+            inner: self.inner.seed(seed),
+        }
+    }
+
+    pub fn budget(self, budget: RequestBudget) -> Self {
+        Self {
+            inner: self.inner.budget(budget),
+        }
+    }
+
+    pub fn generation_config(self, generation: GenerationParams) -> Self {
+        Self {
+            inner: self.inner.generation_config(generation),
+        }
+    }
+
+    pub fn output_schema(
+        self,
+        schema_name: impl Into<String>,
+        schema: impl Into<serde_json::Value>,
+    ) -> Self {
+        Self {
+            inner: self.inner.output_schema(schema_name, schema),
+        }
+    }
+
+    pub fn retry_policy(self, retry_policy: RetryPolicy) -> Self {
+        Self {
+            inner: self.inner.retry_policy(retry_policy),
+        }
+    }
+
+    pub fn tools<T>(self) -> SessionStructuredTurnWithTools<'a, T, O>
+    where
+        T: Toolset,
+    {
+        let StructuredTurn {
+            target,
+            extensions,
+            turn,
+        } = self.inner;
+        let turn = ProtocolStructuredTurn {
+            config: TurnConfig {
+                generation: turn.config.generation,
+                tools: ToolConstraints::default(),
+                budget: turn.config.budget,
+            },
+            output: turn.output,
+        };
+        SessionStructuredTurnWithTools {
+            inner: StructuredTurnWithTools {
+                target,
+                extensions,
+                turn,
+            },
+        }
+    }
+
+    pub async fn start(self, lutum: &Lutum) -> Result<PendingStructuredTurn<O>, LutumError> {
+        let StructuredTurn {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        lutum.run_structured_turn(extensions, input, turn).await
+    }
+
+    pub async fn stream(
+        self,
+        lutum: &Lutum,
+    ) -> Result<ProtocolStructuredTurnEventStream<O>, LutumError> {
+        Ok(self.start(lutum).await?.into_stream())
+    }
+
+    /// Count input tokens for this structured turn without sending a generation request.
+    pub async fn count_tokens(&self, lutum: &Lutum) -> Result<Option<TokenCount>, LutumError> {
+        let mut extensions = self.inner.extensions.clone();
+        let generation = self
+            .inner
+            .target
+            .generation_with_defaults(&extensions, &self.inner.turn.config);
+        let input = self.inner.target.preview_input(&mut extensions);
+        lutum
+            .count_structured_turn_tokens(extensions, input, &self.inner.turn, generation)
+            .await
+    }
+
+    pub async fn collect_with<H>(
+        self,
+        lutum: &Lutum,
+        handler: H,
+    ) -> Result<
+        StagedStructuredTurnResult<O>,
+        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+    >
+    where
+        H: EventHandler<lutum_protocol::StructuredTurnEvent<O>, StructuredTurnCollectedState<O>>,
+    {
+        let StructuredTurn {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        match lutum.run_structured_turn(extensions, input, turn).await {
+            Ok(pending) => pending.collect_with(handler).await,
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: StructuredTurnPartial::from_state(
+                        StructuredTurnCollectedState::default(),
+                    ),
+                })
+            }
+        }
+    }
+
+    pub async fn collect_staged(
+        self,
+        lutum: &Lutum,
+    ) -> Result<
+        StagedStructuredTurnResult<O>,
+        CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+    > {
+        let StructuredTurn {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        drop(target);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        match lutum.run_structured_turn(extensions, input, turn).await {
+            Ok(pending) => pending.collect().await,
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredTurn,
+                    &source,
+                );
+                Err(CollectError::Execution {
+                    source,
+                    partial: StructuredTurnPartial::from_state(
+                        StructuredTurnCollectedState::default(),
+                    ),
+                })
+            }
+        }
+    }
+
+    pub async fn collect(
+        self,
+        lutum: &Lutum,
+    ) -> Result<
+        lutum_protocol::StructuredTurnResult<O>,
+        CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+    > {
+        let StructuredTurn {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum.run_structured_turn(extensions, input, turn).await {
@@ -1321,12 +2215,10 @@ where
         match pending.collect_with(handler).await {
             Ok(staged) => {
                 let outcome = match target {
-                    TurnTarget::Session { session, .. } => {
-                        StructuredStepOutcomeWithTools::from_staged(
-                            staged,
-                            Some(session.input_mut()),
-                        )
-                    }
+                    TurnTarget::Session { session } => StructuredStepOutcomeWithTools::from_staged(
+                        staged,
+                        Some(session.input_mut()),
+                    ),
                     TurnTarget::Lutum { .. } => {
                         StructuredStepOutcomeWithTools::from_staged(staged, None)
                     }
@@ -1419,12 +2311,10 @@ where
         match pending.collect().await {
             Ok(staged) => {
                 let outcome = match target {
-                    TurnTarget::Session { session, .. } => {
-                        StructuredStepOutcomeWithTools::from_staged(
-                            staged,
-                            Some(session.input_mut()),
-                        )
-                    }
+                    TurnTarget::Session { session } => StructuredStepOutcomeWithTools::from_staged(
+                        staged,
+                        Some(session.input_mut()),
+                    ),
                     TurnTarget::Lutum { .. } => {
                         StructuredStepOutcomeWithTools::from_staged(staged, None)
                     }
@@ -1436,6 +2326,351 @@ where
                 partial,
             }) => {
                 // The model used tool calls without structured output — recover as NeedsTools.
+                if (!partial.state.tool_calls.is_empty()
+                    || !partial.state.recoverable_tool_call_issues.is_empty())
+                    && let (
+                        Some(committed_turn),
+                        Some(finish_reason),
+                        Some(usage),
+                        Ok(assistant_turn),
+                    ) = (
+                        partial.committed_turn.clone(),
+                        partial.state.finish_reason.clone(),
+                        partial.state.usage,
+                        AssistantTurn::from_items(partial.state.assistant_turn.clone()),
+                    )
+                {
+                    let tool_calls = partial.state.tool_calls.clone();
+                    let recoverable_tool_call_issues =
+                        partial.state.recoverable_tool_call_issues.clone();
+                    let outcome = StructuredStepOutcomeWithTools::from_partial(
+                        assistant_turn,
+                        committed_turn,
+                        tool_calls,
+                        recoverable_tool_call_issues,
+                        partial.state.continue_suggestion,
+                        partial.state.request_id.clone(),
+                        partial.state.model.clone(),
+                        finish_reason,
+                        usage,
+                        usage,
+                    );
+                    return Ok(outcome);
+                }
+                Err(CollectError::Reduction {
+                    source: StructuredTurnReductionError::MissingSemantic,
+                    partial,
+                })
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+pub struct SessionStructuredTurnWithTools<'a, T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    inner: StructuredTurnWithTools<'a, T, O>,
+}
+
+impl<'a, T, O> SessionStructuredTurnWithTools<'a, T, O>
+where
+    T: Toolset,
+    O: StructuredOutput,
+{
+    pub fn ext<E>(self, extension: E) -> Self
+    where
+        E: Send + Sync + 'static,
+    {
+        Self {
+            inner: self.inner.ext(extension),
+        }
+    }
+
+    pub fn extensions(self, extensions: RequestExtensions) -> Self {
+        Self {
+            inner: self.inner.extensions(extensions),
+        }
+    }
+
+    pub fn temperature(self, temperature: Temperature) -> Self {
+        Self {
+            inner: self.inner.temperature(temperature),
+        }
+    }
+
+    pub fn max_output_tokens(self, max_output_tokens: u32) -> Self {
+        Self {
+            inner: self.inner.max_output_tokens(max_output_tokens),
+        }
+    }
+
+    pub fn seed(self, seed: u64) -> Self {
+        Self {
+            inner: self.inner.seed(seed),
+        }
+    }
+
+    pub fn budget(self, budget: RequestBudget) -> Self {
+        Self {
+            inner: self.inner.budget(budget),
+        }
+    }
+
+    pub fn generation_config(self, generation: GenerationParams) -> Self {
+        Self {
+            inner: self.inner.generation_config(generation),
+        }
+    }
+
+    pub fn output_schema(
+        self,
+        schema_name: impl Into<String>,
+        schema: impl Into<serde_json::Value>,
+    ) -> Self {
+        Self {
+            inner: self.inner.output_schema(schema_name, schema),
+        }
+    }
+
+    pub fn retry_policy(self, retry_policy: RetryPolicy) -> Self {
+        Self {
+            inner: self.inner.retry_policy(retry_policy),
+        }
+    }
+
+    pub fn available_tools(self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
+        Self {
+            inner: self.inner.available_tools(selectors),
+        }
+    }
+
+    pub fn available_tools_default_plus(
+        self,
+        selectors: impl IntoIterator<Item = T::Selector>,
+    ) -> Self {
+        Self {
+            inner: self.inner.available_tools_default_plus(selectors),
+        }
+    }
+
+    pub fn require_any_tool(self) -> Self {
+        Self {
+            inner: self.inner.require_any_tool(),
+        }
+    }
+
+    pub fn require_tool(self, selector: T::Selector) -> Self {
+        Self {
+            inner: self.inner.require_tool(selector),
+        }
+    }
+
+    pub fn describe_tool(self, selector: T::Selector, description: impl Into<String>) -> Self {
+        Self {
+            inner: self.inner.describe_tool(selector, description),
+        }
+    }
+
+    pub fn describe_many_tools(
+        self,
+        overrides: impl IntoIterator<Item = (T::Selector, String)>,
+    ) -> Self {
+        Self {
+            inner: self.inner.describe_many_tools(overrides),
+        }
+    }
+
+    pub async fn start(
+        self,
+        lutum: &Lutum,
+    ) -> Result<PendingStructuredTurnWithTools<T, O>, LutumError> {
+        let StructuredTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        lutum
+            .run_structured_turn_with_tools(extensions, input, turn)
+            .await
+    }
+
+    pub async fn stream(
+        self,
+        lutum: &Lutum,
+    ) -> Result<lutum_protocol::StructuredTurnEventStreamWithTools<T, O>, LutumError> {
+        Ok(self.start(lutum).await?.into_stream())
+    }
+
+    pub async fn count_tokens(&self, lutum: &Lutum) -> Result<Option<TokenCount>, LutumError> {
+        let mut extensions = self.inner.extensions.clone();
+        let generation = self
+            .inner
+            .target
+            .generation_with_defaults(&extensions, &self.inner.turn.config);
+        let input = self.inner.target.preview_input(&mut extensions);
+        lutum
+            .count_structured_turn_tokens(extensions, input, &self.inner.turn, generation)
+            .await
+    }
+
+    pub async fn collect_with<H>(
+        self,
+        lutum: &Lutum,
+        handler: H,
+    ) -> Result<
+        StructuredStepOutcomeWithTools<T, O>,
+        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
+    >
+    where
+        H: EventHandler<
+                lutum_protocol::StructuredTurnEventWithTools<T, O>,
+                StructuredTurnStateWithTools<T, O>,
+            >,
+    {
+        let StructuredTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        let pending = match lutum
+            .run_structured_turn_with_tools(extensions, input, turn)
+            .await
+        {
+            Ok(p) => p,
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredTurn,
+                    &source,
+                );
+                return Err(CollectError::Execution {
+                    source,
+                    partial: StructuredTurnPartialWithTools::from_state(
+                        StructuredTurnStateWithTools::default(),
+                    ),
+                });
+            }
+        };
+        match pending.collect_with(handler).await {
+            Ok(staged) => {
+                let outcome = match target {
+                    TurnTarget::Session { session } => StructuredStepOutcomeWithTools::from_staged(
+                        staged,
+                        Some(session.input_mut()),
+                    ),
+                    TurnTarget::Lutum { .. } => {
+                        StructuredStepOutcomeWithTools::from_staged(staged, None)
+                    }
+                };
+                Ok(outcome)
+            }
+            Err(CollectError::Reduction {
+                source: StructuredTurnReductionError::MissingSemantic,
+                partial,
+            }) => {
+                if (!partial.state.tool_calls.is_empty()
+                    || !partial.state.recoverable_tool_call_issues.is_empty())
+                    && let (
+                        Some(committed_turn),
+                        Some(finish_reason),
+                        Some(usage),
+                        Ok(assistant_turn),
+                    ) = (
+                        partial.committed_turn.clone(),
+                        partial.state.finish_reason.clone(),
+                        partial.state.usage,
+                        AssistantTurn::from_items(partial.state.assistant_turn.clone()),
+                    )
+                {
+                    let tool_calls = partial.state.tool_calls.clone();
+                    let recoverable_tool_call_issues =
+                        partial.state.recoverable_tool_call_issues.clone();
+                    let outcome = StructuredStepOutcomeWithTools::from_partial(
+                        assistant_turn,
+                        committed_turn,
+                        tool_calls,
+                        recoverable_tool_call_issues,
+                        partial.state.continue_suggestion,
+                        partial.state.request_id.clone(),
+                        partial.state.model.clone(),
+                        finish_reason,
+                        usage,
+                        usage,
+                    );
+                    return Ok(outcome);
+                }
+                Err(CollectError::Reduction {
+                    source: StructuredTurnReductionError::MissingSemantic,
+                    partial,
+                })
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn collect(
+        self,
+        lutum: &Lutum,
+    ) -> Result<
+        StructuredStepOutcomeWithTools<T, O>,
+        CollectError<
+            Infallible,
+            StructuredTurnReductionError,
+            StructuredTurnPartialWithTools<T, O>,
+        >,
+    > {
+        let StructuredTurnWithTools {
+            mut target,
+            mut extensions,
+            mut turn,
+        } = self.inner;
+        target.apply_defaults(&extensions, &mut turn.config);
+        let input = target.input(&mut extensions);
+        let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
+        let pending = match lutum
+            .run_structured_turn_with_tools(extensions, input, turn)
+            .await
+        {
+            Ok(p) => p,
+            Err(source) => {
+                emit_pre_stream_collect_error(
+                    raw_collect_errors_enabled,
+                    OperationKind::StructuredTurn,
+                    &source,
+                );
+                return Err(CollectError::Execution {
+                    source,
+                    partial: StructuredTurnPartialWithTools::from_state(
+                        StructuredTurnStateWithTools::default(),
+                    ),
+                });
+            }
+        };
+        match pending.collect().await {
+            Ok(staged) => {
+                let outcome = match target {
+                    TurnTarget::Session { session } => StructuredStepOutcomeWithTools::from_staged(
+                        staged,
+                        Some(session.input_mut()),
+                    ),
+                    TurnTarget::Lutum { .. } => {
+                        StructuredStepOutcomeWithTools::from_staged(staged, None)
+                    }
+                };
+                Ok(outcome)
+            }
+            Err(CollectError::Reduction {
+                source: StructuredTurnReductionError::MissingSemantic,
+                partial,
+            }) => {
                 if (!partial.state.tool_calls.is_empty()
                     || !partial.state.recoverable_tool_call_issues.is_empty())
                     && let (
@@ -1491,6 +2726,18 @@ where
     pub fn with_dynamic_tools(mut self, tools: impl IntoIterator<Item = DynamicTool>) -> Self {
         self.turn.config.tools.dynamic_tools.extend(tools);
         self
+    }
+}
+
+impl<'a, T, O> SessionStructuredTurnWithTools<'a, T, O>
+where
+    T: Toolset + HasDynamicSlot,
+    O: StructuredOutput,
+{
+    pub fn with_dynamic_tools(self, tools: impl IntoIterator<Item = DynamicTool>) -> Self {
+        Self {
+            inner: self.inner.with_dynamic_tools(tools),
+        }
     }
 }
 

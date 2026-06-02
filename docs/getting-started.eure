@@ -70,8 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     session.push_user("Explain what a borrow checker does in one sentence.");
 
     let result = session
-        .text_turn(&llm)
-        .collect()
+        .text_turn()
+        .collect(&llm)
         .await?;
 
     println!("{}", result.assistant_text());
@@ -115,8 +115,8 @@ struct Sentiment {
 session.push_user("Classify the sentiment of: 'I love this crate!'");
 
 let result = session
-    .structured_turn::<Sentiment>(&llm)
-    .collect()
+    .structured_turn::<Sentiment>()
+    .collect(&llm)
     .await?;
 
 match result.semantic.clone() {

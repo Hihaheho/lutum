@@ -38,8 +38,8 @@ async fn run_session_turn(
     let mut session = Session::new();
     session.push_user(prompt);
     session
-        .text_turn(&llm)
-        .collect()
+        .text_turn()
+        .collect(&llm)
         .await
         .expect("mock text turn should collect")
         .assistant_text()

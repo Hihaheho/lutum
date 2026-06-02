@@ -210,11 +210,11 @@ async fn run_early_return() -> Result<(), Box<dyn std::error::Error>> {
     session.push_user("Check the weather in Tokyo.");
 
     let outcome = session
-        .text_turn(&ctx)
+        .text_turn()
         .tools::<Tools>()
         .available_tools([ToolsSelector::Weather])
         .require_any_tool()
-        .collect_controlled_with(JsonBlockHandler::return_early())
+        .collect_controlled_with(&ctx, JsonBlockHandler::return_early())
         .await?;
 
     let TextStepOutcomeWithTools::NeedsTools(round) = outcome else {
@@ -277,11 +277,11 @@ async fn run_length_recovery() -> Result<(), Box<dyn std::error::Error>> {
     session.push_user("Check the weather in Osaka.");
 
     let outcome = session
-        .text_turn(&ctx)
+        .text_turn()
         .tools::<Tools>()
         .available_tools([ToolsSelector::Weather])
         .require_any_tool()
-        .collect_controlled_with(JsonBlockHandler::recover_on_length_error())
+        .collect_controlled_with(&ctx, JsonBlockHandler::recover_on_length_error())
         .await?;
 
     let TextStepOutcomeWithTools::NeedsTools(round) = outcome else {

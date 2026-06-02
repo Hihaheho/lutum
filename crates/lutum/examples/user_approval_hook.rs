@@ -238,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
     session.push_user("Summarise /readme.md and /config.toml, then delete /data.csv.");
 
     for _step in 1..=10 {
-        let outcome = session.text_turn(&llm).tools::<FsTools>().collect().await?;
+        let outcome = session.text_turn().tools::<FsTools>().collect(&llm).await?;
 
         match outcome {
             TextStepOutcomeWithTools::NeedsTools(round) => {

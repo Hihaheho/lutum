@@ -18,9 +18,8 @@ use lutum_protocol::{
 use thiserror::Error;
 
 use crate::{
-    Lutum,
     agent_loop::AgentLoop,
-    builders::{StructuredTurn, TextTurn},
+    builders::{SessionStructuredTurn, SessionTextTurn},
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -103,27 +102,27 @@ impl Session {
         self.input
     }
 
-    /// Create a text turn builder. Calling `collect()` on the builder will auto-commit the turn
-    /// to this session. Use `collect_staged()` to opt out of auto-commit.
-    pub fn text_turn(&mut self, lutum: &Lutum) -> TextTurn<'_> {
-        TextTurn::from_session(self, lutum)
+    /// Create a text turn builder. Calling `collect(&lutum)` on the builder will auto-commit the
+    /// turn to this session. Use `collect_staged(&lutum)` to opt out of auto-commit.
+    pub fn text_turn(&mut self) -> SessionTextTurn<'_> {
+        crate::builders::TextTurn::from_session(self)
     }
 
     /// Create an [`AgentLoop`] builder for running a tool-calling agentic loop on this session.
     ///
     /// The loop drives the model through tool calls until it produces a text-only
     /// response or the round limit is reached.
-    pub fn agent_loop<T: Toolset>(&mut self, lutum: &Lutum) -> AgentLoop<'_, T> {
-        AgentLoop::new(self, lutum)
+    pub fn agent_loop<T: Toolset>(&mut self) -> AgentLoop<'_, T> {
+        AgentLoop::new(self)
     }
 
-    /// Create a structured turn builder. Calling `collect()` on the builder will auto-commit the
-    /// turn to this session. Use `collect_staged()` to opt out of auto-commit.
-    pub fn structured_turn<O>(&mut self, lutum: &Lutum) -> StructuredTurn<'_, O>
+    /// Create a structured turn builder. Calling `collect(&lutum)` on the builder will auto-commit
+    /// the turn to this session. Use `collect_staged(&lutum)` to opt out of auto-commit.
+    pub fn structured_turn<O>(&mut self) -> SessionStructuredTurn<'_, O>
     where
         O: StructuredOutput,
     {
-        StructuredTurn::from_session(self, lutum)
+        crate::builders::StructuredTurn::from_session(self)
     }
 
     pub fn push_system(&mut self, text: impl Into<String>) {

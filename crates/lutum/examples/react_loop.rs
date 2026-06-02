@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
     session.push_user("Who is the top spender? Give their name and total.");
 
     for _step in 1..=10 {
-        let outcome = session.text_turn(&llm).tools::<DbTools>().collect().await?;
+        let outcome = session.text_turn().tools::<DbTools>().collect(&llm).await?;
 
         match outcome {
             TextStepOutcomeWithTools::NeedsTools(round) => {

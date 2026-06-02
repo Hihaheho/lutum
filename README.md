@@ -102,9 +102,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     session.push_user("Say hello in one sentence.");
 
     let result = session
-        .text_turn(&llm)
+        .text_turn()
         .temperature(lutum::Temperature::new(0.2)?)
-        .collect()
+        .collect(&llm)
         .await?;
 
     println!("{}", result.assistant_text());
@@ -120,7 +120,7 @@ on the returned builder.
 
 ## Structured Output
 
-Use `Session::structured_turn::<O>(&llm)` when structured output should participate in the same
+Use `Session::structured_turn::<O>()` when structured output should participate in the same
 explicit transcript model as text turns. Starting from the quickstart setup, reuse the same
 mutable `session` and swap the turn kind:
 
@@ -137,8 +137,8 @@ struct Contact {
 session.push_user("Extract the email address from `Reach me at user@example.com`.");
 
 let result = session
-    .structured_turn::<Contact>(&llm)
-    .collect()
+    .structured_turn::<Contact>()
+    .collect(&llm)
     .await?;
 
 match result.semantic.clone() {
@@ -243,10 +243,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         let outcome = session
-            .text_turn(&llm)
+            .text_turn()
             .tools::<Tools>()
             .allow_only([ToolsSelector::Weather])
-            .collect()
+            .collect(&llm)
             .await?;
 
         match outcome {
@@ -353,9 +353,9 @@ Attach request-scoped metadata inline on builders with `.ext(...)` or `.extensio
 struct Tenant(&'static str);
 
 let result = session
-    .text_turn(&llm)
+    .text_turn()
     .ext(Tenant("prod-eu"))
-    .collect()
+    .collect(&llm)
     .await?;
 ```
 
@@ -382,8 +382,8 @@ let collected = lutum_trace::capture(
         session.push_user("Say hello.");
 
         let _ = session
-            .text_turn(&llm)
-            .collect()
+            .text_turn()
+            .collect(&llm)
             .await?;
 
         Ok::<(), Box<dyn std::error::Error>>(())

@@ -62,14 +62,14 @@ let mut session = Session::new();
 session.push_system("Answer concisely.");
 session.push_user("Explain provider-side token counting.");
 
-let turn = session.text_turn(&llm).max_output_tokens(64);
+let turn = session.text_turn().max_output_tokens(64);
 
-let count = turn.count_tokens().await?;
+let count = turn.count_tokens(&llm).await?;
 if let Some(count) = count {
     println!("input tokens: {}", count.input_tokens);
 }
 
-let result = turn.collect().await?;
+let result = turn.collect(&llm).await?;
 println!("{}", result.assistant_text());
 ```
 

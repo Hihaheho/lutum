@@ -179,8 +179,8 @@ It owns:
 - a `ModelInput` (which contains `Turn` items for committed history)
 - optional turn defaults
 
-Execution `Lutum` contexts are passed to session turn builders per request, so callers can keep
-one transcript while switching providers, hooks, or budgets.
+Execution `Lutum` contexts are passed to session turn terminal methods per request, so callers can
+keep one transcript while switching providers, hooks, or budgets.
 
 It deliberately does not own:
 
@@ -192,9 +192,9 @@ It deliberately does not own:
 
 ### Explicit commit model
 
-- `Session::text_turn(&llm)` / `Session::structured_turn::<O>(&llm)` return executable builders
-- `builder.start()` / `builder.collect()` / `builder.collect_with(...)` do not mutate transcript
-  state
+- `Session::text_turn()` / `Session::structured_turn::<O>()` return turn builders
+- `builder.start(&llm)` / `builder.collect(&llm)` / `builder.collect_with(&llm, ...)` execute
+  using the supplied `Lutum` and do not mutate transcript state except auto-commit paths
 - transcript state changes only through explicit `commit_*`
 - `input()`, `input_mut()`, and `into_input()` give direct access to the ordered input
 
@@ -223,9 +223,9 @@ Execution config is shared across text and structured turns:
 
 Public builders in `lutum`:
 
-- `Session::text_turn(&llm)` / `Lutum::text_turn(input)` return `TextTurn`
-- `Session::structured_turn::<O>(&llm)` / `Lutum::structured_turn::<O>(input)` return
-  `StructuredTurn<O>`
+- `Session::text_turn()` / `Lutum::text_turn(input)` return text turn builders
+- `Session::structured_turn::<O>()` / `Lutum::structured_turn::<O>(input)` return structured
+  turn builders
 - `.tools::<T>()` upgrades those into `TextTurnWithTools<T>` /
   `StructuredTurnWithTools<T, O>`
 - request metadata is attached inline with `.ext(...)` / `.extensions(...)`
@@ -336,7 +336,7 @@ the transcript model.
 context returns an error; use `Lutum::from_parts(...)` when completion is needed.
 
 If you need transcript/session/replay but still do not need tools, use
-`Session::structured_turn::<O>(&llm)` or `Lutum::structured_turn::<O>(input)`.
+`Session::structured_turn::<O>()` or `Lutum::structured_turn::<O>(input)`.
 
 Budget reservation, tracing, and usage recovery follow the same path as turn execution.
 

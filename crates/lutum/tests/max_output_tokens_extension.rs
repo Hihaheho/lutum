@@ -295,21 +295,21 @@ async fn session_turn_precedence_is_request_then_session_then_lutum_default() {
     let mut request_session = Session::new().with_defaults(defaults.clone());
     request_session.push_user("hello");
     request_session
-        .text_turn(&ctx)
+        .text_turn()
         .ext(MaxOutputTokens::new(12))
-        .collect()
+        .collect(&ctx)
         .await
         .unwrap();
 
     let mut default_session = Session::new().with_defaults(defaults);
     default_session.push_user("hello");
-    default_session.text_turn(&ctx).collect().await.unwrap();
+    default_session.text_turn().collect(&ctx).await.unwrap();
 
     let mut lutum_default_session = Session::new();
     lutum_default_session.push_user("hello");
     lutum_default_session
-        .text_turn(&ctx)
-        .collect()
+        .text_turn()
+        .collect(&ctx)
         .await
         .unwrap();
 

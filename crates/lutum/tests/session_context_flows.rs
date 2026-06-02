@@ -101,7 +101,7 @@ fn structured_session_turn_auto_commits_on_collect() {
     let before_len = session.input().items().len();
 
     let result =
-        block_on(async { session.structured_turn::<Contact>(&ctx).collect().await }).unwrap();
+        block_on(async { session.structured_turn::<Contact>().collect(&ctx).await }).unwrap();
 
     // collect() auto-commits
     assert_eq!(session.input().items().len(), before_len + 1);
@@ -149,10 +149,10 @@ fn session_commits_parallel_tool_results_in_order() {
 
     let outcome = block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather, ToolsSelector::Search])
-            .collect()
+            .collect(&ctx)
             .await
             .unwrap()
     });

@@ -6,7 +6,7 @@ use lutum_openai::OpenAiAdapter;
 async fn ask(llm: &Lutum, prompt: impl Into<String>) -> anyhow::Result<String> {
     let mut session = Session::new();
     session.push_user(prompt);
-    let result = session.text_turn(llm).collect().await?;
+    let result = session.text_turn().collect(llm).await?;
     Ok(result.assistant_text())
 }
 

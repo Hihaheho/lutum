@@ -106,7 +106,7 @@ pub async fn run_turn(
     let history_ref = sql_history.clone();
 
     let mut builder = session
-        .agent_loop::<SqlTools>(llm)
+        .agent_loop::<SqlTools>()
         .max_rounds(config.max_rounds)
         .available_tools(available);
 
@@ -117,7 +117,7 @@ pub async fn run_turn(
     }
 
     let loop_output = builder
-        .run(move |call| {
+        .run(llm, move |call| {
             let history = history_ref.clone();
             async move { dispatch_tool(call, registry, hooks, config, &history).await }
         })

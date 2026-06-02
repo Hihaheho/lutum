@@ -3375,7 +3375,7 @@ where
         let finish_reason = synthetic
             .finish_reason
             .or_else(|| state.finish_reason.clone())
-            .unwrap_or_else(|| {
+            .unwrap_or({
                 if !synthetic.tool_calls.is_empty()
                     || !synthetic.recoverable_tool_call_issues.is_empty()
                 {

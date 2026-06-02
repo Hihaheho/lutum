@@ -50,8 +50,9 @@ pub mod toolset {
 
 pub use agent_loop::{AgentLoop, AgentLoopError, AgentLoopOutput};
 pub use builders::{
-    Completion, StructuredCompletion, StructuredTurn, StructuredTurnWithTools, TextTurn,
-    TextTurnWithTools,
+    Completion, SessionStructuredTurn, SessionStructuredTurnWithTools, SessionTextTurn,
+    SessionTextTurnWithTools, StructuredCompletion, StructuredTurn, StructuredTurnWithTools,
+    TextTurn, TextTurnWithTools,
 };
 pub use context::{
     CollectError, EventHandler, HandlerContext, HandlerDirective, Lutum, LutumError,

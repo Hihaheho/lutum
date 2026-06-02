@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
         let mut last_text = String::new();
 
         for _step in 1..=6 {
-            let outcome = session.text_turn(&llm).tools::<MathTools>().collect().await?;
+            let outcome = session.text_turn().tools::<MathTools>().collect(&llm).await?;
 
             match outcome {
                 TextStepOutcomeWithTools::NeedsTools(round) => {

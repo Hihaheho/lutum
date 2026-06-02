@@ -105,7 +105,7 @@ async fn ask(llm: &Lutum, system: &str, prompt: &str) -> anyhow::Result<String> 
     let mut session = Session::new();
     session.push_system(system);
     session.push_user(prompt);
-    let result = session.text_turn(llm).collect().await?;
+    let result = session.text_turn().collect(llm).await?;
     Ok(result.assistant_text())
 }
 

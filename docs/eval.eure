@@ -58,7 +58,7 @@ let collected = lutum_trace::capture(
     async {
         let mut session = Session::new();
         session.push_user("Say hello in one sentence.");
-        let result = session.text_turn(&llm).collect().await?;
+        let result = session.text_turn().collect(&llm).await?;
         Ok::<_, Box<dyn std::error::Error>>(result.assistant_text().to_string())
     }
     .with_subscriber(subscriber),
@@ -129,7 +129,7 @@ let collected = lutum_trace::capture(async {
         let planner = async {
             let mut session = Session::new();
             session.push_user("Draft the plan.");
-            session.text_turn(&llm).collect().await
+            session.text_turn().collect(&llm).await
         }
         .instrument(tracing::info_span!(
             "planner_agent",
@@ -140,7 +140,7 @@ let collected = lutum_trace::capture(async {
         let reviewer = async {
             let mut session = Session::new();
             session.push_user("Review the plan.");
-            session.text_turn(&llm).collect().await
+            session.text_turn().collect(&llm).await
         }
         .instrument(tracing::info_span!(
             "reviewer_agent",
@@ -188,7 +188,7 @@ let collected = lutum_trace::capture_raw(
     async {
         let mut session = Session::new();
         session.push_user("Say hello in one sentence.");
-        session.text_turn(&llm).collect().await
+        session.text_turn().collect(&llm).await
     }
     .with_subscriber(subscriber),
 )
@@ -305,8 +305,8 @@ impl Probe for FirstTokenTimer {
 }
 
 let result = session
-    .text_turn(&llm)
-    .collect_with(FirstTokenTimer { start: std::time::Instant::now() })
+    .text_turn()
+    .collect_with(&llm, FirstTokenTimer { start: std::time::Instant::now() })
     .await?;
 ```
 
@@ -450,7 +450,7 @@ let metric: KMetric = pass_at_k(
     10,    // k — number of trials
     1,     // n — number of successes required
     || async {
-        let result = session.text_turn(&llm).collect().await?;
+        let result = session.text_turn().collect(&llm).await?;
         let passes = result.assistant_text().contains("correct answer");
         Ok(passes)
     },

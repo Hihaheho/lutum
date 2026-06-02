@@ -34,7 +34,8 @@ Nothing is hidden. `Session` is a convenience wrapper that adds user/assistant/t
   "##": Lutum — The Execution Boundary
 
   "body" = ```markdown
-`Lutum` is the only execution boundary in the library. When you call `.collect()` or `.stream()` on a turn builder, `Lutum`:
+`Lutum` is the only execution boundary in the library. When you call `.collect()` / `.stream()` on
+a direct turn builder, or `.collect(&llm)` / `.stream(&llm)` on a session turn builder, `Lutum`:
 
 1. Validates `ModelInput` (role ordering, required fields)
 2. Counts input tokens first when a `TokenCounter` is attached and supported
@@ -95,7 +96,7 @@ You can consume the stream directly:
 use futures::StreamExt as _;
 use lutum::TextTurnEvent;
 
-let mut stream = session.text_turn(&llm).stream().await?;
+let mut stream = session.text_turn().stream(&llm).await?;
 
 while let Some(event) = stream.next().await {
     match event? {

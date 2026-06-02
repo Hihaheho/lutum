@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
         session.push_system("You are a concise Rust explainer. Answer in one short paragraph.");
         session.push_user("Explain Rust ownership in plain language.");
 
-        let result = session.text_turn(&llm).collect().await?;
+        let result = session.text_turn().collect(&llm).await?;
 
         anyhow::Ok::<String>(result.assistant_text())
     })

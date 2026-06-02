@@ -80,7 +80,7 @@ fn collect_auto_commits_collect_staged_does_not() {
 
     // collect() auto-commits immediately
     let result =
-        futures::executor::block_on(async { session.text_turn(&ctx).collect().await }).unwrap();
+        futures::executor::block_on(async { session.text_turn().collect(&ctx).await }).unwrap();
 
     assert_eq!(result.assistant_text(), "hello");
     assert_eq!(session.input().items().len(), before_len + 1);
@@ -135,11 +135,11 @@ fn session_can_switch_lutum_instances_between_turns() {
 
     session.push_user("first");
     let first =
-        futures::executor::block_on(async { session.text_turn(&llm_a).collect().await }).unwrap();
+        futures::executor::block_on(async { session.text_turn().collect(&llm_a).await }).unwrap();
 
     session.push_user("second");
     let second =
-        futures::executor::block_on(async { session.text_turn(&llm_b).collect().await }).unwrap();
+        futures::executor::block_on(async { session.text_turn().collect(&llm_b).await }).unwrap();
 
     assert_eq!(first.model, "model-a");
     assert_eq!(first.assistant_text(), "from a");
@@ -185,7 +185,7 @@ fn collect_staged_does_not_commit_until_explicit() {
     let before_len = session.input().items().len();
 
     let staged =
-        futures::executor::block_on(async { session.text_turn(&ctx).collect_staged().await })
+        futures::executor::block_on(async { session.text_turn().collect_staged(&ctx).await })
             .unwrap();
 
     // Not committed yet
@@ -229,10 +229,10 @@ fn tool_round_is_only_applied_on_explicit_commit() {
 
     let outcome = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect()
+            .collect(&ctx)
             .await
             .unwrap()
     });
@@ -299,9 +299,9 @@ fn tools_text_no_output_completion_does_not_commit_turn() {
 
     let outcome = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
-            .collect()
+            .collect(&ctx)
             .await
             .unwrap()
     });
@@ -352,10 +352,10 @@ fn required_tool_text_only_completion_errors_without_commit() {
 
     let err = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .require_any_tool()
-            .collect()
+            .collect(&ctx)
             .await
     })
     .unwrap_err();
@@ -407,7 +407,7 @@ fn optional_tool_text_only_completion_still_auto_commits() {
     let before_len = session.input().items().len();
 
     let outcome = futures::executor::block_on(async {
-        session.text_turn(&ctx).tools::<Tools>().collect().await
+        session.text_turn().tools::<Tools>().collect(&ctx).await
     })
     .unwrap();
 
@@ -451,9 +451,9 @@ fn tool_text_collect_staged_does_not_auto_commit_finished_turn() {
 
     let staged = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
-            .collect_staged()
+            .collect_staged(&ctx)
             .await
     })
     .unwrap();
@@ -505,7 +505,7 @@ fn required_specific_tool_text_fallback_recovers_needs_tools_round() {
 
     let outcome = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
             .require_tool(ToolsSelector::Weather)
@@ -520,7 +520,7 @@ fn required_specific_tool_text_fallback_recovers_needs_tools_round() {
                 ])
                 .map(Some)
             })
-            .collect()
+            .collect(&ctx)
             .await
     })
     .unwrap();
@@ -581,13 +581,13 @@ fn required_tool_text_fallback_none_errors_without_commit() {
 
     let err = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .require_any_tool()
             .recover_tool_calls_with(|_cx: &lutum::TextToolCallFallbackContext<'_, Tools>| {
                 Ok::<_, ToolCallFallbackError>(None)
             })
-            .collect()
+            .collect(&ctx)
             .await
     })
     .unwrap_err();
@@ -637,11 +637,12 @@ fn controlled_handler_can_return_tool_round_from_text_delta() {
 
     let outcome = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools([ToolsSelector::Weather])
             .require_any_tool()
             .collect_controlled_with(
+                &ctx,
                 |event: &lutum::TextTurnEventWithTools<Tools>,
                  cx: &lutum::TextToolHandlerContext<'_, Tools>|
                  -> Result<_, Infallible> {
@@ -699,10 +700,11 @@ fn controlled_synthetic_finished_respects_required_tool_constraint() {
 
     let err = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .require_any_tool()
             .collect_controlled_with(
+                &ctx,
                 |event: &lutum::TextTurnEventWithTools<Tools>,
                  _cx: &lutum::TextToolHandlerContext<'_, Tools>|
                  -> Result<_, Infallible> {
@@ -811,11 +813,11 @@ fn controlled_handler_can_recover_output_limit_as_tool_round() {
 
     let outcome = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools([ToolsSelector::Weather])
             .require_any_tool()
-            .collect_controlled_with(LengthRecoveryHandler { recovered: None })
+            .collect_controlled_with(&ctx, LengthRecoveryHandler { recovered: None })
             .await
     })
     .unwrap();
@@ -856,9 +858,10 @@ fn controlled_handler_propagates_output_limit_by_default() {
 
     let err = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .collect_controlled_with(
+                &ctx,
                 |_event: &lutum::TextTurnEventWithTools<Tools>,
                  _cx: &lutum::TextToolHandlerContext<'_, Tools>|
                  -> Result<_, Infallible> {
@@ -917,10 +920,11 @@ fn controlled_context_rejects_unavailable_recovered_tool() {
 
     let err = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<ValidationTools>()
             .available_tools([ValidationToolsSelector::ValidationWeather])
             .collect_controlled_with(
+                &ctx,
                 |event: &lutum::TextTurnEventWithTools<ValidationTools>,
                  cx: &lutum::TextToolHandlerContext<'_, ValidationTools>| {
                     if matches!(event, lutum::TextTurnEventWithTools::TextDelta { .. }) {
@@ -962,7 +966,7 @@ fn controlled_context_rejects_wrong_required_recovered_tool() {
 
     let err = futures::executor::block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<ValidationTools>()
             .available_tools([
                 ValidationToolsSelector::ValidationWeather,
@@ -970,6 +974,7 @@ fn controlled_context_rejects_wrong_required_recovered_tool() {
             ])
             .require_tool(ValidationToolsSelector::ValidationWeather)
             .collect_controlled_with(
+                &ctx,
                 |event: &lutum::TextTurnEventWithTools<ValidationTools>,
                  cx: &lutum::TextToolHandlerContext<'_, ValidationTools>| {
                     if matches!(event, lutum::TextTurnEventWithTools::TextDelta { .. }) {
@@ -1038,7 +1043,7 @@ fn session_auto_commits_across_multiple_turns() {
     // collect() auto-commits each turn; no explicit commit needed
     for prompt in ["step one", "step two"] {
         session.push_user(prompt);
-        futures::executor::block_on(async { session.text_turn(&ctx).collect().await }).unwrap();
+        futures::executor::block_on(async { session.text_turn().collect(&ctx).await }).unwrap();
     }
 
     assert_eq!(session.input().items().len(), 4);
@@ -1090,10 +1095,10 @@ fn structured_tool_round_stays_explicit_until_commit() {
 
     let outcome = futures::executor::block_on(async {
         session
-            .structured_turn::<Summary>(&ctx)
+            .structured_turn::<Summary>()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect()
+            .collect(&ctx)
             .await
             .unwrap()
     });
@@ -1155,10 +1160,10 @@ fn structured_tool_parse_failure_recovers_as_tool_round() {
 
     let outcome = futures::executor::block_on(async {
         session
-            .structured_turn::<Summary>(&ctx)
+            .structured_turn::<Summary>()
             .tools::<Tools>()
             .available_tools(vec![ToolsSelector::Weather])
-            .collect()
+            .collect(&ctx)
             .await
             .unwrap()
     });
@@ -1256,7 +1261,7 @@ fn ephemeral_turn_is_cleared_after_collect() {
 
     // collect() — ephemeral turn goes into the snapshot sent to the model,
     // then is cleared from the session. Only the new committed turn remains.
-    futures::executor::block_on(async { session.text_turn(&ctx).collect().await }).unwrap();
+    futures::executor::block_on(async { session.text_turn().collect(&ctx).await }).unwrap();
 
     assert_eq!(observed.observed_ephemeral_indices(), vec![vec![1]]);
     assert_eq!(
@@ -1299,7 +1304,7 @@ fn ephemeral_message_indices_are_attached_to_session_turn_request() {
     session.push_user("Stable prompt.");
     session.push_ephemeral_user("Dynamic prompt.");
 
-    futures::executor::block_on(async { session.text_turn(&ctx).collect().await }).unwrap();
+    futures::executor::block_on(async { session.text_turn().collect(&ctx).await }).unwrap();
 
     assert_eq!(observed.observed_ephemeral_indices(), vec![vec![1]]);
     assert_eq!(

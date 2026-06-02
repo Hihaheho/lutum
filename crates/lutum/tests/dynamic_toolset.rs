@@ -282,10 +282,10 @@ fn mixed_static_and_dynamic_calls_commit_in_order() {
 
     let outcome = block_on(async {
         session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<DynamicTools>()
             .with_dynamic_tools([weather_tool()])
-            .collect()
+            .collect(&ctx)
             .await
             .unwrap()
     });

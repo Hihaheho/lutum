@@ -37,7 +37,7 @@ fn seed_history(session: &mut Session) {
     }
 }
 async fn ask(session: &mut Session, llm: &Lutum) -> anyhow::Result<(String, Usage)> {
-    let result = session.text_turn(llm).collect().await?;
+    let result = session.text_turn().collect(llm).await?;
     Ok((result.assistant_text(), result.usage))
 }
 async fn ask_with_prompt(

@@ -202,9 +202,9 @@ async fn main() -> anyhow::Result<()> {
 
     for step in 1..=8 {
         let outcome = session
-            .text_turn(&llm)
+            .text_turn()
             .tools::<AppTools>()
-            .collect()
+            .collect(&llm)
             .await?;
 
         match outcome {

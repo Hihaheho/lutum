@@ -54,7 +54,7 @@ produce well-structured output.
   "##": StructuredTurn — Transcript-Integrated
 
   "body" = ```markdown
-Use `Session::structured_turn::<O>(&llm)` when the result should participate in the transcript:
+Use `Session::structured_turn::<O>()` when the result should participate in the transcript:
 ```
 
   "rust-example" = ````rust
@@ -63,8 +63,8 @@ use lutum::StructuredTurnOutcome;
 session.push_user("Review this Rust function for quality issues:\n\n```rust\nfn add(a: i32, b: i32) -> i32 { a + b }\n```");
 
 let result = session
-    .structured_turn::<CodeReview>(&llm)
-    .collect()
+    .structured_turn::<CodeReview>()
+    .collect(&llm)
     .await?;
 
 match result.semantic.clone() {
@@ -105,9 +105,9 @@ use lutum::StructuredStepOutcomeWithTools;
 
 loop {
     let outcome = session
-        .structured_turn::<CodeReview>(&llm)
+        .structured_turn::<CodeReview>()
         .tools::<MyTools>()
-        .collect()
+        .collect(&llm)
         .await?;
 
     match outcome {
@@ -172,7 +172,7 @@ match result.semantic {
   "note".$mark.alert = "NOTE"
   "note" = ```markdown
 `structured_completion` does not produce a `CommittedTurn` and does not integrate with the
-transcript model. If you need turn history and replay, use `Session::structured_turn::<O>(&llm)`.
+transcript model. If you need turn history and replay, use `Session::structured_turn::<O>()`.
 ```
 
 }
@@ -188,11 +188,11 @@ Both turn and completion builders accept inline generation parameters:
 use lutum::Temperature;
 
 let result = session
-    .structured_turn::<CodeReview>(&llm)
+    .structured_turn::<CodeReview>()
     .temperature(Temperature::new(0.0)?)   // deterministic output
     .max_output_tokens(1024)
     .seed(42)
-    .collect()
+    .collect(&llm)
     .await?;
 ```
 

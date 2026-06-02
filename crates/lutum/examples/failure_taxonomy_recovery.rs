@@ -23,7 +23,7 @@ async fn ask(llm: &Lutum, system: &str, user: impl Into<String>) -> anyhow::Resu
     let mut session = Session::new();
     session.push_system(system);
     session.push_user(user);
-    let result = session.text_turn(llm).collect().await?;
+    let result = session.text_turn().collect(llm).await?;
     Ok(result.assistant_text())
 }
 
@@ -36,8 +36,8 @@ async fn classify(
     session.push_system(system);
     session.push_user(user);
     let result = session
-        .structured_turn::<RecoveryAction>(llm)
-        .collect()
+        .structured_turn::<RecoveryAction>()
+        .collect(llm)
         .await?;
     match result.semantic {
         StructuredTurnOutcome::Structured(action) => Ok(action),

@@ -8,9 +8,9 @@ $frontmatter {
 
 "intro" = ```markdown
 `Session` is a transcript helper, not a higher-order runtime. It owns a `ModelInput`, exposes
-builder-style turn launchers that accept a `Lutum` execution context per turn, and auto-commits
-turns to the transcript when `collect()` is called. It deliberately does not own hidden loops,
-retries, or branch graphs.
+builder-style turn launchers, and auto-commits turns to the transcript when `collect(&llm)` is
+called. The `Lutum` execution context is supplied at execution time. It deliberately does not own
+hidden loops, retries, or branch graphs.
 ```
 
 "toc".$toc = true
@@ -19,7 +19,7 @@ retries, or branch graphs.
   "##": Building and Pushing Messages
 
   "body" = ```markdown
-Construct a `Session`, then pass the `Lutum` context when launching a turn:
+Construct a `Session`, then pass the `Lutum` context when executing a turn:
 ```
 
   "rust-example" = ```rust
@@ -48,7 +48,7 @@ The returned result is ready to use — no separate commit call is needed:
 
   "rust-example" = ```rust
 // collect() auto-commits when called on a session-originated turn
-let result = session.text_turn(&llm).collect().await?;
+let result = session.text_turn().collect(&llm).await?;
 
 // The turn is already in the transcript — use the result directly
 println!("{}", result.assistant_text());
@@ -63,7 +63,7 @@ To inspect or discard a result before committing, use `collect_staged()`. It ret
 use lutum::CommitTurn as _;
 
 // Does NOT commit — returns a staged result
-let staged = session.text_turn(&llm).collect_staged().await?;
+let staged = session.text_turn().collect_staged(&llm).await?;
 
 // Inspect...
 println!("{}", staged.assistant_text());
@@ -79,8 +79,8 @@ Commit behaviour by turn kind:
 
 | Turn kind | Auto-commit path | Explicit-commit path |
 |---|---|---|
-| Text turn | `session.text_turn(&llm).collect()` | `collect_staged()` + `staged.turn.commit(&mut session)` |
-| Structured turn | `session.structured_turn().collect()` | `collect_staged()` + `staged.turn.commit(&mut session)` |
+| Text turn | `session.text_turn().collect(&llm)` | `collect_staged()` + `staged.turn.commit(&mut session)` |
+| Structured turn | `session.structured_turn::<O>().collect(&llm)` | `collect_staged(&llm)` + `staged.turn.commit(&mut session)` |
 | Tool turn — `Finished` | auto-committed when `collect()` returns the variant | `collect_staged()` not available; see tool-rounds section |
 | Tool turn — `NeedsTools` | `round.commit(&mut session, tool_results)?` after executing | `round.discard()` to opt out |
 
@@ -103,9 +103,9 @@ use lutum::TextStepOutcomeWithTools;
 
 loop {
     let outcome = session
-        .text_turn(&llm)
+        .text_turn()
         .tools::<MyTools>()
-        .collect()
+        .collect(&llm)
         .await?;
 
     match outcome {
@@ -174,8 +174,8 @@ branch_a.push_user("Explain with an analogy.");
 branch_b.push_user("Explain with pseudocode.");
 
 // collect_staged() does not auto-commit
-let staged_a = branch_a.text_turn(&llm).collect_staged().await?;
-let staged_b = branch_b.text_turn(&llm).collect_staged().await?;
+let staged_a = branch_a.text_turn().collect_staged(&llm).await?;
+let staged_b = branch_b.text_turn().collect_staged(&llm).await?;
 
 // Pick the better result and commit it to the original session
 if pick_a(&staged_a, &staged_b) {
@@ -237,12 +237,12 @@ produces a text-only response or the round limit is reached:
 use lutum::{AgentLoopError, Session};
 
 let output = session
-    .agent_loop::<AppTools>(&llm)
+    .agent_loop::<AppTools>()
     .max_rounds(20)                          // default is 20
     .on_text_delta(move |delta| {            // optional — stream text to a channel
         let _ = tx.send(delta);
     })
-    .run(|call| async move {
+    .run(&llm, |call| async move {
         match call {
             AppToolsCall::WebSearch(c) => {
                 let result = web_search(c.args().clone()).await?;
@@ -293,7 +293,7 @@ session.push_ephemeral_user("(Internal: reply in under 50 words.)");
 session.push_ephemeral_developer("Active feature flags: [ff-search]");
 
 // The next collect() sees the ephemeral items; they are removed after commit
-let result = session.text_turn(&llm).collect().await?;
+let result = session.text_turn().collect(&llm).await?;
 // session transcript no longer contains the ephemeral messages
 ```
 
@@ -305,7 +305,7 @@ transcript, use `push_ephemeral_turn`:
   "rust-example-2" = ```rust
 // Include an earlier turn as context for one request only
 session.push_ephemeral_turn(some_committed_turn);
-let result = session.text_turn(&llm).collect().await?;
+let result = session.text_turn().collect(&llm).await?;
 // the ephemeral turn is not part of the session after this point
 ```
 

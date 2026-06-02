@@ -228,11 +228,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let outcome = session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<Tools>()
             .available_tools(available.iter().cloned())
             .describe_many_tools(desc_overrides)
-            .collect()
+            .collect(&ctx)
             .await?;
 
         match outcome {

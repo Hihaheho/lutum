@@ -198,8 +198,8 @@ async fn session_count_tokens_does_not_mutate_session() {
     session.push_ephemeral_user("ephemeral");
     let input_items_before = session.input().items().len();
 
-    let turn = session.text_turn(&ctx).max_output_tokens(3);
-    let count = turn.count_tokens().await.unwrap();
+    let turn = session.text_turn().max_output_tokens(3);
+    let count = turn.count_tokens(&ctx).await.unwrap();
 
     assert_eq!(count, Some(TokenCount::new(7)));
     drop(turn);
@@ -219,9 +219,13 @@ async fn session_turn_builder_can_collect_after_count_tokens() {
     let mut session = Session::new();
     session.push_user("persistent");
 
-    let turn = session.text_turn(&ctx).max_output_tokens(3);
-    let count = turn.count_tokens().await.unwrap();
-    let result = turn.collect().await.map_err(|err| err.to_string()).unwrap();
+    let turn = session.text_turn().max_output_tokens(3);
+    let count = turn.count_tokens(&ctx).await.unwrap();
+    let result = turn
+        .collect(&ctx)
+        .await
+        .map_err(|err| err.to_string())
+        .unwrap();
 
     assert_eq!(count, Some(TokenCount::new(7)));
     assert_eq!(result.assistant_text(), "ok");

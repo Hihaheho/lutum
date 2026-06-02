@@ -316,7 +316,7 @@ async fn run() -> anyhow::Result<()> {
             .collect();
 
         let outcome = session
-            .text_turn(&ctx)
+            .text_turn()
             .tools::<AppTools>()
             .available_tools_default_plus(extra_selectors)
             .describe_tool(AppToolsSelector::LoadSkill, render_load_catalogue(&loaded))
@@ -324,7 +324,7 @@ async fn run() -> anyhow::Result<()> {
                 AppToolsSelector::UnloadSkill,
                 render_unload_catalogue(&loaded),
             )
-            .collect()
+            .collect(&ctx)
             .await?;
 
         let round = match outcome {

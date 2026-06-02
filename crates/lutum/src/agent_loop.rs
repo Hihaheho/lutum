@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! loop {
-//!     outcome = session.text_turn(&llm).tools::<T>().collect_with(handler).await?;
+//!     outcome = session.text_turn().tools::<T>().collect_with(&llm, handler).await?;
 //!     match outcome {
 //!         Finished  => return usage,
 //!         NeedsTools(round) => {
@@ -68,10 +68,10 @@ pub enum AgentLoopError<E> {
 ///
 /// ```rust,ignore
 /// let output = session
-///     .agent_loop::<MyTools>(&llm)
+///     .agent_loop::<MyTools>()
 ///     .max_rounds(20)
 ///     .on_text_delta(move |delta| { let _ = tx.send(delta); })
-///     .run(|call| async move {
+///     .run(&llm, |call| async move {
 ///         match call {
 ///             MyToolsCall::Foo(c) => {
 ///                 let result = do_foo(c.input()).await?;
@@ -82,7 +82,6 @@ pub enum AgentLoopError<E> {
 ///     .await?;
 /// ```
 pub struct AgentLoop<'s, T: Toolset> {
-    lutum: Lutum,
     session: &'s mut Session,
     max_rounds: usize,
     on_text_delta: Option<Box<dyn Fn(String) + Send + Sync>>,
@@ -94,9 +93,8 @@ impl<'s, T> AgentLoop<'s, T>
 where
     T: Toolset,
 {
-    pub(crate) fn new(session: &'s mut Session, lutum: &Lutum) -> Self {
+    pub(crate) fn new(session: &'s mut Session) -> Self {
         Self {
-            lutum: lutum.clone(),
             session,
             max_rounds: 20,
             on_text_delta: None,
@@ -150,14 +148,17 @@ where
     /// - the model produces a text-only response (success), or
     /// - the round limit is reached ([`AgentLoopError::RoundLimit`]), or
     /// - `dispatch` returns `Err` ([`AgentLoopError::Dispatch`]).
-    pub async fn run<F, Fut, E>(self, dispatch: F) -> Result<AgentLoopOutput, AgentLoopError<E>>
+    pub async fn run<F, Fut, E>(
+        self,
+        lutum: &Lutum,
+        dispatch: F,
+    ) -> Result<AgentLoopOutput, AgentLoopError<E>>
     where
         F: Fn(T::ToolCall) -> Fut,
         Fut: Future<Output = Result<ToolResult, E>>,
         E: std::error::Error + 'static,
     {
         let AgentLoop {
-            lutum,
             session,
             max_rounds,
             on_text_delta,
@@ -174,7 +175,7 @@ where
         for _round in 0..max_rounds {
             let cb = on_text_delta.clone();
 
-            let mut turn = session.text_turn(&lutum).tools::<T>();
+            let mut turn = session.text_turn().tools::<T>();
             if let Some(ref availability) = available {
                 turn = match availability {
                     ToolAvailability::All => turn,
@@ -190,6 +191,7 @@ where
 
             let outcome = turn
                 .collect_with(
+                    lutum,
                     move |event: &TextTurnEventWithTools<T>,
                           _cx: &HandlerContext<TextTurnStateWithTools<T>>|
                           -> Result<HandlerDirective, Infallible> {

@@ -90,10 +90,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_weather_hook(RejectAtlantis);
 
     let round = match session
-        .text_turn(&ctx)
+        .text_turn()
         .tools::<Tools>()
         .available_tools([ToolsSelector::Weather])
-        .collect()
+        .collect(&ctx)
         .await?
     {
         TextStepOutcomeWithTools::NeedsTools(round) => round,

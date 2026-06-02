@@ -104,10 +104,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tool_hooks = ToolsHooksSet::new().with_weather_hook(CachedWeather);
 
     let round = match session
-        .text_turn(&ctx)
+        .text_turn()
         .tools::<Tools>()
         .available_tools([ToolsSelector::Weather, ToolsSelector::Search])
-        .collect()
+        .collect(&ctx)
         .await?
     {
         TextStepOutcomeWithTools::NeedsTools(round) => round,
