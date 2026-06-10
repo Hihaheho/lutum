@@ -1,4 +1,4 @@
-use std::{convert::Infallible, ops::Deref, sync::Arc, time::Duration};
+use std::{ops::Deref, sync::Arc, time::Duration};
 #[cfg(not(target_family = "wasm"))]
 use std::{
     sync::Mutex,
@@ -405,6 +405,8 @@ pub enum HandlerDirective {
     Stop,
 }
 
+pub type HandlerResult = Result<HandlerDirective, AgentError>;
+
 pub struct HandlerContext<'a, S> {
     extensions: &'a RequestExtensions,
     state: &'a S,
@@ -428,13 +430,7 @@ impl<'a, S> HandlerContext<'a, S> {
 #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 pub trait EventHandler<E, S>: MaybeSend {
-    type Error;
-
-    async fn on_event(
-        &mut self,
-        event: &E,
-        cx: &HandlerContext<S>,
-    ) -> Result<HandlerDirective, Self::Error>;
+    async fn on_event(&mut self, event: &E, cx: &HandlerContext<S>) -> HandlerResult;
 }
 
 #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
@@ -442,26 +438,126 @@ pub trait EventHandler<E, S>: MaybeSend {
 impl<E, S, F, Err> EventHandler<E, S> for F
 where
     F: MaybeSend + for<'a> FnMut(&'a E, &'a HandlerContext<'a, S>) -> Result<HandlerDirective, Err>,
+    Err: Into<AgentError>,
     E: MaybeSync,
     S: MaybeSync,
 {
-    type Error = Err;
-
-    async fn on_event(
-        &mut self,
-        event: &E,
-        cx: &HandlerContext<S>,
-    ) -> Result<HandlerDirective, Self::Error> {
-        (self)(event, cx)
+    async fn on_event(&mut self, event: &E, cx: &HandlerContext<S>) -> HandlerResult {
+        (self)(event, cx).map_err(Into::into)
     }
 }
+
+pub struct EventHandlers<'h, E, S> {
+    handlers: Vec<Box<dyn EventHandler<E, S> + 'h>>,
+}
+
+impl<'h, E, S> EventHandlers<'h, E, S> {
+    pub fn new() -> Self {
+        Self {
+            handlers: Vec::new(),
+        }
+    }
+
+    pub fn with<H>(mut self, handler: H) -> Self
+    where
+        H: EventHandler<E, S> + 'h,
+    {
+        self.push(handler);
+        self
+    }
+
+    pub fn push<H>(&mut self, handler: H) -> &mut Self
+    where
+        H: EventHandler<E, S> + 'h,
+    {
+        self.handlers.push(Box::new(handler));
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.handlers.is_empty()
+    }
+}
+
+impl<'h, E, S> Default for EventHandlers<'h, E, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+impl<E, S> EventHandler<E, S> for ()
+where
+    E: MaybeSync,
+    S: MaybeSync,
+{
+    async fn on_event(&mut self, _event: &E, _cx: &HandlerContext<S>) -> HandlerResult {
+        Ok(HandlerDirective::Continue)
+    }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+impl<'h, E, S> EventHandler<E, S> for EventHandlers<'h, E, S>
+where
+    E: MaybeSync,
+    S: MaybeSync,
+{
+    async fn on_event(&mut self, event: &E, cx: &HandlerContext<S>) -> HandlerResult {
+        for handler in &mut self.handlers {
+            match handler.on_event(event, cx).await? {
+                HandlerDirective::Continue => {}
+                HandlerDirective::Stop => return Ok(HandlerDirective::Stop),
+            }
+        }
+        Ok(HandlerDirective::Continue)
+    }
+}
+
+macro_rules! impl_event_handler_tuple {
+    ($($name:ident),+ $(,)?) => {
+        #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+        impl<E, S, $($name),+> EventHandler<E, S> for ($($name,)+)
+        where
+            E: MaybeSync,
+            S: MaybeSync,
+            $($name: EventHandler<E, S>,)+
+        {
+            async fn on_event(
+                &mut self,
+                event: &E,
+                cx: &HandlerContext<S>,
+            ) -> HandlerResult {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+                $(
+                    match $name.on_event(event, cx).await? {
+                        HandlerDirective::Continue => {}
+                        HandlerDirective::Stop => return Ok(HandlerDirective::Stop),
+                    }
+                )+
+                Ok(HandlerDirective::Continue)
+            }
+        }
+    };
+}
+
+impl_event_handler_tuple!(A, B);
+impl_event_handler_tuple!(A, B, C);
+impl_event_handler_tuple!(A, B, C, D);
+impl_event_handler_tuple!(A, B, C, D, E1);
+impl_event_handler_tuple!(A, B, C, D, E1, F);
+impl_event_handler_tuple!(A, B, C, D, E1, F, G);
+impl_event_handler_tuple!(A, B, C, D, E1, F, G, H);
 
 /// Recoverable collection errors exposed to [`TextToolEventHandler::on_error`].
 ///
 /// Handler errors and budget-finalization errors are intentionally not routed
 /// through this type; those errors are returned directly to avoid recursive
 /// recovery paths.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum TextToolCollectError<'a> {
     /// The adapter or execution layer failed before a reducible event was available.
     Execution(&'a AgentError),
@@ -543,6 +639,9 @@ pub enum TextToolErrorDirective<T: Toolset> {
     /// Treat the error as handled and return a synthetic text+tools outcome.
     Return(SyntheticTextToolTurn<T>),
 }
+
+pub type TextToolHandlerResult<T> = Result<TextToolHandlerDirective<T>, AgentError>;
+pub type TextToolErrorHandlerResult<T> = Result<TextToolErrorDirective<T>, AgentError>;
 
 /// Context passed to [`TextToolEventHandler`] callbacks.
 ///
@@ -646,16 +745,13 @@ where
 #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 pub trait TextToolEventHandler<T: Toolset>: MaybeSend {
-    /// User error returned from handler callbacks.
-    type Error;
-
     /// Observe a reduced stream event and decide whether collection should
     /// continue, stop, or return a synthetic outcome.
     async fn on_event(
         &mut self,
         event: &TextTurnEventWithTools<T>,
         cx: &TextToolHandlerContext<T>,
-    ) -> Result<TextToolHandlerDirective<T>, Self::Error>;
+    ) -> TextToolHandlerResult<T>;
 
     /// Optionally recover from controlled collection errors.
     ///
@@ -666,7 +762,7 @@ pub trait TextToolEventHandler<T: Toolset>: MaybeSend {
         &mut self,
         _error: TextToolCollectError<'_>,
         _cx: &TextToolHandlerContext<T>,
-    ) -> Result<TextToolErrorDirective<T>, Self::Error> {
+    ) -> TextToolErrorHandlerResult<T> {
         Ok(TextToolErrorDirective::Propagate)
     }
 }
@@ -681,20 +777,175 @@ where
             &'a TextTurnEventWithTools<T>,
             &'a TextToolHandlerContext<'a, T>,
         ) -> Result<TextToolHandlerDirective<T>, Err>,
+    Err: Into<AgentError>,
 {
-    type Error = Err;
-
     async fn on_event(
         &mut self,
         event: &TextTurnEventWithTools<T>,
         cx: &TextToolHandlerContext<T>,
-    ) -> Result<TextToolHandlerDirective<T>, Self::Error> {
-        (self)(event, cx)
+    ) -> TextToolHandlerResult<T> {
+        (self)(event, cx).map_err(Into::into)
     }
 }
 
+pub struct TextToolEventHandlers<'h, T: Toolset> {
+    handlers: Vec<Box<dyn TextToolEventHandler<T> + 'h>>,
+}
+
+impl<'h, T> TextToolEventHandlers<'h, T>
+where
+    T: Toolset,
+{
+    pub fn new() -> Self {
+        Self {
+            handlers: Vec::new(),
+        }
+    }
+
+    pub fn with<H>(mut self, handler: H) -> Self
+    where
+        H: TextToolEventHandler<T> + 'h,
+    {
+        self.push(handler);
+        self
+    }
+
+    pub fn push<H>(&mut self, handler: H) -> &mut Self
+    where
+        H: TextToolEventHandler<T> + 'h,
+    {
+        self.handlers.push(Box::new(handler));
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.handlers.is_empty()
+    }
+}
+
+impl<'h, T> Default for TextToolEventHandlers<'h, T>
+where
+    T: Toolset,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+impl<T> TextToolEventHandler<T> for ()
+where
+    T: Toolset,
+{
+    async fn on_event(
+        &mut self,
+        _event: &TextTurnEventWithTools<T>,
+        _cx: &TextToolHandlerContext<T>,
+    ) -> TextToolHandlerResult<T> {
+        Ok(TextToolHandlerDirective::Continue)
+    }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+impl<'h, T> TextToolEventHandler<T> for TextToolEventHandlers<'h, T>
+where
+    T: Toolset,
+{
+    async fn on_event(
+        &mut self,
+        event: &TextTurnEventWithTools<T>,
+        cx: &TextToolHandlerContext<T>,
+    ) -> TextToolHandlerResult<T> {
+        for handler in &mut self.handlers {
+            match handler.on_event(event, cx).await? {
+                TextToolHandlerDirective::Continue => {}
+                TextToolHandlerDirective::Stop => return Ok(TextToolHandlerDirective::Stop),
+                TextToolHandlerDirective::Return(synthetic) => {
+                    return Ok(TextToolHandlerDirective::Return(synthetic));
+                }
+            }
+        }
+        Ok(TextToolHandlerDirective::Continue)
+    }
+
+    async fn on_error(
+        &mut self,
+        error: TextToolCollectError<'_>,
+        cx: &TextToolHandlerContext<T>,
+    ) -> TextToolErrorHandlerResult<T> {
+        for handler in &mut self.handlers {
+            match handler.on_error(error, cx).await? {
+                TextToolErrorDirective::Propagate => {}
+                TextToolErrorDirective::Return(synthetic) => {
+                    return Ok(TextToolErrorDirective::Return(synthetic));
+                }
+            }
+        }
+        Ok(TextToolErrorDirective::Propagate)
+    }
+}
+
+macro_rules! impl_text_tool_event_handler_tuple {
+    ($($name:ident),+ $(,)?) => {
+        #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+        impl<T, $($name),+> TextToolEventHandler<T> for ($($name,)+)
+        where
+            T: Toolset,
+            $($name: TextToolEventHandler<T>,)+
+        {
+            async fn on_event(
+                &mut self,
+                event: &TextTurnEventWithTools<T>,
+                cx: &TextToolHandlerContext<T>,
+            ) -> TextToolHandlerResult<T> {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+                $(
+                    match $name.on_event(event, cx).await? {
+                        TextToolHandlerDirective::Continue => {}
+                        TextToolHandlerDirective::Stop => return Ok(TextToolHandlerDirective::Stop),
+                        TextToolHandlerDirective::Return(synthetic) => {
+                            return Ok(TextToolHandlerDirective::Return(synthetic));
+                        }
+                    }
+                )+
+                Ok(TextToolHandlerDirective::Continue)
+            }
+
+            async fn on_error(
+                &mut self,
+                error: TextToolCollectError<'_>,
+                cx: &TextToolHandlerContext<T>,
+            ) -> TextToolErrorHandlerResult<T> {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+                $(
+                    match $name.on_error(error, cx).await? {
+                        TextToolErrorDirective::Propagate => {}
+                        TextToolErrorDirective::Return(synthetic) => {
+                            return Ok(TextToolErrorDirective::Return(synthetic));
+                        }
+                    }
+                )+
+                Ok(TextToolErrorDirective::Propagate)
+            }
+        }
+    };
+}
+
+impl_text_tool_event_handler_tuple!(A, B);
+impl_text_tool_event_handler_tuple!(A, B, C);
+impl_text_tool_event_handler_tuple!(A, B, C, D);
+impl_text_tool_event_handler_tuple!(A, B, C, D, E);
+impl_text_tool_event_handler_tuple!(A, B, C, D, E, F);
+impl_text_tool_event_handler_tuple!(A, B, C, D, E, F, G);
+impl_text_tool_event_handler_tuple!(A, B, C, D, E, F, G, H);
+
 #[derive(Debug, Error)]
-pub enum CollectError<HandlerError, ReductionError, Partial> {
+pub enum CollectError<ReductionError, Partial> {
     #[error("execution error: {source}")]
     Execution {
         #[source]
@@ -704,7 +955,7 @@ pub enum CollectError<HandlerError, ReductionError, Partial> {
     #[error("handler error: {source}")]
     Handler {
         #[source]
-        source: HandlerError,
+        source: AgentError,
         partial: Partial,
     },
     #[error("reduction error: {source}")]
@@ -1453,7 +1704,7 @@ impl PendingTextTurn {
     pub async fn collect_with<H>(
         mut self,
         mut handler: H,
-    ) -> Result<StagedTextTurnResult, CollectError<H::Error, TextTurnReductionError, TextTurnState>>
+    ) -> Result<StagedTextTurnResult, CollectError<TextTurnReductionError, TextTurnState>>
     where
         H: EventHandler<TextTurnEvent, TextTurnState>,
     {
@@ -1934,16 +2185,11 @@ impl PendingTextTurn {
 
     pub async fn collect(
         self,
-    ) -> Result<StagedTextTurnResult, CollectError<Infallible, TextTurnReductionError, TextTurnState>>
-    {
-        self.collect_with(NoopHandler).await
+    ) -> Result<StagedTextTurnResult, CollectError<TextTurnReductionError, TextTurnState>> {
+        self.collect_with(()).await
     }
 
-    async fn call_handler<H>(
-        &self,
-        handler: &mut H,
-        event: &TextTurnEvent,
-    ) -> Result<HandlerDirective, H::Error>
+    async fn call_handler<H>(&self, handler: &mut H, event: &TextTurnEvent) -> HandlerResult
     where
         H: EventHandler<TextTurnEvent, TextTurnState>,
     {
@@ -2098,7 +2344,7 @@ where
         mut handler: H,
     ) -> Result<
         StagedTextTurnOutcomeWithTools<T>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: EventHandler<TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
@@ -2611,9 +2857,9 @@ where
         self,
     ) -> Result<
         StagedTextTurnOutcomeWithTools<T>,
-        CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     > {
-        self.collect_with(NoopHandler).await
+        self.collect_with(()).await
     }
 
     /// Collect this pending text+tools stream with a handler that can return a
@@ -2626,7 +2872,7 @@ where
         mut handler: H,
     ) -> Result<
         StagedTextTurnOutcomeWithTools<T>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: TextToolEventHandler<T>,
@@ -3192,7 +3438,7 @@ where
         &self,
         handler: &mut H,
         event: &TextTurnEventWithTools<T>,
-    ) -> Result<HandlerDirective, H::Error>
+    ) -> HandlerResult
     where
         H: EventHandler<TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
     {
@@ -3208,7 +3454,7 @@ where
         &self,
         handler: &mut H,
         event: &TextTurnEventWithTools<T>,
-    ) -> Result<TextToolHandlerDirective<T>, H::Error>
+    ) -> TextToolHandlerResult<T>
     where
         H: TextToolEventHandler<T>,
     {
@@ -3220,7 +3466,7 @@ where
         &self,
         handler: &mut H,
         error: TextToolCollectError<'_>,
-    ) -> Result<TextToolErrorDirective<T>, H::Error>
+    ) -> TextToolErrorHandlerResult<T>
     where
         H: TextToolEventHandler<T>,
     {
@@ -3238,13 +3484,13 @@ where
         }
     }
 
-    async fn finish_controlled_synthetic<HandlerError>(
+    async fn finish_controlled_synthetic(
         &mut self,
         synthetic: SyntheticTextToolTurn<T>,
         cumulative_usage: Usage,
     ) -> Result<
         StagedTextTurnOutcomeWithTools<T>,
-        CollectError<HandlerError, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     > {
         let partial = self.reducer.state().clone();
         let (outcome, next_cumulative_usage) = match self
@@ -3413,7 +3659,7 @@ where
         partial: &TextTurnStateWithTools<T>,
     ) -> Result<
         Option<StagedTextTurnOutcomeWithTools<T>>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: TextToolEventHandler<T>,
@@ -3496,7 +3742,7 @@ where
         partial: &TextTurnStateWithTools<T>,
     ) -> Result<
         Option<StagedTextTurnOutcomeWithTools<T>>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: TextToolEventHandler<T>,
@@ -3578,7 +3824,7 @@ where
         partial: &TextTurnStateWithTools<T>,
     ) -> Result<
         Option<StagedTextTurnOutcomeWithTools<T>>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: TextToolEventHandler<T>,
@@ -4054,7 +4300,7 @@ where
         mut handler: H,
     ) -> Result<
         StagedStructuredTurnResult<O>,
-        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartial<O>>,
     >
     where
         H: EventHandler<StructuredTurnEvent<O>, StructuredTurnState<O>>,
@@ -4549,16 +4795,16 @@ where
         self,
     ) -> Result<
         StagedStructuredTurnResult<O>,
-        CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartial<O>>,
     > {
-        self.collect_with(NoopHandler).await
+        self.collect_with(()).await
     }
 
     async fn call_handler<H>(
         &self,
         handler: &mut H,
         event: &StructuredTurnEvent<O>,
-    ) -> Result<HandlerDirective, H::Error>
+    ) -> HandlerResult
     where
         H: EventHandler<StructuredTurnEvent<O>, StructuredTurnState<O>>,
     {
@@ -4714,7 +4960,7 @@ where
         mut handler: H,
     ) -> Result<
         StagedStructuredTurnResultWithTools<T, O>,
-        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
     >
     where
         H: EventHandler<StructuredTurnEventWithTools<T, O>, StructuredTurnStateWithTools<T, O>>,
@@ -5221,20 +5467,16 @@ where
         self,
     ) -> Result<
         StagedStructuredTurnResultWithTools<T, O>,
-        CollectError<
-            Infallible,
-            StructuredTurnReductionError,
-            StructuredTurnPartialWithTools<T, O>,
-        >,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
     > {
-        self.collect_with(NoopHandler).await
+        self.collect_with(()).await
     }
 
     async fn call_handler<H>(
         &self,
         handler: &mut H,
         event: &StructuredTurnEventWithTools<T, O>,
-    ) -> Result<HandlerDirective, H::Error>
+    ) -> HandlerResult
     where
         H: EventHandler<StructuredTurnEventWithTools<T, O>, StructuredTurnStateWithTools<T, O>>,
     {
@@ -5372,10 +5614,7 @@ impl PendingCompletion {
     pub async fn collect_with<H>(
         mut self,
         mut handler: H,
-    ) -> Result<
-        CompletionTurnResult,
-        CollectError<H::Error, CompletionReductionError, CompletionTurnState>,
-    >
+    ) -> Result<CompletionTurnResult, CollectError<CompletionReductionError, CompletionTurnState>>
     where
         H: EventHandler<CompletionEvent, CompletionTurnState>,
     {
@@ -5853,18 +6092,12 @@ impl PendingCompletion {
 
     pub async fn collect(
         self,
-    ) -> Result<
-        CompletionTurnResult,
-        CollectError<Infallible, CompletionReductionError, CompletionTurnState>,
-    > {
-        self.collect_with(NoopHandler).await
+    ) -> Result<CompletionTurnResult, CollectError<CompletionReductionError, CompletionTurnState>>
+    {
+        self.collect_with(()).await
     }
 
-    async fn call_handler<H>(
-        &self,
-        handler: &mut H,
-        event: &CompletionEvent,
-    ) -> Result<HandlerDirective, H::Error>
+    async fn call_handler<H>(&self, handler: &mut H, event: &CompletionEvent) -> HandlerResult
     where
         H: EventHandler<CompletionEvent, CompletionTurnState>,
     {
@@ -6012,7 +6245,7 @@ where
         mut handler: H,
     ) -> Result<
         StructuredCompletionResult<O>,
-        CollectError<H::Error, StructuredCompletionReductionError, StructuredCompletionState<O>>,
+        CollectError<StructuredCompletionReductionError, StructuredCompletionState<O>>,
     >
     where
         H: EventHandler<StructuredCompletionEvent<O>, StructuredCompletionState<O>>,
@@ -6493,16 +6726,16 @@ where
         self,
     ) -> Result<
         StructuredCompletionResult<O>,
-        CollectError<Infallible, StructuredCompletionReductionError, StructuredCompletionState<O>>,
+        CollectError<StructuredCompletionReductionError, StructuredCompletionState<O>>,
     > {
-        self.collect_with(NoopHandler).await
+        self.collect_with(()).await
     }
 
     async fn call_handler<H>(
         &self,
         handler: &mut H,
         event: &StructuredCompletionEvent<O>,
-    ) -> Result<HandlerDirective, H::Error>
+    ) -> HandlerResult
     where
         H: EventHandler<StructuredCompletionEvent<O>, StructuredCompletionState<O>>,
     {
@@ -6512,26 +6745,6 @@ where
             remaining_budget: self.owned_lease.budget.remaining(&self.extensions),
         };
         handler.on_event(event, &cx).await
-    }
-}
-
-struct NoopHandler;
-
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
-impl<E, S> EventHandler<E, S> for NoopHandler
-where
-    E: MaybeSend + MaybeSync + 'static,
-    S: MaybeSend + MaybeSync + 'static,
-{
-    type Error = Infallible;
-
-    async fn on_event(
-        &mut self,
-        _event: &E,
-        _cx: &HandlerContext<S>,
-    ) -> Result<HandlerDirective, Self::Error> {
-        Ok(HandlerDirective::Continue)
     }
 }
 

@@ -1,4 +1,4 @@
-use std::{convert::Infallible, sync::Arc};
+use std::sync::Arc;
 
 use lutum_protocol::{
     AssistantTurn, CollectErrorKind, NoTools, OperationKind, RequestBudget, RequestExtensions,
@@ -28,9 +28,9 @@ use lutum_protocol::{
 };
 
 use crate::{
-    CollectError, EventHandler, Lutum, LutumError, PendingCompletion, PendingStructuredCompletion,
-    PendingStructuredTurn, PendingStructuredTurnWithTools, PendingTextTurn,
-    PendingTextTurnWithTools, Session, StagedTextStepOutcomeWithTools,
+    CollectError, EventHandler, EventHandlers, Lutum, LutumError, PendingCompletion,
+    PendingStructuredCompletion, PendingStructuredTurn, PendingStructuredTurnWithTools,
+    PendingTextTurn, PendingTextTurnWithTools, Session, StagedTextStepOutcomeWithTools,
     StructuredStepOutcomeWithTools, TextStepOutcomeWithTools, TextToolEventHandler,
     context::{StructuredTurnPartial, StructuredTurnPartialWithTools},
 };
@@ -145,6 +145,7 @@ pub struct TextTurn<'a> {
     target: TurnTarget<'a>,
     extensions: RequestExtensions,
     turn: ProtocolTextTurn<NoTools>,
+    event_handlers: EventHandlers<'a, lutum_protocol::TextTurnEvent, TextTurnCollectedState>,
 }
 
 impl<'a> TextTurn<'a> {
@@ -153,6 +154,7 @@ impl<'a> TextTurn<'a> {
             target: TurnTarget::Lutum { lutum, input },
             extensions: RequestExtensions::new(),
             turn: ProtocolTextTurn::new(),
+            event_handlers: EventHandlers::new(),
         }
     }
 
@@ -162,6 +164,7 @@ impl<'a> TextTurn<'a> {
                 target: TurnTarget::Session { session },
                 extensions: RequestExtensions::new(),
                 turn: ProtocolTextTurn::new(),
+                event_handlers: EventHandlers::new(),
             },
         }
     }
@@ -209,6 +212,27 @@ impl<'a> TextTurn<'a> {
         self
     }
 
+    /// Register a per-turn event handler for this no-tools text turn.
+    ///
+    /// Handlers run after the reducer has applied each event, in registration
+    /// order. After registering a no-tools text handler, use `collect`,
+    /// `collect_staged`, or `collect_with` to run the turn.
+    pub fn on_event<H>(mut self, handler: H) -> Self
+    where
+        H: EventHandler<lutum_protocol::TextTurnEvent, TextTurnCollectedState> + 'a,
+    {
+        self.event_handlers.push(handler);
+        self
+    }
+
+    /// Enable tools for this text turn.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `on_event` was already called on the no-tools text builder.
+    /// Register event handlers after `tools::<T>()` so they use the
+    /// tool-enabled event and state types.
+    #[track_caller]
     pub fn tools<T>(self) -> TextTurnWithTools<'a, T>
     where
         T: Toolset,
@@ -217,7 +241,12 @@ impl<'a> TextTurn<'a> {
             target,
             extensions,
             turn,
+            event_handlers,
         } = self;
+        assert!(
+            event_handlers.is_empty(),
+            "text event handlers must be registered after `.tools::<T>()` because tool-enabled turns use a different event type"
+        );
         let turn = ProtocolTextTurn {
             config: TurnConfig {
                 generation: turn.config.generation,
@@ -230,21 +259,39 @@ impl<'a> TextTurn<'a> {
             extensions,
             turn,
             fallback_parser: None,
+            event_handlers: EventHandlers::new(),
         }
     }
 
+    /// Start the turn and return the pending stream collector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `on_event` was already called. Builder-registered handlers are
+    /// consumed by `collect`, `collect_staged`, and `collect_with`.
     pub async fn start(self) -> Result<PendingTextTurn, LutumError> {
         let TextTurn {
             mut target,
             mut extensions,
             mut turn,
+            event_handlers,
         } = self;
+        assert!(
+            event_handlers.is_empty(),
+            "`on_event` handlers are used by collection methods; call `collect`, `collect_staged`, or `collect_with` instead of `start` after registering handlers"
+        );
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         lutum.run_text_turn(extensions, input, turn).await
     }
 
+    /// Start the turn and return the raw event stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `on_event` was already called. Builder-registered handlers are
+    /// only used by collection methods.
     pub async fn stream(self) -> Result<ProtocolTextTurnEventStream, LutumError> {
         Ok(self.start().await?.into_stream())
     }
@@ -271,10 +318,7 @@ impl<'a> TextTurn<'a> {
     pub async fn collect_with<H>(
         self,
         handler: H,
-    ) -> Result<
-        StagedTextTurnResult,
-        CollectError<H::Error, TextTurnReductionError, TextTurnCollectedState>,
-    >
+    ) -> Result<StagedTextTurnResult, CollectError<TextTurnReductionError, TextTurnCollectedState>>
     where
         H: EventHandler<lutum_protocol::TextTurnEvent, TextTurnCollectedState>,
     {
@@ -282,14 +326,16 @@ impl<'a> TextTurn<'a> {
             mut target,
             mut extensions,
             mut turn,
+            mut event_handlers,
         } = self;
+        event_handlers.push(handler);
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_text_turn(extensions, input, turn).await {
-            Ok(pending) => pending.collect_with(handler).await,
+            Ok(pending) => pending.collect_with(event_handlers).await,
             Err(source) => {
                 emit_pre_stream_collect_error(
                     raw_collect_errors_enabled,
@@ -308,14 +354,13 @@ impl<'a> TextTurn<'a> {
     /// [`UncommittedAssistantTurn`] that you can commit later.
     pub async fn collect_staged(
         self,
-    ) -> Result<
-        StagedTextTurnResult,
-        CollectError<Infallible, TextTurnReductionError, TextTurnCollectedState>,
-    > {
+    ) -> Result<StagedTextTurnResult, CollectError<TextTurnReductionError, TextTurnCollectedState>>
+    {
         let TextTurn {
             mut target,
             mut extensions,
             mut turn,
+            event_handlers,
         } = self;
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
@@ -323,7 +368,7 @@ impl<'a> TextTurn<'a> {
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_text_turn(extensions, input, turn).await {
-            Ok(pending) => pending.collect().await,
+            Ok(pending) => pending.collect_with(event_handlers).await,
             Err(source) => {
                 emit_pre_stream_collect_error(
                     raw_collect_errors_enabled,
@@ -344,19 +389,20 @@ impl<'a> TextTurn<'a> {
         self,
     ) -> Result<
         lutum_protocol::TextTurnResult,
-        CollectError<Infallible, TextTurnReductionError, TextTurnCollectedState>,
+        CollectError<TextTurnReductionError, TextTurnCollectedState>,
     > {
         let TextTurn {
             mut target,
             mut extensions,
             mut turn,
+            event_handlers,
         } = self;
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum.run_text_turn(extensions, input, turn).await {
-            Ok(pending) => match pending.collect().await {
+            Ok(pending) => match pending.collect_with(event_handlers).await {
                 Ok(s) => s,
                 Err(e) => return Err(e),
             },
@@ -441,6 +487,28 @@ impl<'a> SessionTextTurn<'a> {
         }
     }
 
+    /// Register a per-turn event handler for this no-tools text turn.
+    ///
+    /// Handlers run after the reducer has applied each event, in registration
+    /// order. After registering a no-tools text handler, use `collect`,
+    /// `collect_staged`, or `collect_with` to run the turn.
+    pub fn on_event<H>(self, handler: H) -> Self
+    where
+        H: EventHandler<lutum_protocol::TextTurnEvent, TextTurnCollectedState> + 'a,
+    {
+        Self {
+            inner: self.inner.on_event(handler),
+        }
+    }
+
+    /// Enable tools for this text turn.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `on_event` was already called on the no-tools text builder.
+    /// Register event handlers after `tools::<T>()` so they use the
+    /// tool-enabled event and state types.
+    #[track_caller]
     pub fn tools<T>(self) -> SessionTextTurnWithTools<'a, T>
     where
         T: Toolset,
@@ -449,7 +517,12 @@ impl<'a> SessionTextTurn<'a> {
             target,
             extensions,
             turn,
+            event_handlers,
         } = self.inner;
+        assert!(
+            event_handlers.is_empty(),
+            "text event handlers must be registered after `.tools::<T>()` because tool-enabled turns use a different event type"
+        );
         let turn = ProtocolTextTurn {
             config: TurnConfig {
                 generation: turn.config.generation,
@@ -463,21 +536,39 @@ impl<'a> SessionTextTurn<'a> {
                 extensions,
                 turn,
                 fallback_parser: None,
+                event_handlers: EventHandlers::new(),
             },
         }
     }
 
+    /// Start the turn and return the pending stream collector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `on_event` was already called. Builder-registered handlers are
+    /// consumed by `collect`, `collect_staged`, and `collect_with`.
     pub async fn start(self, lutum: &Lutum) -> Result<PendingTextTurn, LutumError> {
         let TextTurn {
             mut target,
             mut extensions,
             mut turn,
+            event_handlers,
         } = self.inner;
+        assert!(
+            event_handlers.is_empty(),
+            "`on_event` handlers are used by collection methods; call `collect`, `collect_staged`, or `collect_with` instead of `start` after registering handlers"
+        );
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         lutum.run_text_turn(extensions, input, turn).await
     }
 
+    /// Start the turn and return the raw event stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `on_event` was already called. Builder-registered handlers are
+    /// only used by collection methods.
     pub async fn stream(self, lutum: &Lutum) -> Result<ProtocolTextTurnEventStream, LutumError> {
         Ok(self.start(lutum).await?.into_stream())
     }
@@ -505,10 +596,7 @@ impl<'a> SessionTextTurn<'a> {
         self,
         lutum: &Lutum,
         handler: H,
-    ) -> Result<
-        StagedTextTurnResult,
-        CollectError<H::Error, TextTurnReductionError, TextTurnCollectedState>,
-    >
+    ) -> Result<StagedTextTurnResult, CollectError<TextTurnReductionError, TextTurnCollectedState>>
     where
         H: EventHandler<lutum_protocol::TextTurnEvent, TextTurnCollectedState>,
     {
@@ -516,13 +604,15 @@ impl<'a> SessionTextTurn<'a> {
             mut target,
             mut extensions,
             mut turn,
+            mut event_handlers,
         } = self.inner;
+        event_handlers.push(handler);
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_text_turn(extensions, input, turn).await {
-            Ok(pending) => pending.collect_with(handler).await,
+            Ok(pending) => pending.collect_with(event_handlers).await,
             Err(source) => {
                 emit_pre_stream_collect_error(
                     raw_collect_errors_enabled,
@@ -542,21 +632,20 @@ impl<'a> SessionTextTurn<'a> {
     pub async fn collect_staged(
         self,
         lutum: &Lutum,
-    ) -> Result<
-        StagedTextTurnResult,
-        CollectError<Infallible, TextTurnReductionError, TextTurnCollectedState>,
-    > {
+    ) -> Result<StagedTextTurnResult, CollectError<TextTurnReductionError, TextTurnCollectedState>>
+    {
         let TextTurn {
             mut target,
             mut extensions,
             mut turn,
+            event_handlers,
         } = self.inner;
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         match lutum.run_text_turn(extensions, input, turn).await {
-            Ok(pending) => pending.collect().await,
+            Ok(pending) => pending.collect_with(event_handlers).await,
             Err(source) => {
                 emit_pre_stream_collect_error(
                     raw_collect_errors_enabled,
@@ -578,18 +667,19 @@ impl<'a> SessionTextTurn<'a> {
         lutum: &Lutum,
     ) -> Result<
         lutum_protocol::TextTurnResult,
-        CollectError<Infallible, TextTurnReductionError, TextTurnCollectedState>,
+        CollectError<TextTurnReductionError, TextTurnCollectedState>,
     > {
         let TextTurn {
             mut target,
             mut extensions,
             mut turn,
+            event_handlers,
         } = self.inner;
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
         let staged = match lutum.run_text_turn(extensions, input, turn).await {
-            Ok(pending) => match pending.collect().await {
+            Ok(pending) => match pending.collect_with(event_handlers).await {
                 Ok(s) => s,
                 Err(e) => return Err(e),
             },
@@ -626,6 +716,8 @@ where
     extensions: RequestExtensions,
     turn: ProtocolTextTurn<T>,
     fallback_parser: Option<Arc<dyn TextToolCallFallbackParser<T>>>,
+    event_handlers:
+        EventHandlers<'a, lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
 }
 
 impl<'a, T> TextTurnWithTools<'a, T>
@@ -672,6 +764,19 @@ where
 
     pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.extensions.insert(retry_policy);
+        self
+    }
+
+    /// Register a normal per-turn event handler for this tool-enabled text turn.
+    ///
+    /// Handlers run after the reducer has applied each event, in registration
+    /// order. Use `collect_controlled_with` instead when the handler needs the
+    /// controlled text+tools directives.
+    pub fn on_event<H>(mut self, handler: H) -> Self
+    where
+        H: EventHandler<lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>> + 'a,
+    {
+        self.event_handlers.push(handler);
         self
     }
 
@@ -738,13 +843,24 @@ where
         self
     }
 
+    /// Start the turn and return the pending stream collector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `on_event` was already called. Builder-registered handlers are
+    /// consumed by `collect`, `collect_staged`, and `collect_with`.
     pub async fn start(self) -> Result<PendingTextTurnWithTools<T>, LutumError> {
         let TextTurnWithTools {
             mut target,
             mut extensions,
             mut turn,
             fallback_parser,
+            event_handlers,
         } = self;
+        assert!(
+            event_handlers.is_empty(),
+            "`on_event` handlers are used by collection methods; call `collect`, `collect_staged`, or `collect_with` instead of `start` after registering handlers"
+        );
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
@@ -753,6 +869,12 @@ where
             .await
     }
 
+    /// Start the turn and return the raw event stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `on_event` was already called. Builder-registered handlers are
+    /// only used by collection methods.
     pub async fn stream(
         self,
     ) -> Result<lutum_protocol::TextTurnEventStreamWithTools<T>, LutumError> {
@@ -780,7 +902,7 @@ where
         handler: H,
     ) -> Result<
         TextStepOutcomeWithTools<T>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: EventHandler<lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
@@ -790,7 +912,9 @@ where
             mut extensions,
             mut turn,
             fallback_parser,
+            mut event_handlers,
         } = self;
+        event_handlers.push(handler);
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
@@ -799,7 +923,7 @@ where
             .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
             .await
         {
-            Ok(pending) => match pending.collect_with(handler).await {
+            Ok(pending) => match pending.collect_with(event_handlers).await {
                 Ok(s) => s,
                 Err(e) => return Err(e),
             },
@@ -830,12 +954,18 @@ where
     /// This is the text+tools-only control path. It keeps `collect_with`
     /// source-compatible while allowing handlers to return early or recover
     /// from collection errors through `TextToolEventHandler::on_error`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if normal `on_event` handlers are already registered on the
+    /// builder. Use `collect_with` for normal handlers, or pass controlled
+    /// handlers directly to this method.
     pub async fn collect_controlled_with<H>(
         self,
         handler: H,
     ) -> Result<
         TextStepOutcomeWithTools<T>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: TextToolEventHandler<T>,
@@ -845,7 +975,12 @@ where
             mut extensions,
             mut turn,
             fallback_parser,
+            event_handlers,
         } = self;
+        assert!(
+            event_handlers.is_empty(),
+            "use `collect_with` for normal text+tools event handlers; `collect_controlled_with` accepts `TextToolEventHandler` handlers"
+        );
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
@@ -887,7 +1022,7 @@ where
         handler: H,
     ) -> Result<
         StagedTextStepOutcomeWithTools<T>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: EventHandler<lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
@@ -897,7 +1032,9 @@ where
             mut extensions,
             mut turn,
             fallback_parser,
+            mut event_handlers,
         } = self;
+        event_handlers.push(handler);
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
@@ -908,7 +1045,7 @@ where
             .await
         {
             Ok(pending) => pending
-                .collect_with(handler)
+                .collect_with(event_handlers)
                 .await
                 .map(StagedTextStepOutcomeWithTools::from_staged),
             Err(source) => {
@@ -930,12 +1067,18 @@ where
     ///
     /// Finished turns are returned as staged outcomes. Tool rounds remain
     /// uncommitted until the caller commits the round.
+    ///
+    /// # Panics
+    ///
+    /// Panics if normal `on_event` handlers are already registered on the
+    /// builder. Use `collect_staged_with` for normal handlers, or pass
+    /// controlled handlers directly to this method.
     pub async fn collect_staged_controlled_with<H>(
         self,
         handler: H,
     ) -> Result<
         StagedTextStepOutcomeWithTools<T>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: TextToolEventHandler<T>,
@@ -945,7 +1088,12 @@ where
             mut extensions,
             mut turn,
             fallback_parser,
+            event_handlers,
         } = self;
+        assert!(
+            event_handlers.is_empty(),
+            "use `collect_staged_with` for normal text+tools event handlers; `collect_staged_controlled_with` accepts `TextToolEventHandler` handlers"
+        );
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
         let input = target.input(&mut extensions);
@@ -979,13 +1127,14 @@ where
         self,
     ) -> Result<
         StagedTextStepOutcomeWithTools<T>,
-        CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     > {
         let TextTurnWithTools {
             mut target,
             mut extensions,
             mut turn,
             fallback_parser,
+            event_handlers,
         } = self;
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
@@ -997,7 +1146,7 @@ where
             .await
         {
             Ok(pending) => pending
-                .collect()
+                .collect_with(event_handlers)
                 .await
                 .map(StagedTextStepOutcomeWithTools::from_staged),
             Err(source) => {
@@ -1018,13 +1167,14 @@ where
         self,
     ) -> Result<
         TextStepOutcomeWithTools<T>,
-        CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     > {
         let TextTurnWithTools {
             mut target,
             mut extensions,
             mut turn,
             fallback_parser,
+            event_handlers,
         } = self;
         target.apply_defaults(&mut extensions, &mut turn.config);
         let lutum = target.lutum_owned();
@@ -1034,7 +1184,7 @@ where
             .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
             .await
         {
-            Ok(pending) => match pending.collect().await {
+            Ok(pending) => match pending.collect_with(event_handlers).await {
                 Ok(s) => s,
                 Err(e) => return Err(e),
             },
@@ -1122,6 +1272,20 @@ where
         }
     }
 
+    /// Register a normal per-turn event handler for this tool-enabled text turn.
+    ///
+    /// Handlers run after the reducer has applied each event, in registration
+    /// order. Use `collect_controlled_with` instead when the handler needs the
+    /// controlled text+tools directives.
+    pub fn on_event<H>(self, handler: H) -> Self
+    where
+        H: EventHandler<lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>> + 'a,
+    {
+        Self {
+            inner: self.inner.on_event(handler),
+        }
+    }
+
     pub fn available_tools(self, selectors: impl IntoIterator<Item = T::Selector>) -> Self {
         Self {
             inner: self.inner.available_tools(selectors),
@@ -1173,13 +1337,24 @@ where
         }
     }
 
+    /// Start the turn and return the pending stream collector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `on_event` was already called. Builder-registered handlers are
+    /// consumed by `collect`, `collect_staged`, and `collect_with`.
     pub async fn start(self, lutum: &Lutum) -> Result<PendingTextTurnWithTools<T>, LutumError> {
         let TextTurnWithTools {
             mut target,
             mut extensions,
             mut turn,
             fallback_parser,
+            event_handlers,
         } = self.inner;
+        assert!(
+            event_handlers.is_empty(),
+            "`on_event` handlers are used by collection methods; call `collect`, `collect_staged`, or `collect_with` instead of `start` after registering handlers"
+        );
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         lutum
@@ -1187,6 +1362,12 @@ where
             .await
     }
 
+    /// Start the turn and return the raw event stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `on_event` was already called. Builder-registered handlers are
+    /// only used by collection methods.
     pub async fn stream(
         self,
         lutum: &Lutum,
@@ -1213,7 +1394,7 @@ where
         handler: H,
     ) -> Result<
         TextStepOutcomeWithTools<T>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: EventHandler<lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
@@ -1223,7 +1404,9 @@ where
             mut extensions,
             mut turn,
             fallback_parser,
+            mut event_handlers,
         } = self.inner;
+        event_handlers.push(handler);
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1231,7 +1414,7 @@ where
             .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
             .await
         {
-            Ok(pending) => match pending.collect_with(handler).await {
+            Ok(pending) => match pending.collect_with(event_handlers).await {
                 Ok(s) => s,
                 Err(e) => return Err(e),
             },
@@ -1255,13 +1438,21 @@ where
         })
     }
 
+    /// Collect a text+tools turn with an advanced handler that can synthesize
+    /// a finished turn or tool round.
+    ///
+    /// # Panics
+    ///
+    /// Panics if normal `on_event` handlers are already registered on the
+    /// builder. Use `collect_with` for normal handlers, or pass controlled
+    /// handlers directly to this method.
     pub async fn collect_controlled_with<H>(
         self,
         lutum: &Lutum,
         handler: H,
     ) -> Result<
         TextStepOutcomeWithTools<T>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: TextToolEventHandler<T>,
@@ -1271,7 +1462,12 @@ where
             mut extensions,
             mut turn,
             fallback_parser,
+            event_handlers,
         } = self.inner;
+        assert!(
+            event_handlers.is_empty(),
+            "use `collect_with` for normal text+tools event handlers; `collect_controlled_with` accepts `TextToolEventHandler` handlers"
+        );
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         let raw_collect_errors_enabled = lutum.raw_collect_errors_enabled(&extensions);
@@ -1309,7 +1505,7 @@ where
         handler: H,
     ) -> Result<
         StagedTextStepOutcomeWithTools<T>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: EventHandler<lutum_protocol::TextTurnEventWithTools<T>, TextTurnStateWithTools<T>>,
@@ -1319,7 +1515,9 @@ where
             mut extensions,
             mut turn,
             fallback_parser,
+            mut event_handlers,
         } = self.inner;
+        event_handlers.push(handler);
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
@@ -1329,7 +1527,7 @@ where
             .await
         {
             Ok(pending) => pending
-                .collect_with(handler)
+                .collect_with(event_handlers)
                 .await
                 .map(StagedTextStepOutcomeWithTools::from_staged),
             Err(source) => {
@@ -1346,13 +1544,21 @@ where
         }
     }
 
+    /// Collect without auto-committing, using the controlled text+tools handler
+    /// path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if normal `on_event` handlers are already registered on the
+    /// builder. Use `collect_staged_with` for normal handlers, or pass
+    /// controlled handlers directly to this method.
     pub async fn collect_staged_controlled_with<H>(
         self,
         lutum: &Lutum,
         handler: H,
     ) -> Result<
         StagedTextStepOutcomeWithTools<T>,
-        CollectError<H::Error, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     >
     where
         H: TextToolEventHandler<T>,
@@ -1362,7 +1568,12 @@ where
             mut extensions,
             mut turn,
             fallback_parser,
+            event_handlers,
         } = self.inner;
+        assert!(
+            event_handlers.is_empty(),
+            "use `collect_staged_with` for normal text+tools event handlers; `collect_staged_controlled_with` accepts `TextToolEventHandler` handlers"
+        );
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
         drop(target);
@@ -1394,13 +1605,14 @@ where
         lutum: &Lutum,
     ) -> Result<
         StagedTextStepOutcomeWithTools<T>,
-        CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     > {
         let TextTurnWithTools {
             mut target,
             mut extensions,
             mut turn,
             fallback_parser,
+            event_handlers,
         } = self.inner;
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
@@ -1411,7 +1623,7 @@ where
             .await
         {
             Ok(pending) => pending
-                .collect()
+                .collect_with(event_handlers)
                 .await
                 .map(StagedTextStepOutcomeWithTools::from_staged),
             Err(source) => {
@@ -1433,13 +1645,14 @@ where
         lutum: &Lutum,
     ) -> Result<
         TextStepOutcomeWithTools<T>,
-        CollectError<Infallible, TextTurnReductionError, TextTurnStateWithTools<T>>,
+        CollectError<TextTurnReductionError, TextTurnStateWithTools<T>>,
     > {
         let TextTurnWithTools {
             mut target,
             mut extensions,
             mut turn,
             fallback_parser,
+            event_handlers,
         } = self.inner;
         target.apply_defaults(&mut extensions, &mut turn.config);
         let input = target.input(&mut extensions);
@@ -1448,7 +1661,7 @@ where
             .run_text_turn_with_tools(extensions, input, turn, fallback_parser)
             .await
         {
-            Ok(pending) => match pending.collect().await {
+            Ok(pending) => match pending.collect_with(event_handlers).await {
                 Ok(s) => s,
                 Err(e) => return Err(e),
             },
@@ -1651,7 +1864,7 @@ where
         handler: H,
     ) -> Result<
         StagedStructuredTurnResult<O>,
-        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartial<O>>,
     >
     where
         H: EventHandler<lutum_protocol::StructuredTurnEvent<O>, StructuredTurnCollectedState<O>>,
@@ -1690,7 +1903,7 @@ where
         self,
     ) -> Result<
         StagedStructuredTurnResult<O>,
-        CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartial<O>>,
     > {
         let StructuredTurn {
             mut target,
@@ -1726,7 +1939,7 @@ where
         self,
     ) -> Result<
         lutum_protocol::StructuredTurnResult<O>,
-        CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartial<O>>,
     > {
         let StructuredTurn {
             mut target,
@@ -1905,7 +2118,7 @@ where
         handler: H,
     ) -> Result<
         StagedStructuredTurnResult<O>,
-        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartial<O>>,
     >
     where
         H: EventHandler<lutum_protocol::StructuredTurnEvent<O>, StructuredTurnCollectedState<O>>,
@@ -1942,7 +2155,7 @@ where
         lutum: &Lutum,
     ) -> Result<
         StagedStructuredTurnResult<O>,
-        CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartial<O>>,
     > {
         let StructuredTurn {
             mut target,
@@ -1976,7 +2189,7 @@ where
         lutum: &Lutum,
     ) -> Result<
         lutum_protocol::StructuredTurnResult<O>,
-        CollectError<Infallible, StructuredTurnReductionError, StructuredTurnPartial<O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartial<O>>,
     > {
         let StructuredTurn {
             mut target,
@@ -2184,7 +2397,7 @@ where
         handler: H,
     ) -> Result<
         StructuredStepOutcomeWithTools<T, O>,
-        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
     >
     where
         H: EventHandler<
@@ -2282,11 +2495,7 @@ where
         self,
     ) -> Result<
         StructuredStepOutcomeWithTools<T, O>,
-        CollectError<
-            Infallible,
-            StructuredTurnReductionError,
-            StructuredTurnPartialWithTools<T, O>,
-        >,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
     > {
         let StructuredTurnWithTools {
             mut target,
@@ -2532,7 +2741,7 @@ where
         handler: H,
     ) -> Result<
         StructuredStepOutcomeWithTools<T, O>,
-        CollectError<H::Error, StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
     >
     where
         H: EventHandler<
@@ -2629,11 +2838,7 @@ where
         lutum: &Lutum,
     ) -> Result<
         StructuredStepOutcomeWithTools<T, O>,
-        CollectError<
-            Infallible,
-            StructuredTurnReductionError,
-            StructuredTurnPartialWithTools<T, O>,
-        >,
+        CollectError<StructuredTurnReductionError, StructuredTurnPartialWithTools<T, O>>,
     > {
         let StructuredTurnWithTools {
             mut target,
@@ -2825,10 +3030,7 @@ impl<'a> Completion<'a> {
     pub async fn collect_with<H>(
         self,
         handler: H,
-    ) -> Result<
-        CompletionTurnResult,
-        CollectError<H::Error, CompletionReductionError, CompletionTurnState>,
-    >
+    ) -> Result<CompletionTurnResult, CollectError<CompletionReductionError, CompletionTurnState>>
     where
         H: EventHandler<lutum_protocol::CompletionEvent, CompletionTurnState>,
     {
@@ -2851,10 +3053,8 @@ impl<'a> Completion<'a> {
 
     pub async fn collect(
         self,
-    ) -> Result<
-        CompletionTurnResult,
-        CollectError<Infallible, CompletionReductionError, CompletionTurnState>,
-    > {
+    ) -> Result<CompletionTurnResult, CollectError<CompletionReductionError, CompletionTurnState>>
+    {
         let raw_collect_errors_enabled = self.lutum.raw_collect_errors_enabled(&self.extensions);
         match self.start().await {
             Ok(pending) => pending.collect().await,
@@ -2980,7 +3180,7 @@ where
         handler: H,
     ) -> Result<
         StructuredCompletionResult<O>,
-        CollectError<H::Error, StructuredCompletionReductionError, StructuredCompletionState<O>>,
+        CollectError<StructuredCompletionReductionError, StructuredCompletionState<O>>,
     >
     where
         H: EventHandler<lutum_protocol::StructuredCompletionEvent<O>, StructuredCompletionState<O>>,
@@ -3006,7 +3206,7 @@ where
         self,
     ) -> Result<
         StructuredCompletionResult<O>,
-        CollectError<Infallible, StructuredCompletionReductionError, StructuredCompletionState<O>>,
+        CollectError<StructuredCompletionReductionError, StructuredCompletionState<O>>,
     > {
         let raw_collect_errors_enabled = self.lutum.raw_collect_errors_enabled(&self.extensions);
         match self.start().await {

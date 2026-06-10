@@ -70,6 +70,12 @@ impl From<ToolCallFallbackError> for HandlerError {
     }
 }
 
+impl From<HandlerError> for lutum::AgentError {
+    fn from(source: HandlerError) -> Self {
+        lutum::AgentError::other(source)
+    }
+}
+
 struct JsonBlockHandler {
     buffered_text: String,
     recovered: Option<RecoveredTextToolCalls<Tools>>,
@@ -97,13 +103,11 @@ impl JsonBlockHandler {
 #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl lutum::TextToolEventHandler<Tools> for JsonBlockHandler {
-    type Error = HandlerError;
-
     async fn on_event(
         &mut self,
         event: &TextTurnEventWithTools<Tools>,
         cx: &TextToolHandlerContext<Tools>,
-    ) -> Result<TextToolHandlerDirective<Tools>, Self::Error> {
+    ) -> lutum::TextToolHandlerResult<Tools> {
         if let TextTurnEventWithTools::TextDelta { delta } = event {
             self.buffered_text.push_str(delta);
 
@@ -127,7 +131,7 @@ impl lutum::TextToolEventHandler<Tools> for JsonBlockHandler {
         &mut self,
         error: TextToolCollectError<'_>,
         _cx: &TextToolHandlerContext<Tools>,
-    ) -> Result<TextToolErrorDirective<Tools>, Self::Error> {
+    ) -> lutum::TextToolErrorHandlerResult<Tools> {
         if matches!(
             error,
             TextToolCollectError::Reduction(lutum::TextTurnReductionError::OutputLimitExceeded(_))

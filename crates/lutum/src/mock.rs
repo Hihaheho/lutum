@@ -321,25 +321,27 @@ impl MockLlmAdapter {
     }
 }
 
-fn agent_error_from_mock(error: MockError) -> AgentError {
-    match error {
-        MockError::Request {
-            kind,
-            status,
-            retry_after,
-            message,
-        } => AgentError::request(
-            kind,
-            status,
-            retry_after,
+impl From<MockError> for AgentError {
+    fn from(error: MockError) -> Self {
+        match error {
             MockError::Request {
                 kind,
                 status,
                 retry_after,
                 message,
-            },
-        ),
-        other => AgentError::backend(other),
+            } => Self::request(
+                kind,
+                status,
+                retry_after,
+                MockError::Request {
+                    kind,
+                    status,
+                    retry_after,
+                    message,
+                },
+            ),
+            other => Self::backend(other),
+        }
     }
 }
 
@@ -368,7 +370,7 @@ impl TurnAdapter for MockLlmAdapter {
             events,
         } = scenario;
         if let Some(error) = start_error {
-            return Err(agent_error_from_mock(error));
+            return Err(AgentError::from(error));
         }
         let mut tool_buffers: BTreeMap<ToolCallId, (ToolName, String)> = BTreeMap::new();
         let mut committed_items = Vec::<AssistantTurnItem>::new();
@@ -433,7 +435,7 @@ impl TurnAdapter for MockLlmAdapter {
                     usage,
                     committed_turn: Arc::new(AssistantTurnView::from_items(&committed_items)),
                 })],
-                Err(err) => vec![Err(agent_error_from_mock(err))],
+                Err(err) => vec![Err(AgentError::from(err))],
             })
             .collect::<Vec<_>>();
 
@@ -462,7 +464,7 @@ impl TurnAdapter for MockLlmAdapter {
             events,
         } = scenario;
         if let Some(error) = start_error {
-            return Err(agent_error_from_mock(error));
+            return Err(AgentError::from(error));
         }
         let mut structured_buffer = String::new();
         let mut tool_buffers: BTreeMap<ToolCallId, (ToolName, String)> = BTreeMap::new();
@@ -540,7 +542,7 @@ impl TurnAdapter for MockLlmAdapter {
                     }));
                     out
                 }
-                Err(err) => vec![Err(agent_error_from_mock(err))],
+                Err(err) => vec![Err(AgentError::from(err))],
             })
             .collect::<Vec<_>>();
 
@@ -567,7 +569,7 @@ impl CompletionAdapter for MockLlmAdapter {
             events,
         } = scenario;
         if let Some(error) = start_error {
-            return Err(agent_error_from_mock(error));
+            return Err(AgentError::from(error));
         }
         let events = events.into_iter().map(|event| match event {
             Ok(RawCompletionEvent::Started { request_id, model }) => {
@@ -583,7 +585,7 @@ impl CompletionAdapter for MockLlmAdapter {
                 finish_reason,
                 usage,
             }),
-            Err(err) => Err(agent_error_from_mock(err)),
+            Err(err) => Err(AgentError::from(err)),
         });
 
         Ok(Box::pin(stream::iter(events.collect::<Vec<_>>())) as CompletionEventStream)
@@ -605,7 +607,7 @@ impl CompletionAdapter for MockLlmAdapter {
             events,
         } = scenario;
         if let Some(error) = start_error {
-            return Err(agent_error_from_mock(error));
+            return Err(AgentError::from(error));
         }
         let mut structured_buffer = String::new();
         let events = events.into_iter().flat_map(|event| match event {
@@ -647,7 +649,7 @@ impl CompletionAdapter for MockLlmAdapter {
                 finish_reason,
                 usage,
             })],
-            Err(err) => vec![Err(agent_error_from_mock(err))],
+            Err(err) => vec![Err(AgentError::from(err))],
         });
 
         Ok(Box::pin(stream::iter(events.collect::<Vec<_>>()))

@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -87,13 +90,11 @@ struct StopOnWillRetry;
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl EventHandler<TextTurnEvent, TextTurnState> for StopOnWillRetry {
-    type Error = std::convert::Infallible;
-
     async fn on_event(
         &mut self,
         event: &TextTurnEvent,
         _cx: &HandlerContext<TextTurnState>,
-    ) -> Result<HandlerDirective, Self::Error> {
+    ) -> lutum::HandlerResult {
         Ok(if matches!(event, TextTurnEvent::WillRetry { .. }) {
             HandlerDirective::Stop
         } else {
@@ -143,6 +144,57 @@ async fn pre_stream_failure_emits_will_retry_before_started() {
             && completed_request_id.as_deref() == Some("req-2")
             && usage.total_tokens == 3
     ));
+}
+
+#[tokio::test]
+async fn will_retry_event_runs_ordered_handlers_in_registration_order() {
+    let adapter = MockLlmAdapter::new()
+        .with_text_scenario(MockTextScenario::start_error(MockError::retryable_server(
+            "boom",
+        )))
+        .with_text_scenario(MockTextScenario::events(vec![
+            Ok(lutum::mock::RawTextTurnEvent::TextDelta { delta: "ok".into() }),
+            Ok(lutum::mock::RawTextTurnEvent::Completed {
+                request_id: Some("req-retry-handler-order".into()),
+                finish_reason: FinishReason::Stop,
+                usage: usage(3),
+            }),
+        ]));
+    let ctx = Lutum::new(Arc::new(adapter), budget());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let first_seen = Arc::clone(&seen);
+    let second_seen = Arc::clone(&seen);
+
+    let pending = ctx
+        .text_turn(input())
+        .retry_policy(retry_policy(2))
+        .start()
+        .await
+        .unwrap();
+
+    let _ = pending
+        .collect_with((
+            move |event: &TextTurnEvent,
+                  _cx: &HandlerContext<TextTurnState>|
+                  -> lutum::HandlerResult {
+                if matches!(event, TextTurnEvent::WillRetry { .. }) {
+                    first_seen.lock().unwrap().push("first");
+                }
+                Ok(HandlerDirective::Continue)
+            },
+            move |event: &TextTurnEvent,
+                  _cx: &HandlerContext<TextTurnState>|
+                  -> lutum::HandlerResult {
+                if matches!(event, TextTurnEvent::WillRetry { .. }) {
+                    second_seen.lock().unwrap().push("second");
+                }
+                Ok(HandlerDirective::Continue)
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec!["first", "second"]);
 }
 
 #[tokio::test]

@@ -18,14 +18,14 @@
 //! [`AgentLoop`] encapsulates this pattern so application authors only need to
 //! supply the dispatch closure that executes individual tool calls.
 
-use std::{convert::Infallible, future::Future, marker::PhantomData};
+use std::{future::Future, marker::PhantomData};
 
 use thiserror::Error;
 
 use lutum_protocol::{ToolAvailability, ToolResult, Toolset, budget::Usage};
 
 use crate::{
-    HandlerContext, HandlerDirective, Lutum, Session, TextStepOutcomeWithTools,
+    HandlerContext, HandlerDirective, HandlerResult, Lutum, Session, TextStepOutcomeWithTools,
     TextTurnEventWithTools, TextTurnStateWithTools,
 };
 
@@ -194,7 +194,7 @@ where
                     lutum,
                     move |event: &TextTurnEventWithTools<T>,
                           _cx: &HandlerContext<TextTurnStateWithTools<T>>|
-                          -> Result<HandlerDirective, Infallible> {
+                          -> HandlerResult {
                         if let TextTurnEventWithTools::TextDelta { delta } = event
                             && let Some(cb) = &cb
                         {

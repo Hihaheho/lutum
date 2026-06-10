@@ -24,17 +24,16 @@ struct FailOnTextDelta;
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl EventHandler<TextTurnEvent, TextTurnState> for FailOnTextDelta {
-    type Error = MockError;
-
     async fn on_event(
         &mut self,
         event: &TextTurnEvent,
         _cx: &HandlerContext<TextTurnState>,
-    ) -> Result<HandlerDirective, Self::Error> {
+    ) -> lutum::HandlerResult {
         if matches!(event, TextTurnEvent::TextDelta { .. }) {
             Err(MockError::Synthetic {
                 message: "handler failed".into(),
-            })
+            }
+            .into())
         } else {
             Ok(HandlerDirective::Continue)
         }

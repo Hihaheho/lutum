@@ -89,6 +89,8 @@ pub enum JudgeEvalError {
     Execution(#[source] lutum::AgentError),
     #[error("judge reduction error: {0}")]
     Reduction(#[source] StructuredTurnReductionError),
+    #[error("judge handler error: {0}")]
+    Handler(#[source] lutum::AgentError),
     #[error("judge collection stopped before completion")]
     Stopped,
     #[error("judge stream ended before completion")]
@@ -132,18 +134,14 @@ where
 }
 
 fn map_collect_error<O>(
-    error: CollectError<
-        core::convert::Infallible,
-        StructuredTurnReductionError,
-        lutum::StructuredTurnPartial<O>,
-    >,
+    error: CollectError<StructuredTurnReductionError, lutum::StructuredTurnPartial<O>>,
 ) -> JudgeEvalError
 where
     O: StructuredOutput,
 {
     match error {
         CollectError::Execution { source, .. } => JudgeEvalError::Execution(source),
-        CollectError::Handler { source, .. } => match source {},
+        CollectError::Handler { source, .. } => JudgeEvalError::Handler(source),
         CollectError::Reduction { source, .. } => JudgeEvalError::Reduction(source),
         CollectError::Stopped { .. } => JudgeEvalError::Stopped,
         CollectError::UnexpectedEof { .. } => JudgeEvalError::UnexpectedEof,

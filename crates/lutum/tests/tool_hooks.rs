@@ -1230,13 +1230,11 @@ struct RecordInvalidEvents(Arc<Mutex<Vec<String>>>);
 impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
     for RecordInvalidEvents
 {
-    type Error = std::convert::Infallible;
-
     async fn on_event(
         &mut self,
         event: &TextTurnEventWithTools<Tools>,
         _cx: &HandlerContext<TextTurnStateWithTools<Tools>>,
-    ) -> Result<HandlerDirective, Self::Error> {
+    ) -> lutum::HandlerResult {
         match event {
             TextTurnEventWithTools::InvalidToolCallChunk { name, .. } => {
                 self.0.lock().unwrap().push(format!("chunk:{}", name));
@@ -1260,13 +1258,11 @@ struct RecordParseFailureEvents(Arc<Mutex<Vec<String>>>);
 impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
     for RecordParseFailureEvents
 {
-    type Error = std::convert::Infallible;
-
     async fn on_event(
         &mut self,
         event: &TextTurnEventWithTools<Tools>,
         _cx: &HandlerContext<TextTurnStateWithTools<Tools>>,
-    ) -> Result<HandlerDirective, Self::Error> {
+    ) -> lutum::HandlerResult {
         if let TextTurnEventWithTools::ToolCallIssue(issue) = event {
             self.0
                 .lock()

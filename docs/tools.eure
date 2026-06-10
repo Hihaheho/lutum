@@ -264,15 +264,22 @@ a text turn with tools. The common case is an assistant that streams a JSON code
 text, where your app wants to parse that JSON, validate it as a Lutum tool call, and immediately
 return a `NeedsTools` round without waiting for provider-native tool-call events.
 
-The existing `EventHandler` and `.collect_with(handler)` behavior is unchanged. The controlled
-path is separate and currently applies only to `TextTurnWithTools<T>`.
+The existing `EventHandler` and `.collect_with(handler)` path remains separate and accepts single
+handlers, tuples, or `EventHandlers` chains. Handlers run in registration order; the first `Stop`,
+`Return`, or error short-circuits the chain. Controlled collection currently applies only to
+`TextTurnWithTools<T>` and follows the same ordered-handler rule.
+
+The builder `.on_event(...)` convenience is currently exposed on text turns and text+tools turns.
+Structured turns and completion turns still use `.collect_with(handler)` directly, including tuple
+handlers and explicit `EventHandlers` chains.
 ```
 
   "rust-example" = ```rust
 use lutum::{
     AssistantTurnItem, RawJson, SyntheticTextToolTurn, TextToolCollectError,
-    TextToolErrorDirective, TextToolEventHandler, TextToolHandlerContext,
-    TextToolHandlerDirective, TextTurnEventWithTools, ToolCallFallbackError,
+    TextToolErrorDirective, TextToolErrorHandlerResult, TextToolEventHandler,
+    TextToolHandlerContext, TextToolHandlerDirective, TextToolHandlerResult,
+    TextTurnEventWithTools,
 };
 
 struct JsonBlockHandler {
@@ -282,13 +289,11 @@ struct JsonBlockHandler {
 
 #[async_trait::async_trait]
 impl TextToolEventHandler<AppTools> for JsonBlockHandler {
-    type Error = ToolCallFallbackError;
-
     async fn on_event(
         &mut self,
         event: &TextTurnEventWithTools<AppTools>,
         cx: &TextToolHandlerContext<AppTools>,
-    ) -> Result<TextToolHandlerDirective<AppTools>, Self::Error> {
+    ) -> TextToolHandlerResult<AppTools> {
         if let TextTurnEventWithTools::TextDelta { delta } = event {
             self.buffer.push_str(delta);
 
@@ -317,7 +322,7 @@ impl TextToolEventHandler<AppTools> for JsonBlockHandler {
         &mut self,
         error: TextToolCollectError<'_>,
         _cx: &TextToolHandlerContext<AppTools>,
-    ) -> Result<TextToolErrorDirective<AppTools>, Self::Error> {
+    ) -> TextToolErrorHandlerResult<AppTools> {
         if matches!(
             error,
             TextToolCollectError::Reduction(lutum::TextTurnReductionError::OutputLimitExceeded(_))

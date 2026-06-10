@@ -2,16 +2,18 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 
 use lutum::{
-    AssistantTurnItem, AssistantTurnView, BudgetManager, CollectError, EventHandler, FinishReason,
-    HandlerContext, HandlerDirective, InputMessageRole, Lutum, MockError, MockLlmAdapter,
-    MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem, OperationKind,
-    RequestBudget, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
-    StructuredTurnOutcome, TextTurnEventWithTools, TextTurnReducerWithTools,
-    TextTurnStateWithTools, ToolMetadata, Usage, UsageEstimate, UsageRecoveryAdapter,
+    AssistantTurnItem, AssistantTurnView, BudgetManager, CollectError, EventHandler, EventHandlers,
+    FinishReason, HandlerContext, HandlerDirective, InputMessageRole, Lutum, MockError,
+    MockLlmAdapter, MockStructuredScenario, MockTextScenario, ModelInput, ModelInputItem,
+    OperationKind, RequestBudget, RequestExtensions, SharedPoolBudgetManager,
+    SharedPoolBudgetOptions, StructuredTurnOutcome, TextToolCollectError, TextToolErrorDirective,
+    TextToolEventHandler, TextToolHandlerContext, TextToolHandlerDirective, TextTurnEvent,
+    TextTurnEventWithTools, TextTurnReducerWithTools, TextTurnState, TextTurnStateWithTools,
+    ToolMetadata, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[lutum::tool_input(name = "weather", output = WeatherResult)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -68,13 +70,11 @@ struct StopOnTextDelta;
 impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
     for StopOnTextDelta
 {
-    type Error = std::convert::Infallible;
-
     async fn on_event(
         &mut self,
         event: &TextTurnEventWithTools<Tools>,
         _cx: &HandlerContext<TextTurnStateWithTools<Tools>>,
-    ) -> Result<HandlerDirective, Self::Error> {
+    ) -> lutum::HandlerResult {
         Ok(
             if matches!(event, TextTurnEventWithTools::TextDelta { .. }) {
                 HandlerDirective::Stop
@@ -92,21 +92,345 @@ struct FailOnTextDelta;
 impl EventHandler<TextTurnEventWithTools<Tools>, TextTurnStateWithTools<Tools>>
     for FailOnTextDelta
 {
-    type Error = MockError;
-
     async fn on_event(
         &mut self,
         event: &TextTurnEventWithTools<Tools>,
         _cx: &HandlerContext<TextTurnStateWithTools<Tools>>,
-    ) -> Result<HandlerDirective, Self::Error> {
+    ) -> lutum::HandlerResult {
         if matches!(event, TextTurnEventWithTools::TextDelta { .. }) {
             Err(MockError::Synthetic {
                 message: "handler failed".into(),
-            })
+            }
+            .into())
         } else {
             Ok(HandlerDirective::Continue)
         }
     }
+}
+
+fn ordered_text_adapter(request_id: &str) -> MockLlmAdapter {
+    MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
+        Ok(lutum::mock::RawTextTurnEvent::Started {
+            request_id: Some(request_id.into()),
+            model: "gpt-4.1".into(),
+        }),
+        Ok(lutum::mock::RawTextTurnEvent::TextDelta {
+            delta: "hello".into(),
+        }),
+        Ok(lutum::mock::RawTextTurnEvent::Completed {
+            request_id: Some(request_id.into()),
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                total_tokens: 5,
+                ..Usage::zero()
+            },
+        }),
+    ]))
+}
+
+fn synthetic_finished_turn<T: lutum::Toolset>() -> lutum::SyntheticTextToolTurn<T> {
+    let assistant_turn =
+        lutum::AssistantTurn::from_items(vec![AssistantTurnItem::Text("synthetic".into())])
+            .unwrap();
+    lutum::SyntheticTextToolTurn::finished(assistant_turn)
+}
+
+struct ReturnFinishedOnTextDelta {
+    label: &'static str,
+    seen: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+impl TextToolEventHandler<Tools> for ReturnFinishedOnTextDelta {
+    async fn on_event(
+        &mut self,
+        event: &TextTurnEventWithTools<Tools>,
+        _cx: &TextToolHandlerContext<Tools>,
+    ) -> lutum::TextToolHandlerResult<Tools> {
+        if matches!(event, TextTurnEventWithTools::TextDelta { .. }) {
+            self.seen.lock().unwrap().push(self.label);
+            return Ok(TextToolHandlerDirective::Return(synthetic_finished_turn()));
+        }
+        Ok(TextToolHandlerDirective::Continue)
+    }
+}
+
+struct RecoverUnexpectedEof {
+    label: &'static str,
+    seen: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+impl TextToolEventHandler<Tools> for RecoverUnexpectedEof {
+    async fn on_event(
+        &mut self,
+        _event: &TextTurnEventWithTools<Tools>,
+        _cx: &TextToolHandlerContext<Tools>,
+    ) -> lutum::TextToolHandlerResult<Tools> {
+        Ok(TextToolHandlerDirective::Continue)
+    }
+
+    async fn on_error(
+        &mut self,
+        error: TextToolCollectError<'_>,
+        _cx: &TextToolHandlerContext<Tools>,
+    ) -> lutum::TextToolErrorHandlerResult<Tools> {
+        if matches!(error, TextToolCollectError::UnexpectedEof) {
+            self.seen.lock().unwrap().push(self.label);
+            return Ok(TextToolErrorDirective::Return(synthetic_finished_turn()));
+        }
+        Ok(TextToolErrorDirective::Propagate)
+    }
+}
+
+#[test]
+fn builder_event_handlers_run_in_registration_order() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = Lutum::new(
+        Arc::new(ordered_text_adapter("req-handler-order")),
+        test_budget(),
+    );
+    let first_seen = Arc::clone(&seen);
+    let second_seen = Arc::clone(&seen);
+
+    let result = block_on(
+        ctx.text_turn(input())
+            .on_event(
+                move |event: &TextTurnEvent,
+                      _cx: &HandlerContext<TextTurnState>|
+                      -> lutum::HandlerResult {
+                    if matches!(event, TextTurnEvent::TextDelta { .. }) {
+                        first_seen.lock().unwrap().push("first");
+                    }
+                    Ok(HandlerDirective::Continue)
+                },
+            )
+            .on_event(
+                move |event: &TextTurnEvent,
+                      _cx: &HandlerContext<TextTurnState>|
+                      -> lutum::HandlerResult {
+                    if matches!(event, TextTurnEvent::TextDelta { .. }) {
+                        second_seen.lock().unwrap().push("second");
+                    }
+                    Ok(HandlerDirective::Continue)
+                },
+            )
+            .collect(),
+    )
+    .unwrap();
+
+    assert_eq!(result.assistant_text(), "hello");
+    assert_eq!(*seen.lock().unwrap(), vec!["first", "second"]);
+}
+
+#[test]
+fn first_stop_short_circuits_ordered_handlers() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = Lutum::new(
+        Arc::new(ordered_text_adapter("req-handler-stop")),
+        test_budget(),
+    );
+    let first_seen = Arc::clone(&seen);
+    let second_seen = Arc::clone(&seen);
+
+    let err = block_on(ctx.text_turn(input()).collect_with((
+        move |event: &TextTurnEvent, _cx: &HandlerContext<TextTurnState>| -> lutum::HandlerResult {
+            if matches!(event, TextTurnEvent::TextDelta { .. }) {
+                first_seen.lock().unwrap().push("stop");
+                return Ok(HandlerDirective::Stop);
+            }
+            Ok(HandlerDirective::Continue)
+        },
+        move |event: &TextTurnEvent, _cx: &HandlerContext<TextTurnState>| -> lutum::HandlerResult {
+            if matches!(event, TextTurnEvent::TextDelta { .. }) {
+                second_seen.lock().unwrap().push("after-stop");
+            }
+            Ok(HandlerDirective::Continue)
+        },
+    )))
+    .unwrap_err();
+
+    assert!(matches!(err, CollectError::Stopped { .. }));
+    assert_eq!(*seen.lock().unwrap(), vec!["stop"]);
+}
+
+#[test]
+fn first_error_short_circuits_ordered_handlers() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = Lutum::new(
+        Arc::new(ordered_text_adapter("req-handler-error")),
+        test_budget(),
+    );
+    let first_seen = Arc::clone(&seen);
+    let second_seen = Arc::clone(&seen);
+
+    let err = block_on(ctx.text_turn(input()).collect_with((
+        move |event: &TextTurnEvent, _cx: &HandlerContext<TextTurnState>| -> lutum::HandlerResult {
+            if matches!(event, TextTurnEvent::TextDelta { .. }) {
+                first_seen.lock().unwrap().push("error");
+                return Err(MockError::Synthetic {
+                    message: "handler failed".into(),
+                }
+                .into());
+            }
+            Ok(HandlerDirective::Continue)
+        },
+        move |event: &TextTurnEvent, _cx: &HandlerContext<TextTurnState>| -> lutum::HandlerResult {
+            if matches!(event, TextTurnEvent::TextDelta { .. }) {
+                second_seen.lock().unwrap().push("after-error");
+            }
+            Ok(HandlerDirective::Continue)
+        },
+    )))
+    .unwrap_err();
+
+    let CollectError::Handler { source, .. } = err else {
+        panic!("expected handler error");
+    };
+    assert!(source.downcast_backend::<MockError>().is_some());
+    assert_eq!(*seen.lock().unwrap(), vec!["error"]);
+}
+
+#[test]
+fn collect_with_appends_after_builder_event_handlers() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = Lutum::new(
+        Arc::new(ordered_text_adapter("req-handler-append")),
+        test_budget(),
+    );
+    let first_seen = Arc::clone(&seen);
+    let second_seen = Arc::clone(&seen);
+
+    let staged = block_on(
+        ctx.text_turn(input())
+            .on_event(
+                move |event: &TextTurnEvent,
+                      _cx: &HandlerContext<TextTurnState>|
+                      -> lutum::HandlerResult {
+                    if matches!(event, TextTurnEvent::TextDelta { .. }) {
+                        first_seen.lock().unwrap().push("builder");
+                    }
+                    Ok(HandlerDirective::Continue)
+                },
+            )
+            .collect_with(
+                move |event: &TextTurnEvent,
+                      _cx: &HandlerContext<TextTurnState>|
+                      -> lutum::HandlerResult {
+                    if matches!(event, TextTurnEvent::TextDelta { .. }) {
+                        second_seen.lock().unwrap().push("collect_with");
+                    }
+                    Ok(HandlerDirective::Continue)
+                },
+            ),
+    )
+    .unwrap();
+
+    assert_eq!(staged.assistant_text(), "hello");
+    assert_eq!(*seen.lock().unwrap(), vec!["builder", "collect_with"]);
+}
+
+#[test]
+fn event_handlers_container_preserves_order() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = Lutum::new(
+        Arc::new(ordered_text_adapter("req-handler-container")),
+        test_budget(),
+    );
+    let first_seen = Arc::clone(&seen);
+    let second_seen = Arc::clone(&seen);
+    let handlers: EventHandlers<'_, TextTurnEvent, TextTurnState> = EventHandlers::new()
+        .with(
+            move |event: &TextTurnEvent,
+                  _cx: &HandlerContext<TextTurnState>|
+                  -> lutum::HandlerResult {
+                if matches!(event, TextTurnEvent::TextDelta { .. }) {
+                    first_seen.lock().unwrap().push("first");
+                }
+                Ok(HandlerDirective::Continue)
+            },
+        )
+        .with(
+            move |event: &TextTurnEvent,
+                  _cx: &HandlerContext<TextTurnState>|
+                  -> lutum::HandlerResult {
+                if matches!(event, TextTurnEvent::TextDelta { .. }) {
+                    second_seen.lock().unwrap().push("second");
+                }
+                Ok(HandlerDirective::Continue)
+            },
+        );
+
+    let _ = block_on(ctx.text_turn(input()).collect_with(handlers)).unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec!["first", "second"]);
+}
+
+#[test]
+fn controlled_return_short_circuits_ordered_handlers() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = Lutum::new(
+        Arc::new(ordered_text_adapter("req-controlled-return-order")),
+        test_budget(),
+    );
+
+    let outcome = block_on(
+        ctx.text_turn(input())
+            .tools::<Tools>()
+            .collect_controlled_with((
+                ReturnFinishedOnTextDelta {
+                    label: "first",
+                    seen: Arc::clone(&seen),
+                },
+                ReturnFinishedOnTextDelta {
+                    label: "second",
+                    seen: Arc::clone(&seen),
+                },
+            )),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        outcome,
+        lutum::TextStepOutcomeWithTools::Finished(_)
+    ));
+    assert_eq!(*seen.lock().unwrap(), vec!["first"]);
+}
+
+#[test]
+fn controlled_on_error_recovery_short_circuits_ordered_handlers() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![Ok(
+        lutum::mock::RawTextTurnEvent::Started {
+            request_id: Some("req-controlled-error-order".into()),
+            model: "gpt-4.1".into(),
+        },
+    )]));
+    let ctx = Lutum::new(Arc::new(adapter), test_budget());
+
+    let outcome = block_on(
+        ctx.text_turn(input())
+            .tools::<Tools>()
+            .collect_controlled_with((
+                RecoverUnexpectedEof {
+                    label: "first",
+                    seen: Arc::clone(&seen),
+                },
+                RecoverUnexpectedEof {
+                    label: "second",
+                    seen: Arc::clone(&seen),
+                },
+            )),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        outcome,
+        lutum::TextStepOutcomeWithTools::Finished(_)
+    ));
+    assert_eq!(*seen.lock().unwrap(), vec!["first"]);
 }
 
 #[test]
@@ -387,10 +711,10 @@ fn recovery_failure_does_not_replace_handler_error() {
     match err {
         CollectError::Handler { source, partial } => {
             assert_eq!(
-                source,
-                MockError::Synthetic {
+                source.downcast_backend::<MockError>(),
+                Some(&MockError::Synthetic {
                     message: "handler failed".into(),
-                }
+                })
             );
             assert_eq!(
                 partial.request_id.as_deref(),

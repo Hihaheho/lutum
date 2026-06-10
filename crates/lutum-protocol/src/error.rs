@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, time::Duration};
+use std::{convert::Infallible, error::Error as StdError, time::Duration};
 
 use thiserror::Error;
 
@@ -99,6 +99,55 @@ impl AgentError {
             Self::Request(failure) => Some(failure),
             _ => None,
         }
+    }
+
+    /// Downcast a boxed source error from variants that store arbitrary error
+    /// values (`Budget`, `Request`, `Backend`, and `Other`).
+    pub fn downcast_ref<E>(&self) -> Option<&E>
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        match self {
+            Self::Budget(source) | Self::Backend(source) | Self::Other(source) => {
+                source.downcast_ref::<E>()
+            }
+            Self::Request(failure) => failure.source.downcast_ref::<E>(),
+            _ => None,
+        }
+    }
+
+    /// Downcast the source error when this is [`AgentError::Backend`].
+    pub fn downcast_backend<E>(&self) -> Option<&E>
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        match self {
+            Self::Backend(source) => source.downcast_ref::<E>(),
+            _ => None,
+        }
+    }
+
+    /// Downcast the source error when this is [`AgentError::Other`].
+    pub fn downcast_other<E>(&self) -> Option<&E>
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        match self {
+            Self::Other(source) => source.downcast_ref::<E>(),
+            _ => None,
+        }
+    }
+}
+
+impl From<Infallible> for AgentError {
+    fn from(error: Infallible) -> Self {
+        match error {}
+    }
+}
+
+impl From<crate::toolset::ToolCallFallbackError> for AgentError {
+    fn from(error: crate::toolset::ToolCallFallbackError) -> Self {
+        Self::other(error)
     }
 }
 

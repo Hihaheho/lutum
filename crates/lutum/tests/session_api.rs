@@ -789,13 +789,11 @@ struct LengthRecoveryHandler {
 #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl lutum::TextToolEventHandler<Tools> for LengthRecoveryHandler {
-    type Error = ToolCallFallbackError;
-
     async fn on_event(
         &mut self,
         event: &lutum::TextTurnEventWithTools<Tools>,
         cx: &lutum::TextToolHandlerContext<Tools>,
-    ) -> Result<TextToolHandlerDirective<Tools>, Self::Error> {
+    ) -> lutum::TextToolHandlerResult<Tools> {
         if let lutum::TextTurnEventWithTools::TextDelta { delta } = event
             && delta.contains("```json")
         {
@@ -815,7 +813,7 @@ impl lutum::TextToolEventHandler<Tools> for LengthRecoveryHandler {
         &mut self,
         error: TextToolCollectError<'_>,
         _cx: &lutum::TextToolHandlerContext<Tools>,
-    ) -> Result<TextToolErrorDirective<Tools>, Self::Error> {
+    ) -> lutum::TextToolErrorHandlerResult<Tools> {
         if matches!(
             error,
             TextToolCollectError::Reduction(lutum::TextTurnReductionError::OutputLimitExceeded(_))
@@ -947,6 +945,10 @@ where
     ))
 }
 
+fn fallback_error(source: &lutum::AgentError) -> Option<&ToolCallFallbackError> {
+    source.downcast_other::<ToolCallFallbackError>()
+}
+
 #[test]
 fn controlled_context_rejects_unavailable_recovered_tool() {
     let adapter = MockLlmAdapter::new().with_text_scenario(MockTextScenario::events(vec![
@@ -984,12 +986,12 @@ fn controlled_context_rejects_unavailable_recovered_tool() {
     })
     .unwrap_err();
 
+    let lutum::CollectError::Handler { source, .. } = err else {
+        panic!("expected handler error");
+    };
     assert!(matches!(
-        err,
-        lutum::CollectError::Handler {
-            source: ToolCallFallbackError::UnavailableTool { ref name },
-            ..
-        } if name == "v_search"
+        fallback_error(&source),
+        Some(ToolCallFallbackError::UnavailableTool { name }) if name == "v_search"
     ));
 }
 
@@ -1034,15 +1036,13 @@ fn controlled_context_rejects_wrong_required_recovered_tool() {
     })
     .unwrap_err();
 
+    let lutum::CollectError::Handler { source, .. } = err else {
+        panic!("expected handler error");
+    };
     assert!(matches!(
-        err,
-        lutum::CollectError::Handler {
-            source: ToolCallFallbackError::WrongRequiredTool {
-                ref expected,
-                ref actual
-            },
-            ..
-        } if expected == "v_weather" && actual == "v_search"
+        fallback_error(&source),
+        Some(ToolCallFallbackError::WrongRequiredTool { expected, actual })
+            if expected == "v_weather" && actual == "v_search"
     ));
 }
 

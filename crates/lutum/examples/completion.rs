@@ -8,7 +8,6 @@
 //!   ENDPOINT=https://api.openai.com/v1 TOKEN=<key> MODEL=gpt-3.5-turbo-instruct \
 //!     cargo run --example completion -p lutum
 
-use std::convert::Infallible;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -27,13 +26,11 @@ struct PrintDelta;
 #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl EventHandler<CompletionEvent, CompletionTurnState> for PrintDelta {
-    type Error = Infallible;
-
     async fn on_event(
         &mut self,
         event: &CompletionEvent,
         _cx: &HandlerContext<CompletionTurnState>,
-    ) -> Result<HandlerDirective, Infallible> {
+    ) -> HandlerResult {
         if let CompletionEvent::TextDelta(delta) = event {
             print!("{delta}");
             let _ = std::io::stdout().flush();
