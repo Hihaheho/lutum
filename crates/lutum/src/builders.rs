@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use lutum_protocol::{
-    AssistantTurn, CollectErrorKind, NoTools, OperationKind, RequestBudget, RequestExtensions,
-    UncommittedAssistantTurn,
+    AssistantTurn, CollectErrorKind, FrequencyPenalty, GenerationParamValue, GenerationSetting,
+    MaxOutputTokens, NoTools, OperationKind, PresencePenalty, RequestBudget, RequestExtensions,
+    Seed, StopSequences, TopP, UncommittedAssistantTurn,
     conversation::ModelInput,
     emit_collect_error_enabled,
     llm::{
@@ -85,7 +86,6 @@ impl<'a> TurnTarget<'a> {
         T: Toolset,
     {
         self.apply_session_extensions(extensions);
-        Lutum::apply_max_output_tokens_extension(extensions, &mut turn.generation);
         if let Self::Session { session, .. } = self {
             session.apply_defaults(turn);
         }
@@ -100,21 +100,7 @@ impl<'a> TurnTarget<'a> {
         T: Toolset,
     {
         self.apply_session_extensions(extensions);
-        let mut generation = config.generation.clone();
-        Lutum::apply_max_output_tokens_extension(extensions, &mut generation);
-        if let Self::Session { session, .. } = self {
-            let defaults = session.defaults();
-            if generation.temperature.is_none() {
-                generation.temperature = defaults.generation.temperature;
-            }
-            if generation.max_output_tokens.is_none() {
-                generation.max_output_tokens = defaults.generation.max_output_tokens;
-            }
-            if generation.seed.is_none() {
-                generation.seed = defaults.generation.seed;
-            }
-        }
-        generation
+        config.generation.clone()
     }
 
     /// Commit to the session if this is a session target; otherwise discard.
@@ -187,13 +173,34 @@ impl<'a> TextTurn<'a> {
         self
     }
 
+    pub fn top_p(mut self, top_p: TopP) -> Self {
+        self.turn.config.generation.top_p = Some(top_p);
+        self
+    }
+
+    pub fn frequency_penalty(mut self, frequency_penalty: FrequencyPenalty) -> Self {
+        self.turn.config.generation.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    pub fn presence_penalty(mut self, presence_penalty: PresencePenalty) -> Self {
+        self.turn.config.generation.presence_penalty = Some(presence_penalty);
+        self
+    }
+
     pub fn max_output_tokens(mut self, max_output_tokens: u32) -> Self {
-        self.turn.config.generation.max_output_tokens = Some(max_output_tokens);
+        self.turn.config.generation.max_output_tokens =
+            Some(MaxOutputTokens::new(max_output_tokens));
         self
     }
 
     pub fn seed(mut self, seed: u64) -> Self {
-        self.turn.config.generation.seed = Some(seed);
+        self.turn.config.generation.seed = Some(Seed::new(seed));
+        self
+    }
+
+    pub fn stop_sequences(mut self, stop_sequences: impl Into<StopSequences>) -> Self {
+        self.turn.config.generation.stop_sequences = Some(stop_sequences.into());
         self
     }
 
@@ -204,6 +211,22 @@ impl<'a> TextTurn<'a> {
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.turn.config.generation = generation;
+        self
+    }
+
+    pub fn generation_param<T>(mut self, value: T) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::set(value));
+        self
+    }
+
+    pub fn clear_generation_param<T>(mut self) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::<T>::clear());
         self
     }
 
@@ -457,6 +480,24 @@ impl<'a> SessionTextTurn<'a> {
         }
     }
 
+    pub fn top_p(self, top_p: TopP) -> Self {
+        Self {
+            inner: self.inner.top_p(top_p),
+        }
+    }
+
+    pub fn frequency_penalty(self, frequency_penalty: FrequencyPenalty) -> Self {
+        Self {
+            inner: self.inner.frequency_penalty(frequency_penalty),
+        }
+    }
+
+    pub fn presence_penalty(self, presence_penalty: PresencePenalty) -> Self {
+        Self {
+            inner: self.inner.presence_penalty(presence_penalty),
+        }
+    }
+
     pub fn max_output_tokens(self, max_output_tokens: u32) -> Self {
         Self {
             inner: self.inner.max_output_tokens(max_output_tokens),
@@ -469,6 +510,12 @@ impl<'a> SessionTextTurn<'a> {
         }
     }
 
+    pub fn stop_sequences(self, stop_sequences: impl Into<StopSequences>) -> Self {
+        Self {
+            inner: self.inner.stop_sequences(stop_sequences),
+        }
+    }
+
     pub fn budget(self, budget: RequestBudget) -> Self {
         Self {
             inner: self.inner.budget(budget),
@@ -478,6 +525,24 @@ impl<'a> SessionTextTurn<'a> {
     pub fn generation_config(self, generation: GenerationParams) -> Self {
         Self {
             inner: self.inner.generation_config(generation),
+        }
+    }
+
+    pub fn generation_param<T>(self, value: T) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        Self {
+            inner: self.inner.generation_param(value),
+        }
+    }
+
+    pub fn clear_generation_param<T>(self) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        Self {
+            inner: self.inner.clear_generation_param::<T>(),
         }
     }
 
@@ -742,13 +807,34 @@ where
         self
     }
 
+    pub fn top_p(mut self, top_p: TopP) -> Self {
+        self.turn.config.generation.top_p = Some(top_p);
+        self
+    }
+
+    pub fn frequency_penalty(mut self, frequency_penalty: FrequencyPenalty) -> Self {
+        self.turn.config.generation.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    pub fn presence_penalty(mut self, presence_penalty: PresencePenalty) -> Self {
+        self.turn.config.generation.presence_penalty = Some(presence_penalty);
+        self
+    }
+
     pub fn max_output_tokens(mut self, max_output_tokens: u32) -> Self {
-        self.turn.config.generation.max_output_tokens = Some(max_output_tokens);
+        self.turn.config.generation.max_output_tokens =
+            Some(MaxOutputTokens::new(max_output_tokens));
         self
     }
 
     pub fn seed(mut self, seed: u64) -> Self {
-        self.turn.config.generation.seed = Some(seed);
+        self.turn.config.generation.seed = Some(Seed::new(seed));
+        self
+    }
+
+    pub fn stop_sequences(mut self, stop_sequences: impl Into<StopSequences>) -> Self {
+        self.turn.config.generation.stop_sequences = Some(stop_sequences.into());
         self
     }
 
@@ -759,6 +845,22 @@ where
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.turn.config.generation = generation;
+        self
+    }
+
+    pub fn generation_param<E>(mut self, value: E) -> Self
+    where
+        E: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::set(value));
+        self
+    }
+
+    pub fn clear_generation_param<E>(mut self) -> Self
+    where
+        E: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::<E>::clear());
         self
     }
 
@@ -1242,6 +1344,24 @@ where
         }
     }
 
+    pub fn top_p(self, top_p: TopP) -> Self {
+        Self {
+            inner: self.inner.top_p(top_p),
+        }
+    }
+
+    pub fn frequency_penalty(self, frequency_penalty: FrequencyPenalty) -> Self {
+        Self {
+            inner: self.inner.frequency_penalty(frequency_penalty),
+        }
+    }
+
+    pub fn presence_penalty(self, presence_penalty: PresencePenalty) -> Self {
+        Self {
+            inner: self.inner.presence_penalty(presence_penalty),
+        }
+    }
+
     pub fn max_output_tokens(self, max_output_tokens: u32) -> Self {
         Self {
             inner: self.inner.max_output_tokens(max_output_tokens),
@@ -1254,6 +1374,12 @@ where
         }
     }
 
+    pub fn stop_sequences(self, stop_sequences: impl Into<StopSequences>) -> Self {
+        Self {
+            inner: self.inner.stop_sequences(stop_sequences),
+        }
+    }
+
     pub fn budget(self, budget: RequestBudget) -> Self {
         Self {
             inner: self.inner.budget(budget),
@@ -1263,6 +1389,24 @@ where
     pub fn generation_config(self, generation: GenerationParams) -> Self {
         Self {
             inner: self.inner.generation_config(generation),
+        }
+    }
+
+    pub fn generation_param<E>(self, value: E) -> Self
+    where
+        E: GenerationParamValue,
+    {
+        Self {
+            inner: self.inner.generation_param(value),
+        }
+    }
+
+    pub fn clear_generation_param<E>(self) -> Self
+    where
+        E: GenerationParamValue,
+    {
+        Self {
+            inner: self.inner.clear_generation_param::<E>(),
         }
     }
 
@@ -1762,13 +1906,34 @@ where
         self
     }
 
+    pub fn top_p(mut self, top_p: TopP) -> Self {
+        self.turn.config.generation.top_p = Some(top_p);
+        self
+    }
+
+    pub fn frequency_penalty(mut self, frequency_penalty: FrequencyPenalty) -> Self {
+        self.turn.config.generation.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    pub fn presence_penalty(mut self, presence_penalty: PresencePenalty) -> Self {
+        self.turn.config.generation.presence_penalty = Some(presence_penalty);
+        self
+    }
+
     pub fn max_output_tokens(mut self, max_output_tokens: u32) -> Self {
-        self.turn.config.generation.max_output_tokens = Some(max_output_tokens);
+        self.turn.config.generation.max_output_tokens =
+            Some(MaxOutputTokens::new(max_output_tokens));
         self
     }
 
     pub fn seed(mut self, seed: u64) -> Self {
-        self.turn.config.generation.seed = Some(seed);
+        self.turn.config.generation.seed = Some(Seed::new(seed));
+        self
+    }
+
+    pub fn stop_sequences(mut self, stop_sequences: impl Into<StopSequences>) -> Self {
+        self.turn.config.generation.stop_sequences = Some(stop_sequences.into());
         self
     }
 
@@ -1779,6 +1944,22 @@ where
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.turn.config.generation = generation;
+        self
+    }
+
+    pub fn generation_param<T>(mut self, value: T) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::set(value));
+        self
+    }
+
+    pub fn clear_generation_param<T>(mut self) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::<T>::clear());
         self
     }
 
@@ -2015,6 +2196,24 @@ where
         }
     }
 
+    pub fn top_p(self, top_p: TopP) -> Self {
+        Self {
+            inner: self.inner.top_p(top_p),
+        }
+    }
+
+    pub fn frequency_penalty(self, frequency_penalty: FrequencyPenalty) -> Self {
+        Self {
+            inner: self.inner.frequency_penalty(frequency_penalty),
+        }
+    }
+
+    pub fn presence_penalty(self, presence_penalty: PresencePenalty) -> Self {
+        Self {
+            inner: self.inner.presence_penalty(presence_penalty),
+        }
+    }
+
     pub fn max_output_tokens(self, max_output_tokens: u32) -> Self {
         Self {
             inner: self.inner.max_output_tokens(max_output_tokens),
@@ -2027,6 +2226,12 @@ where
         }
     }
 
+    pub fn stop_sequences(self, stop_sequences: impl Into<StopSequences>) -> Self {
+        Self {
+            inner: self.inner.stop_sequences(stop_sequences),
+        }
+    }
+
     pub fn budget(self, budget: RequestBudget) -> Self {
         Self {
             inner: self.inner.budget(budget),
@@ -2036,6 +2241,24 @@ where
     pub fn generation_config(self, generation: GenerationParams) -> Self {
         Self {
             inner: self.inner.generation_config(generation),
+        }
+    }
+
+    pub fn generation_param<T>(self, value: T) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        Self {
+            inner: self.inner.generation_param(value),
+        }
+    }
+
+    pub fn clear_generation_param<T>(self) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        Self {
+            inner: self.inner.clear_generation_param::<T>(),
         }
     }
 
@@ -2265,13 +2488,34 @@ where
         self
     }
 
+    pub fn top_p(mut self, top_p: TopP) -> Self {
+        self.turn.config.generation.top_p = Some(top_p);
+        self
+    }
+
+    pub fn frequency_penalty(mut self, frequency_penalty: FrequencyPenalty) -> Self {
+        self.turn.config.generation.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    pub fn presence_penalty(mut self, presence_penalty: PresencePenalty) -> Self {
+        self.turn.config.generation.presence_penalty = Some(presence_penalty);
+        self
+    }
+
     pub fn max_output_tokens(mut self, max_output_tokens: u32) -> Self {
-        self.turn.config.generation.max_output_tokens = Some(max_output_tokens);
+        self.turn.config.generation.max_output_tokens =
+            Some(MaxOutputTokens::new(max_output_tokens));
         self
     }
 
     pub fn seed(mut self, seed: u64) -> Self {
-        self.turn.config.generation.seed = Some(seed);
+        self.turn.config.generation.seed = Some(Seed::new(seed));
+        self
+    }
+
+    pub fn stop_sequences(mut self, stop_sequences: impl Into<StopSequences>) -> Self {
+        self.turn.config.generation.stop_sequences = Some(stop_sequences.into());
         self
     }
 
@@ -2282,6 +2526,22 @@ where
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.turn.config.generation = generation;
+        self
+    }
+
+    pub fn generation_param<E>(mut self, value: E) -> Self
+    where
+        E: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::set(value));
+        self
+    }
+
+    pub fn clear_generation_param<E>(mut self) -> Self
+    where
+        E: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::<E>::clear());
         self
     }
 
@@ -2618,6 +2878,24 @@ where
         }
     }
 
+    pub fn top_p(self, top_p: TopP) -> Self {
+        Self {
+            inner: self.inner.top_p(top_p),
+        }
+    }
+
+    pub fn frequency_penalty(self, frequency_penalty: FrequencyPenalty) -> Self {
+        Self {
+            inner: self.inner.frequency_penalty(frequency_penalty),
+        }
+    }
+
+    pub fn presence_penalty(self, presence_penalty: PresencePenalty) -> Self {
+        Self {
+            inner: self.inner.presence_penalty(presence_penalty),
+        }
+    }
+
     pub fn max_output_tokens(self, max_output_tokens: u32) -> Self {
         Self {
             inner: self.inner.max_output_tokens(max_output_tokens),
@@ -2630,6 +2908,12 @@ where
         }
     }
 
+    pub fn stop_sequences(self, stop_sequences: impl Into<StopSequences>) -> Self {
+        Self {
+            inner: self.inner.stop_sequences(stop_sequences),
+        }
+    }
+
     pub fn budget(self, budget: RequestBudget) -> Self {
         Self {
             inner: self.inner.budget(budget),
@@ -2639,6 +2923,24 @@ where
     pub fn generation_config(self, generation: GenerationParams) -> Self {
         Self {
             inner: self.inner.generation_config(generation),
+        }
+    }
+
+    pub fn generation_param<E>(self, value: E) -> Self
+    where
+        E: GenerationParamValue,
+    {
+        Self {
+            inner: self.inner.generation_param(value),
+        }
+    }
+
+    pub fn clear_generation_param<E>(self) -> Self
+    where
+        E: GenerationParamValue,
+    {
+        Self {
+            inner: self.inner.clear_generation_param::<E>(),
         }
     }
 
@@ -2987,8 +3289,33 @@ impl<'a> Completion<'a> {
         self
     }
 
+    pub fn top_p(mut self, top_p: TopP) -> Self {
+        self.request.options.top_p = Some(top_p);
+        self
+    }
+
+    pub fn frequency_penalty(mut self, frequency_penalty: FrequencyPenalty) -> Self {
+        self.request.options.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    pub fn presence_penalty(mut self, presence_penalty: PresencePenalty) -> Self {
+        self.request.options.presence_penalty = Some(presence_penalty);
+        self
+    }
+
     pub fn max_output_tokens(mut self, max_output_tokens: u32) -> Self {
-        self.request.options.max_output_tokens = Some(max_output_tokens);
+        self.request.options.max_output_tokens = Some(MaxOutputTokens::new(max_output_tokens));
+        self
+    }
+
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.request.options.seed = Some(Seed::new(seed));
+        self
+    }
+
+    pub fn stop_sequences(mut self, stop_sequences: impl Into<StopSequences>) -> Self {
+        self.request.options.stop_sequences = Some(stop_sequences.into());
         self
     }
 
@@ -2999,6 +3326,22 @@ impl<'a> Completion<'a> {
 
     pub fn budget(mut self, budget: RequestBudget) -> Self {
         self.request.budget = budget;
+        self
+    }
+
+    pub fn generation_param<T>(mut self, value: T) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::set(value));
+        self
+    }
+
+    pub fn clear_generation_param<T>(mut self) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::<T>::clear());
         self
     }
 
@@ -3117,13 +3460,33 @@ where
         self
     }
 
+    pub fn top_p(mut self, top_p: TopP) -> Self {
+        self.request.generation.top_p = Some(top_p);
+        self
+    }
+
+    pub fn frequency_penalty(mut self, frequency_penalty: FrequencyPenalty) -> Self {
+        self.request.generation.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    pub fn presence_penalty(mut self, presence_penalty: PresencePenalty) -> Self {
+        self.request.generation.presence_penalty = Some(presence_penalty);
+        self
+    }
+
     pub fn max_output_tokens(mut self, max_output_tokens: u32) -> Self {
-        self.request.generation.max_output_tokens = Some(max_output_tokens);
+        self.request.generation.max_output_tokens = Some(MaxOutputTokens::new(max_output_tokens));
         self
     }
 
     pub fn seed(mut self, seed: u64) -> Self {
-        self.request.generation.seed = Some(seed);
+        self.request.generation.seed = Some(Seed::new(seed));
+        self
+    }
+
+    pub fn stop_sequences(mut self, stop_sequences: impl Into<StopSequences>) -> Self {
+        self.request.generation.stop_sequences = Some(stop_sequences.into());
         self
     }
 
@@ -3134,6 +3497,22 @@ where
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.request.generation = generation;
+        self
+    }
+
+    pub fn generation_param<T>(mut self, value: T) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::set(value));
+        self
+    }
+
+    pub fn clear_generation_param<T>(mut self) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.extensions.insert(GenerationSetting::<T>::clear());
         self
     }
 

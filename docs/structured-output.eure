@@ -181,7 +181,8 @@ transcript model. If you need turn history and replay, use `Session::structured_
   "##": Generation Parameters
 
   "body" = ```markdown
-Both turn and completion builders accept inline generation parameters:
+Both turn and completion builders accept inline generation parameters such as temperature, top_p,
+penalties, max output tokens, seed, and stop sequences:
 ```
 
   "rust-example" = ```rust
@@ -199,6 +200,9 @@ let result = session
   "body-2" = ```markdown
 Setting `temperature(0.0)` is recommended for structured extraction tasks where determinism
 matters more than creative variation.
+
+Generation defaults can also be attached with `.with_generation_param(...)` on `Lutum` or
+`Session`, and cleared for one request with `.clear_generation_param::<T>()`.
 ```
 
 }

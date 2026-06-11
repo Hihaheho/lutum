@@ -16,7 +16,7 @@ use lutum_protocol::{
     extensions::RequestExtensions,
     llm::{
         AdapterTextTurn, AdapterToolChoice, AdapterTurnConfig, ErasedTextTurnEvent,
-        GenerationParams, ModelName, TurnAdapter,
+        GenerationParams, MaxOutputTokens, ModelName, Seed, TurnAdapter,
     },
 };
 
@@ -39,8 +39,9 @@ async fn main() -> anyhow::Result<()> {
         .with_default_model(model);
     let generation = GenerationParams {
         temperature: None,
-        max_output_tokens: Some(2048),
-        seed: Some(SEED),
+        max_output_tokens: Some(MaxOutputTokens::new(2048)),
+        seed: Some(Seed::new(SEED)),
+        ..GenerationParams::default()
     };
 
     let questions = [

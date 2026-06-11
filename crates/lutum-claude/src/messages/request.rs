@@ -43,6 +43,7 @@ use crate::messages::{ClaudeMessage, ClaudeTool};
 ///     stream: None,
 ///     system: Some(vec![SystemBlock::new("Today's date is 2023-01-01.")]),
 ///     temperature: None,
+///     top_p: None,
 ///     tools: None,
 ///     tool_choice: None,
 ///     thinking: Some(ThinkingConfig {
@@ -72,6 +73,8 @@ pub struct MessagesRequest {
     pub system: Option<Vec<SystemBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ClaudeTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]

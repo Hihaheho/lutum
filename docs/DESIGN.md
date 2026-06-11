@@ -217,7 +217,8 @@ graph semantics or first-class branch structure at this stage.
 
 Execution config is shared across text and structured turns:
 
-- `GenerationParams` — temperature, max_output_tokens, seed
+- `GenerationParams` — temperature, top_p, frequency/presence penalties, max_output_tokens, seed,
+  stop sequences
 - `TurnConfig<T>`
 - `ToolPolicy<T>`
 
@@ -230,7 +231,9 @@ Public builders in `lutum`:
   `StructuredTurnWithTools<T, O>`
 - request metadata is attached inline with `.ext(...)` / `.extensions(...)`, or as session
   defaults with `Session::with_extension(s)`
-- low-level generation overrides stay available via `.generation_config(...)`
+- generation defaults use typed request extensions via `.with_generation_param(...)`,
+  `.generation_param(...)`, and `.clear_generation_param::<T>()`
+- low-level explicit generation overrides stay available via `.generation_config(...)`
 
 `ReasoningParams` no longer exists in core. Reasoning is provider-owned: `OpenAiAdapter`
 accepts a `ReasoningEffortResolver`; `ClaudeAdapter` accepts a `BudgetTokensResolver` for
@@ -317,11 +320,12 @@ There are now two completion-style APIs:
 Both return executable builders with the same inline request-metadata style as turn builders:
 
 - `.ext(...)` / `.extensions(...)`
-- `.temperature(...)`, `.max_output_tokens(...)`, `.budget(...)`
+- `.temperature(...)`, `.top_p(...)`, `.frequency_penalty(...)`, `.presence_penalty(...)`,
+  `.max_output_tokens(...)`, `.stop_sequences(...)`, `.budget(...)`
 - `.collect()`, `.collect_with(...)`, `.stream()`
 
-`Lutum::structured_completion::<O>(...)` also supports `.system(...)`, `.seed(...)`, and
-`.generation_config(...)`.
+`Lutum::structured_completion::<O>(...)` also supports `.system(...)`, `.seed(...)`,
+`.generation_param(...)`, `.clear_generation_param::<T>()`, and `.generation_config(...)`.
 
 Internally these builders still compile into `CompletionRequest` /
 `StructuredCompletionRequest<O>` and stream `CompletionEvent` /

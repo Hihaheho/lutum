@@ -7,10 +7,10 @@ use lutum::{
     AssistantTurn, AssistantTurnView, BudgetManager, CompletionAdapter, CompletionEvent,
     CompletionEventStream, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
     ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-    ErasedTextTurnEventStream, FinishReason, GenerationParams, InputMessageRole, Lutum,
+    ErasedTextTurnEventStream, FinishReason, GenerationSetting, InputMessageRole, Lutum,
     MaxOutputTokens, ModelInput, ModelInputItem, RawJson, RequestExtensions, Session,
-    SessionDefaults, SharedPoolBudgetManager, SharedPoolBudgetOptions, TokenCount, TokenCounter,
-    TurnAdapter, Usage, UsageEstimate,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, TokenCount, TokenCounter, TopP, TurnAdapter,
+    Usage, UsageEstimate,
 };
 
 fn input() -> ModelInput {
@@ -29,6 +29,7 @@ fn budget() -> SharedPoolBudgetManager {
 #[derive(Default)]
 struct RecordingTurnAdapter {
     text_max_output_tokens: Mutex<Vec<Option<u32>>>,
+    text_top_p: Mutex<Vec<Option<f32>>>,
     text_extension_max_output_tokens: Mutex<Vec<Option<u32>>>,
     structured_max_output_tokens: Mutex<Vec<Option<u32>>>,
 }
@@ -36,6 +37,10 @@ struct RecordingTurnAdapter {
 impl RecordingTurnAdapter {
     fn text_max_output_tokens(&self) -> Vec<Option<u32>> {
         self.text_max_output_tokens.lock().unwrap().clone()
+    }
+
+    fn text_top_p(&self) -> Vec<Option<f32>> {
+        self.text_top_p.lock().unwrap().clone()
     }
 
     fn text_extension_max_output_tokens(&self) -> Vec<Option<u32>> {
@@ -58,14 +63,23 @@ impl TurnAdapter for RecordingTurnAdapter {
         _input: ModelInput,
         turn: AdapterTextTurn,
     ) -> Result<ErasedTextTurnEventStream, AgentError> {
-        self.text_max_output_tokens
+        self.text_max_output_tokens.lock().unwrap().push(
+            turn.config
+                .generation
+                .max_output_tokens
+                .map(|value| value.get()),
+        );
+        self.text_top_p
             .lock()
             .unwrap()
-            .push(turn.config.generation.max_output_tokens);
+            .push(turn.config.generation.top_p.map(|value| value.get()));
         self.text_extension_max_output_tokens.lock().unwrap().push(
             turn.extensions
-                .get::<MaxOutputTokens>()
-                .map(|value| value.get()),
+                .get::<GenerationSetting<MaxOutputTokens>>()
+                .and_then(|setting| match setting {
+                    GenerationSetting::Set(value) => Some(value.get()),
+                    GenerationSetting::Clear => None,
+                }),
         );
         let assistant_turn = AssistantTurn::text("ok");
         Ok(Box::pin(stream::iter([
@@ -90,10 +104,12 @@ impl TurnAdapter for RecordingTurnAdapter {
         _input: ModelInput,
         turn: AdapterStructuredTurn,
     ) -> Result<ErasedStructuredTurnEventStream, AgentError> {
-        self.structured_max_output_tokens
-            .lock()
-            .unwrap()
-            .push(turn.config.generation.max_output_tokens);
+        self.structured_max_output_tokens.lock().unwrap().push(
+            turn.config
+                .generation
+                .max_output_tokens
+                .map(|value| value.get()),
+        );
         let assistant_turn = AssistantTurn::text(r#"{"ok":true}"#);
         Ok(Box::pin(stream::iter([
             Ok(ErasedStructuredTurnEvent::Started {
@@ -146,7 +162,7 @@ impl CompletionAdapter for RecordingCompletionAdapter {
         self.completion_max_output_tokens
             .lock()
             .unwrap()
-            .push(request.options.max_output_tokens);
+            .push(request.options.max_output_tokens.map(|value| value.get()));
         Ok(Box::pin(stream::iter([
             Ok(CompletionEvent::Started {
                 request_id: None,
@@ -169,7 +185,12 @@ impl CompletionAdapter for RecordingCompletionAdapter {
         self.structured_completion_max_output_tokens
             .lock()
             .unwrap()
-            .push(request.generation.max_output_tokens);
+            .push(
+                request
+                    .generation
+                    .max_output_tokens
+                    .map(|value| value.get()),
+            );
         Ok(Box::pin(stream::iter([
             Ok(ErasedStructuredCompletionEvent::Started {
                 request_id: None,
@@ -209,10 +230,12 @@ impl TokenCounter for RecordingTokenCounter {
         _input: &ModelInput,
         turn: &AdapterTextTurn,
     ) -> Result<Option<TokenCount>, AgentError> {
-        self.text_max_output_tokens
-            .lock()
-            .unwrap()
-            .push(turn.config.generation.max_output_tokens);
+        self.text_max_output_tokens.lock().unwrap().push(
+            turn.config
+                .generation
+                .max_output_tokens
+                .map(|value| value.get()),
+        );
         Ok(Some(TokenCount::new(7)))
     }
 }
@@ -233,7 +256,7 @@ async fn max_output_tokens_extension_applies_to_text_turn_budget_estimate() {
 
     let pending = ctx
         .text_turn(input())
-        .ext(MaxOutputTokens::new(15))
+        .generation_param(MaxOutputTokens::new(15))
         .start()
         .await
         .unwrap();
@@ -249,7 +272,7 @@ async fn count_tokens_uses_lutum_default_max_output_tokens_extension() {
     let adapter = Arc::new(RecordingTurnAdapter::default());
     let ctx = Lutum::new(adapter, budget())
         .with_token_counter(Arc::clone(&counter))
-        .with_extension(MaxOutputTokens::new(17));
+        .with_generation_param(MaxOutputTokens::new(17));
 
     let count = ctx.text_turn(input()).count_tokens().await.unwrap();
 
@@ -263,23 +286,16 @@ async fn session_max_output_tokens_extension_applies_to_counting_and_turns() {
     let adapter = Arc::new(RecordingTurnAdapter::default());
     let ctx = Lutum::new(Arc::clone(&adapter), budget())
         .with_token_counter(Arc::clone(&counter))
-        .with_extension(MaxOutputTokens::new(6));
-    let defaults = SessionDefaults {
-        generation: GenerationParams {
-            max_output_tokens: Some(8),
-            ..GenerationParams::default()
-        },
-        ..SessionDefaults::default()
-    };
+        .with_generation_param(MaxOutputTokens::new(6));
     let mut session = Session::new()
-        .with_defaults(defaults)
-        .with_extension(MaxOutputTokens::new(17));
+        .with_generation_param(MaxOutputTokens::new(8))
+        .with_generation_param(MaxOutputTokens::new(17));
     session.push_user("hello");
 
     let count = session.text_turn().count_tokens(&ctx).await.unwrap();
     let result = session.text_turn().collect(&ctx).await.unwrap();
 
-    let mut builder_override = Session::new().with_extension(MaxOutputTokens::new(17));
+    let mut builder_override = Session::new().with_generation_param(MaxOutputTokens::new(17));
     builder_override.push_user("hello");
     builder_override
         .text_turn()
@@ -308,7 +324,7 @@ async fn builder_max_output_tokens_wins_over_extension() {
 
     let result = ctx
         .text_turn(input())
-        .ext(MaxOutputTokens::new(15))
+        .generation_param(MaxOutputTokens::new(15))
         .max_output_tokens(3)
         .collect()
         .await
@@ -325,7 +341,7 @@ async fn structured_turn_uses_max_output_tokens_extension() {
 
     let result = ctx
         .structured_turn::<serde_json::Value>(input())
-        .ext(MaxOutputTokens::new(18))
+        .generation_param(MaxOutputTokens::new(18))
         .collect()
         .await
         .unwrap();
@@ -340,25 +356,19 @@ async fn structured_turn_uses_max_output_tokens_extension() {
 #[tokio::test]
 async fn session_turn_precedence_is_request_then_session_then_lutum_default() {
     let adapter = Arc::new(RecordingTurnAdapter::default());
-    let ctx = Lutum::new(Arc::clone(&adapter), budget()).with_extension(MaxOutputTokens::new(6));
-    let defaults = SessionDefaults {
-        generation: GenerationParams {
-            max_output_tokens: Some(8),
-            ..GenerationParams::default()
-        },
-        ..SessionDefaults::default()
-    };
+    let ctx =
+        Lutum::new(Arc::clone(&adapter), budget()).with_generation_param(MaxOutputTokens::new(6));
 
-    let mut request_session = Session::new().with_defaults(defaults.clone());
+    let mut request_session = Session::new().with_generation_param(MaxOutputTokens::new(8));
     request_session.push_user("hello");
     request_session
         .text_turn()
-        .ext(MaxOutputTokens::new(12))
+        .generation_param(MaxOutputTokens::new(12))
         .collect(&ctx)
         .await
         .unwrap();
 
-    let mut default_session = Session::new().with_defaults(defaults);
+    let mut default_session = Session::new().with_generation_param(MaxOutputTokens::new(8));
     default_session.push_user("hello");
     default_session.text_turn().collect(&ctx).await.unwrap();
 
@@ -377,6 +387,43 @@ async fn session_turn_precedence_is_request_then_session_then_lutum_default() {
 }
 
 #[tokio::test]
+async fn generation_setting_clear_blocks_inherited_default() {
+    let adapter = Arc::new(RecordingTurnAdapter::default());
+    let ctx = Lutum::new(Arc::clone(&adapter), budget())
+        .with_generation_param(MaxOutputTokens::new(6))
+        .with_generation_param(TopP::new(0.8).unwrap());
+
+    let mut session = Session::new()
+        .with_generation_param(MaxOutputTokens::new(8))
+        .clear_generation_param::<TopP>();
+    session.push_user("hello");
+    session
+        .text_turn()
+        .clear_generation_param::<MaxOutputTokens>()
+        .collect(&ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(adapter.text_max_output_tokens(), vec![None]);
+    assert_eq!(adapter.text_top_p(), vec![None]);
+}
+
+#[tokio::test]
+async fn top_p_generation_setting_applies_to_turns() {
+    let adapter = Arc::new(RecordingTurnAdapter::default());
+    let ctx =
+        Lutum::new(Arc::clone(&adapter), budget()).with_generation_param(TopP::new(0.8).unwrap());
+
+    ctx.text_turn(input())
+        .generation_param(TopP::new(0.4).unwrap())
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(adapter.text_top_p(), vec![Some(0.4)]);
+}
+
+#[tokio::test]
 async fn completion_requests_use_max_output_tokens_extension() {
     let turns = Arc::new(RecordingTurnAdapter::default());
     let completions = Arc::new(RecordingCompletionAdapter::default());
@@ -386,13 +433,13 @@ async fn completion_requests_use_max_output_tokens_extension() {
 
     let completion = ctx
         .completion("hello")
-        .ext(MaxOutputTokens::new(21))
+        .generation_param(MaxOutputTokens::new(21))
         .collect()
         .await
         .unwrap();
     let structured = ctx
         .structured_completion::<serde_json::Value>("hello")
-        .ext(MaxOutputTokens::new(22))
+        .generation_param(MaxOutputTokens::new(22))
         .collect()
         .await
         .unwrap();

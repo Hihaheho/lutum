@@ -13,11 +13,11 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use lutum::{
-    AgentError, AssistantTurnItem, CompletionOptions, CompletionReductionError, Lutum, ModelName,
-    OutputLimitExceeded, RawTelemetryConfig, RequestBudget, RequestExtensions, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, StructuredStepOutcomeWithTools,
-    StructuredTurnOutcome, TextStepOutcomeWithTools, TextTurnReductionError, Usage, UsageEstimate,
-    UsageRecoveryAdapter,
+    AgentError, AssistantTurnItem, CompletionOptions, CompletionReductionError, Lutum,
+    MaxOutputTokens, ModelName, OutputLimitExceeded, RawTelemetryConfig, RequestBudget,
+    RequestExtensions, Session, SharedPoolBudgetManager, SharedPoolBudgetOptions, StopSequences,
+    StructuredStepOutcomeWithTools, StructuredTurnOutcome, TextStepOutcomeWithTools,
+    TextTurnReductionError, Usage, UsageEstimate, UsageRecoveryAdapter,
 };
 use lutum_claude::{ClaudeAdapter, MessagesRequest};
 use lutum_openai::{CompletionRequest, OpenAiAdapter, OpenAiReasoningEffort};
@@ -882,8 +882,11 @@ async fn run_completion(llm: &Lutum, case: &CaseSpec, defaults: &DefaultsConfig)
     let result = llm
         .completion("Return exactly OK.")
         .completion_options(CompletionOptions {
-            max_output_tokens: Some(text_max_output_tokens(&case.endpoint, defaults)),
-            stop: vec![".".to_string(), "\n".to_string()],
+            max_output_tokens: Some(MaxOutputTokens::new(text_max_output_tokens(
+                &case.endpoint,
+                defaults,
+            ))),
+            stop_sequences: Some(StopSequences::new([".", "\n"])),
             ..CompletionOptions::default()
         })
         .collect()
@@ -909,7 +912,7 @@ async fn run_output_limit(llm: &Lutum, case: &CaseSpec) -> Result<Usage> {
         let result = llm
             .completion(OUTPUT_LIMIT_PROMPT)
             .completion_options(CompletionOptions {
-                max_output_tokens: Some(OUTPUT_LIMIT_MAX_OUTPUT_TOKENS),
+                max_output_tokens: Some(MaxOutputTokens::new(OUTPUT_LIMIT_MAX_OUTPUT_TOKENS)),
                 ..CompletionOptions::default()
             })
             .collect()

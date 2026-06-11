@@ -43,13 +43,14 @@ pub use llm::{
     CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionOptions,
     CompletionRequest, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
     ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-    ErasedTextTurnEventStream, FinishReason, GenerationParams, MaxOutputTokens, ModelName,
-    ModelNameError, OperationKind, RetryPolicy, StructuredCompletionEvent,
+    ErasedTextTurnEventStream, FinishReason, FrequencyPenalty, GenerationParamValue,
+    GenerationParams, GenerationSetting, MaxOutputTokens, ModelName, ModelNameError, OperationKind,
+    PenaltyError, PresencePenalty, RetryPolicy, Seed, StopSequences, StructuredCompletionEvent,
     StructuredCompletionEventStream, StructuredCompletionRequest, StructuredOutputSpec,
     StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream,
     StructuredTurnEventStreamWithTools, StructuredTurnEventWithTools, Temperature,
     TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TextTurnEventStreamWithTools,
-    TextTurnEventWithTools, TokenCount, TokenCounter, TurnAdapter, TurnConfig,
+    TextTurnEventWithTools, TokenCount, TokenCounter, TopP, TopPError, TurnAdapter, TurnConfig,
     UsageRecoveryAdapter,
 };
 pub use reducer::{

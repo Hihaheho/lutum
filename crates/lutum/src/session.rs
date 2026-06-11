@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lutum_protocol::{
     AssistantTurn, AssistantTurnInputError, AssistantTurnItem, CommittedTurn,
-    ContinueSuggestionReason, EphemeralTurnView, FinishReason, GenerationParams, HookableToolset,
-    InputMessageRole, IntoToolResult, ModelInput, ModelInputItem, REJECTED_TOOL_RESULT_PREFIX,
-    RawJson, RecoverableToolCallIssue, RejectedToolCall, RequestBudget, RequestExtensions,
-    ToolHookOutcome, ToolHooks, ToolResult, ToolResultError, Toolset, TurnConfig, TurnView,
-    UncommittedAssistantTurn,
+    ContinueSuggestionReason, EphemeralTurnView, FinishReason, GenerationParamValue,
+    GenerationSetting, HookableToolset, InputMessageRole, IntoToolResult, ModelInput,
+    ModelInputItem, REJECTED_TOOL_RESULT_PREFIX, RawJson, RecoverableToolCallIssue,
+    RejectedToolCall, RequestBudget, RequestExtensions, ToolHookOutcome, ToolHooks, ToolResult,
+    ToolResultError, Toolset, TurnConfig, TurnView, UncommittedAssistantTurn,
     budget::Usage,
     conversation::EphemeralInputIndices,
     reducer::{
@@ -23,32 +23,6 @@ use crate::{
     builders::{SessionStructuredTurn, SessionTextTurn},
 };
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct SessionDefaults {
-    pub generation: GenerationParams,
-    pub budget: RequestBudget,
-}
-
-impl SessionDefaults {
-    pub(crate) fn apply<T>(&self, turn: &mut TurnConfig<T>)
-    where
-        T: Toolset,
-    {
-        if turn.generation.temperature.is_none() {
-            turn.generation.temperature = self.generation.temperature;
-        }
-        if turn.generation.max_output_tokens.is_none() {
-            turn.generation.max_output_tokens = self.generation.max_output_tokens;
-        }
-        if turn.generation.seed.is_none() {
-            turn.generation.seed = self.generation.seed;
-        }
-        if turn.budget == RequestBudget::unlimited() && self.budget != RequestBudget::unlimited() {
-            turn.budget = self.budget;
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Session {
     input: ModelInput,
@@ -62,7 +36,7 @@ pub struct Session {
     /// Turn-level ephemerality continues to be expressed via `EphemeralTurnView` and is handled
     /// by [`ModelInput::remove_ephemeral_turns`].
     ephemeral_indices: Vec<usize>,
-    defaults: SessionDefaults,
+    default_budget: RequestBudget,
     extensions: RequestExtensions,
 }
 
@@ -71,7 +45,7 @@ impl Session {
         Self {
             input: ModelInput::new(),
             ephemeral_indices: Vec::new(),
-            defaults: SessionDefaults::default(),
+            default_budget: RequestBudget::unlimited(),
             extensions: RequestExtensions::new(),
         }
     }
@@ -80,18 +54,32 @@ impl Session {
         Self {
             input,
             ephemeral_indices: Vec::new(),
-            defaults: SessionDefaults::default(),
+            default_budget: RequestBudget::unlimited(),
             extensions: RequestExtensions::new(),
         }
     }
 
-    pub fn with_defaults(mut self, defaults: SessionDefaults) -> Self {
-        self.defaults = defaults;
+    pub fn with_default_budget(mut self, budget: RequestBudget) -> Self {
+        self.default_budget = budget;
         self
     }
 
-    pub fn defaults(&self) -> &SessionDefaults {
-        &self.defaults
+    pub fn default_budget(&self) -> RequestBudget {
+        self.default_budget
+    }
+
+    pub fn with_generation_param<T>(self, value: T) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.with_extension(GenerationSetting::set(value))
+    }
+
+    pub fn clear_generation_param<T>(self) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.with_extension(GenerationSetting::<T>::clear())
     }
 
     pub fn with_extension<T>(self, extension: T) -> Self
@@ -282,7 +270,11 @@ impl Session {
     where
         T: Toolset,
     {
-        self.defaults.apply(turn);
+        if turn.budget == RequestBudget::unlimited()
+            && self.default_budget != RequestBudget::unlimited()
+        {
+            turn.budget = self.default_budget;
+        }
     }
 
     /// Returns committed (non-ephemeral) turns stored in the ordered `ModelInput`.

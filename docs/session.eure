@@ -200,26 +200,38 @@ primitive.
   "##": Turn Defaults
 
   "body" = ```markdown
-`SessionDefaults` lets you set temperature, max output tokens, and a per-request token budget
-that apply to every turn launched from the session, without repeating them on each builder call.
-It has two public fields — `generation: GenerationParams` and `budget: RequestBudget`:
+Generation defaults are request extensions. A session can set fine-grained generation defaults
+that apply to every turn launched from it, and a turn can override or clear each field
+independently:
 ```
 
   "rust-example" = ```rust
-use lutum::{Session, SessionDefaults, GenerationParams, Temperature};
+use lutum::{MaxOutputTokens, Session, Temperature, TopP};
 
-let defaults = SessionDefaults {
-    generation: GenerationParams {
-        temperature: Some(Temperature::new(0.3)?),
-        ..Default::default()
-    },
-    ..Default::default()
-};
+let mut session = Session::new()
+    .with_generation_param(Temperature::new(0.3)?)
+    .with_generation_param(TopP::new(0.9)?)
+    .with_generation_param(MaxOutputTokens::new(1024));
 
-let mut session = Session::new().with_defaults(defaults);
-
-// System messages are pushed directly — SessionDefaults has no system-prompt field.
 session.push_system("You are a code review assistant.");
+
+// This turn inherits temperature and max output tokens, but omits top_p.
+let result = session
+    .text_turn()
+    .clear_generation_param::<TopP>()
+    .collect(&lutum)
+    .await?;
+```
+
+  "body-2" = ```markdown
+Budget defaults are separate from generation params:
+```
+
+  "rust-example-2" = ```rust
+use lutum::{RequestBudget, Session};
+
+let mut session = Session::new()
+    .with_default_budget(RequestBudget::from_tokens(4096));
 ```
 
 }

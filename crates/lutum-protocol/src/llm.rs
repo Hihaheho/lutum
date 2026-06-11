@@ -138,12 +138,77 @@ pub enum ModelNameError {
 #[builder(builder_type(name = GenerationParamsBuilder))]
 pub struct GenerationParams {
     pub temperature: Option<Temperature>,
-    pub max_output_tokens: Option<u32>,
-    pub seed: Option<u64>,
+    pub top_p: Option<TopP>,
+    pub frequency_penalty: Option<FrequencyPenalty>,
+    pub presence_penalty: Option<PresencePenalty>,
+    pub max_output_tokens: Option<MaxOutputTokens>,
+    pub seed: Option<Seed>,
+    pub stop_sequences: Option<StopSequences>,
 }
 
-/// Request extension for defaulting max output tokens when a turn or request
-/// has not set them explicitly.
+impl GenerationParams {
+    pub fn resolved_with_extensions(mut self, extensions: &RequestExtensions) -> Self {
+        self.resolve_with_extensions(extensions);
+        self
+    }
+
+    pub fn resolve_with_extensions(&mut self, extensions: &RequestExtensions) {
+        resolve_generation_param::<Temperature>(self, extensions);
+        resolve_generation_param::<TopP>(self, extensions);
+        resolve_generation_param::<FrequencyPenalty>(self, extensions);
+        resolve_generation_param::<PresencePenalty>(self, extensions);
+        resolve_generation_param::<MaxOutputTokens>(self, extensions);
+        resolve_generation_param::<Seed>(self, extensions);
+        resolve_generation_param::<StopSequences>(self, extensions);
+    }
+}
+
+fn resolve_generation_param<T>(generation: &mut GenerationParams, extensions: &RequestExtensions)
+where
+    T: GenerationParamValue,
+{
+    if T::get(generation).is_some() {
+        return;
+    }
+    match extensions.get::<GenerationSetting<T>>() {
+        Some(GenerationSetting::Set(value)) => T::set(generation, value.clone()),
+        Some(GenerationSetting::Clear) | None => {}
+    }
+}
+
+mod generation_param_seal {
+    pub trait Sealed {}
+}
+
+pub trait GenerationParamValue:
+    generation_param_seal::Sealed + Clone + Send + Sync + 'static
+{
+    fn get(generation: &GenerationParams) -> Option<Self>;
+    fn set(generation: &mut GenerationParams, value: Self);
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GenerationSetting<T> {
+    Set(T),
+    Clear,
+}
+
+impl<T> GenerationSetting<T> {
+    pub fn set(value: T) -> Self {
+        Self::Set(value)
+    }
+
+    pub fn clear() -> Self {
+        Self::Clear
+    }
+}
+
+impl<T> From<T> for GenerationSetting<T> {
+    fn from(value: T) -> Self {
+        Self::Set(value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct MaxOutputTokens(u32);
 
@@ -160,6 +225,18 @@ impl MaxOutputTokens {
 impl From<u32> for MaxOutputTokens {
     fn from(value: u32) -> Self {
         Self::new(value)
+    }
+}
+
+impl generation_param_seal::Sealed for MaxOutputTokens {}
+
+impl GenerationParamValue for MaxOutputTokens {
+    fn get(generation: &GenerationParams) -> Option<Self> {
+        generation.max_output_tokens
+    }
+
+    fn set(generation: &mut GenerationParams, value: Self) {
+        generation.max_output_tokens = Some(value);
     }
 }
 
@@ -470,6 +547,243 @@ pub enum TemperatureError {
     OutOfRange { value: f32 },
 }
 
+impl GenerationParamValue for Temperature {
+    fn get(generation: &GenerationParams) -> Option<Self> {
+        generation.temperature
+    }
+
+    fn set(generation: &mut GenerationParams, value: Self) {
+        generation.temperature = Some(value);
+    }
+}
+
+impl generation_param_seal::Sealed for Temperature {}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TopP(f32);
+
+impl TopP {
+    pub const MIN: f32 = 0.0;
+    pub const MAX: f32 = 1.0;
+
+    pub fn new(value: f32) -> Result<Self, TopPError> {
+        if !value.is_finite() {
+            return Err(TopPError::NonFinite);
+        }
+        if !(Self::MIN..=Self::MAX).contains(&value) {
+            return Err(TopPError::OutOfRange { value });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl TryFrom<f32> for TopP {
+    type Error = TopPError;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+#[derive(Clone, Debug, thiserror::Error, PartialEq)]
+pub enum TopPError {
+    #[error("top_p must be finite")]
+    NonFinite,
+    #[error("top_p {value} must be in the range [0.0, 1.0]")]
+    OutOfRange { value: f32 },
+}
+
+impl GenerationParamValue for TopP {
+    fn get(generation: &GenerationParams) -> Option<Self> {
+        generation.top_p
+    }
+
+    fn set(generation: &mut GenerationParams, value: Self) {
+        generation.top_p = Some(value);
+    }
+}
+
+impl generation_param_seal::Sealed for TopP {}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrequencyPenalty(f32);
+
+impl FrequencyPenalty {
+    pub const MIN: f32 = -2.0;
+    pub const MAX: f32 = 2.0;
+
+    pub fn new(value: f32) -> Result<Self, PenaltyError> {
+        if !value.is_finite() {
+            return Err(PenaltyError::NonFinite);
+        }
+        if !(Self::MIN..=Self::MAX).contains(&value) {
+            return Err(PenaltyError::OutOfRange { value });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl TryFrom<f32> for FrequencyPenalty {
+    type Error = PenaltyError;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl GenerationParamValue for FrequencyPenalty {
+    fn get(generation: &GenerationParams) -> Option<Self> {
+        generation.frequency_penalty
+    }
+
+    fn set(generation: &mut GenerationParams, value: Self) {
+        generation.frequency_penalty = Some(value);
+    }
+}
+
+impl generation_param_seal::Sealed for FrequencyPenalty {}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PresencePenalty(f32);
+
+impl PresencePenalty {
+    pub const MIN: f32 = -2.0;
+    pub const MAX: f32 = 2.0;
+
+    pub fn new(value: f32) -> Result<Self, PenaltyError> {
+        if !value.is_finite() {
+            return Err(PenaltyError::NonFinite);
+        }
+        if !(Self::MIN..=Self::MAX).contains(&value) {
+            return Err(PenaltyError::OutOfRange { value });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl TryFrom<f32> for PresencePenalty {
+    type Error = PenaltyError;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl GenerationParamValue for PresencePenalty {
+    fn get(generation: &GenerationParams) -> Option<Self> {
+        generation.presence_penalty
+    }
+
+    fn set(generation: &mut GenerationParams, value: Self) {
+        generation.presence_penalty = Some(value);
+    }
+}
+
+impl generation_param_seal::Sealed for PresencePenalty {}
+
+#[derive(Clone, Debug, thiserror::Error, PartialEq)]
+pub enum PenaltyError {
+    #[error("penalty must be finite")]
+    NonFinite,
+    #[error("penalty {value} must be in the range [-2.0, 2.0]")]
+    OutOfRange { value: f32 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Seed(u64);
+
+impl Seed {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for Seed {
+    fn from(value: u64) -> Self {
+        Self::new(value)
+    }
+}
+
+impl GenerationParamValue for Seed {
+    fn get(generation: &GenerationParams) -> Option<Self> {
+        generation.seed
+    }
+
+    fn set(generation: &mut GenerationParams, value: Self) {
+        generation.seed = Some(value);
+    }
+}
+
+impl generation_param_seal::Sealed for Seed {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StopSequences(Vec<String>);
+
+impl StopSequences {
+    pub fn new(sequences: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self(sequences.into_iter().map(Into::into).collect())
+    }
+
+    pub fn one(sequence: impl Into<String>) -> Self {
+        Self(vec![sequence.into()])
+    }
+
+    pub fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn into_vec(self) -> Vec<String> {
+        self.0
+    }
+}
+
+impl<S> From<Vec<S>> for StopSequences
+where
+    S: Into<String>,
+{
+    fn from(value: Vec<S>) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<const N: usize> From<[&str; N]> for StopSequences {
+    fn from(value: [&str; N]) -> Self {
+        Self::new(value)
+    }
+}
+
+impl GenerationParamValue for StopSequences {
+    fn get(generation: &GenerationParams) -> Option<Self> {
+        generation.stop_sequences.clone()
+    }
+
+    fn set(generation: &mut GenerationParams, value: Self) {
+        generation.stop_sequences = Some(value);
+    }
+}
+
+impl generation_param_seal::Sealed for StopSequences {}
+
 #[derive(Builder, Clone, Debug, PartialEq)]
 #[builder(builder_type(name = CompletionRequestBuilder))]
 pub struct CompletionRequest {
@@ -505,9 +819,39 @@ impl CompletionRequest {
 #[builder(builder_type(name = CompletionOptionsBuilder))]
 pub struct CompletionOptions {
     pub temperature: Option<Temperature>,
-    pub max_output_tokens: Option<u32>,
-    #[builder(default)]
-    pub stop: Vec<String>,
+    pub top_p: Option<TopP>,
+    pub frequency_penalty: Option<FrequencyPenalty>,
+    pub presence_penalty: Option<PresencePenalty>,
+    pub max_output_tokens: Option<MaxOutputTokens>,
+    pub seed: Option<Seed>,
+    pub stop_sequences: Option<StopSequences>,
+}
+
+impl CompletionOptions {
+    pub fn resolved_with_extensions(mut self, extensions: &RequestExtensions) -> Self {
+        self.resolve_with_extensions(extensions);
+        self
+    }
+
+    pub fn resolve_with_extensions(&mut self, extensions: &RequestExtensions) {
+        let mut generation = GenerationParams {
+            temperature: self.temperature,
+            top_p: self.top_p,
+            frequency_penalty: self.frequency_penalty,
+            presence_penalty: self.presence_penalty,
+            max_output_tokens: self.max_output_tokens,
+            seed: self.seed,
+            stop_sequences: self.stop_sequences.clone(),
+        }
+        .resolved_with_extensions(extensions);
+        self.temperature = generation.temperature.take();
+        self.top_p = generation.top_p.take();
+        self.frequency_penalty = generation.frequency_penalty.take();
+        self.presence_penalty = generation.presence_penalty.take();
+        self.max_output_tokens = generation.max_output_tokens.take();
+        self.seed = generation.seed.take();
+        self.stop_sequences = generation.stop_sequences.take();
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1522,6 +1866,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use super::*;
+    use crate::extensions::RequestExtensions;
     use crate::transcript::AssistantTurnView;
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1583,5 +1928,45 @@ mod tests {
 
         assert_eq!(lhs, same);
         assert_ne!(lhs, different);
+    }
+
+    #[test]
+    fn generation_params_resolve_each_field_from_extensions() {
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(GenerationSetting::set(MaxOutputTokens::new(32)));
+        extensions.insert(GenerationSetting::set(TopP::new(0.7).unwrap()));
+
+        let resolved = GenerationParams::default().resolved_with_extensions(&extensions);
+
+        assert_eq!(resolved.max_output_tokens, Some(MaxOutputTokens::new(32)));
+        assert_eq!(resolved.top_p, Some(TopP::new(0.7).unwrap()));
+    }
+
+    #[test]
+    fn explicit_generation_params_win_over_extension_defaults() {
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(GenerationSetting::set(MaxOutputTokens::new(32)));
+
+        let resolved = GenerationParams {
+            max_output_tokens: Some(MaxOutputTokens::new(8)),
+            ..GenerationParams::default()
+        }
+        .resolved_with_extensions(&extensions);
+
+        assert_eq!(resolved.max_output_tokens, Some(MaxOutputTokens::new(8)));
+    }
+
+    #[test]
+    fn generation_setting_clear_blocks_fallback_lookup() {
+        let mut root = RequestExtensions::new();
+        root.insert(GenerationSetting::set(MaxOutputTokens::new(32)));
+
+        let mut request = RequestExtensions::new();
+        request.insert(GenerationSetting::<MaxOutputTokens>::clear());
+        request.push_fallback(Arc::new(root));
+
+        let resolved = GenerationParams::default().resolved_with_extensions(&request);
+
+        assert_eq!(resolved.max_output_tokens, None);
     }
 }

@@ -710,6 +710,7 @@ fn messages_count_tokens_body(request: &MessagesRequest) -> Result<Value, Claude
         map.remove("max_tokens");
         map.remove("stream");
         map.remove("temperature");
+        map.remove("top_p");
         map.remove("stop_sequences");
     }
     Ok(body)
@@ -863,7 +864,13 @@ fn build_messages_request(
     let compiled = compile_model_input(input)?;
     let system = (!compiled.system.is_empty()).then_some(compiled.system.clone());
     let system_sources = compiled.system_sources.clone();
-    let max_tokens = resolve_max_tokens(config.generation.max_output_tokens, thinking_budget);
+    let max_tokens = resolve_max_tokens(
+        config
+            .generation
+            .max_output_tokens
+            .map(|max_output_tokens| max_output_tokens.get()),
+        thinking_budget,
+    );
     let tools = (!config.tools.is_empty()).then(|| build_tool_definitions(config));
     let tool_count = tools.as_ref().map(|tools| tools.len()).unwrap_or(0);
     let (messages, message_sources) = compiled.into_messages();
@@ -881,6 +888,7 @@ fn build_messages_request(
                 .generation
                 .temperature
                 .map(|temperature| temperature.get()),
+            top_p: config.generation.top_p.map(|top_p| top_p.get()),
             tools,
             tool_choice: build_tool_choice(config),
             thinking: thinking_budget.map(|budget_tokens| ThinkingConfig {
@@ -888,7 +896,13 @@ fn build_messages_request(
                 budget_tokens,
             }),
             output_config: format.map(|format| OutputConfig { format }),
-            stop_sequences: None,
+            stop_sequences: config
+                .generation
+                .stop_sequences
+                .as_ref()
+                .and_then(|stop_sequences| {
+                    (!stop_sequences.is_empty()).then(|| stop_sequences.as_slice().to_vec())
+                }),
             models: None,
         },
         cache_map,
@@ -2120,9 +2134,10 @@ mod tests {
 
     use lutum_protocol::{
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, EphemeralInputIndices,
-        ErasedTextTurnEvent, GenerationParams, ModelInput, ModelInputItem, ModelName, NonEmpty,
-        OperationKind, ParseErrorStage, RawTelemetryConfig, RequestErrorDebugInfo,
-        RequestErrorKind, RequestExtensions, UsageRecoveryAdapter, budget::Usage,
+        ErasedTextTurnEvent, GenerationParams, MaxOutputTokens, ModelInput, ModelInputItem,
+        ModelName, NonEmpty, OperationKind, ParseErrorStage, RawTelemetryConfig,
+        RequestErrorDebugInfo, RequestErrorKind, RequestExtensions, StopSequences, TopP,
+        UsageRecoveryAdapter, budget::Usage,
     };
     use lutum_trace::RawTraceEntry;
 
@@ -2277,7 +2292,7 @@ mod tests {
         let turn = AdapterTextTurn {
             config: AdapterTurnConfig {
                 generation: GenerationParams {
-                    max_output_tokens: Some(8),
+                    max_output_tokens: Some(MaxOutputTokens::new(8)),
                     ..GenerationParams::default()
                 },
                 tools: Vec::new(),
@@ -2306,6 +2321,78 @@ mod tests {
         assert!(body.get("max_tokens").is_none());
         assert!(body.get("stream").is_none());
         assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+    }
+
+    #[test]
+    fn messages_request_maps_supported_generation_params() {
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams {
+                temperature: Some(lutum_protocol::Temperature::new(0.4).unwrap()),
+                top_p: Some(TopP::new(0.8).unwrap()),
+                max_output_tokens: Some(MaxOutputTokens::new(32)),
+                stop_sequences: Some(StopSequences::new(["END", "STOP"])),
+                ..GenerationParams::default()
+            },
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::None,
+        };
+
+        let (request, _) =
+            build_messages_request(&input, &config, "claude-opus-4-5", None, None, true).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(request.temperature, Some(0.4));
+        assert_eq!(request.top_p, Some(0.8));
+        assert_eq!(request.max_tokens, 32);
+        assert_eq!(
+            request.stop_sequences,
+            Some(vec!["END".to_string(), "STOP".to_string()])
+        );
+        assert!((body["temperature"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+        assert!((body["top_p"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+        assert_eq!(body["max_tokens"], 32);
+        assert_eq!(body["stop_sequences"], serde_json::json!(["END", "STOP"]));
+    }
+
+    #[test]
+    fn messages_request_omits_unset_stop_sequences() {
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::None,
+        };
+
+        let (request, _) =
+            build_messages_request(&input, &config, "claude-opus-4-5", None, None, true).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+
+        assert!(body.get("stop_sequences").is_none());
+    }
+
+    #[test]
+    fn messages_request_omits_empty_stop_sequences() {
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams {
+                stop_sequences: Some(StopSequences::new(Vec::<String>::new())),
+                ..GenerationParams::default()
+            },
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::None,
+        };
+
+        let (request, _) =
+            build_messages_request(&input, &config, "claude-opus-4-5", None, None, true).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(request.stop_sequences, None);
+        assert!(body.get("stop_sequences").is_none());
     }
 
     #[tokio::test]

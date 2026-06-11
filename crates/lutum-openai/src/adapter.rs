@@ -861,7 +861,11 @@ fn build_structured_completion_request(
             .generation
             .temperature
             .map(|temperature| temperature.get()),
-        max_output_tokens: request.generation.max_output_tokens,
+        top_p: request.generation.top_p.map(|top_p| top_p.get()),
+        max_output_tokens: request
+            .generation
+            .max_output_tokens
+            .map(|max_output_tokens| max_output_tokens.get()),
         reasoning: None,
         text: Some(crate::responses::ResponsesTextConfig {
             format: TextFormat::JsonSchema {
@@ -873,7 +877,7 @@ fn build_structured_completion_request(
         }),
         tool_choice: None,
         models: None,
-        seed: request.generation.seed,
+        seed: request.generation.seed.map(|seed| seed.get()),
     }
 }
 
@@ -1290,13 +1294,17 @@ fn build_responses_request(
             .generation
             .temperature
             .map(|temperature| temperature.get()),
-        max_output_tokens: config.generation.max_output_tokens,
+        top_p: config.generation.top_p.map(|top_p| top_p.get()),
+        max_output_tokens: config
+            .generation
+            .max_output_tokens
+            .map(|max_output_tokens| max_output_tokens.get()),
         reasoning: reasoning_effort
             .map(|effort| crate::responses::ResponsesReasoningConfig { effort }),
         text: text_format.map(|format| crate::responses::ResponsesTextConfig { format }),
         tool_choice,
         models: None,
-        seed: config.generation.seed,
+        seed: config.generation.seed.map(|seed| seed.get()),
     })
 }
 
@@ -1309,8 +1317,26 @@ fn build_completion_request(request: &ProtocolCompletionRequest, model: &str) ->
             .options
             .temperature
             .map(|temperature| temperature.get()),
-        max_tokens: request.options.max_output_tokens,
-        stop: request.options.stop.clone(),
+        top_p: request.options.top_p.map(|top_p| top_p.get()),
+        frequency_penalty: request
+            .options
+            .frequency_penalty
+            .map(|frequency_penalty| frequency_penalty.get()),
+        presence_penalty: request
+            .options
+            .presence_penalty
+            .map(|presence_penalty| presence_penalty.get()),
+        max_tokens: request
+            .options
+            .max_output_tokens
+            .map(|max_output_tokens| max_output_tokens.get()),
+        seed: request.options.seed.map(|seed| seed.get()),
+        stop: request
+            .options
+            .stop_sequences
+            .as_ref()
+            .map(|stop_sequences| stop_sequences.as_slice().to_vec())
+            .unwrap_or_default(),
         models: None,
     }
 }
@@ -3210,19 +3236,36 @@ fn build_chat_request(
                 include_obfuscation: None,
             }),
             temperature: config.generation.temperature.map(|t| t.get()),
-            max_completion_tokens: config.generation.max_output_tokens,
-            seed: config.generation.seed,
+            top_p: config.generation.top_p.map(|top_p| top_p.get()),
+            frequency_penalty: config
+                .generation
+                .frequency_penalty
+                .map(|frequency_penalty| frequency_penalty.get()),
+            presence_penalty: config
+                .generation
+                .presence_penalty
+                .map(|presence_penalty| presence_penalty.get()),
+            max_completion_tokens: config
+                .generation
+                .max_output_tokens
+                .map(|max_output_tokens| max_output_tokens.get()),
+            seed: config.generation.seed.map(|seed| seed.get()),
+            stop: config
+                .generation
+                .stop_sequences
+                .as_ref()
+                .and_then(|stop_sequences| match stop_sequences.as_slice() {
+                    [] => None,
+                    [single] => Some(crate::chat::ChatStop::Single(single.clone())),
+                    multiple => Some(crate::chat::ChatStop::Multiple(multiple.to_vec())),
+                }),
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
             reasoning_effort,
-            top_p: None,
             n: None,
-            frequency_penalty: None,
-            presence_penalty: None,
             max_tokens: None,
             logprobs: None,
             top_logprobs: None,
-            stop: None,
             parallel_tool_calls: None,
             response_format: None,
             store: None,
@@ -4263,10 +4306,11 @@ mod tests {
     use lutum_protocol::{
         AdapterStructuredCompletionRequest, AdapterStructuredOutputSpec, AdapterStructuredTurn,
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, AssistantInputItem,
-        AssistantTurnItem, AssistantTurnView, EphemeralInputIndices, ErasedStructuredTurnEvent,
-        ErasedTextTurnEvent, GenerationParams, InputMessageRole, ModelInput, ModelInputItem,
-        ModelName, NonEmpty, ParseErrorStage, RawTelemetryConfig, RequestErrorDebugInfo,
-        RequestErrorKind, RequestExtensions, ToolResult,
+        AssistantTurnItem, AssistantTurnView, CompletionOptions, EphemeralInputIndices,
+        ErasedStructuredTurnEvent, ErasedTextTurnEvent, FrequencyPenalty, GenerationParams,
+        InputMessageRole, MaxOutputTokens, ModelInput, ModelInputItem, ModelName, NonEmpty,
+        ParseErrorStage, PresencePenalty, RawTelemetryConfig, RequestErrorDebugInfo,
+        RequestErrorKind, RequestExtensions, Seed, StopSequences, ToolResult, TopP,
     };
     use lutum_trace::RawTraceEntry;
 
@@ -5023,7 +5067,7 @@ mod tests {
         let turn = AdapterTextTurn {
             config: AdapterTurnConfig {
                 generation: GenerationParams {
-                    max_output_tokens: Some(5),
+                    max_output_tokens: Some(MaxOutputTokens::new(5)),
                     ..GenerationParams::default()
                 },
                 tools: Vec::new(),
@@ -5062,7 +5106,7 @@ mod tests {
             system: Some("Return JSON only.".to_string()),
             prompt: "Count this structured completion".to_string(),
             generation: GenerationParams {
-                max_output_tokens: Some(9),
+                max_output_tokens: Some(MaxOutputTokens::new(9)),
                 ..GenerationParams::default()
             },
             output: AdapterStructuredOutputSpec {
@@ -5478,15 +5522,17 @@ mod tests {
     }
 
     #[test]
-    fn prepare_responses_request_propagates_seed() {
+    fn prepare_responses_request_propagates_supported_generation_params() {
         let adapter = test_openai_adapter("test-key");
         let input =
             ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
         let config = AdapterTurnConfig {
             generation: GenerationParams {
                 temperature: None,
-                max_output_tokens: Some(128),
-                seed: Some(42),
+                top_p: Some(TopP::new(0.7).unwrap()),
+                max_output_tokens: Some(MaxOutputTokens::new(128)),
+                seed: Some(Seed::new(42)),
+                ..GenerationParams::default()
             },
             tools: Vec::new(),
             tool_choice: AdapterToolChoice::Auto,
@@ -5496,7 +5542,132 @@ mod tests {
             .prepare_responses_request(&input, &config, "gpt-4.1", None, None)
             .unwrap();
 
+        assert_eq!(request.top_p, Some(0.7));
         assert_eq!(request.seed, Some(42));
+    }
+
+    #[test]
+    fn responses_request_omits_unset_generation_params() {
+        let adapter = test_openai_adapter("test-key");
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+
+        let request = adapter
+            .prepare_responses_request(&input, &config, "gpt-4.1", None, None)
+            .unwrap();
+        let body = serde_json::to_value(request).unwrap();
+
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+        assert!(body.get("max_output_tokens").is_none());
+        assert!(body.get("seed").is_none());
+    }
+
+    #[test]
+    fn prepare_chat_request_propagates_supported_generation_params() {
+        let adapter = test_openai_adapter("test-key").with_chat_completions();
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams {
+                temperature: Some(lutum_protocol::Temperature::new(0.3).unwrap()),
+                top_p: Some(TopP::new(0.7).unwrap()),
+                frequency_penalty: Some(FrequencyPenalty::new(0.2).unwrap()),
+                presence_penalty: Some(PresencePenalty::new(-0.1).unwrap()),
+                max_output_tokens: Some(MaxOutputTokens::new(128)),
+                seed: Some(Seed::new(42)),
+                stop_sequences: Some(StopSequences::new(["END", "STOP"])),
+            },
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "gpt-4.1", None)
+            .unwrap();
+
+        assert_eq!(prepared.body.temperature, Some(0.3));
+        assert_eq!(prepared.body.top_p, Some(0.7));
+        assert_eq!(prepared.body.frequency_penalty, Some(0.2));
+        assert_eq!(prepared.body.presence_penalty, Some(-0.1));
+        assert_eq!(prepared.body.max_completion_tokens, Some(128));
+        assert_eq!(prepared.body.seed, Some(42));
+        assert_eq!(
+            prepared.body.stop,
+            Some(crate::chat::ChatStop::Multiple(vec![
+                "END".to_string(),
+                "STOP".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_omits_empty_stop_sequences() {
+        let adapter = test_openai_adapter("test-key").with_chat_completions();
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams {
+                stop_sequences: Some(StopSequences::new(Vec::<String>::new())),
+                ..GenerationParams::default()
+            },
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "gpt-4.1", None)
+            .unwrap();
+        let body = serde_json::to_value(&prepared.body).unwrap();
+
+        assert_eq!(prepared.body.stop, None);
+        assert!(body.get("stop").is_none());
+    }
+
+    #[test]
+    fn prepare_completion_request_maps_supported_generation_params() {
+        let adapter = test_openai_adapter("test-key");
+        let request = ProtocolCompletionRequest::new("hello").with_options(CompletionOptions {
+            temperature: Some(lutum_protocol::Temperature::new(0.4).unwrap()),
+            top_p: Some(TopP::new(0.8).unwrap()),
+            frequency_penalty: Some(FrequencyPenalty::new(0.2).unwrap()),
+            presence_penalty: Some(PresencePenalty::new(-0.1).unwrap()),
+            max_output_tokens: Some(MaxOutputTokens::new(32)),
+            seed: Some(Seed::new(42)),
+            stop_sequences: Some(StopSequences::new(["END", "STOP"])),
+        });
+
+        let body = adapter.prepare_completion_request(&request, "gpt-3.5-turbo-instruct");
+
+        assert_eq!(body.temperature, Some(0.4));
+        assert_eq!(body.top_p, Some(0.8));
+        assert_eq!(body.frequency_penalty, Some(0.2));
+        assert_eq!(body.presence_penalty, Some(-0.1));
+        assert_eq!(body.max_tokens, Some(32));
+        assert_eq!(body.seed, Some(42));
+        assert_eq!(body.stop, vec!["END".to_string(), "STOP".to_string()]);
+    }
+
+    #[test]
+    fn prepare_completion_request_omits_unset_generation_params() {
+        let adapter = test_openai_adapter("test-key");
+        let request = ProtocolCompletionRequest::new("hello");
+
+        let body = adapter.prepare_completion_request(&request, "gpt-3.5-turbo-instruct");
+        let json = serde_json::to_value(body).unwrap();
+
+        assert!(json.get("temperature").is_none());
+        assert!(json.get("top_p").is_none());
+        assert!(json.get("frequency_penalty").is_none());
+        assert!(json.get("presence_penalty").is_none());
+        assert!(json.get("max_tokens").is_none());
+        assert!(json.get("seed").is_none());
+        assert!(json.get("stop").is_none());
     }
 
     #[test]

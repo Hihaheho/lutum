@@ -4,11 +4,12 @@ use lutum::{
     AssistantInputItem, AssistantTurnItem, AssistantTurnView, BudgetLease, BudgetManager,
     CompletionAdapter, CompletionEventStream, CompletionRequest,
     ErasedStructuredCompletionEventStream, ErasedStructuredTurnEventStream,
-    ErasedTextTurnEventStream, InputMessageRole, Lutum, LutumError, MessageContent, ModelInput,
-    ModelInputItem, ModelName, ModelNameError, NonEmpty, OperationKind, RawJson, RequestBudget,
-    RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions, Temperature,
-    TextTurnReducer, TextTurnReducerWithTools, ToolAvailability, ToolConstraints, ToolMetadata,
-    ToolRequirement, ToolResult, TurnAdapter, Usage, UsageEstimate, UsageRecoveryAdapter,
+    ErasedTextTurnEventStream, InputMessageRole, Lutum, LutumError, MaxOutputTokens,
+    MessageContent, ModelInput, ModelInputItem, ModelName, ModelNameError, NonEmpty, OperationKind,
+    RawJson, RequestBudget, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
+    Temperature, TextTurnReducer, TextTurnReducerWithTools, ToolAvailability, ToolConstraints,
+    ToolMetadata, ToolRequirement, ToolResult, TurnAdapter, Usage, UsageEstimate,
+    UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -148,8 +149,8 @@ fn typed_public_api_compiles_and_constructs_requests() {
         .tools::<Tools>()
         .generation_config(lutum::GenerationParams {
             temperature: Some(Temperature::try_from(0.3).unwrap()),
-            max_output_tokens: Some(512),
-            seed: None,
+            max_output_tokens: Some(MaxOutputTokens::new(512)),
+            ..lutum::GenerationParams::default()
         });
     let _completion = ctx
         .completion("hello")

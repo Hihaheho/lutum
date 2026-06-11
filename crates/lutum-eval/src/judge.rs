@@ -2,8 +2,9 @@ use std::marker::PhantomData;
 
 use async_trait::async_trait;
 use lutum::{
-    CollectError, GenerationParams, ModelInput, RequestBudget, RequestExtensions, StructuredOutput,
-    StructuredTurnOutcome, StructuredTurnReductionError,
+    CollectError, FrequencyPenalty, GenerationParamValue, GenerationParams, GenerationSetting,
+    MaxOutputTokens, ModelInput, PresencePenalty, RequestBudget, RequestExtensions, Seed,
+    StopSequences, StructuredOutput, StructuredTurnOutcome, StructuredTurnReductionError, TopP,
 };
 use thiserror::Error;
 
@@ -54,13 +55,33 @@ impl<A, R, F> JudgeEval<A, R, F> {
         self
     }
 
+    pub fn top_p(mut self, top_p: TopP) -> Self {
+        self.generation.top_p = Some(top_p);
+        self
+    }
+
+    pub fn frequency_penalty(mut self, frequency_penalty: FrequencyPenalty) -> Self {
+        self.generation.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    pub fn presence_penalty(mut self, presence_penalty: PresencePenalty) -> Self {
+        self.generation.presence_penalty = Some(presence_penalty);
+        self
+    }
+
     pub fn max_output_tokens(mut self, max_output_tokens: u32) -> Self {
-        self.generation.max_output_tokens = Some(max_output_tokens);
+        self.generation.max_output_tokens = Some(MaxOutputTokens::new(max_output_tokens));
         self
     }
 
     pub fn seed(mut self, seed: u64) -> Self {
-        self.generation.seed = Some(seed);
+        self.generation.seed = Some(Seed::new(seed));
+        self
+    }
+
+    pub fn stop_sequences(mut self, stop_sequences: impl Into<StopSequences>) -> Self {
+        self.generation.stop_sequences = Some(stop_sequences.into());
         self
     }
 
@@ -71,6 +92,28 @@ impl<A, R, F> JudgeEval<A, R, F> {
 
     pub fn generation_config(mut self, generation: GenerationParams) -> Self {
         self.generation = generation;
+        self
+    }
+
+    pub fn generation_param<T>(mut self, value: T) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.extension_factories
+            .push(Box::new(move |extensions: &mut RequestExtensions| {
+                extensions.insert(GenerationSetting::set(value.clone()));
+            }));
+        self
+    }
+
+    pub fn clear_generation_param<T>(mut self) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.extension_factories
+            .push(Box::new(move |extensions: &mut RequestExtensions| {
+                extensions.insert(GenerationSetting::<T>::clear());
+            }));
         self
     }
 

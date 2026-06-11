@@ -24,13 +24,13 @@ use lutum_protocol::{
         CompletionAdapter, CompletionEvent, CompletionEventStream, CompletionOptions,
         CompletionRequest, ErasedStructuredCompletionEvent, ErasedStructuredCompletionEventStream,
         ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
-        ErasedTextTurnEventStream, GenerationParams, MaxOutputTokens, OperationKind, RetryPolicy,
-        StructuredCompletionEvent, StructuredCompletionEventStream, StructuredCompletionRequest,
-        StructuredTurn as ProtocolStructuredTurn, StructuredTurnEvent, StructuredTurnEventStream,
-        StructuredTurnEventStreamWithTools, StructuredTurnEventWithTools,
-        TextTurn as ProtocolTextTurn, TextTurnEvent, TextTurnEventStream,
-        TextTurnEventStreamWithTools, TextTurnEventWithTools, TokenCount, TokenCounter,
-        TurnAdapter, TurnConfig, UsageRecoveryAdapter,
+        ErasedTextTurnEventStream, GenerationParamValue, GenerationParams, GenerationSetting,
+        OperationKind, RetryPolicy, StructuredCompletionEvent, StructuredCompletionEventStream,
+        StructuredCompletionRequest, StructuredTurn as ProtocolStructuredTurn, StructuredTurnEvent,
+        StructuredTurnEventStream, StructuredTurnEventStreamWithTools,
+        StructuredTurnEventWithTools, TextTurn as ProtocolTextTurn, TextTurnEvent,
+        TextTurnEventStream, TextTurnEventStreamWithTools, TextTurnEventWithTools, TokenCount,
+        TokenCounter, TurnAdapter, TurnConfig, UsageRecoveryAdapter,
     },
     reducer::{
         CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,
@@ -176,6 +176,20 @@ impl Lutum {
         self.with_extensions(extensions)
     }
 
+    pub fn with_generation_param<T>(self, value: T) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.with_extension(GenerationSetting::set(value))
+    }
+
+    pub fn clear_generation_param<T>(self) -> Self
+    where
+        T: GenerationParamValue,
+    {
+        self.with_extension(GenerationSetting::<T>::clear())
+    }
+
     pub fn with_extensions(mut self, mut extensions: RequestExtensions) -> Self {
         extensions.push_fallback(Arc::clone(&self.default_extensions));
         self.default_extensions = Arc::new(extensions);
@@ -309,7 +323,7 @@ impl Lutum {
                 Ok(estimate_with_token_count(
                     fallback,
                     count.input_tokens,
-                    request.options.max_output_tokens,
+                    request.options.max_output_tokens.map(|value| value.get()),
                 ))
             }
             None => Ok(self
@@ -354,26 +368,18 @@ impl Lutum {
         extensions
     }
 
-    pub(crate) fn apply_max_output_tokens_extension(
+    pub(crate) fn resolve_generation_params(
         extensions: &RequestExtensions,
         generation: &mut GenerationParams,
     ) {
-        if generation.max_output_tokens.is_none() {
-            generation.max_output_tokens = extensions
-                .get::<MaxOutputTokens>()
-                .map(|max_output_tokens| max_output_tokens.get());
-        }
+        generation.resolve_with_extensions(extensions);
     }
 
-    pub(crate) fn apply_completion_max_output_tokens_extension(
+    pub(crate) fn resolve_completion_options(
         extensions: &RequestExtensions,
         options: &mut CompletionOptions,
     ) {
-        if options.max_output_tokens.is_none() {
-            options.max_output_tokens = extensions
-                .get::<MaxOutputTokens>()
-                .map(|max_output_tokens| max_output_tokens.get());
-        }
+        options.resolve_with_extensions(extensions);
     }
 
     pub(crate) fn raw_collect_errors_enabled(&self, extensions: &RequestExtensions) -> bool {
@@ -1217,7 +1223,7 @@ impl Lutum {
         input.validate()?;
         let extensions = Arc::new(self.apply_default_extensions(extensions));
         let mut generation = generation;
-        Self::apply_max_output_tokens_extension(extensions.as_ref(), &mut generation);
+        Self::resolve_generation_params(extensions.as_ref(), &mut generation);
         let turn = erase_text_turn_ref(turn, generation, Arc::clone(&extensions))?;
         let Some(counter) = self.token_counter.as_ref() else {
             return Ok(None);
@@ -1239,7 +1245,7 @@ impl Lutum {
         input.validate()?;
         let extensions = Arc::new(self.apply_default_extensions(extensions));
         let mut generation = generation;
-        Self::apply_max_output_tokens_extension(extensions.as_ref(), &mut generation);
+        Self::resolve_generation_params(extensions.as_ref(), &mut generation);
         let turn = erase_structured_turn_ref(turn, generation, Arc::clone(&extensions))?;
         let Some(counter) = self.token_counter.as_ref() else {
             return Ok(None);
@@ -1253,7 +1259,7 @@ impl Lutum {
         mut request: CompletionRequest,
     ) -> Result<Option<TokenCount>, LutumError> {
         let extensions = self.apply_default_extensions(extensions);
-        Self::apply_completion_max_output_tokens_extension(&extensions, &mut request.options);
+        Self::resolve_completion_options(&extensions, &mut request.options);
         let Some(counter) = self.token_counter.as_ref() else {
             return Ok(None);
         };
@@ -1270,7 +1276,7 @@ impl Lutum {
     {
         let extensions = self.apply_default_extensions(extensions);
         let mut request = erase_structured_completion_request_ref(request)?;
-        Self::apply_max_output_tokens_extension(&extensions, &mut request.generation);
+        Self::resolve_generation_params(&extensions, &mut request.generation);
         let Some(counter) = self.token_counter.as_ref() else {
             return Ok(None);
         };
@@ -1288,9 +1294,13 @@ impl Lutum {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
         let mut turn = turn;
-        Self::apply_max_output_tokens_extension(&extensions, &mut turn.config.generation);
+        Self::resolve_generation_params(&extensions, &mut turn.config.generation);
         let request_budget = turn.config.budget;
-        let max_output_tokens = turn.config.generation.max_output_tokens;
+        let max_output_tokens = turn
+            .config
+            .generation
+            .max_output_tokens
+            .map(|value| value.get());
         let extensions = Arc::new(extensions);
         let turn = erase_text_turn(turn, Arc::clone(&extensions))?;
         let estimate = self
@@ -1335,9 +1345,13 @@ impl Lutum {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
         let mut turn = turn;
-        Self::apply_max_output_tokens_extension(&extensions, &mut turn.config.generation);
+        Self::resolve_generation_params(&extensions, &mut turn.config.generation);
         let request_budget = turn.config.budget;
-        let max_output_tokens = turn.config.generation.max_output_tokens;
+        let max_output_tokens = turn
+            .config
+            .generation
+            .max_output_tokens
+            .map(|value| value.get());
         // Extract availability before erase_text_turn consumes the turn config.
         let availability = turn.config.tools.available.clone();
         let tool_constraints = ToolConstraints {
@@ -1402,9 +1416,13 @@ impl Lutum {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
         let mut turn = turn;
-        Self::apply_max_output_tokens_extension(&extensions, &mut turn.config.generation);
+        Self::resolve_generation_params(&extensions, &mut turn.config.generation);
         let request_budget = turn.config.budget;
-        let max_output_tokens = turn.config.generation.max_output_tokens;
+        let max_output_tokens = turn
+            .config
+            .generation
+            .max_output_tokens
+            .map(|value| value.get());
         let extensions = Arc::new(extensions);
         let turn = erase_structured_turn(turn, Arc::clone(&extensions))?;
         let estimate = self
@@ -1454,9 +1472,13 @@ impl Lutum {
         input.validate()?;
         let extensions = self.apply_default_extensions(extensions);
         let mut turn = turn;
-        Self::apply_max_output_tokens_extension(&extensions, &mut turn.config.generation);
+        Self::resolve_generation_params(&extensions, &mut turn.config.generation);
         let request_budget = turn.config.budget;
-        let max_output_tokens = turn.config.generation.max_output_tokens;
+        let max_output_tokens = turn
+            .config
+            .generation
+            .max_output_tokens
+            .map(|value| value.get());
         // Extract availability before erase_structured_turn consumes the turn config.
         let availability = turn.config.tools.available.clone();
         let dynamic_names = turn
@@ -1510,7 +1532,7 @@ impl Lutum {
         mut request: CompletionRequest,
     ) -> Result<PendingCompletion, LutumError> {
         let extensions = self.apply_default_extensions(extensions);
-        Self::apply_completion_max_output_tokens_extension(&extensions, &mut request.options);
+        Self::resolve_completion_options(&extensions, &mut request.options);
         let estimate = self
             .estimate_completion_usage(&extensions, &request)
             .await?;
@@ -1546,9 +1568,12 @@ impl Lutum {
         O: StructuredOutput,
     {
         let extensions = self.apply_default_extensions(extensions);
-        Self::apply_max_output_tokens_extension(&extensions, &mut request.generation);
+        Self::resolve_generation_params(&extensions, &mut request.generation);
         let request_budget = request.budget;
-        let max_output_tokens = request.generation.max_output_tokens;
+        let max_output_tokens = request
+            .generation
+            .max_output_tokens
+            .map(|value| value.get());
         let request = erase_structured_completion_request(request)?;
         let estimate = self
             .estimate_structured_completion_usage(&extensions, &request, max_output_tokens)

@@ -356,8 +356,9 @@ println!("score={}, reason={}", report.score, report.explanation);
 ```
 
   "body-2" = ```markdown
-`JudgeEval` accepts the same builder methods as turn builders (`.temperature(...)`,
-`.max_output_tokens(...)`, `.budget(...)`, `.ext(...)`) so you can configure the judge call
+`JudgeEval` accepts the same generation and request-metadata builder methods as turn builders
+(`.temperature(...)`, `.top_p(...)`, `.max_output_tokens(...)`, `.generation_param(...)`,
+`.clear_generation_param::<T>()`, `.budget(...)`, `.ext(...)`) so you can configure the judge call
 independently of the main session.
 ```
 
