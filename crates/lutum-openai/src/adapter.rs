@@ -526,6 +526,14 @@ impl OpenAiAdapter {
                 replacement = Some(value);
             }
 
+            if let Some(value) = replacement.as_mut() {
+                normalize_empty_chat_assistant_message_content(value);
+            } else if matches!(message, ChatMessageParam::Assistant(_)) {
+                let mut value = serde_json::to_value(message).ok()?;
+                normalize_empty_chat_assistant_message_content(&mut value);
+                replacement = Some(value);
+            }
+
             replacement
         })
     }
@@ -3890,6 +3898,33 @@ fn add_cache_control_to_chat_message_value(value: &mut Value) -> bool {
     false
 }
 
+fn normalize_empty_chat_assistant_message_content(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if object.get("role").and_then(Value::as_str) != Some("assistant") {
+        return;
+    }
+    if object
+        .get("content")
+        .is_some_and(|content| !content.is_null())
+    {
+        return;
+    }
+    if object
+        .get("tool_calls")
+        .is_some_and(|tool_calls| !tool_calls_is_absent(tool_calls))
+    {
+        return;
+    }
+
+    object.insert("content".to_string(), Value::String(String::new()));
+}
+
+fn tool_calls_is_absent(value: &Value) -> bool {
+    value.is_null() || value.as_array().is_some_and(Vec::is_empty)
+}
+
 fn chat_text_part_with_cache_control(text: String) -> Value {
     serde_json::json!({
         "type": "text",
@@ -5506,6 +5541,84 @@ mod tests {
     }
 
     #[test]
+    fn chat_serialization_fills_empty_assistant_content_without_tool_calls() {
+        let adapter = test_openai_adapter("test-key").with_chat_completions();
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::Turn(Arc::new(OpenAiCommittedTurn {
+                request_id: Some("resp_1".into()),
+                model: "gpt-4.1".into(),
+                items: vec![OpenAiTurnItem::Reasoning {
+                    content: "think".into(),
+                    encrypted_content: None,
+                    id: None,
+                    status: None,
+                }],
+                finish_reason: FinishReason::Stop,
+                usage: Usage::zero(),
+            }))]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "gpt-4.1", None)
+            .unwrap();
+
+        assert!(matches!(
+            &prepared.body.messages[0],
+            ChatMessageParam::Assistant(ChatAssistantMessage {
+                content: None,
+                tool_calls: None,
+                ..
+            })
+        ));
+
+        let body = adapter
+            .serialize_chat_request_body(
+                &prepared.body,
+                &prepared.cache_map,
+                &RequestExtensions::new(),
+            )
+            .unwrap();
+
+        assert_eq!(body["messages"][0]["content"], "");
+    }
+
+    #[test]
+    fn chat_serialization_does_not_fill_empty_assistant_content_with_tool_calls() {
+        let adapter = test_openai_adapter("test-key").with_chat_completions();
+        let input = ModelInput::from_items(vec![ModelInputItem::ToolResult(ToolResult::new(
+            "call-1",
+            "weather",
+            RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
+            RawJson::parse("\"sunny\"").unwrap(),
+        ))]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "gpt-4.1", None)
+            .unwrap();
+
+        let body = adapter
+            .serialize_chat_request_body(
+                &prepared.body,
+                &prepared.cache_map,
+                &RequestExtensions::new(),
+            )
+            .unwrap();
+
+        assert!(body["messages"][0].get("content").is_none());
+        assert_eq!(
+            body["messages"][0]["tool_calls"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
     fn chat_message_json_serializer_can_replace_message_json() {
         fn add_provider_marker(message: &ChatMessageParam) -> Option<Value> {
             let mut value = serde_json::to_value(message).ok()?;
@@ -5535,6 +5648,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(body["messages"][0]["provider_marker"], "present");
+    }
+
+    #[test]
+    fn chat_message_json_serializer_null_assistant_content_is_normalized() {
+        fn null_assistant_content(message: &ChatMessageParam) -> Option<Value> {
+            let ChatMessageParam::Assistant(_) = message else {
+                return None;
+            };
+            Some(serde_json::json!({
+                "role": "assistant",
+                "content": null
+            }))
+        }
+
+        let adapter = test_openai_adapter("test-key")
+            .with_chat_message_json_serializer(null_assistant_content);
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::Turn(Arc::new(OpenAiCommittedTurn {
+                request_id: Some("resp_1".into()),
+                model: "gpt-4.1".into(),
+                items: vec![OpenAiTurnItem::Reasoning {
+                    content: "think".into(),
+                    encrypted_content: None,
+                    id: None,
+                    status: None,
+                }],
+                finish_reason: FinishReason::Stop,
+                usage: Usage::zero(),
+            }))]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "gpt-4.1", None)
+            .unwrap();
+
+        let body = adapter
+            .serialize_chat_request_body(
+                &prepared.body,
+                &prepared.cache_map,
+                &RequestExtensions::new(),
+            )
+            .unwrap();
+
+        assert_eq!(body["messages"][0]["content"], "");
     }
 
     #[test]
