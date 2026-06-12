@@ -72,6 +72,9 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    /// OpenAI-compatible extension used by llama-server and some local backends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub n: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

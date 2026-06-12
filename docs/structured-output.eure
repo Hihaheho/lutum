@@ -182,7 +182,7 @@ transcript model. If you need turn history and replay, use `Session::structured_
 
   "body" = ```markdown
 Both turn and completion builders accept inline generation parameters such as temperature, top_p,
-penalties, max output tokens, seed, and stop sequences:
+top_k, penalties, max output tokens, seed, and stop sequences:
 ```
 
   "rust-example" = ```rust

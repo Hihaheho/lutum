@@ -9,8 +9,8 @@ use lutum::{
     ErasedStructuredTurnEvent, ErasedStructuredTurnEventStream, ErasedTextTurnEvent,
     ErasedTextTurnEventStream, FinishReason, GenerationSetting, InputMessageRole, Lutum,
     MaxOutputTokens, ModelInput, ModelInputItem, RawJson, RequestExtensions, Session,
-    SharedPoolBudgetManager, SharedPoolBudgetOptions, TokenCount, TokenCounter, TopP, TurnAdapter,
-    Usage, UsageEstimate,
+    SharedPoolBudgetManager, SharedPoolBudgetOptions, TokenCount, TokenCounter, TopK, TopP,
+    TurnAdapter, Usage, UsageEstimate,
 };
 
 fn input() -> ModelInput {
@@ -30,6 +30,7 @@ fn budget() -> SharedPoolBudgetManager {
 struct RecordingTurnAdapter {
     text_max_output_tokens: Mutex<Vec<Option<u32>>>,
     text_top_p: Mutex<Vec<Option<f32>>>,
+    text_top_k: Mutex<Vec<Option<u32>>>,
     text_extension_max_output_tokens: Mutex<Vec<Option<u32>>>,
     structured_max_output_tokens: Mutex<Vec<Option<u32>>>,
 }
@@ -41,6 +42,10 @@ impl RecordingTurnAdapter {
 
     fn text_top_p(&self) -> Vec<Option<f32>> {
         self.text_top_p.lock().unwrap().clone()
+    }
+
+    fn text_top_k(&self) -> Vec<Option<u32>> {
+        self.text_top_k.lock().unwrap().clone()
     }
 
     fn text_extension_max_output_tokens(&self) -> Vec<Option<u32>> {
@@ -73,6 +78,10 @@ impl TurnAdapter for RecordingTurnAdapter {
             .lock()
             .unwrap()
             .push(turn.config.generation.top_p.map(|value| value.get()));
+        self.text_top_k
+            .lock()
+            .unwrap()
+            .push(turn.config.generation.top_k.map(|value| value.get()));
         self.text_extension_max_output_tokens.lock().unwrap().push(
             turn.extensions
                 .get::<GenerationSetting<MaxOutputTokens>>()
@@ -421,6 +430,21 @@ async fn top_p_generation_setting_applies_to_turns() {
         .unwrap();
 
     assert_eq!(adapter.text_top_p(), vec![Some(0.4)]);
+}
+
+#[tokio::test]
+async fn top_k_generation_setting_applies_to_turns() {
+    let adapter = Arc::new(RecordingTurnAdapter::default());
+    let ctx =
+        Lutum::new(Arc::clone(&adapter), budget()).with_generation_param(TopK::new(40).unwrap());
+
+    ctx.text_turn(input())
+        .generation_param(TopK::new(20).unwrap())
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(adapter.text_top_k(), vec![Some(20)]);
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use lutum_protocol::{
     AssistantTurn, CollectErrorKind, FrequencyPenalty, GenerationParamValue, GenerationSetting,
     MaxOutputTokens, NoTools, OperationKind, PresencePenalty, RequestBudget, RequestExtensions,
-    Seed, StopSequences, TopP, UncommittedAssistantTurn,
+    Seed, StopSequences, TopK, TopP, UncommittedAssistantTurn,
     conversation::ModelInput,
     emit_collect_error_enabled,
     llm::{
@@ -175,6 +175,11 @@ impl<'a> TextTurn<'a> {
 
     pub fn top_p(mut self, top_p: TopP) -> Self {
         self.turn.config.generation.top_p = Some(top_p);
+        self
+    }
+
+    pub fn top_k(mut self, top_k: TopK) -> Self {
+        self.turn.config.generation.top_k = Some(top_k);
         self
     }
 
@@ -483,6 +488,12 @@ impl<'a> SessionTextTurn<'a> {
     pub fn top_p(self, top_p: TopP) -> Self {
         Self {
             inner: self.inner.top_p(top_p),
+        }
+    }
+
+    pub fn top_k(self, top_k: TopK) -> Self {
+        Self {
+            inner: self.inner.top_k(top_k),
         }
     }
 
@@ -809,6 +820,11 @@ where
 
     pub fn top_p(mut self, top_p: TopP) -> Self {
         self.turn.config.generation.top_p = Some(top_p);
+        self
+    }
+
+    pub fn top_k(mut self, top_k: TopK) -> Self {
+        self.turn.config.generation.top_k = Some(top_k);
         self
     }
 
@@ -1347,6 +1363,12 @@ where
     pub fn top_p(self, top_p: TopP) -> Self {
         Self {
             inner: self.inner.top_p(top_p),
+        }
+    }
+
+    pub fn top_k(self, top_k: TopK) -> Self {
+        Self {
+            inner: self.inner.top_k(top_k),
         }
     }
 
@@ -1911,6 +1933,11 @@ where
         self
     }
 
+    pub fn top_k(mut self, top_k: TopK) -> Self {
+        self.turn.config.generation.top_k = Some(top_k);
+        self
+    }
+
     pub fn frequency_penalty(mut self, frequency_penalty: FrequencyPenalty) -> Self {
         self.turn.config.generation.frequency_penalty = Some(frequency_penalty);
         self
@@ -2202,6 +2229,12 @@ where
         }
     }
 
+    pub fn top_k(self, top_k: TopK) -> Self {
+        Self {
+            inner: self.inner.top_k(top_k),
+        }
+    }
+
     pub fn frequency_penalty(self, frequency_penalty: FrequencyPenalty) -> Self {
         Self {
             inner: self.inner.frequency_penalty(frequency_penalty),
@@ -2490,6 +2523,11 @@ where
 
     pub fn top_p(mut self, top_p: TopP) -> Self {
         self.turn.config.generation.top_p = Some(top_p);
+        self
+    }
+
+    pub fn top_k(mut self, top_k: TopK) -> Self {
+        self.turn.config.generation.top_k = Some(top_k);
         self
     }
 
@@ -2881,6 +2919,12 @@ where
     pub fn top_p(self, top_p: TopP) -> Self {
         Self {
             inner: self.inner.top_p(top_p),
+        }
+    }
+
+    pub fn top_k(self, top_k: TopK) -> Self {
+        Self {
+            inner: self.inner.top_k(top_k),
         }
     }
 
@@ -3294,6 +3338,11 @@ impl<'a> Completion<'a> {
         self
     }
 
+    pub fn top_k(mut self, top_k: TopK) -> Self {
+        self.request.options.top_k = Some(top_k);
+        self
+    }
+
     pub fn frequency_penalty(mut self, frequency_penalty: FrequencyPenalty) -> Self {
         self.request.options.frequency_penalty = Some(frequency_penalty);
         self
@@ -3462,6 +3511,11 @@ where
 
     pub fn top_p(mut self, top_p: TopP) -> Self {
         self.request.generation.top_p = Some(top_p);
+        self
+    }
+
+    pub fn top_k(mut self, top_k: TopK) -> Self {
+        self.request.generation.top_k = Some(top_k);
         self
     }
 

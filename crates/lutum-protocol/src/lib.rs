@@ -50,8 +50,8 @@ pub use llm::{
     StructuredTurn, StructuredTurnEvent, StructuredTurnEventStream,
     StructuredTurnEventStreamWithTools, StructuredTurnEventWithTools, Temperature,
     TemperatureError, TextTurn, TextTurnEvent, TextTurnEventStream, TextTurnEventStreamWithTools,
-    TextTurnEventWithTools, TokenCount, TokenCounter, TopP, TopPError, TurnAdapter, TurnConfig,
-    UsageRecoveryAdapter,
+    TextTurnEventWithTools, TokenCount, TokenCounter, TopK, TopKError, TopP, TopPError,
+    TurnAdapter, TurnConfig, UsageRecoveryAdapter,
 };
 pub use reducer::{
     CompletionReducer, CompletionReductionError, CompletionTurnResult, CompletionTurnState,

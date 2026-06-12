@@ -217,8 +217,8 @@ graph semantics or first-class branch structure at this stage.
 
 Execution config is shared across text and structured turns:
 
-- `GenerationParams` — temperature, top_p, frequency/presence penalties, max_output_tokens, seed,
-  stop sequences
+- `GenerationParams` — temperature, top_p, top_k, frequency/presence penalties,
+  max_output_tokens, seed, stop sequences
 - `TurnConfig<T>`
 - `ToolPolicy<T>`
 
@@ -320,8 +320,8 @@ There are now two completion-style APIs:
 Both return executable builders with the same inline request-metadata style as turn builders:
 
 - `.ext(...)` / `.extensions(...)`
-- `.temperature(...)`, `.top_p(...)`, `.frequency_penalty(...)`, `.presence_penalty(...)`,
-  `.max_output_tokens(...)`, `.stop_sequences(...)`, `.budget(...)`
+- `.temperature(...)`, `.top_p(...)`, `.top_k(...)`, `.frequency_penalty(...)`,
+  `.presence_penalty(...)`, `.max_output_tokens(...)`, `.stop_sequences(...)`, `.budget(...)`
 - `.collect()`, `.collect_with(...)`, `.stream()`
 
 `Lutum::structured_completion::<O>(...)` also supports `.system(...)`, `.seed(...)`,
@@ -330,6 +330,11 @@ Both return executable builders with the same inline request-metadata style as t
 Internally these builders still compile into `CompletionRequest` /
 `StructuredCompletionRequest<O>` and stream `CompletionEvent` /
 `StructuredCompletionEvent<O>`.
+
+OpenAI-compatible backend extensions are gated by `FeatureFlags`. `FeatureFlags::OPENAI`
+keeps the official OpenAI request shape, while `FeatureFlags::FULL` enables known compatible
+backend fields such as Chat Completions and legacy Completions `top_k`. The Responses API path
+ignores `top_k`.
 
 Like turn builders, the model is selected by the adapter's configured default plus request hooks,
 not by a per-request `ModelName` argument.

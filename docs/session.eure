@@ -206,16 +206,17 @@ independently:
 ```
 
   "rust-example" = ```rust
-use lutum::{MaxOutputTokens, Session, Temperature, TopP};
+use lutum::{MaxOutputTokens, Session, Temperature, TopK, TopP};
 
 let mut session = Session::new()
     .with_generation_param(Temperature::new(0.3)?)
     .with_generation_param(TopP::new(0.9)?)
+    .with_generation_param(TopK::new(40)?)
     .with_generation_param(MaxOutputTokens::new(1024));
 
 session.push_system("You are a code review assistant.");
 
-// This turn inherits temperature and max output tokens, but omits top_p.
+// This turn inherits temperature, top_k, and max output tokens, but omits top_p.
 let result = session
     .text_turn()
     .clear_generation_param::<TopP>()

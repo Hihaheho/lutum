@@ -8,7 +8,7 @@ use lutum::{
     MessageContent, ModelInput, ModelInputItem, ModelName, ModelNameError, NonEmpty, OperationKind,
     RawJson, RequestBudget, RequestExtensions, SharedPoolBudgetManager, SharedPoolBudgetOptions,
     Temperature, TextTurnReducer, TextTurnReducerWithTools, ToolAvailability, ToolConstraints,
-    ToolMetadata, ToolRequirement, ToolResult, TurnAdapter, Usage, UsageEstimate,
+    ToolMetadata, ToolRequirement, ToolResult, TopK, TurnAdapter, Usage, UsageEstimate,
     UsageRecoveryAdapter,
 };
 use schemars::JsonSchema;
@@ -143,6 +143,7 @@ fn typed_public_api_compiles_and_constructs_requests() {
         .text_turn(input.clone())
         .tools::<Tools>()
         .available_tools(vec![ToolsSelector::Weather])
+        .top_k(TopK::new(40).unwrap())
         .budget(RequestBudget::from_tokens(256));
     let _structured = ctx
         .structured_turn::<Summary>(input.clone())

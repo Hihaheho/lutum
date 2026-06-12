@@ -711,6 +711,7 @@ fn messages_count_tokens_body(request: &MessagesRequest) -> Result<Value, Claude
         map.remove("stream");
         map.remove("temperature");
         map.remove("top_p");
+        map.remove("top_k");
         map.remove("stop_sequences");
     }
     Ok(body)
@@ -889,6 +890,7 @@ fn build_messages_request(
                 .temperature
                 .map(|temperature| temperature.get()),
             top_p: config.generation.top_p.map(|top_p| top_p.get()),
+            top_k: config.generation.top_k.map(|top_k| top_k.get()),
             tools,
             tool_choice: build_tool_choice(config),
             thinking: thinking_budget.map(|budget_tokens| ThinkingConfig {
@@ -2136,7 +2138,7 @@ mod tests {
         AdapterToolChoice, AdapterToolDefinition, AdapterTurnConfig, EphemeralInputIndices,
         ErasedTextTurnEvent, GenerationParams, MaxOutputTokens, ModelInput, ModelInputItem,
         ModelName, NonEmpty, OperationKind, ParseErrorStage, RawTelemetryConfig,
-        RequestErrorDebugInfo, RequestErrorKind, RequestExtensions, StopSequences, TopP,
+        RequestErrorDebugInfo, RequestErrorKind, RequestExtensions, StopSequences, TopK, TopP,
         UsageRecoveryAdapter, budget::Usage,
     };
     use lutum_trace::RawTraceEntry;
@@ -2322,6 +2324,7 @@ mod tests {
         assert!(body.get("stream").is_none());
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
+        assert!(body.get("top_k").is_none());
     }
 
     #[test]
@@ -2332,6 +2335,7 @@ mod tests {
             generation: GenerationParams {
                 temperature: Some(lutum_protocol::Temperature::new(0.4).unwrap()),
                 top_p: Some(TopP::new(0.8).unwrap()),
+                top_k: Some(TopK::new(40).unwrap()),
                 max_output_tokens: Some(MaxOutputTokens::new(32)),
                 stop_sequences: Some(StopSequences::new(["END", "STOP"])),
                 ..GenerationParams::default()
@@ -2346,6 +2350,7 @@ mod tests {
 
         assert_eq!(request.temperature, Some(0.4));
         assert_eq!(request.top_p, Some(0.8));
+        assert_eq!(request.top_k, Some(40));
         assert_eq!(request.max_tokens, 32);
         assert_eq!(
             request.stop_sequences,
@@ -2353,6 +2358,7 @@ mod tests {
         );
         assert!((body["temperature"].as_f64().unwrap() - 0.4).abs() < 1e-6);
         assert!((body["top_p"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+        assert_eq!(body["top_k"], 40);
         assert_eq!(body["max_tokens"], 32);
         assert_eq!(body["stop_sequences"], serde_json::json!(["END", "STOP"]));
     }

@@ -92,6 +92,42 @@ where
     }
 }
 
+/// Optional request features for OpenAI-compatible backends.
+///
+/// ```rust,ignore
+/// # use lutum_openai::{FeatureFlags, OpenAiAdapter};
+/// let adapter = OpenAiAdapter::new("local")
+///     .with_base_url("http://127.0.0.1:8080/v1")
+///     .with_chat_completions()
+///     .with_feature_flags(FeatureFlags::FULL);
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct FeatureFlags {
+    /// Enable `top_k` for OpenAI-compatible Chat Completions and legacy
+    /// Completions backends. The Responses API path ignores `top_k`.
+    pub top_k: bool,
+}
+
+impl FeatureFlags {
+    /// Official OpenAI API-compatible request shape.
+    pub const OPENAI: Self = Self { top_k: false };
+
+    /// All known OpenAI-compatible backend extensions.
+    pub const FULL: Self = Self { top_k: true };
+
+    pub const fn with_top_k(mut self, top_k: bool) -> Self {
+        self.top_k = top_k;
+        self
+    }
+}
+
+impl Default for FeatureFlags {
+    fn default() -> Self {
+        Self::OPENAI
+    }
+}
+
 #[lutum_macros::hooks]
 pub trait OpenAiHooks {
     #[hook(singleton)]
@@ -218,6 +254,7 @@ pub struct OpenAiAdapter {
     sse_event_recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
     headers_customizer: Option<Arc<dyn HeadersCustomizer>>,
     use_chat_completions: bool,
+    feature_flags: FeatureFlags,
 }
 
 #[derive(Clone, Debug)]
@@ -285,6 +322,7 @@ impl OpenAiAdapter {
             sse_event_recovery_hook: None,
             headers_customizer: None,
             use_chat_completions: false,
+            feature_flags: FeatureFlags::OPENAI,
         }
     }
 
@@ -292,6 +330,11 @@ impl OpenAiAdapter {
     /// instead of the Responses API (`/responses`).
     pub fn with_chat_completions(mut self) -> Self {
         self.use_chat_completions = true;
+        self
+    }
+
+    pub fn with_feature_flags(mut self, feature_flags: FeatureFlags) -> Self {
+        self.feature_flags = feature_flags;
         self
     }
 
@@ -426,7 +469,8 @@ impl OpenAiAdapter {
         model: &str,
         reasoning_effort: Option<OpenAiReasoningEffort>,
     ) -> Result<PreparedChatRequest, OpenAiError> {
-        let (mut body, cache_map) = build_chat_request(input, config, model, reasoning_effort)?;
+        let (mut body, cache_map) =
+            build_chat_request(input, config, model, reasoning_effort, self.feature_flags)?;
         if let Some(serializer) = self.fallback_serializer.as_ref() {
             serializer.apply_to_chat(&mut body);
         }
@@ -438,7 +482,7 @@ impl OpenAiAdapter {
         request: &ProtocolCompletionRequest,
         model: &str,
     ) -> CompletionRequest {
-        let mut body = build_completion_request(request, model);
+        let mut body = build_completion_request(request, model, self.feature_flags);
         if let Some(serializer) = self.fallback_serializer.as_ref() {
             serializer.apply_to_completion(&mut body);
         }
@@ -1308,7 +1352,11 @@ fn build_responses_request(
     })
 }
 
-fn build_completion_request(request: &ProtocolCompletionRequest, model: &str) -> CompletionRequest {
+fn build_completion_request(
+    request: &ProtocolCompletionRequest,
+    model: &str,
+    feature_flags: FeatureFlags,
+) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
         prompt: request.prompt.clone(),
@@ -1326,6 +1374,11 @@ fn build_completion_request(request: &ProtocolCompletionRequest, model: &str) ->
             .options
             .presence_penalty
             .map(|presence_penalty| presence_penalty.get()),
+        top_k: feature_flags
+            .top_k
+            .then_some(request.options.top_k)
+            .flatten()
+            .map(|top_k| top_k.get()),
         max_tokens: request
             .options
             .max_output_tokens
@@ -3199,6 +3252,7 @@ fn build_chat_request(
     config: &AdapterTurnConfig,
     model: &str,
     reasoning_effort: Option<OpenAiReasoningEffort>,
+    feature_flags: FeatureFlags,
 ) -> Result<(crate::chat::ChatCompletionRequest, ChatCacheMap), OpenAiError> {
     let compilation = convert_model_input_to_chat_messages(input)?;
     let cache_map = build_chat_cache_map(&compilation);
@@ -3237,6 +3291,11 @@ fn build_chat_request(
             }),
             temperature: config.generation.temperature.map(|t| t.get()),
             top_p: config.generation.top_p.map(|top_p| top_p.get()),
+            top_k: feature_flags
+                .top_k
+                .then_some(config.generation.top_k)
+                .flatten()
+                .map(|top_k| top_k.get()),
             frequency_penalty: config
                 .generation
                 .frequency_penalty
@@ -4310,7 +4369,7 @@ mod tests {
         ErasedStructuredTurnEvent, ErasedTextTurnEvent, FrequencyPenalty, GenerationParams,
         InputMessageRole, MaxOutputTokens, ModelInput, ModelInputItem, ModelName, NonEmpty,
         ParseErrorStage, PresencePenalty, RawTelemetryConfig, RequestErrorDebugInfo,
-        RequestErrorKind, RequestExtensions, Seed, StopSequences, ToolResult, TopP,
+        RequestErrorKind, RequestExtensions, Seed, StopSequences, ToolResult, TopK, TopP,
     };
     use lutum_trace::RawTraceEntry;
 
@@ -5577,6 +5636,7 @@ mod tests {
             generation: GenerationParams {
                 temperature: Some(lutum_protocol::Temperature::new(0.3).unwrap()),
                 top_p: Some(TopP::new(0.7).unwrap()),
+                top_k: None,
                 frequency_penalty: Some(FrequencyPenalty::new(0.2).unwrap()),
                 presence_penalty: Some(PresencePenalty::new(-0.1).unwrap()),
                 max_output_tokens: Some(MaxOutputTokens::new(128)),
@@ -5604,6 +5664,54 @@ mod tests {
                 "STOP".to_string()
             ]))
         );
+    }
+
+    #[test]
+    fn prepare_chat_request_omits_top_k_by_default() {
+        let adapter = test_openai_adapter("test-key").with_chat_completions();
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams {
+                top_k: Some(TopK::new(40).unwrap()),
+                ..GenerationParams::default()
+            },
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "gpt-4.1", None)
+            .unwrap();
+        let body = serde_json::to_value(&prepared.body).unwrap();
+
+        assert_eq!(prepared.body.top_k, None);
+        assert!(body.get("top_k").is_none());
+    }
+
+    #[test]
+    fn prepare_chat_request_serializes_top_k_with_full_feature_flags() {
+        let adapter = test_openai_adapter("test-key")
+            .with_chat_completions()
+            .with_feature_flags(FeatureFlags::FULL);
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::text(InputMessageRole::User, "hello")]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams {
+                top_k: Some(TopK::new(40).unwrap()),
+                ..GenerationParams::default()
+            },
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "llama", None)
+            .unwrap();
+        let body = serde_json::to_value(&prepared.body).unwrap();
+
+        assert_eq!(prepared.body.top_k, Some(40));
+        assert_eq!(body["top_k"], 40);
     }
 
     #[test]
@@ -5635,6 +5743,7 @@ mod tests {
         let request = ProtocolCompletionRequest::new("hello").with_options(CompletionOptions {
             temperature: Some(lutum_protocol::Temperature::new(0.4).unwrap()),
             top_p: Some(TopP::new(0.8).unwrap()),
+            top_k: Some(TopK::new(40).unwrap()),
             frequency_penalty: Some(FrequencyPenalty::new(0.2).unwrap()),
             presence_penalty: Some(PresencePenalty::new(-0.1).unwrap()),
             max_output_tokens: Some(MaxOutputTokens::new(32)),
@@ -5646,11 +5755,27 @@ mod tests {
 
         assert_eq!(body.temperature, Some(0.4));
         assert_eq!(body.top_p, Some(0.8));
+        assert_eq!(body.top_k, None);
         assert_eq!(body.frequency_penalty, Some(0.2));
         assert_eq!(body.presence_penalty, Some(-0.1));
         assert_eq!(body.max_tokens, Some(32));
         assert_eq!(body.seed, Some(42));
         assert_eq!(body.stop, vec!["END".to_string(), "STOP".to_string()]);
+    }
+
+    #[test]
+    fn prepare_completion_request_serializes_top_k_with_full_feature_flags() {
+        let adapter = test_openai_adapter("test-key").with_feature_flags(FeatureFlags::FULL);
+        let request = ProtocolCompletionRequest::new("hello").with_options(CompletionOptions {
+            top_k: Some(TopK::new(40).unwrap()),
+            ..CompletionOptions::default()
+        });
+
+        let body = adapter.prepare_completion_request(&request, "llama");
+        let json = serde_json::to_value(&body).unwrap();
+
+        assert_eq!(body.top_k, Some(40));
+        assert_eq!(json["top_k"], 40);
     }
 
     #[test]
@@ -5663,6 +5788,7 @@ mod tests {
 
         assert!(json.get("temperature").is_none());
         assert!(json.get("top_p").is_none());
+        assert!(json.get("top_k").is_none());
         assert!(json.get("frequency_penalty").is_none());
         assert!(json.get("presence_penalty").is_none());
         assert!(json.get("max_tokens").is_none());

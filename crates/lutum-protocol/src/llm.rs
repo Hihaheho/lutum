@@ -139,6 +139,7 @@ pub enum ModelNameError {
 pub struct GenerationParams {
     pub temperature: Option<Temperature>,
     pub top_p: Option<TopP>,
+    pub top_k: Option<TopK>,
     pub frequency_penalty: Option<FrequencyPenalty>,
     pub presence_penalty: Option<PresencePenalty>,
     pub max_output_tokens: Option<MaxOutputTokens>,
@@ -155,6 +156,7 @@ impl GenerationParams {
     pub fn resolve_with_extensions(&mut self, extensions: &RequestExtensions) {
         resolve_generation_param::<Temperature>(self, extensions);
         resolve_generation_param::<TopP>(self, extensions);
+        resolve_generation_param::<TopK>(self, extensions);
         resolve_generation_param::<FrequencyPenalty>(self, extensions);
         resolve_generation_param::<PresencePenalty>(self, extensions);
         resolve_generation_param::<MaxOutputTokens>(self, extensions);
@@ -609,6 +611,50 @@ impl GenerationParamValue for TopP {
 
 impl generation_param_seal::Sealed for TopP {}
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TopK(u32);
+
+impl TopK {
+    pub const MIN: u32 = 1;
+
+    pub fn new(value: u32) -> Result<Self, TopKError> {
+        if value < Self::MIN {
+            return Err(TopKError::OutOfRange { value });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for TopK {
+    type Error = TopKError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+#[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
+pub enum TopKError {
+    #[error("top_k {value} must be at least 1")]
+    OutOfRange { value: u32 },
+}
+
+impl GenerationParamValue for TopK {
+    fn get(generation: &GenerationParams) -> Option<Self> {
+        generation.top_k
+    }
+
+    fn set(generation: &mut GenerationParams, value: Self) {
+        generation.top_k = Some(value);
+    }
+}
+
+impl generation_param_seal::Sealed for TopK {}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrequencyPenalty(f32);
 
@@ -820,6 +866,7 @@ impl CompletionRequest {
 pub struct CompletionOptions {
     pub temperature: Option<Temperature>,
     pub top_p: Option<TopP>,
+    pub top_k: Option<TopK>,
     pub frequency_penalty: Option<FrequencyPenalty>,
     pub presence_penalty: Option<PresencePenalty>,
     pub max_output_tokens: Option<MaxOutputTokens>,
@@ -837,6 +884,7 @@ impl CompletionOptions {
         let mut generation = GenerationParams {
             temperature: self.temperature,
             top_p: self.top_p,
+            top_k: self.top_k,
             frequency_penalty: self.frequency_penalty,
             presence_penalty: self.presence_penalty,
             max_output_tokens: self.max_output_tokens,
@@ -846,6 +894,7 @@ impl CompletionOptions {
         .resolved_with_extensions(extensions);
         self.temperature = generation.temperature.take();
         self.top_p = generation.top_p.take();
+        self.top_k = generation.top_k.take();
         self.frequency_penalty = generation.frequency_penalty.take();
         self.presence_penalty = generation.presence_penalty.take();
         self.max_output_tokens = generation.max_output_tokens.take();
@@ -1935,11 +1984,13 @@ mod tests {
         let mut extensions = RequestExtensions::new();
         extensions.insert(GenerationSetting::set(MaxOutputTokens::new(32)));
         extensions.insert(GenerationSetting::set(TopP::new(0.7).unwrap()));
+        extensions.insert(GenerationSetting::set(TopK::new(40).unwrap()));
 
         let resolved = GenerationParams::default().resolved_with_extensions(&extensions);
 
         assert_eq!(resolved.max_output_tokens, Some(MaxOutputTokens::new(32)));
         assert_eq!(resolved.top_p, Some(TopP::new(0.7).unwrap()));
+        assert_eq!(resolved.top_k, Some(TopK::new(40).unwrap()));
     }
 
     #[test]
