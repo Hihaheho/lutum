@@ -406,6 +406,9 @@ pub struct ChatAssistantMessage {
     pub content: Option<AssistantContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
+    /// Reasoning tokens accepted by some OpenAI-compatible providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio: Option<ChatAssistantAudioRef>,
     #[serde(skip_serializing_if = "Option::is_none")]

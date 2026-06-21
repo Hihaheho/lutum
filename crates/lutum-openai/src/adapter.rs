@@ -107,17 +107,32 @@ pub struct FeatureFlags {
     /// Enable `top_k` for OpenAI-compatible Chat Completions and legacy
     /// Completions backends. The Responses API path ignores `top_k`.
     pub top_k: bool,
+    /// Preserve assistant reasoning items as `reasoning` fields in Chat
+    /// Completions messages. This is for compatible backends that round-trip
+    /// visible thinking/reasoning outside the official OpenAI request shape.
+    pub chat_completions_reasoning_replay: bool,
 }
 
 impl FeatureFlags {
     /// Official OpenAI API-compatible request shape.
-    pub const OPENAI: Self = Self { top_k: false };
+    pub const OPENAI: Self = Self {
+        top_k: false,
+        chat_completions_reasoning_replay: false,
+    };
 
     /// All known OpenAI-compatible backend extensions.
-    pub const FULL: Self = Self { top_k: true };
+    pub const FULL: Self = Self {
+        top_k: true,
+        chat_completions_reasoning_replay: true,
+    };
 
     pub const fn with_top_k(mut self, top_k: bool) -> Self {
         self.top_k = top_k;
+        self
+    }
+
+    pub const fn with_chat_completions_reasoning_replay(mut self, enabled: bool) -> Self {
+        self.chat_completions_reasoning_replay = enabled;
         self
     }
 }
@@ -3262,7 +3277,7 @@ fn build_chat_request(
     reasoning_effort: Option<OpenAiReasoningEffort>,
     feature_flags: FeatureFlags,
 ) -> Result<(crate::chat::ChatCompletionRequest, ChatCacheMap), OpenAiError> {
-    let compilation = convert_model_input_to_chat_messages(input)?;
+    let compilation = convert_model_input_to_chat_messages(input, feature_flags)?;
     let cache_map = build_chat_cache_map(&compilation);
     let tools: Vec<crate::chat::ChatTool> = config
         .tools
@@ -3349,6 +3364,7 @@ fn build_chat_request(
 /// Convert a `ModelInput` to a list of `ChatMessageParam` for the Chat Completions API.
 fn convert_model_input_to_chat_messages(
     input: &ModelInput,
+    feature_flags: FeatureFlags,
 ) -> Result<ChatCompilation, OpenAiError> {
     let mut compilation = ChatCompilation::default();
     let mut pending_assistant: Option<PendingChatAssistant> = None;
@@ -3393,8 +3409,14 @@ fn convert_model_input_to_chat_messages(
                         push_source_index(&mut pending.sources, source_index);
                         pending.message.refusal = Some(text.clone());
                     }
-                    AssistantInputItem::Reasoning(_) => {
-                        // Reasoning items are not sent in chat completions format.
+                    AssistantInputItem::Reasoning(text) => {
+                        if feature_flags.chat_completions_reasoning_replay {
+                            let pending = pending_chat_assistant(&mut pending_assistant);
+                            push_source_index(&mut pending.sources, source_index);
+                            push_assistant_reasoning_content(&mut pending.message, text);
+                        } else {
+                            // Reasoning items are not part of the official Chat Completions shape.
+                        }
                     }
                 }
             }
@@ -3413,7 +3435,12 @@ fn convert_model_input_to_chat_messages(
                     .downcast_ref::<OpenAiCommittedTurn>()
                 {
                     record_openai_turn_tool_calls(openai_turn, &mut replayed_tool_call_ids);
-                    emit_openai_turn_as_chat_messages(openai_turn, &mut compilation, source_index);
+                    emit_openai_turn_as_chat_messages(
+                        openai_turn,
+                        &mut compilation,
+                        source_index,
+                        feature_flags,
+                    );
                 } else {
                     record_turn_view_tool_calls(
                         committed_turn.as_ref(),
@@ -3423,6 +3450,7 @@ fn convert_model_input_to_chat_messages(
                         committed_turn.as_ref(),
                         &mut compilation,
                         source_index,
+                        feature_flags,
                     );
                 }
             }
@@ -3453,6 +3481,7 @@ fn push_chat_tool_result(
             ChatMessageParam::Assistant(ChatAssistantMessage {
                 content: None,
                 refusal: None,
+                reasoning: None,
                 audio: None,
                 name: None,
                 tool_calls: Some(vec![ChatMessageToolCall::Function(
@@ -3522,6 +3551,7 @@ fn pending_chat_assistant(pending: &mut Option<PendingChatAssistant>) -> &mut Pe
         message: ChatAssistantMessage {
             content: None,
             refusal: None,
+            reasoning: None,
             audio: None,
             name: None,
             tool_calls: None,
@@ -3618,6 +3648,14 @@ fn push_assistant_text_content(msg: &mut ChatAssistantMessage, text: &str) {
     });
 }
 
+fn push_assistant_reasoning_content(msg: &mut ChatAssistantMessage, text: &str) {
+    let existing = msg.reasoning.take();
+    msg.reasoning = Some(match existing {
+        Some(existing) => format!("{existing}{text}"),
+        None => text.to_string(),
+    });
+}
+
 fn push_assistant_image_content(msg: &mut ChatAssistantMessage, image: &Image) {
     let existing = msg.content.take();
     msg.content = Some(match existing {
@@ -3655,20 +3693,26 @@ fn chat_image_url(image: &Image) -> ImageUrl {
 /// Convert an `OpenAiCommittedTurn` to one or more `ChatMessageParam` entries.
 ///
 /// Text and tool calls are merged into a single assistant message. Reasoning
-/// items are silently dropped — the Chat Completions API does not accept them.
+/// items are emitted only when the Chat Completions reasoning replay extension is enabled.
 fn emit_openai_turn_as_chat_messages(
     turn: &OpenAiCommittedTurn,
     compilation: &mut ChatCompilation,
     source_index: usize,
+    feature_flags: FeatureFlags,
 ) {
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut tool_calls: Vec<ChatMessageToolCall> = Vec::new();
 
     for item in &turn.items {
         match item {
             OpenAiTurnItem::Text { content } => text.push_str(content),
             OpenAiTurnItem::Refusal { content } => text.push_str(content),
-            OpenAiTurnItem::Reasoning { .. } => {}
+            OpenAiTurnItem::Reasoning { content, .. } => {
+                if feature_flags.chat_completions_reasoning_replay {
+                    reasoning.push_str(content);
+                }
+            }
             OpenAiTurnItem::ToolCall {
                 id,
                 name,
@@ -3695,6 +3739,11 @@ fn emit_openai_turn_as_chat_messages(
                 Some(AssistantContent::Text(text))
             },
             refusal: None,
+            reasoning: if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            },
             audio: None,
             name: None,
             tool_calls: if tool_calls.is_empty() {
@@ -3713,8 +3762,10 @@ fn emit_turn_view_as_chat_messages(
     turn: &dyn TurnView,
     compilation: &mut ChatCompilation,
     source_index: usize,
+    feature_flags: FeatureFlags,
 ) {
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut tool_calls: Vec<ChatMessageToolCall> = Vec::new();
 
     for index in 0..turn.item_count() {
@@ -3723,6 +3774,10 @@ fn emit_turn_view_as_chat_messages(
         };
         if let Some(t) = item.as_text().or_else(|| item.as_refusal()) {
             text.push_str(t);
+        } else if let Some(t) = item.as_reasoning() {
+            if feature_flags.chat_completions_reasoning_replay {
+                reasoning.push_str(t);
+            }
         } else if let Some(tc) = item.as_tool_call() {
             tool_calls.push(ChatMessageToolCall::Function(ChatMessageFunctionToolCall {
                 id: tc.id.as_str().to_string(),
@@ -3744,6 +3799,11 @@ fn emit_turn_view_as_chat_messages(
                 Some(AssistantContent::Text(text))
             },
             refusal: None,
+            reasoning: if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            },
             audio: None,
             name: None,
             tool_calls: if tool_calls.is_empty() {
@@ -5569,6 +5629,7 @@ mod tests {
             &prepared.body.messages[0],
             ChatMessageParam::Assistant(ChatAssistantMessage {
                 content: None,
+                reasoning: None,
                 tool_calls: None,
                 ..
             })
@@ -5583,6 +5644,56 @@ mod tests {
             .unwrap();
 
         assert_eq!(body["messages"][0]["content"], "");
+        assert!(body["messages"][0].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn chat_serialization_preserves_reasoning_with_full_feature_flags() {
+        let adapter = test_openai_adapter("test-key")
+            .with_chat_completions()
+            .with_feature_flags(FeatureFlags::FULL);
+        let input =
+            ModelInput::from_items(vec![ModelInputItem::Turn(Arc::new(OpenAiCommittedTurn {
+                request_id: Some("resp_1".into()),
+                model: "gpt-4.1".into(),
+                items: vec![OpenAiTurnItem::Reasoning {
+                    content: "think".into(),
+                    encrypted_content: None,
+                    id: None,
+                    status: None,
+                }],
+                finish_reason: FinishReason::Stop,
+                usage: Usage::zero(),
+            }))]);
+        let config = AdapterTurnConfig {
+            generation: GenerationParams::default(),
+            tools: Vec::new(),
+            tool_choice: AdapterToolChoice::Auto,
+        };
+        let prepared = adapter
+            .prepare_chat_request(&input, &config, "gpt-4.1", None)
+            .unwrap();
+
+        assert!(matches!(
+            &prepared.body.messages[0],
+            ChatMessageParam::Assistant(ChatAssistantMessage {
+                content: None,
+                reasoning: Some(reasoning),
+                tool_calls: None,
+                ..
+            }) if reasoning == "think"
+        ));
+
+        let body = adapter
+            .serialize_chat_request_body(
+                &prepared.body,
+                &prepared.cache_map,
+                &RequestExtensions::new(),
+            )
+            .unwrap();
+
+        assert_eq!(body["messages"][0]["content"], "");
+        assert_eq!(body["messages"][0]["reasoning"], "think");
     }
 
     #[test]
@@ -6173,7 +6284,8 @@ mod tests {
             }),
         ]);
 
-        let compilation = convert_model_input_to_chat_messages(&input).unwrap();
+        let compilation =
+            convert_model_input_to_chat_messages(&input, FeatureFlags::OPENAI).unwrap();
         let messages = compilation.messages;
 
         let ChatMessageParam::User(user_message) = &messages[0] else {
@@ -6217,7 +6329,8 @@ mod tests {
             RawJson::from_serializable(&tool_output).unwrap(),
         ))]);
 
-        let compilation = convert_model_input_to_chat_messages(&input).unwrap();
+        let compilation =
+            convert_model_input_to_chat_messages(&input, FeatureFlags::OPENAI).unwrap();
         let messages = compilation.messages;
 
         assert!(matches!(

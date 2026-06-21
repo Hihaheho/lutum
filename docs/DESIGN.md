@@ -333,8 +333,8 @@ Internally these builders still compile into `CompletionRequest` /
 
 OpenAI-compatible backend extensions are gated by `FeatureFlags`. `FeatureFlags::OPENAI`
 keeps the official OpenAI request shape, while `FeatureFlags::FULL` enables known compatible
-backend fields such as Chat Completions and legacy Completions `top_k`. The Responses API path
-ignores `top_k`.
+backend fields such as Chat Completions and legacy Completions `top_k`, plus Chat Completions
+reasoning replay. The Responses API path ignores `top_k`.
 
 Like turn builders, the model is selected by the adapter's configured default plus request hooks,
 not by a per-request `ModelName` argument.
