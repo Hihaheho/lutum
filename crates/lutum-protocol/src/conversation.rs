@@ -195,7 +195,7 @@ impl ModelInputItem {
     pub fn tool_result_parts(
         id: impl Into<ToolCallId>,
         name: impl Into<ToolName>,
-        arguments: RawJson,
+        arguments: impl Into<ToolArguments>,
         result: RawJson,
     ) -> Self {
         Self::ToolResult(ToolResult::new(id, name, arguments, result))
@@ -302,7 +302,7 @@ pub enum AssistantInputItem {
 pub struct ToolResult {
     pub id: ToolCallId,
     pub name: ToolName,
-    pub arguments: RawJson,
+    pub arguments: ToolArguments,
     pub result: RawJson,
 }
 
@@ -312,13 +312,13 @@ impl ToolResult {
     pub fn new(
         id: impl Into<ToolCallId>,
         name: impl Into<ToolName>,
-        arguments: RawJson,
+        arguments: impl Into<ToolArguments>,
         result: RawJson,
     ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
-            arguments,
+            arguments: arguments.into(),
             result,
         }
     }
@@ -336,15 +336,19 @@ impl ToolResult {
 pub struct ToolMetadata {
     pub id: ToolCallId,
     pub name: ToolName,
-    pub arguments: RawJson,
+    pub arguments: ToolArguments,
 }
 
 impl ToolMetadata {
-    pub fn new(id: impl Into<ToolCallId>, name: impl Into<ToolName>, arguments: RawJson) -> Self {
+    pub fn new(
+        id: impl Into<ToolCallId>,
+        name: impl Into<ToolName>,
+        arguments: impl Into<ToolArguments>,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
-            arguments,
+            arguments: arguments.into(),
         }
     }
 
@@ -398,12 +402,12 @@ impl AssistantTurn {
     pub fn tool_call(
         id: impl Into<ToolCallId>,
         name: impl Into<ToolName>,
-        arguments: RawJson,
+        arguments: impl Into<ToolArguments>,
     ) -> Self {
         Self::new(NonEmpty::one(AssistantTurnItem::ToolCall {
             id: id.into(),
             name: name.into(),
-            arguments,
+            arguments: arguments.into(),
         }))
     }
 
@@ -483,7 +487,7 @@ pub enum AssistantTurnItem {
     ToolCall {
         id: ToolCallId,
         name: ToolName,
-        arguments: RawJson,
+        arguments: ToolArguments,
     },
 }
 
@@ -590,9 +594,42 @@ pub enum AssistantTurnInputError {
     #[error("assistant turn tool call `{id}` received mismatched arguments")]
     MismatchedToolArguments {
         id: ToolCallId,
-        expected: RawJson,
-        actual: RawJson,
+        expected: ToolArguments,
+        actual: ToolArguments,
     },
+}
+
+/// Raw model-authored tool arguments. Unlike `RawJson`, these may be invalid JSON.
+/// Serialized as a string so malformed output and whitespace survive persistence.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolArguments(String);
+
+impl ToolArguments {
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+    pub fn get(&self) -> &str {
+        &self.0
+    }
+    pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        serde_json::from_str(self.get())
+    }
+    pub fn validate(&self) -> Result<RawJson, serde_json::Error> {
+        RawJson::parse(self.0.clone())
+    }
+}
+
+impl From<RawJson> for ToolArguments {
+    fn from(value: RawJson) -> Self {
+        Self::new(value.get())
+    }
+}
+
+impl fmt::Display for ToolArguments {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.get())
+    }
 }
 
 #[derive(Serialize, Deserialize)]

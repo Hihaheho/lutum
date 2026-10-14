@@ -7323,6 +7323,15 @@ where
                 }
                 ReadyToolNameClass::Available => {
                     let original_metadata = metadata.clone();
+                    if let Err(source) = metadata.arguments.validate() {
+                        let error = lutum_protocol::ToolCallError::Deserialize {
+                            name: metadata.name.as_str().to_string(),
+                            source,
+                        };
+                        return Ok(TextTurnEventWithTools::ToolCallIssue(
+                            RecoverableToolCallIssue::from_tool_call_error(metadata, error),
+                        ));
+                    }
                     match T::parse_tool_call(metadata) {
                         Ok(tool_call) => Ok(TextTurnEventWithTools::ToolCallReady(tool_call)),
                         // All current toolset parse errors are model-authored and recoverable here.
@@ -7366,10 +7375,14 @@ where
         ErasedStructuredTurnEvent::StructuredOutputChunk { json_delta } => {
             Ok(StructuredTurnEvent::StructuredOutputChunk { json_delta })
         }
-        ErasedStructuredTurnEvent::StructuredOutputReady(raw) => {
-            Ok(StructuredTurnEvent::StructuredOutputReady(
-                raw.deserialize().map_err(AgentError::structured_output)?,
-            ))
+        ErasedStructuredTurnEvent::StructuredOutputReady(raw) => Ok(match raw.deserialize() {
+            Ok(value) => StructuredTurnEvent::StructuredOutputReady(value),
+            Err(error) => StructuredTurnEvent::StructuredOutputIssue(
+                lutum_protocol::structured::StructuredOutputIssue::new(raw.get(), error),
+            ),
+        }),
+        ErasedStructuredTurnEvent::StructuredOutputIssue(issue) => {
+            Ok(StructuredTurnEvent::StructuredOutputIssue(issue))
         }
         ErasedStructuredTurnEvent::ReasoningDelta { delta } => {
             Ok(StructuredTurnEvent::ReasoningDelta { delta })
@@ -7419,10 +7432,14 @@ where
         ErasedStructuredTurnEvent::StructuredOutputChunk { json_delta } => {
             Ok(StructuredTurnEventWithTools::StructuredOutputChunk { json_delta })
         }
-        ErasedStructuredTurnEvent::StructuredOutputReady(raw) => {
-            Ok(StructuredTurnEventWithTools::StructuredOutputReady(
-                raw.deserialize().map_err(AgentError::structured_output)?,
-            ))
+        ErasedStructuredTurnEvent::StructuredOutputReady(raw) => Ok(match raw.deserialize() {
+            Ok(value) => StructuredTurnEventWithTools::StructuredOutputReady(value),
+            Err(error) => StructuredTurnEventWithTools::StructuredOutputIssue(
+                lutum_protocol::structured::StructuredOutputIssue::new(raw.get(), error),
+            ),
+        }),
+        ErasedStructuredTurnEvent::StructuredOutputIssue(issue) => {
+            Ok(StructuredTurnEventWithTools::StructuredOutputIssue(issue))
         }
         ErasedStructuredTurnEvent::ReasoningDelta { delta } => {
             Ok(StructuredTurnEventWithTools::ReasoningDelta { delta })
@@ -7467,6 +7484,15 @@ where
                 }
                 ReadyToolNameClass::Available => {
                     let original_metadata = metadata.clone();
+                    if let Err(source) = metadata.arguments.validate() {
+                        let error = lutum_protocol::ToolCallError::Deserialize {
+                            name: metadata.name.as_str().to_string(),
+                            source,
+                        };
+                        return Ok(StructuredTurnEventWithTools::ToolCallIssue(
+                            RecoverableToolCallIssue::from_tool_call_error(metadata, error),
+                        ));
+                    }
                     match T::parse_tool_call(metadata) {
                         Ok(tool_call) => Ok(StructuredTurnEventWithTools::ToolCallReady(tool_call)),
                         // All current toolset parse errors are model-authored and recoverable here.
@@ -7513,9 +7539,15 @@ where
             Ok(StructuredCompletionEvent::StructuredOutputChunk { json_delta })
         }
         ErasedStructuredCompletionEvent::StructuredOutputReady(raw) => {
-            Ok(StructuredCompletionEvent::StructuredOutputReady(
-                raw.deserialize().map_err(AgentError::structured_output)?,
-            ))
+            Ok(match raw.deserialize() {
+                Ok(value) => StructuredCompletionEvent::StructuredOutputReady(value),
+                Err(error) => StructuredCompletionEvent::StructuredOutputIssue(
+                    lutum_protocol::structured::StructuredOutputIssue::new(raw.get(), error),
+                ),
+            })
+        }
+        ErasedStructuredCompletionEvent::StructuredOutputIssue(issue) => {
+            Ok(StructuredCompletionEvent::StructuredOutputIssue(issue))
         }
         ErasedStructuredCompletionEvent::ReasoningDelta { delta } => {
             Ok(StructuredCompletionEvent::ReasoningDelta { delta })

@@ -1,7 +1,8 @@
+use lutum_protocol::ToolArguments;
 use lutum_protocol::{
     FinishReason,
     budget::Usage,
-    conversation::{RawJson, ToolCallId, ToolName},
+    conversation::{ToolCallId, ToolName},
     transcript::{ItemView, ToolCallItemView, ToolResultItemView, TurnRole, TurnView},
 };
 use serde::{Deserialize, Serialize};
@@ -81,7 +82,7 @@ pub enum OpenAiTurnItem {
     ToolCall {
         id: ToolCallId,
         name: ToolName,
-        arguments: RawJson,
+        arguments: ToolArguments,
     },
 }
 

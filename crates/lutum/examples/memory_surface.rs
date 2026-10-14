@@ -27,6 +27,7 @@ async fn update_task_state(
     let result = session.structured_turn::<TaskState>().collect(llm).await?;
     let state = match &result.semantic {
         StructuredTurnOutcome::Structured(state) => state.clone(),
+        StructuredTurnOutcome::Invalid(issue) => anyhow::bail!(issue.message.clone()),
         StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason.clone()),
     };
     Ok(state)

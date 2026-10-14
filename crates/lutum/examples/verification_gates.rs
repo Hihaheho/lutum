@@ -114,6 +114,7 @@ async fn extract(llm: &Lutum, prompt: &str) -> anyhow::Result<Contact> {
     let result = session.structured_turn::<Contact>().collect(llm).await?;
     match result.semantic {
         StructuredTurnOutcome::Structured(contact) => Ok(contact),
+        StructuredTurnOutcome::Invalid(issue) => anyhow::bail!(issue.message),
         StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),
     }
 }

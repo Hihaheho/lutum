@@ -64,16 +64,14 @@ pub enum ClaudeModelInputItem {
 
 /// Serializable form of [`ToolResult`].
 ///
-/// [`ToolResult`] carries its `arguments` and `result` fields as [`RawJson`] (`Box<RawValue>`
-/// under the hood).  Serde's internally-tagged enum machinery routes deserialization through
-/// a `Content` intermediary that is incompatible with `RawValue`.  This type sidesteps the
-/// issue by storing both fields as `serde_json::Value`, which converts losslessly to/from
-/// `RawJson`.
+/// Model-authored arguments are stored as a raw string, including invalid JSON.
+/// Results remain validated JSON and use `serde_json::Value` to work with Serde's
+/// internally tagged enum deserialization.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistedToolResult {
     pub id: ToolCallId,
     pub name: ToolName,
-    pub arguments: serde_json::Value,
+    pub arguments: lutum_protocol::ToolArguments,
     pub result: serde_json::Value,
 }
 
@@ -82,8 +80,7 @@ impl PersistedToolResult {
         Self {
             id: tool_result.id.clone(),
             name: tool_result.name.clone(),
-            arguments: serde_json::from_str(tool_result.arguments.get())
-                .expect("RawJson is valid JSON"),
+            arguments: tool_result.arguments.clone(),
             result: serde_json::from_str(tool_result.result.get()).expect("RawJson is valid JSON"),
         }
     }
@@ -92,8 +89,7 @@ impl PersistedToolResult {
         ToolResult {
             id: self.id,
             name: self.name,
-            arguments: RawJson::from_serializable(&self.arguments)
-                .expect("serde_json::Value is valid JSON"),
+            arguments: self.arguments,
             result: RawJson::from_serializable(&self.result)
                 .expect("serde_json::Value is valid JSON"),
         }
@@ -262,7 +258,7 @@ mod tests {
                 ClaudeTurnItem::ToolCall {
                     id: ToolCallId::from("call_1"),
                     name: ToolName::from("search"),
-                    arguments: RawJson::parse(r#"{"q":"rust"}"#).unwrap(),
+                    arguments: RawJson::parse(r#"{"q":"rust"}"#).unwrap().into(),
                 },
             ],
             finish_reason: FinishReason::ToolCall,

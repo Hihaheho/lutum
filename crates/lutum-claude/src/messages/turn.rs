@@ -1,6 +1,7 @@
+use lutum_protocol::ToolArguments;
 use lutum_protocol::{
     budget::Usage,
-    conversation::{RawJson, ToolCallId, ToolName},
+    conversation::{ToolCallId, ToolName},
     llm::FinishReason,
     transcript::{ItemView, ToolCallItemView, ToolResultItemView, TurnRole, TurnView},
 };
@@ -12,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// use lutum_claude::messages::turn::{ClaudeCommittedTurn, ClaudeTurnItem};
 /// use lutum_protocol::{
 ///     budget::Usage,
-///     conversation::{RawJson, ToolCallId, ToolName},
+///     conversation::{ToolArguments, ToolCallId, ToolName},
 ///     llm::FinishReason,
 /// };
 ///
@@ -26,7 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///                 "type": "tool_call",
 ///                 "id": "toolu_01D7FLrfh4GYq7yT1ULFeyMV",
 ///                 "name": "get_stock_price",
-///                 "arguments": {"ticker": "^GSPC"}
+///                 "arguments": "{\"ticker\":\"^GSPC\"}"
 ///             }
 ///         ],
 ///         "finish_reason": "ToolCall",
@@ -52,7 +53,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///         ClaudeTurnItem::ToolCall {
 ///             id: ToolCallId::from("toolu_01D7FLrfh4GYq7yT1ULFeyMV"),
 ///             name: ToolName::from("get_stock_price"),
-///             arguments: RawJson::parse(r#"{"ticker":"^GSPC"}"#).unwrap(),
+///             arguments: ToolArguments::new(r#"{"ticker":"^GSPC"}"#),
 ///         },
 ///     ],
 ///     finish_reason: FinishReason::ToolCall,
@@ -100,20 +101,20 @@ impl PartialEq for ClaudeCommittedTurn {
 ///
 /// ```
 /// use lutum_claude::messages::turn::ClaudeTurnItem;
-/// use lutum_protocol::conversation::{RawJson, ToolCallId, ToolName};
+/// use lutum_protocol::conversation::{ToolArguments, ToolCallId, ToolName};
 ///
 /// let json = serde_json::from_str::<serde_json::Value>(
 ///     r#"{
 ///         "type": "tool_call",
 ///         "id": "toolu_01D7FLrfh4GYq7yT1ULFeyMV",
 ///         "name": "get_stock_price",
-///         "arguments": {"ticker": "^GSPC"}
+///         "arguments": "{\"ticker\":\"^GSPC\"}"
 ///     }"#,
 /// ).unwrap();
 /// let value = ClaudeTurnItem::ToolCall {
 ///     id: ToolCallId::from("toolu_01D7FLrfh4GYq7yT1ULFeyMV"),
 ///     name: ToolName::from("get_stock_price"),
-///     arguments: RawJson::parse(r#"{"ticker":"^GSPC"}"#).unwrap(),
+///     arguments: ToolArguments::new(r#"{"ticker":"^GSPC"}"#),
 /// };
 ///
 /// assert_eq!(serde_json::to_value(&value).unwrap(), json);
@@ -140,7 +141,7 @@ pub enum ClaudeTurnItem {
     ToolCall {
         id: ToolCallId,
         name: ToolName,
-        arguments: RawJson,
+        arguments: ToolArguments,
     },
 }
 
@@ -176,8 +177,7 @@ impl<'de> Deserialize<'de> for ClaudeTurnItem {
             } => Ok(Self::ToolCall {
                 id,
                 name,
-                arguments: RawJson::from_serializable(&arguments)
-                    .map_err(serde::de::Error::custom)?,
+                arguments,
             }),
         }
     }
@@ -266,7 +266,7 @@ enum ClaudeTurnItemRepr<'a> {
     ToolCall {
         id: &'a ToolCallId,
         name: &'a ToolName,
-        arguments: serde_json::Value,
+        arguments: ToolArguments,
     },
 }
 
@@ -287,7 +287,7 @@ impl<'a> From<&'a ClaudeTurnItem> for ClaudeTurnItemRepr<'a> {
             } => Self::ToolCall {
                 id,
                 name,
-                arguments: serde_json::from_str(arguments.get()).expect("validated JSON"),
+                arguments: arguments.clone(),
             },
         }
     }
@@ -315,6 +315,6 @@ enum ClaudeTurnItemReprOwned {
     ToolCall {
         id: ToolCallId,
         name: ToolName,
-        arguments: serde_json::Value,
+        arguments: ToolArguments,
     },
 }

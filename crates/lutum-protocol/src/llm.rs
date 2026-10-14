@@ -1076,6 +1076,7 @@ pub enum StructuredTurnEvent<O: StructuredOutput> {
         json_delta: String,
     },
     StructuredOutputReady(O),
+    StructuredOutputIssue(crate::structured::StructuredOutputIssue),
     ReasoningDelta {
         delta: String,
     },
@@ -1109,6 +1110,7 @@ pub enum StructuredTurnEventWithTools<T: Toolset, O: StructuredOutput> {
         json_delta: String,
     },
     StructuredOutputReady(O),
+    StructuredOutputIssue(crate::structured::StructuredOutputIssue),
     ReasoningDelta {
         delta: String,
     },
@@ -1178,6 +1180,7 @@ pub enum ErasedStructuredTurnEvent {
         json_delta: String,
     },
     StructuredOutputReady(RawJson),
+    StructuredOutputIssue(crate::structured::StructuredOutputIssue),
     ReasoningDelta {
         delta: String,
     },
@@ -1404,6 +1407,7 @@ where
                 Self::StructuredOutputChunk { json_delta: rhs },
             ) => lhs == rhs,
             (Self::StructuredOutputReady(lhs), Self::StructuredOutputReady(rhs)) => lhs == rhs,
+            (Self::StructuredOutputIssue(lhs), Self::StructuredOutputIssue(rhs)) => lhs == rhs,
             (Self::ReasoningDelta { delta: lhs }, Self::ReasoningDelta { delta: rhs }) => {
                 lhs == rhs
             }
@@ -1483,6 +1487,7 @@ where
                 Self::StructuredOutputChunk { json_delta: rhs },
             ) => lhs == rhs,
             (Self::StructuredOutputReady(lhs), Self::StructuredOutputReady(rhs)) => lhs == rhs,
+            (Self::StructuredOutputIssue(lhs), Self::StructuredOutputIssue(rhs)) => lhs == rhs,
             (Self::ReasoningDelta { delta: lhs }, Self::ReasoningDelta { delta: rhs }) => {
                 lhs == rhs
             }
@@ -1596,6 +1601,7 @@ impl PartialEq for ErasedStructuredTurnEvent {
                 Self::StructuredOutputChunk { json_delta: rhs },
             ) => lhs == rhs,
             (Self::StructuredOutputReady(lhs), Self::StructuredOutputReady(rhs)) => lhs == rhs,
+            (Self::StructuredOutputIssue(lhs), Self::StructuredOutputIssue(rhs)) => lhs == rhs,
             (Self::ReasoningDelta { delta: lhs }, Self::ReasoningDelta { delta: rhs }) => {
                 lhs == rhs
             }
@@ -1678,6 +1684,7 @@ pub enum StructuredCompletionEvent<O: StructuredOutput> {
         json_delta: String,
     },
     StructuredOutputReady(O),
+    StructuredOutputIssue(crate::structured::StructuredOutputIssue),
     ReasoningDelta {
         delta: String,
     },
@@ -1701,6 +1708,7 @@ pub enum ErasedStructuredCompletionEvent {
         json_delta: String,
     },
     StructuredOutputReady(RawJson),
+    StructuredOutputIssue(crate::structured::StructuredOutputIssue),
     ReasoningDelta {
         delta: String,
     },

@@ -1,3 +1,4 @@
+use crate::conversation::ToolArguments;
 use std::{any::Any, fmt, sync::Arc};
 
 use crate::conversation::{AssistantTurnItem, RawJson, ToolCallId, ToolName};
@@ -15,14 +16,14 @@ pub enum TurnRole {
 pub struct ToolCallItemView<'a> {
     pub id: &'a ToolCallId,
     pub name: &'a ToolName,
-    pub arguments: &'a RawJson,
+    pub arguments: &'a ToolArguments,
 }
 
 /// Borrowed view of a tool-result item's key fields.
 pub struct ToolResultItemView<'a> {
     pub id: &'a ToolCallId,
     pub name: &'a ToolName,
-    pub arguments: &'a RawJson,
+    pub arguments: &'a ToolArguments,
     pub result: &'a RawJson,
 }
 
@@ -147,7 +148,7 @@ enum CoreAssistantItemKind {
     ToolCall {
         id: ToolCallId,
         name: ToolName,
-        arguments: RawJson,
+        arguments: ToolArguments,
     },
 }
 

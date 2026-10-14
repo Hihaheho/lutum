@@ -105,7 +105,7 @@ impl DynamicToolCall {
         self.metadata.name.as_str()
     }
 
-    pub fn arguments(&self) -> &crate::conversation::RawJson {
+    pub fn arguments(&self) -> &crate::conversation::ToolArguments {
         &self.metadata.arguments
     }
 
@@ -205,11 +205,17 @@ impl RecoverableToolCallIssueReason {
 pub struct RecoverableToolCallIssue {
     pub metadata: ToolMetadata,
     pub reason: RecoverableToolCallIssueReason,
+    /// Original parse error, when decoding model-authored arguments failed.
+    pub message: Option<String>,
 }
 
 impl RecoverableToolCallIssue {
     pub fn new(metadata: ToolMetadata, reason: RecoverableToolCallIssueReason) -> Self {
-        Self { metadata, reason }
+        Self {
+            metadata,
+            reason,
+            message: None,
+        }
     }
 
     pub fn not_available(metadata: ToolMetadata) -> Self {
@@ -217,9 +223,11 @@ impl RecoverableToolCallIssue {
     }
 
     pub fn from_tool_call_error(metadata: ToolMetadata, error: ToolCallError) -> Self {
+        let message = Some(error.to_string());
         Self {
             metadata,
             reason: RecoverableToolCallIssueReason::from_tool_call_error(error),
+            message,
         }
     }
 

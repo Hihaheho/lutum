@@ -91,3 +91,7 @@ pub use transcript::{
     AssistantTurnView, CommittedTurn, EphemeralTurnView, ItemView, ToolCallItemView,
     ToolResultItemView, TurnItemIter, TurnRole, TurnView,
 };
+
+pub use structured::StructuredOutputIssue;
+
+pub use conversation::ToolArguments;

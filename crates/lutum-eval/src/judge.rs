@@ -128,6 +128,8 @@ impl<A, R, F> JudgeEval<A, R, F> {
 
 #[derive(Debug, Error)]
 pub enum JudgeEvalError {
+    #[error("judge returned invalid structured output: {0:?}")]
+    InvalidStructuredOutput(lutum::StructuredOutputIssue),
     #[error("judge execution error: {0}")]
     Execution(#[source] lutum::AgentError),
     #[error("judge reduction error: {0}")]
@@ -171,6 +173,9 @@ where
 
         match result.semantic {
             StructuredTurnOutcome::Structured(report) => Ok(report),
+            StructuredTurnOutcome::Invalid(issue) => {
+                Err(JudgeEvalError::InvalidStructuredOutput(issue))
+            }
             StructuredTurnOutcome::Refusal(reason) => Err(JudgeEvalError::Refusal { reason }),
         }
     }

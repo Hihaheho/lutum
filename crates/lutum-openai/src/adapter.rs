@@ -1114,6 +1114,9 @@ fn map_erased_structured_completion_event(
         ErasedStructuredTurnEvent::StructuredOutputChunk { json_delta } => {
             Ok(ErasedStructuredCompletionEvent::StructuredOutputChunk { json_delta })
         }
+        ErasedStructuredTurnEvent::StructuredOutputIssue(issue) => Ok(
+            ErasedStructuredCompletionEvent::StructuredOutputIssue(issue),
+        ),
         ErasedStructuredTurnEvent::StructuredOutputReady(raw) => {
             Ok(ErasedStructuredCompletionEvent::StructuredOutputReady(raw))
         }
@@ -1560,7 +1563,7 @@ fn lower_tool_result(
 fn lower_tool_result_parts(
     id: &ToolCallId,
     name: &ToolName,
-    arguments: &RawJson,
+    arguments: &lutum_protocol::ToolArguments,
     result: &RawJson,
     emit_call: bool,
     out: &mut Vec<InputItem>,
@@ -2008,7 +2011,7 @@ impl ToolCallTracker {
             return Ok(None);
         }
 
-        let arguments = RawJson::parse(arguments_json.clone())?;
+        let arguments = lutum_protocol::ToolArguments::new(arguments_json.clone());
         let metadata = ToolMetadata::new(resolved_id.clone(), resolved_name.clone(), arguments);
         self.finalized.insert(
             key,
@@ -2206,15 +2209,16 @@ fn decode_sse_event(
 fn maybe_parse_structured_output(
     buffer: &str,
     emitted_ready: &mut bool,
-) -> Result<Option<RawJson>, OpenAiError> {
+) -> Option<Result<RawJson, lutum_protocol::structured::StructuredOutputIssue>> {
     if *emitted_ready || buffer.is_empty() {
-        return Ok(None);
+        return None;
     }
 
     *emitted_ready = true;
-    RawJson::parse(buffer.to_string())
-        .map(Some)
-        .map_err(OpenAiError::StructuredOutput)
+    Some(
+        RawJson::parse(buffer.to_string())
+            .map_err(|error| lutum_protocol::structured::StructuredOutputIssue::new(buffer, error)),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2745,24 +2749,16 @@ where
                         structured_buffer.is_empty() && !saw_tool_call && !saw_refusal,
                     );
                     if finish_reason != FinishReason::Length {
-                        let value = match maybe_parse_structured_output(
-                            &structured_buffer,
-                            &mut emitted_ready,
-                        ) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                emit_openai_parse_error(
-                                    raw.as_ref(),
-                                    request_id.as_deref(),
-                                    ParseErrorStage::StructuredOutputParse,
-                                    &structured_buffer,
-                                    &err,
-                                );
-                                Err(err)?
-                            }
-                        };
+                        let value = maybe_parse_structured_output(&structured_buffer, &mut emitted_ready);
                         if let Some(value) = value {
-                            yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
+                            yield match value {
+                                Ok(value) => ErasedStructuredTurnEvent::StructuredOutputReady(value),
+                                Err(issue) => {
+                                    emit_openai_parse_error(raw.as_ref(), request_id.as_deref(),
+                                        ParseErrorStage::StructuredOutputParse, &issue.raw, &issue.message);
+                                    ErasedStructuredTurnEvent::StructuredOutputIssue(issue)
+                                },
+                            };
                         }
                     }
                     flush_buffered_content(&mut pending_item, &mut committed_items);
@@ -2804,24 +2800,16 @@ where
                             &event.item_id,
                             &event.text,
                         );
-                        let value = match maybe_parse_structured_output(
-                            &structured_buffer,
-                            &mut emitted_ready,
-                        ) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                emit_openai_parse_error(
-                                    raw.as_ref(),
-                                    request_id.as_deref(),
-                                    ParseErrorStage::StructuredOutputParse,
-                                    &structured_buffer,
-                                    &err,
-                                );
-                                Err(err)?
-                            }
-                        };
+                        let value = maybe_parse_structured_output(&structured_buffer, &mut emitted_ready);
                         if let Some(value) = value {
-                            yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
+                            yield match value {
+                                Ok(value) => ErasedStructuredTurnEvent::StructuredOutputReady(value),
+                                Err(issue) => {
+                                    emit_openai_parse_error(raw.as_ref(), request_id.as_deref(),
+                                        ParseErrorStage::StructuredOutputParse, &issue.raw, &issue.message);
+                                    ErasedStructuredTurnEvent::StructuredOutputIssue(issue)
+                                },
+                            };
                         }
                     }
                     SseEvent::ResponseReasoningSummaryTextDelta(event) => {
@@ -4147,19 +4135,7 @@ where
         // Build committed turn.
         flush_buffered_content(&mut pending_item, &mut committed_items);
         for finalized in tool_calls.finalized.values() {
-            let arguments = match RawJson::parse(finalized.arguments_json.clone()) {
-                Ok(arguments) => arguments,
-                Err(err) => {
-                    emit_openai_parse_error(
-                        raw.as_ref(),
-                        request_id.as_deref(),
-                        ParseErrorStage::ToolCallArgumentsParse,
-                        &finalized.arguments_json,
-                        &err,
-                    );
-                    Err(OpenAiError::Json(err))?
-                }
-            };
+            let arguments = lutum_protocol::ToolArguments::new(finalized.arguments_json.clone());
             committed_items.push(OpenAiTurnItem::ToolCall {
                 id: finalized.id.clone(),
                 name: finalized.name.clone(),
@@ -4371,7 +4347,7 @@ where
                 && !json_buffer.is_empty()
             {
                 let raw_json = match RawJson::parse(json_buffer.clone()) {
-                    Ok(raw_json) => raw_json,
+                    Ok(raw_json) => Some(raw_json),
                     Err(err) => {
                         emit_openai_parse_error(
                             raw.as_ref(),
@@ -4380,27 +4356,21 @@ where
                             &json_buffer,
                             &err,
                         );
-                        Err(OpenAiError::Json(err))?
+                        yield ErasedStructuredTurnEvent::StructuredOutputIssue(
+                            lutum_protocol::structured::StructuredOutputIssue::new(json_buffer.clone(), &err)
+                        );
+                        // Syntax failure is model output; still complete and account usage.
+                        None
                     }
                 };
-                yield ErasedStructuredTurnEvent::StructuredOutputReady(raw_json);
+                if let Some(raw_json) = raw_json {
+                    yield ErasedStructuredTurnEvent::StructuredOutputReady(raw_json);
+                }
             }
 
             flush_buffered_content(&mut pending_item, &mut committed_items);
             for finalized in tool_calls.finalized.values() {
-                let arguments = match RawJson::parse(finalized.arguments_json.clone()) {
-                    Ok(arguments) => arguments,
-                    Err(err) => {
-                        emit_openai_parse_error(
-                            raw.as_ref(),
-                            request_id.as_deref(),
-                            ParseErrorStage::ToolCallArgumentsParse,
-                            &finalized.arguments_json,
-                            &err,
-                        );
-                        Err(OpenAiError::Json(err))?
-                    }
-                };
+                let arguments = lutum_protocol::ToolArguments::new(finalized.arguments_json.clone());
                 committed_items.push(OpenAiTurnItem::ToolCall {
                     id: finalized.id.clone(),
                     name: finalized.name.clone(),
@@ -6134,7 +6104,7 @@ mod tests {
                     OpenAiTurnItem::ToolCall {
                         id: "call-1".into(),
                         name: "weather".into(),
-                        arguments: RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
+                        arguments: RawJson::parse("{\"city\":\"Tokyo\"}").unwrap().into(),
                     },
                 ],
                 finish_reason: FinishReason::ToolCall,
@@ -6165,7 +6135,7 @@ mod tests {
                 AssistantTurnItem::ToolCall {
                     id: "call-1".into(),
                     name: "weather".into(),
-                    arguments: RawJson::parse("{\"city\":\"Tokyo\"}").unwrap(),
+                    arguments: RawJson::parse("{\"city\":\"Tokyo\"}").unwrap().into(),
                 },
             ]),
         ))]);
@@ -6703,6 +6673,121 @@ mod tests {
             ErasedStructuredTurnEvent::StructuredOutputReady(summary)
                 if summary.deserialize::<Summary>().unwrap().answer == "42"
         )));
+    }
+
+    #[test]
+    fn responses_and_chat_preserve_malformed_tool_arguments_through_completion() {
+        type EventStream<E> = std::pin::Pin<Box<dyn Stream<Item = Result<E, OpenAiError>>>>;
+        fn responses() -> Vec<Result<Bytes, HttpError>> {
+            [
+                serde_json::json!({"type":"response.created","response":{"id":"bad","model":"mock","output":[],"usage":null}}),
+                serde_json::json!({"type":"response.function_call_arguments.delta","item_id":"item","call_id":"call","output_index":0,"sequence_number":0,"delta":"{"}),
+                serde_json::json!({"type":"response.function_call_arguments.done","item_id":"item","call_id":"call","output_index":0,"sequence_number":1,"name":"weather"}),
+                serde_json::json!({"type":"response.completed","response":{"id":"bad","model":"mock","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}),
+            ].into_iter().map(|event| Ok(Bytes::from(format!("data: {event}\n\n")))).collect()
+        }
+        fn chat() -> Vec<Result<Bytes, HttpError>> {
+            [
+                serde_json::json!({"id":"bad","model":"mock","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call","type":"function","function":{"name":"weather","arguments":"{"}}]},"finish_reason":null}]}),
+                serde_json::json!({"id":"bad","model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}),
+            ].into_iter().map(|event| Ok(Bytes::from(format!("data: {event}\n\n")))).collect()
+        }
+        let text_streams: Vec<EventStream<ErasedTextTurnEvent>> = vec![
+            Box::pin(map_text_stream(
+                futures::stream::iter(responses()),
+                "mock".into(),
+                None,
+                None,
+            )),
+            Box::pin(map_chat_text_stream(
+                futures::stream::iter(chat()),
+                "mock".into(),
+                None,
+            )),
+        ];
+        for stream in text_streams {
+            let events = block_on(stream.collect::<Vec<_>>())
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let Some(ErasedTextTurnEvent::Completed {
+                committed_turn,
+                usage,
+                ..
+            }) = events.last()
+            else {
+                panic!("missing completed")
+            };
+            assert_eq!(usage.total_tokens, 3);
+            let call = committed_turn.item_at(0).unwrap().as_tool_call().unwrap();
+            assert_eq!(call.arguments.get(), "{");
+            let encoded = serde_json::to_string(
+                committed_turn
+                    .as_any()
+                    .downcast_ref::<OpenAiCommittedTurn>()
+                    .unwrap(),
+            )
+            .unwrap();
+            let restored: OpenAiCommittedTurn = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(
+                restored
+                    .item_at(0)
+                    .unwrap()
+                    .as_tool_call()
+                    .unwrap()
+                    .arguments
+                    .get(),
+                "{"
+            );
+        }
+        let structured_streams: Vec<EventStream<ErasedStructuredTurnEvent>> = vec![
+            Box::pin(map_structured_stream(
+                futures::stream::iter(responses()),
+                "mock".into(),
+                None,
+                None,
+            )),
+            Box::pin(map_chat_structured_stream(
+                futures::stream::iter(chat()),
+                "mock".into(),
+                None,
+            )),
+        ];
+        for stream in structured_streams {
+            let events = block_on(stream.collect::<Vec<_>>())
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let Some(ErasedStructuredTurnEvent::Completed { committed_turn, .. }) = events.last()
+            else {
+                panic!("missing completed")
+            };
+            assert_eq!(
+                committed_turn
+                    .item_at(0)
+                    .unwrap()
+                    .as_tool_call()
+                    .unwrap()
+                    .arguments
+                    .get(),
+                "{"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_structured_invalid_json_is_a_completed_issue() {
+        let event = serde_json::json!({"id":"bad-json","model":"mock","choices":[{"index":0,"delta":{"role":"assistant","content":"{"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}});
+        let stream = futures::stream::iter(vec![Ok(Bytes::from(format!("data: {event}\n\n")))]);
+        let events =
+            block_on(map_chat_structured_stream(stream, "mock".into(), None).collect::<Vec<_>>())
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+        assert!(events.iter().any(|event| matches!(event, ErasedStructuredTurnEvent::StructuredOutputIssue(issue) if issue.raw == "{")));
+        assert!(
+            matches!(events.last(), Some(ErasedStructuredTurnEvent::Completed { usage, .. }) if usage.total_tokens == 3)
+        );
     }
 
     #[test]
@@ -7297,7 +7382,16 @@ mod tests {
         })
         .await;
 
-        assert!(collected.output.is_err());
+        let events = collected
+            .output
+            .expect("invalid JSON is a recoverable output");
+        assert!(events.iter().any(|event| matches!(event,
+            ErasedStructuredTurnEvent::StructuredOutputIssue(issue) if issue.raw == "{"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(ErasedStructuredTurnEvent::Completed { .. })
+        ));
         assert!(collected.raw.entries.iter().any(|entry| matches!(
             entry,
             RawTraceEntry::ParseError {

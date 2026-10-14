@@ -414,7 +414,7 @@ impl TurnAdapter for MockLlmAdapter {
                             &mut committed_items,
                             id.clone(),
                             entry.0.clone(),
-                            arguments.clone(),
+                            arguments.clone().into(),
                         );
                         out.push(Ok(ErasedTextTurnEvent::ToolCallReady(ToolMetadata::new(
                             id.clone(),
@@ -429,12 +429,28 @@ impl TurnAdapter for MockLlmAdapter {
                     request_id,
                     finish_reason,
                     usage,
-                }) => vec![Ok(ErasedTextTurnEvent::Completed {
-                    request_id,
-                    finish_reason,
-                    usage,
-                    committed_turn: Arc::new(AssistantTurnView::from_items(&committed_items)),
-                })],
+                }) => {
+                    let mut out = Vec::new();
+                    for (id, (name, raw)) in std::mem::take(&mut tool_buffers) {
+                        let arguments = lutum_protocol::ToolArguments::new(raw);
+                        push_tool_call(
+                            &mut committed_items,
+                            id.clone(),
+                            name.clone(),
+                            arguments.clone(),
+                        );
+                        out.push(Ok(ErasedTextTurnEvent::ToolCallReady(ToolMetadata::new(
+                            id, name, arguments,
+                        ))));
+                    }
+                    out.push(Ok(ErasedTextTurnEvent::Completed {
+                        request_id,
+                        finish_reason,
+                        usage,
+                        committed_turn: Arc::new(AssistantTurnView::from_items(&committed_items)),
+                    }));
+                    out
+                }
                 Err(err) => vec![Err(AgentError::from(err))],
             })
             .collect::<Vec<_>>();
@@ -512,7 +528,7 @@ impl TurnAdapter for MockLlmAdapter {
                             &mut committed_items,
                             id.clone(),
                             entry.0.clone(),
-                            arguments.clone(),
+                            arguments.clone().into(),
                         );
                         out.push(Ok(ErasedStructuredTurnEvent::ToolCallReady(
                             ToolMetadata::new(id.clone(), entry.0.clone(), arguments),
@@ -527,11 +543,30 @@ impl TurnAdapter for MockLlmAdapter {
                     usage,
                 }) => {
                     let mut out = Vec::new();
+                    for (id, (name, raw)) in std::mem::take(&mut tool_buffers) {
+                        let arguments = lutum_protocol::ToolArguments::new(raw);
+                        push_tool_call(
+                            &mut committed_items,
+                            id.clone(),
+                            name.clone(),
+                            arguments.clone(),
+                        );
+                        out.push(Ok(ErasedStructuredTurnEvent::ToolCallReady(
+                            ToolMetadata::new(id, name, arguments),
+                        )));
+                    }
                     if !structured_buffer.is_empty() {
                         match RawJson::parse(structured_buffer.clone()) {
                             Ok(value) => out
                                 .push(Ok(ErasedStructuredTurnEvent::StructuredOutputReady(value))),
-                            Err(err) => out.push(Err(AgentError::structured_output(err))),
+                            Err(err) => {
+                                out.push(Ok(ErasedStructuredTurnEvent::StructuredOutputIssue(
+                                    lutum_protocol::StructuredOutputIssue::new(
+                                        structured_buffer.clone(),
+                                        err,
+                                    ),
+                                )))
+                            }
                         }
                     }
                     out.push(Ok(ErasedStructuredTurnEvent::Completed {
@@ -619,17 +654,10 @@ impl CompletionAdapter for MockLlmAdapter {
             }
             Ok(RawStructuredCompletionEvent::StructuredOutputChunk { json_delta }) => {
                 structured_buffer.push_str(&json_delta);
-                let mut out = vec![Ok(ErasedStructuredCompletionEvent::StructuredOutputChunk {
+                let out = vec![Ok(ErasedStructuredCompletionEvent::StructuredOutputChunk {
                     json_delta,
                 })];
-                if is_complete_json(&structured_buffer) {
-                    match RawJson::parse(structured_buffer.clone()) {
-                        Ok(value) => out.push(Ok(
-                            ErasedStructuredCompletionEvent::StructuredOutputReady(value),
-                        )),
-                        Err(err) => out.push(Err(AgentError::structured_output(err))),
-                    }
-                }
+
                 out
             }
             Ok(RawStructuredCompletionEvent::ReasoningDelta { delta }) => {
@@ -644,11 +672,26 @@ impl CompletionAdapter for MockLlmAdapter {
                 request_id,
                 finish_reason,
                 usage,
-            }) => vec![Ok(ErasedStructuredCompletionEvent::Completed {
-                request_id,
-                finish_reason,
-                usage,
-            })],
+            }) => {
+                let mut out = Vec::new();
+                if !structured_buffer.is_empty() {
+                    out.push(Ok(match RawJson::parse(structured_buffer.clone()) {
+                        Ok(value) => ErasedStructuredCompletionEvent::StructuredOutputReady(value),
+                        Err(error) => ErasedStructuredCompletionEvent::StructuredOutputIssue(
+                            lutum_protocol::StructuredOutputIssue::new(
+                                structured_buffer.clone(),
+                                error,
+                            ),
+                        ),
+                    }));
+                }
+                out.push(Ok(ErasedStructuredCompletionEvent::Completed {
+                    request_id,
+                    finish_reason,
+                    usage,
+                }));
+                out
+            }
             Err(err) => vec![Err(AgentError::from(err))],
         });
 
@@ -722,7 +765,7 @@ fn push_tool_call(
     items: &mut Vec<AssistantTurnItem>,
     id: ToolCallId,
     name: ToolName,
-    arguments: RawJson,
+    arguments: lutum_protocol::ToolArguments,
 ) {
     items.push(AssistantTurnItem::ToolCall {
         id,

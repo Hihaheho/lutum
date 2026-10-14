@@ -1017,7 +1017,7 @@ fn tool_call_deserialize_error_is_collected_as_recoverable_failure() {
 }
 
 #[test]
-fn structured_output_deserialize_error_surfaces_as_execution_error() {
+fn structured_output_deserialize_error_is_a_completed_output() {
     let budget = test_budget();
     let adapter =
         MockLlmAdapter::new().with_structured_scenario(MockStructuredScenario::events(vec![
@@ -1048,23 +1048,17 @@ fn structured_output_deserialize_error_surfaces_as_execution_error() {
     )
     .unwrap();
 
-    let err = block_on(pending.collect()).unwrap_err();
-
-    match err {
-        CollectError::Execution { source, partial } => {
-            assert!(matches!(source, lutum::AgentError::StructuredOutput(_)));
-            assert_eq!(partial.request_id.as_deref(), Some("req-bad-structured"));
-            assert!(matches!(
-                partial.assistant_turn.as_slice(),
-                [AssistantTurnItem::Text(text)] if text == "{\"answer\":42}"
-            ));
-            assert!(partial.structured.is_none());
-            assert!(partial.finish_reason.is_none());
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
-
-    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 90);
+    let result = block_on(pending.collect()).unwrap();
+    assert_eq!(result.request_id.as_deref(), Some("req-bad-structured"));
+    assert_eq!(result.usage.total_tokens, 8);
+    assert_eq!(result.finish_reason, FinishReason::Stop);
+    let lutum::StructuredTurnOutcome::Invalid(issue) = result.semantic else {
+        panic!("expected recoverable invalid structured output");
+    };
+    assert_eq!(issue.raw, "{\"answer\":42}");
+    assert!(issue.message.contains("invalid type"));
+    assert_eq!(result.turn.assistant_turn().assistant_text(), issue.raw);
+    assert_eq!(budget.remaining(&RequestExtensions::new()).tokens, 92);
 }
 
 #[test]

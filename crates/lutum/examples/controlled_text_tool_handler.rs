@@ -170,7 +170,7 @@ fn recover_json_tool_call(
         AssistantTurnItem::ToolCall {
             id: id.into(),
             name: candidate.name.into(),
-            arguments,
+            arguments: arguments.into(),
         },
     ])?)
 }

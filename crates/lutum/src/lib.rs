@@ -130,3 +130,7 @@ pub use session::{
     Session, StagedTextStepOutcomeWithTools, StructuredStepOutcomeWithTools,
     TextStepOutcomeWithTools, ToolRoundArityError, ToolRoundCommitError,
 };
+
+pub use lutum_protocol::structured::StructuredOutputIssue;
+
+pub use lutum_protocol::conversation::ToolArguments;

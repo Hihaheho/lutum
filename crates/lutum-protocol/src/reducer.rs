@@ -410,6 +410,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StructuredTurnOutcome<O> {
     Structured(O),
+    Invalid(crate::structured::StructuredOutputIssue),
     Refusal(String),
 }
 
@@ -525,6 +526,7 @@ pub struct StructuredTurnState<O: StructuredOutput> {
     pub model: String,
     pub assistant_turn: Vec<AssistantTurnItem>,
     pub structured: Option<O>,
+    pub structured_output_issue: Option<crate::structured::StructuredOutputIssue>,
     pub refusal: Option<String>,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
@@ -542,6 +544,7 @@ where
             model: String::new(),
             assistant_turn: Vec::new(),
             structured: None,
+            structured_output_issue: None,
             refusal: None,
             finish_reason: None,
             usage: None,
@@ -561,6 +564,7 @@ where
             model: self.model.clone(),
             assistant_turn: self.assistant_turn.clone(),
             structured: self.structured.clone(),
+            structured_output_issue: self.structured_output_issue.clone(),
             refusal: self.refusal.clone(),
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
@@ -579,6 +583,7 @@ where
             && self.model == other.model
             && self.assistant_turn == other.assistant_turn
             && self.structured == other.structured
+            && self.structured_output_issue == other.structured_output_issue
             && self.refusal == other.refusal
             && self.finish_reason == other.finish_reason
             && self.usage == other.usage
@@ -614,8 +619,14 @@ where
             StructuredTurnEvent::StructuredOutputChunk { json_delta } => {
                 push_or_extend_text(&mut self.assistant_turn, json_delta);
             }
+            StructuredTurnEvent::StructuredOutputIssue(issue) => {
+                if self.structured.is_some() || self.structured_output_issue.is_some() {
+                    return Err(StructuredTurnReductionError::DuplicateStructuredOutput);
+                }
+                self.structured_output_issue = Some(issue.clone());
+            }
             StructuredTurnEvent::StructuredOutputReady(value) => {
-                if self.structured.is_some() {
+                if self.structured.is_some() || self.structured_output_issue.is_some() {
                     return Err(StructuredTurnReductionError::DuplicateStructuredOutput);
                 }
                 self.structured = Some(value.clone());
@@ -670,11 +681,12 @@ where
                 event_count: self.event_count,
             }
         })?;
-        let semantic = match (self.structured, self.refusal) {
-            (Some(value), None) => StructuredTurnOutcome::Structured(value),
-            (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
-            (None, None) => return Err(StructuredTurnReductionError::MissingSemantic),
-            (Some(_), Some(_)) => return Err(StructuredTurnReductionError::ConflictingSemantic),
+        let semantic = match (self.structured, self.structured_output_issue, self.refusal) {
+            (Some(value), None, None) => StructuredTurnOutcome::Structured(value),
+            (None, Some(issue), None) => StructuredTurnOutcome::Invalid(issue),
+            (None, None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
+            (None, None, None) => return Err(StructuredTurnReductionError::MissingSemantic),
+            _ => return Err(StructuredTurnReductionError::ConflictingSemantic),
         };
 
         Ok(StagedStructuredTurnResult {
@@ -698,6 +710,7 @@ pub struct StructuredTurnStateWithTools<T: Toolset, O: StructuredOutput> {
     pub recoverable_tool_call_issues: Vec<RecoverableToolCallIssue>,
     pub continue_suggestion: Option<ContinueSuggestionReason>,
     pub structured: Option<O>,
+    pub structured_output_issue: Option<crate::structured::StructuredOutputIssue>,
     pub refusal: Option<String>,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
@@ -719,6 +732,7 @@ where
             recoverable_tool_call_issues: Vec::new(),
             continue_suggestion: None,
             structured: None,
+            structured_output_issue: None,
             refusal: None,
             finish_reason: None,
             usage: None,
@@ -742,6 +756,7 @@ where
             recoverable_tool_call_issues: self.recoverable_tool_call_issues.clone(),
             continue_suggestion: self.continue_suggestion,
             structured: self.structured.clone(),
+            structured_output_issue: self.structured_output_issue.clone(),
             refusal: self.refusal.clone(),
             finish_reason: self.finish_reason.clone(),
             usage: self.usage,
@@ -765,6 +780,7 @@ where
             && self.recoverable_tool_call_issues == other.recoverable_tool_call_issues
             && self.continue_suggestion == other.continue_suggestion
             && self.structured == other.structured
+            && self.structured_output_issue == other.structured_output_issue
             && self.refusal == other.refusal
             && self.finish_reason == other.finish_reason
             && self.usage == other.usage
@@ -807,8 +823,14 @@ where
             StructuredTurnEventWithTools::StructuredOutputChunk { json_delta } => {
                 push_or_extend_text(&mut self.assistant_turn, json_delta);
             }
+            StructuredTurnEventWithTools::StructuredOutputIssue(issue) => {
+                if self.structured.is_some() || self.structured_output_issue.is_some() {
+                    return Err(StructuredTurnReductionError::DuplicateStructuredOutput);
+                }
+                self.structured_output_issue = Some(issue.clone());
+            }
             StructuredTurnEventWithTools::StructuredOutputReady(value) => {
-                if self.structured.is_some() {
+                if self.structured.is_some() || self.structured_output_issue.is_some() {
                     return Err(StructuredTurnReductionError::DuplicateStructuredOutput);
                 }
                 self.structured = Some(value.clone());
@@ -875,11 +897,12 @@ where
                 event_count: self.event_count,
             }
         })?;
-        let semantic = match (self.structured, self.refusal) {
-            (Some(value), None) => StructuredTurnOutcome::Structured(value),
-            (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
-            (None, None) => return Err(StructuredTurnReductionError::MissingSemantic),
-            (Some(_), Some(_)) => return Err(StructuredTurnReductionError::ConflictingSemantic),
+        let semantic = match (self.structured, self.structured_output_issue, self.refusal) {
+            (Some(value), None, None) => StructuredTurnOutcome::Structured(value),
+            (None, Some(issue), None) => StructuredTurnOutcome::Invalid(issue),
+            (None, None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
+            (None, None, None) => return Err(StructuredTurnReductionError::MissingSemantic),
+            _ => return Err(StructuredTurnReductionError::ConflictingSemantic),
         };
 
         Ok(StagedStructuredTurnResultWithTools {
@@ -1041,6 +1064,7 @@ pub struct StructuredCompletionState<O: StructuredOutput> {
     pub request_id: Option<String>,
     pub model: String,
     pub structured: Option<O>,
+    pub structured_output_issue: Option<crate::structured::StructuredOutputIssue>,
     pub refusal: Option<String>,
     pub finish_reason: Option<FinishReason>,
     pub usage: Option<Usage>,
@@ -1056,6 +1080,7 @@ where
             request_id: None,
             model: String::new(),
             structured: None,
+            structured_output_issue: None,
             refusal: None,
             finish_reason: None,
             usage: None,
@@ -1088,8 +1113,14 @@ where
             }
             StructuredCompletionEvent::WillRetry { .. } => {}
             StructuredCompletionEvent::StructuredOutputChunk { .. } => {}
+            StructuredCompletionEvent::StructuredOutputIssue(issue) => {
+                if self.structured.is_some() || self.structured_output_issue.is_some() {
+                    return Err(StructuredCompletionReductionError::DuplicateStructuredOutput);
+                }
+                self.structured_output_issue = Some(issue.clone());
+            }
             StructuredCompletionEvent::StructuredOutputReady(value) => {
-                if self.structured.is_some() {
+                if self.structured.is_some() || self.structured_output_issue.is_some() {
                     return Err(StructuredCompletionReductionError::DuplicateStructuredOutput);
                 }
                 self.structured = Some(value.clone());
@@ -1129,11 +1160,12 @@ where
                 OutputLimitExceeded::new(self.model, self.request_id, usage, self.event_count),
             ));
         }
-        let semantic = match (self.structured, self.refusal) {
-            (Some(value), None) => StructuredTurnOutcome::Structured(value),
-            (None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
-            (None, None) => return Err(StructuredCompletionReductionError::MissingSemantic),
-            (Some(_), Some(_)) => {
+        let semantic = match (self.structured, self.structured_output_issue, self.refusal) {
+            (Some(value), None, None) => StructuredTurnOutcome::Structured(value),
+            (None, Some(issue), None) => StructuredTurnOutcome::Invalid(issue),
+            (None, None, Some(refusal)) => StructuredTurnOutcome::Refusal(refusal),
+            (None, None, None) => return Err(StructuredCompletionReductionError::MissingSemantic),
+            _ => {
                 return Err(StructuredCompletionReductionError::ConflictingSemantic);
             }
         };
@@ -1617,7 +1649,7 @@ pub fn assistant_json(items: &[AssistantTurnItem]) -> Option<Result<RawJson, ser
 pub fn find_tool_call_arguments<'a>(
     items: &'a [AssistantTurnItem],
     id: &ToolCallId,
-) -> Option<&'a RawJson> {
+) -> Option<&'a crate::conversation::ToolArguments> {
     items.iter().find_map(|item| match item {
         AssistantTurnItem::ToolCall {
             id: candidate,

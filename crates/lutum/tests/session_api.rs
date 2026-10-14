@@ -562,7 +562,7 @@ fn required_specific_tool_text_fallback_recovers_needs_tools_round() {
                     AssistantTurnItem::ToolCall {
                         id: "fallback-call-1".into(),
                         name: "weather".into(),
-                        arguments: RawJson::parse(r#"{"city":"Tokyo"}"#).unwrap(),
+                        arguments: RawJson::parse(r#"{"city":"Tokyo"}"#).unwrap().into(),
                     },
                 ])
                 .map(Some)
@@ -702,7 +702,9 @@ fn controlled_handler_can_return_tool_round_from_text_delta() {
                                 AssistantTurnItem::ToolCall {
                                     id: "controlled-call-1".into(),
                                     name: "weather".into(),
-                                    arguments: RawJson::parse(r#"{"city":"Tokyo"}"#).unwrap(),
+                                    arguments: RawJson::parse(r#"{"city":"Tokyo"}"#)
+                                        .unwrap()
+                                        .into(),
                                 },
                             ])
                             .unwrap();
@@ -802,7 +804,7 @@ impl lutum::TextToolEventHandler<Tools> for LengthRecoveryHandler {
                 AssistantTurnItem::ToolCall {
                     id: "controlled-length-call-1".into(),
                     name: "weather".into(),
-                    arguments: RawJson::parse(r#"{"city":"Tokyo"}"#).unwrap(),
+                    arguments: RawJson::parse(r#"{"city":"Tokyo"}"#).unwrap().into(),
                 },
             ])?);
         }
@@ -937,7 +939,7 @@ where
         AssistantTurnItem::ToolCall {
             id: "validation-call-1".into(),
             name: "v_search".into(),
-            arguments: RawJson::parse(r#"{"query":"rust"}"#).unwrap(),
+            arguments: RawJson::parse(r#"{"query":"rust"}"#).unwrap().into(),
         },
     ])?;
     Ok(TextToolHandlerDirective::Return(

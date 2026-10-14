@@ -225,7 +225,7 @@ enum ContentBlockState {
         name: ToolName,
         initial_json: Option<String>,
         delta_json: String,
-        finalized_arguments: Option<RawJson>,
+        finalized_arguments: Option<lutum_protocol::ToolArguments>,
     },
     Unsupported,
 }
@@ -841,7 +841,7 @@ impl ContentBlockState {
                 } else {
                     delta_json.clone()
                 };
-                let arguments = RawJson::parse(arguments_json)?;
+                let arguments = lutum_protocol::ToolArguments::new(arguments_json);
                 *finalized_arguments = Some(arguments.clone());
                 Ok(Some(ToolMetadata::new(id.clone(), name.clone(), arguments)))
             }
@@ -1429,7 +1429,7 @@ fn image_source(image: &Image) -> ImageSource {
 fn tool_use_block(
     id: &ToolCallId,
     name: &ToolName,
-    arguments: &RawJson,
+    arguments: &lutum_protocol::ToolArguments,
 ) -> Result<ClaudeContentBlock, ClaudeError> {
     Ok(ClaudeContentBlock::ToolUse(ToolUseBlock {
         id: id.clone(),
@@ -1456,8 +1456,12 @@ fn tool_result_block_from_view(
     }))
 }
 
-fn parse_tool_input(arguments: &RawJson) -> Result<Value, ClaudeError> {
-    let value = serde_json::from_str::<Value>(arguments.get())?;
+fn parse_tool_input(arguments: &lutum_protocol::ToolArguments) -> Result<Value, ClaudeError> {
+    let value = match serde_json::from_str::<Value>(arguments.get()) {
+        Ok(value) => value,
+        // JSON transport cannot embed malformed JSON; preserve its exact text as a string.
+        Err(_) => return Ok(Value::String(arguments.get().to_string())),
+    };
     if value.is_object() {
         return Ok(value);
     }
@@ -1854,10 +1858,10 @@ where
                         }
                     }
                     SseEvent::MessageStop(_) => {
-                        if !emitted_ready && !structured_buffer.trim().is_empty() {
+                        if !emitted_ready && !structured_buffer.is_empty() {
                             emitted_ready = true;
                             let value = match RawJson::parse(structured_buffer.clone()) {
-                                Ok(value) => value,
+                                Ok(value) => Some(value),
                                 Err(err) => {
                                     emit_claude_parse_error(
                                         raw.as_ref(),
@@ -1866,10 +1870,15 @@ where
                                         &structured_buffer,
                                         &err,
                                     );
-                                    Err(ClaudeError::StructuredOutput(err))?
+                                    yield ErasedStructuredTurnEvent::StructuredOutputIssue(
+                                        lutum_protocol::structured::StructuredOutputIssue::new(structured_buffer.clone(), &err)
+                                    );
+                                    None
                                 }
                             };
-                            yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
+                            if let Some(value) = value {
+                                yield ErasedStructuredTurnEvent::StructuredOutputReady(value);
+                            }
                         }
 
                         let finish_reason = map_claude_stop_reason(stop_reason.as_deref());
@@ -3221,7 +3230,16 @@ mod tests {
         })
         .await;
 
-        assert!(collected.output.is_err());
+        let events = collected
+            .output
+            .expect("invalid JSON is a recoverable output");
+        assert!(events.iter().any(|event| matches!(event,
+            ErasedStructuredTurnEvent::StructuredOutputIssue(issue) if issue.raw == "{"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(ErasedStructuredTurnEvent::Completed { .. })
+        ));
         assert!(collected.raw.entries.iter().any(|entry| matches!(
             entry,
             RawTraceEntry::ParseError {
@@ -3233,6 +3251,33 @@ mod tests {
                 && *stage == ParseErrorStage::StructuredOutputParse
                 && payload == "{"
         )));
+    }
+
+    #[test]
+    fn malformed_tool_arguments_are_captured_and_persisted_without_failure() {
+        use lutum_protocol::ItemView;
+        let mut block = ContentBlockState::ToolUse {
+            id: "call".into(),
+            name: "weather".into(),
+            initial_json: None,
+            delta_json: "{\"city\":".into(),
+            finalized_arguments: None,
+        };
+        let metadata = block.finalize_tool_call().unwrap().unwrap();
+        assert_eq!(metadata.arguments.get(), "{\"city\":");
+        let mut blocks = BTreeMap::new();
+        blocks.insert(0, block);
+        let items = finalize_committed_items(&mut blocks, &FinishReason::ToolCall).unwrap();
+        let encoded = serde_json::to_string(&items).unwrap();
+        let restored: Vec<ClaudeTurnItem> = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            restored[0].as_tool_call().unwrap().arguments.get(),
+            "{\"city\":"
+        );
+        assert_eq!(
+            parse_tool_input(&metadata.arguments).unwrap(),
+            Value::String("{\"city\":".into())
+        );
     }
 
     #[test]

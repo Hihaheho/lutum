@@ -41,6 +41,7 @@ async fn classify(
         .await?;
     match result.semantic {
         StructuredTurnOutcome::Structured(action) => Ok(action),
+        StructuredTurnOutcome::Invalid(issue) => anyhow::bail!(issue.message),
         StructuredTurnOutcome::Refusal(reason) => anyhow::bail!(reason),
     }
 }

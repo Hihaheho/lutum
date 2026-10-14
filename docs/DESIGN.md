@@ -75,8 +75,8 @@ Session history is stored as exact committed turns — not as a canonical librar
 - `Session::list_turns()` returns an iterator over `&dyn TurnView`
 - committed turns live inside `ModelInput` as `ModelInputItem::Turn` items
 - adapters implement `TurnView` and `ItemView` over their exact concrete turn types
-- adapters also implement `as_any()` on `TurnView` so the OpenAI adapter can downcast to
-  `OpenAiCommittedTurn` for exact same-adapter replay
+- adapters also implement `as_any()` on `TurnView` so adapters can downcast to their concrete
+  committed-turn type for exact same-adapter replay
 
 The library does not collapse session history into `Vec<CanonicalIrTurn>` or any equivalent.
 
@@ -145,7 +145,8 @@ Core does not attempt `common event projection → exact transcript turn`.
 A `TurnAdapter` is responsible for:
 
 1. translating canonical request facades into provider transport requests
-2. handling `ModelInputItem::Turn` in request compilation — exact downcast first (`OpenAiCommittedTurn` / `ClaudeCommittedTurn`), `ItemView` projection fallback for cross-adapter turns
+2. handling `ModelInputItem::Turn` in request compilation — exact provider-turn downcast first,
+   `ItemView` projection fallback for cross-adapter turns
 3. emitting exact committed turn values in `Completed` events
 4. implementing `TurnView` / `ItemView` / `as_any()` over those exact values
 5. accepting a `ModelSelector` for pluggable model routing
@@ -434,3 +435,28 @@ Each adapter also accepts a provider-specific `FallbackSerializer` for serializi
 - transcript branch graph semantics (for now)
 - a universal app-facing transcript IR
 - reasoning configuration (provider-owned)
+
+## Model-authored JSON failures
+
+Malformed structured JSON and JSON that cannot deserialize into the requested output type
+are completed outputs: `StructuredTurnOutcome::Invalid(StructuredOutputIssue { raw, message })`.
+Streaming emits `StructuredOutputIssue` and continues through `Completed`, preserving usage,
+request metadata, and exact adapter-owned transcript capture. Callers decide whether to commit,
+repair, or retry; the library does not retry these outputs automatically.
+
+Model-authored tool arguments use `ToolArguments`, which preserves the original string even
+when it is invalid JSON. `RawJson` still guarantees valid JSON for application-authored results.
+Malformed arguments and typed argument failures produce `ToolCallIssue` with raw metadata and
+an error message. Valid calls in the same turn remain usable; invalid calls are never executed
+as dynamic tools either. Existing explicit tool-round rejection/commit behavior applies.
+
+API migration: tool argument fields and view accessors now use `ToolArguments`; constructors
+accept `RawJson` via `Into<ToolArguments>`, and struct literals can use `.into()` or
+`ToolArguments::new(raw)`. Tool arguments serialize as strings, including in persisted turns.
+Previously stored argument objects must be converted to JSON strings when migrating snapshots.
+OpenAI replays raw argument strings. Claude's JSON transport cannot embed malformed JSON;
+for these arguments only, replay forwards the original text as a JSON string. The committed
+turn and inspection view retain the original bytes; callers can also discard or repair a turn.
+
+Transport/SSE decoding errors and stream-contract violations remain execution failures.
+Output-token-limit handling retains its existing policy.
