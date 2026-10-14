@@ -13,7 +13,6 @@ async-trait.workspace = true
 lutum.workspace = true
 lutum-trace.workspace = true
 thiserror.workspace = true
-paste.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
 
 [dev-dependencies]
