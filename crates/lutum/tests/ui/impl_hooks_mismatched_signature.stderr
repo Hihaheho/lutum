@@ -34,5 +34,5 @@ note: type in trait
 help: change the parameter type to match the trait
    |
 13 -     async fn select_label(&self, label: &str) -> String {
-13 +     async fn select_label(&self, label: String) -> String {
+13 +     async fn select_label(&self, label: std::string::String) -> String {
    |

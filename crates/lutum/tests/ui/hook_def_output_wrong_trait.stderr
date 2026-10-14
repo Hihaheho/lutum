@@ -1,24 +1,19 @@
-error[E0599]: the method `call` exists for struct `WrongAggregate`, but its trait bounds were not satisfied
+error[E0599]: expected an `FnOnce(String)` closure, found `WrongAggregate`
   --> tests/ui/hook_def_output_wrong_trait.rs:13:1
    |
  5 | struct WrongAggregate;
-   | --------------------- method `call` not found for this struct because it doesn't satisfy `<WrongAggregate as FnOnce<(String,)>>::Output = _`, `WrongAggregate: AggregateLabel` or `WrongAggregate: Fn<(String,)>`
+   | --------------------- method `call` not found for this struct because it doesn't satisfy `WrongAggregate: AggregateLabel` or `WrongAggregate: FnOnce<(String,)>`
 ...
 13 | #[lutum::hooks]
-   | ^^^^^^^^^^^^^^^
+   | ^^^^^^^^^^^^^^^ expected an `FnOnce(String)` closure, found `WrongAggregate`
    |
-note: the following trait bounds were not satisfied:
-      `<WrongAggregate as FnOnce<(String,)>>::Output = _`
-      `WrongAggregate: Fn<(String,)>`
+note: trait bound `WrongAggregate: FnOnce<(String,)>` was not satisfied
   --> tests/ui/hook_def_output_wrong_trait.rs:13:1
    |
 13 | #[lutum::hooks]
    | ^^^^^^^^^^^^^^^
-note: the trait `Fn` must be implemented
+note: the trait `FnOnce` must be implemented
   --> $RUST/core/src/ops/function.rs
-   |
-   | pub const trait Fn<Args: Tuple>: FnMut<Args> {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: items from traits can only be used if the trait is in scope
    = note: this error originates in the attribute macro `lutum::hooks` (in Nightly builds, run with -Z macro-backtrace for more info)
 help: trait `Aggregate` which provides `call` is implemented but not in scope; perhaps you want to import it

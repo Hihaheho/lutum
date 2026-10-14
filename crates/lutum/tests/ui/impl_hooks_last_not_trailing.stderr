@@ -50,5 +50,5 @@ note: type in trait
 help: change the parameter type to match the trait
    |
 19 -         last: Option<Result<(), String>>,
-19 +         last: String,
+19 +         last: std::string::String,
    |
