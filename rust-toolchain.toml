@@ -1,2 +1,6 @@
+# A nightly Cargo enforces the publish-age cooldown in .cargo/config.toml.
+# Keep any CI toolchain pins equal to this date.
 [toolchain]
-channel = "stable"
+channel = "nightly-2026-09-30"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
