@@ -3,7 +3,10 @@
 
 use std::{sync::Arc, time::Duration};
 
+mod provider;
 pub mod transport;
+
+pub use provider::ProviderPreferences;
 
 #[cfg(feature = "reqwest")]
 pub use transport::ReqwestHttpClient;

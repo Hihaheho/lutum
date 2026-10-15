@@ -10,9 +10,10 @@ keywords = ["llm", "ai", "openrouter"]
 
 [features]
 default = ["reqwest"]
-reqwest = ["dep:reqwest"]
+reqwest = ["dep:reqwest", "lutum-openai/reqwest"]
 
 [dependencies]
+lutum-openai = { workspace = true, default-features = false }
 lutum-protocol = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -23,3 +24,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt"] }

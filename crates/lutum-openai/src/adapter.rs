@@ -92,6 +92,24 @@ where
     }
 }
 
+/// Rewrites the fully serialized JSON body immediately before an HTTP POST.
+///
+/// Runs after typed hooks, message serialization, and cache-control injection,
+/// for streaming requests and token-count requests alike. The customizer owns
+/// responsibility for preserving a valid provider request shape.
+pub trait BodyCustomizer: Send + Sync {
+    fn customize(&self, extensions: &RequestExtensions, body: &mut Value);
+}
+
+impl<F> BodyCustomizer for F
+where
+    F: Fn(&RequestExtensions, &mut Value) + Send + Sync,
+{
+    fn customize(&self, extensions: &RequestExtensions, body: &mut Value) {
+        self(extensions, body)
+    }
+}
+
 /// Optional request features for OpenAI-compatible backends.
 ///
 /// ```rust,ignore
@@ -268,6 +286,7 @@ pub struct OpenAiAdapter {
     claude_prompt_caching: bool,
     sse_event_recovery_hook: Option<Arc<dyn SseEventRecoveryHook>>,
     headers_customizer: Option<Arc<dyn HeadersCustomizer>>,
+    body_customizer: Option<Arc<dyn BodyCustomizer>>,
     use_chat_completions: bool,
     feature_flags: FeatureFlags,
 }
@@ -336,6 +355,7 @@ impl OpenAiAdapter {
             claude_prompt_caching: false,
             sse_event_recovery_hook: None,
             headers_customizer: None,
+            body_customizer: None,
             use_chat_completions: false,
             feature_flags: FeatureFlags::OPENAI,
         }
@@ -445,6 +465,27 @@ impl OpenAiAdapter {
     pub fn with_headers_customizer(mut self, customizer: impl HeadersCustomizer + 'static) -> Self {
         self.headers_customizer = Some(Arc::new(customizer));
         self
+    }
+
+    /// Install a final JSON body customizer, replacing any previous customizer.
+    /// This applies to every POST, including token counting, but not GET requests.
+    pub fn with_body_customizer(mut self, customizer: impl BodyCustomizer + 'static) -> Self {
+        self.body_customizer = Some(Arc::new(customizer));
+        self
+    }
+
+    fn serialize_body<T: Serialize + ?Sized>(
+        &self,
+        body: &T,
+        extensions: &RequestExtensions,
+    ) -> Result<Vec<u8>, OpenAiError> {
+        if let Some(customizer) = &self.body_customizer {
+            let mut body = serde_json::to_value(body).map_err(OpenAiError::Json)?;
+            customizer.customize(extensions, &mut body);
+            serde_json::to_vec(&body).map_err(OpenAiError::Json)
+        } else {
+            serde_json::to_vec(body).map_err(OpenAiError::Json)
+        }
     }
 
     fn request_headers(&self, extensions: &RequestExtensions) -> Result<HeaderMap, OpenAiError> {
@@ -565,7 +606,7 @@ impl OpenAiAdapter {
     {
         let url = format!("{}{}", self.base_url, path);
         let headers = self.request_headers(extensions)?;
-        let body = serde_json::to_vec(body).map_err(OpenAiError::Json)?;
+        let body = self.serialize_body(body, extensions)?;
         let request = HttpRequest {
             method: Method::POST,
             url,
@@ -628,7 +669,7 @@ impl OpenAiAdapter {
             method: Method::POST,
             url: format!("{}{}", self.base_url, path),
             headers: self.request_headers(extensions)?,
-            body: Some(serde_json::to_vec(body).map_err(OpenAiError::Json)?),
+            body: Some(self.serialize_body(body, extensions)?),
         };
         let response = match self.client.send(request).await {
             Ok(response) => response,
@@ -5015,6 +5056,55 @@ mod tests {
         );
         let body = serde_json::from_slice::<Value>(request.body.as_deref().unwrap()).unwrap();
         assert_eq!(body, serde_json::json!({"stream": true}));
+    }
+
+    #[tokio::test]
+    async fn body_customizer_rewrites_all_post_paths_with_request_extensions() {
+        for path in [
+            "/responses",
+            "/chat/completions",
+            "/completions",
+            "/responses/input_tokens",
+        ] {
+            let fake = FakeHttpClient::new(fake_response(
+                StatusCode::OK,
+                HeaderMap::new(),
+                vec![Ok(Bytes::from_static(b"{}"))],
+            ));
+            let adapter = OpenAiAdapter::new_with_http_client("test-key", fake.clone())
+                .with_body_customizer(|extensions: &RequestExtensions, body: &mut Value| {
+                    assert_eq!(body["messages"][0]["cache_control"]["type"], "ephemeral");
+                    body["model"] = serde_json::json!(extensions.get::<String>().unwrap());
+                    body.as_object_mut().unwrap().remove("remove_me");
+                    body["extra"] = serde_json::json!({"enabled": true});
+                });
+            let mut extensions = RequestExtensions::new();
+            extensions.insert(String::from("custom-model"));
+            let body = serde_json::json!({
+                "model": "original", "remove_me": true,
+                "messages": [{"cache_control": {"type": "ephemeral"}}]
+            });
+            if path.ends_with("input_tokens") {
+                adapter
+                    .post_json(path, &body, &extensions, None)
+                    .await
+                    .unwrap();
+            } else {
+                drop(
+                    adapter
+                        .clone()
+                        .send_streaming_json(path, &body, &extensions, None)
+                        .await
+                        .unwrap(),
+                );
+            }
+            let captured = fake.captured();
+            let sent: Value = serde_json::from_slice(captured[0].body.as_deref().unwrap()).unwrap();
+            assert_eq!(sent["model"], "custom-model");
+            assert!(sent.get("remove_me").is_none());
+            assert_eq!(sent["extra"]["enabled"], true);
+            assert_eq!(sent["messages"], body["messages"]);
+        }
     }
 
     #[tokio::test]

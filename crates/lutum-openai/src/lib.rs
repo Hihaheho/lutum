@@ -7,9 +7,9 @@ pub mod sse;
 pub mod transport;
 
 pub use adapter::{
-    ChatMessageJsonSerializer, FallbackSerializer, FeatureFlags, HeadersCustomizer, OpenAiAdapter,
-    OpenAiHooks, OpenAiHooksSet, ResolveReasoningEffort, SelectOpenaiModel, SseEventRecoveryHook,
-    SseHints,
+    BodyCustomizer, ChatMessageJsonSerializer, FallbackSerializer, FeatureFlags, HeadersCustomizer,
+    OpenAiAdapter, OpenAiHooks, OpenAiHooksSet, ResolveReasoningEffort, SelectOpenaiModel,
+    SseEventRecoveryHook, SseHints,
 };
 pub use chat::ChatCompletionRequest;
 pub use completion::CompletionRequest;

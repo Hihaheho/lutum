@@ -1648,11 +1648,13 @@ dependencies = [
  "bytes",
  "futures",
  "http",
+ "lutum-openai",
  "lutum-protocol",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
